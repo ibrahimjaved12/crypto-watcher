@@ -14,7 +14,165 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      alerts: {
+        Row: {
+          change_pct: number
+          created_at: string
+          data_source: string
+          id: string
+          is_test: boolean
+          price: number | null
+          rule: string
+          symbol: string
+          threshold_pct: number
+          triggered_at: string
+          user_id: string
+          window_minutes: number
+        }
+        Insert: {
+          change_pct: number
+          created_at?: string
+          data_source: string
+          id?: string
+          is_test?: boolean
+          price?: number | null
+          rule: string
+          symbol: string
+          threshold_pct: number
+          triggered_at?: string
+          user_id: string
+          window_minutes: number
+        }
+        Update: {
+          change_pct?: number
+          created_at?: string
+          data_source?: string
+          id?: string
+          is_test?: boolean
+          price?: number | null
+          rule?: string
+          symbol?: string
+          threshold_pct?: number
+          triggered_at?: string
+          user_id?: string
+          window_minutes?: number
+        }
+        Relationships: []
+      }
+      monitor_runs: {
+        Row: {
+          alerts_created: number
+          data_source: string | null
+          error_message: string | null
+          id: string
+          ran_at: string
+          status: string
+          symbols_checked: number
+          user_id: string | null
+        }
+        Insert: {
+          alerts_created?: number
+          data_source?: string | null
+          error_message?: string | null
+          id?: string
+          ran_at?: string
+          status: string
+          symbols_checked?: number
+          user_id?: string | null
+        }
+        Update: {
+          alerts_created?: number
+          data_source?: string | null
+          error_message?: string | null
+          id?: string
+          ran_at?: string
+          status?: string
+          symbols_checked?: number
+          user_id?: string | null
+        }
+        Relationships: []
+      }
+      monitor_settings: {
+        Row: {
+          cooldown_minutes: number
+          created_at: string
+          monitoring_enabled: boolean
+          threshold_pct: number
+          updated_at: string
+          user_id: string
+          window_minutes: number
+        }
+        Insert: {
+          cooldown_minutes?: number
+          created_at?: string
+          monitoring_enabled?: boolean
+          threshold_pct?: number
+          updated_at?: string
+          user_id: string
+          window_minutes?: number
+        }
+        Update: {
+          cooldown_minutes?: number
+          created_at?: string
+          monitoring_enabled?: boolean
+          threshold_pct?: number
+          updated_at?: string
+          user_id?: string
+          window_minutes?: number
+        }
+        Relationships: []
+      }
+      notes: {
+        Row: {
+          body: string
+          created_at: string
+          id: string
+          symbol: string | null
+          title: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          body?: string
+          created_at?: string
+          id?: string
+          symbol?: string | null
+          title: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          id?: string
+          symbol?: string | null
+          title?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      watchlist_items: {
+        Row: {
+          created_at: string
+          id: string
+          symbol: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          symbol: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          symbol?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
