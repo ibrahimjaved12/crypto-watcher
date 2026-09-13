@@ -1,0 +1,193 @@
+import { createFileRoute } from "@tanstack/react-router";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
+
+import { AppShell } from "@/components/app-shell";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { fetchRuns, fetchSettings, saveSettings } from "@/lib/db";
+import { CHANGE_WINDOWS, WINDOW_LABELS } from "@/lib/market/symbols";
+
+export const Route = createFileRoute("/_authenticated/settings")({
+  head: () => ({
+    meta: [
+      { title: "Monitoring settings — Crypto Watch" },
+      {
+        name: "description",
+        content:
+          "Set your alert threshold, comparison window and cooldown, and review recent scheduled checks.",
+      },
+      { property: "og:title", content: "Monitoring settings — Crypto Watch" },
+      { property: "og:description", content: "Threshold, window, cooldown and run history." },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
+    ],
+  }),
+  component: SettingsPage,
+});
+
+function SettingsPage() {
+  const queryClient = useQueryClient();
+  const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
+  const runs = useQuery({ queryKey: ["runs"], queryFn: fetchRuns });
+
+  const [threshold, setThreshold] = useState("2");
+  const [window, setWindow] = useState("15");
+  const [cooldown, setCooldown] = useState("15");
+  const [enabled, setEnabled] = useState(true);
+
+  useEffect(() => {
+    if (!settings.data) return;
+    setThreshold(String(settings.data.threshold_pct));
+    setWindow(String(settings.data.window_minutes));
+    setCooldown(String(settings.data.cooldown_minutes));
+    setEnabled(settings.data.monitoring_enabled);
+  }, [settings.data]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      saveSettings({
+        threshold_pct: Number(threshold),
+        window_minutes: Number(window),
+        cooldown_minutes: Number(cooldown),
+        monitoring_enabled: enabled,
+      }),
+    onSuccess: () => {
+      toast.success("Settings saved.");
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <AppShell>
+      <h1 className="text-2xl font-semibold">Monitoring settings</h1>
+      <p className="text-sm text-muted-foreground">
+        The backend checks your watchlist every 5 minutes, with or without your browser open.
+      </p>
+
+      <div className="mt-5 grid gap-4 lg:grid-cols-2">
+        <form
+          className="panel space-y-5 p-5"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save.mutate();
+          }}
+        >
+          <div className="space-y-2">
+            <Label htmlFor="threshold">Alert threshold (%)</Label>
+            <Input
+              id="threshold"
+              type="number"
+              step="0.1"
+              min="0.1"
+              max="100"
+              required
+              value={threshold}
+              onChange={(e) => setThreshold(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              An alert is saved when the absolute price change reaches this percentage.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="window">Comparison window</Label>
+            <Select value={window} onValueChange={setWindow}>
+              <SelectTrigger id="window">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CHANGE_WINDOWS.map((w) => (
+                  <SelectItem key={w} value={String(w)}>
+                    {WINDOW_LABELS[w]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="cooldown">Cooldown per pair and rule (minutes)</Label>
+            <Input
+              id="cooldown"
+              type="number"
+              min="1"
+              max="1440"
+              required
+              value={cooldown}
+              onChange={(e) => setCooldown(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Prevents duplicate alerts for the same pair and rule.
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between rounded-md border border-border p-3">
+            <div>
+              <Label htmlFor="enabled">Scheduled monitoring</Label>
+              <p className="text-xs text-muted-foreground">Pause without losing your settings.</p>
+            </div>
+            <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
+          </div>
+
+          <Button type="submit" disabled={save.isPending}>
+            Save settings
+          </Button>
+        </form>
+
+        <section className="panel p-5">
+          <h2 className="text-base font-semibold">Recent monitoring runs</h2>
+          <p className="text-xs text-muted-foreground">
+            Every scheduled and manual check, including failures.
+          </p>
+          <ul className="mt-4 space-y-2">
+            {(runs.data ?? []).map((r) => (
+              <li key={r.id} className="rounded-md border border-border/70 p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge
+                    variant={
+                      r.status === "success"
+                        ? "secondary"
+                        : r.status === "failed"
+                          ? "destructive"
+                          : "outline"
+                    }
+                  >
+                    {r.status}
+                  </Badge>
+                  <span className="num text-xs text-muted-foreground">
+                    {new Date(r.ran_at).toLocaleString()}
+                  </span>
+                  <span className="num ml-auto text-xs text-muted-foreground">
+                    {r.symbols_checked} pairs · {r.alerts_created} alerts
+                    {r.data_source ? ` · ${r.data_source}` : ""}
+                  </span>
+                </div>
+                {r.error_message ? (
+                  <p className="mt-2 text-xs text-destructive">{r.error_message}</p>
+                ) : null}
+              </li>
+            ))}
+            {runs.data?.length === 0 ? (
+              <li className="text-sm text-muted-foreground">
+                No runs recorded yet. The scheduler runs every 5 minutes.
+              </li>
+            ) : null}
+          </ul>
+        </section>
+      </div>
+    </AppShell>
+  );
+}
