@@ -10,33 +10,44 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiPublicHooksMonitorPricesRouteImport } from './routes/api/public/hooks/monitor-prices'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicHooksMonitorPricesRoute =
+  ApiPublicHooksMonitorPricesRouteImport.update({
+    id: '/api/public/hooks/monitor-prices',
+    path: '/api/public/hooks/monitor-prices',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/' | '/api/public/hooks/monitor-prices'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/api/public/hooks/monitor-prices'
+  id: '__root__' | '/' | '/api/public/hooks/monitor-prices'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ApiPublicHooksMonitorPricesRoute: typeof ApiPublicHooksMonitorPricesRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +59,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/hooks/monitor-prices': {
+      id: '/api/public/hooks/monitor-prices'
+      path: '/api/public/hooks/monitor-prices'
+      fullPath: '/api/public/hooks/monitor-prices'
+      preLoaderRoute: typeof ApiPublicHooksMonitorPricesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ApiPublicHooksMonitorPricesRoute: ApiPublicHooksMonitorPricesRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
