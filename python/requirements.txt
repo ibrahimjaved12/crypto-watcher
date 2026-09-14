@@ -1,0 +1,2 @@
+# Intentionally empty: runtime and tests use only the Python standard library.
+# Reference interpreter: CPython 3.10.12 (see .python-version).
