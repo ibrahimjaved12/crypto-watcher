@@ -13,8 +13,14 @@ import {
  * so monitoring keeps running with no browser open.
  */
 async function handle(request: Request) {
-  const unauthorized = await authenticateCronRequest(request);
-  if (unauthorized) return unauthorized;
+  // The scheduler authenticates with a shared token; the platform cron secret
+  // is accepted too so either caller works.
+  const bearer = /^Bearer ([^\s,]+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
+  const token = process.env["MONITOR_CRON_TOKEN"];
+  if (!token || bearer !== token) {
+    const unauthorized = await authenticateCronRequest(request);
+    if (unauthorized) return unauthorized;
+  }
 
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
