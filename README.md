@@ -110,3 +110,10 @@ cd <repository-name>
 npm i
 npm run dev
 ```
+
+## Python analysis milestone
+
+The separate [Python module](python/README.md) provides a one-shot public-candle
+analysis command and offline fixture tests. It does not change the running monitor,
+authentication, database or scheduler. Read the [implementation inspection](python/INSPECTION.md)
+and [calculation specification](python/SPEC.md) before integrating its results.
