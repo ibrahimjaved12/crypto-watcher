@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
 import { QuoteCard } from "@/components/market/quote-card";
+import { PythonAnalysisPanel } from "@/components/market/python-analysis";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -113,7 +114,10 @@ function Dashboard() {
             </SelectContent>
           </Select>
           <Button variant="secondary" onClick={() => market.refetch()} disabled={market.isFetching}>
-            <RefreshCw className={`size-4 ${market.isFetching ? "animate-spin" : ""}`} aria-hidden />
+            <RefreshCw
+              className={`size-4 ${market.isFetching ? "animate-spin" : ""}`}
+              aria-hidden
+            />
             Refresh
           </Button>
           <Button onClick={() => check.mutate()} disabled={check.isPending}>
@@ -141,10 +145,14 @@ function Dashboard() {
         <span className="text-muted-foreground">
           Last scheduled run:{" "}
           <span className="num text-foreground">
-            {lastRun ? `${new Date(lastRun.ran_at).toLocaleString()} (${lastRun.status})` : "none yet"}
+            {lastRun
+              ? `${new Date(lastRun.ran_at).toLocaleString()} (${lastRun.status})`
+              : "none yet"}
           </span>
         </span>
       </div>
+
+      <PythonAnalysisPanel symbols={symbols} />
 
       {sourcesDown ? (
         <p className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm">

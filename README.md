@@ -1,5 +1,9 @@
 # Crypto Watcher
 
+The dashboard now supports optional read-only Python analysis through a separate
+FastAPI service. See [Python API setup and hosted testing](docs/python-api.md)
+for the server secrets, local/Docker commands and deployment steps.
+
 The monitoring algorithm now has a [saved-baseline cumulative rule](docs/cumulative-monitoring.md)
 for gradual rises and falls. Its database migration must be applied before deploying
 the updated monitor; the original milestone brief below remains as project history.

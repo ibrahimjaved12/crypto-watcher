@@ -1,0 +1,69 @@
+"""FastAPI service. No database client, user authentication replacement or writes."""
+import asyncio
+from contextlib import asynccontextmanager
+import hmac
+import os
+import re
+
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+import httpx
+
+from .api_models import AnalysisRequest
+from .service import analyze_request
+
+
+def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
+    token = os.environ.get("PYTHON_ANALYSIS_TOKEN", "") if token is None else token
+    configured = bool(re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token))
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async with httpx.AsyncClient(timeout=5, follow_redirects=False,
+                                    limits=httpx.Limits(max_connections=20),
+                                    headers={"Accept": "application/json"}) as client:
+            app.state.market_client = client
+            yield
+
+    app = FastAPI(title="Crypto Watch analysis", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.middleware("http")
+    async def private_responses(request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, error):
+        # Default validation responses echo input values. Keep personal state out.
+        return JSONResponse(status_code=422, content={"detail": "Invalid analysis request"})
+
+    async def authorize(request: Request):
+        if not configured:
+            raise HTTPException(503, "Analysis service is not configured")
+        match = re.fullmatch(r"Bearer ([A-Za-z0-9_-]{32,256})", request.headers.get("authorization", ""))
+        if not match or not hmac.compare_digest(match[1], token):
+            raise HTTPException(401, "Unauthorized", headers={"WWW-Authenticate": "Bearer"})
+
+    @app.get("/health")
+    async def health():
+        return JSONResponse(status_code=200 if configured else 503,
+                            content={"status": "ok" if configured else "not_configured"})
+
+    @app.post("/v1/analysis", dependencies=[Depends(authorize)])
+    async def analysis(body: AnalysisRequest, request: Request):
+        try:
+            return await asyncio.wait_for(analyzer(body, request.app.state.market_client),
+                                          timeout=analysis_timeout)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "Analysis timed out") from None
+        except Exception:
+            # No raw provider error, URL, token or baseline payload in responses/logs.
+            raise HTTPException(502, "Analysis could not be completed") from None
+
+    return app
+
+
+app = create_app()

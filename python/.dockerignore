@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!requirements.txt
+!market_analysis/
+!market_analysis/*.py
+market_analysis/__pycache__/
