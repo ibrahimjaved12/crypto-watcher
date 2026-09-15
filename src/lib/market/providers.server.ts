@@ -6,7 +6,7 @@
  * region is blocked) we report the failure instead of inventing prices.
  */
 
-export type Candle = { time: number; close: number };
+export type Candle = { time: number; close: number; complete?: boolean };
 
 export type ProviderResult = {
   source: string;
@@ -39,14 +39,15 @@ async function binance(symbol: string): Promise<ProviderResult> {
     )) as unknown[];
     if (!Array.isArray(raw) || raw.length === 0) throw new Error("empty response");
     return raw.map((row) => {
-      const r = row as [number, string, string, string, string];
-      return { time: Number(r[0]), close: Number(r[4]) };
+      const r = row as [number, string, string, string, string, string, number];
+      const duration = interval === "1m" ? 60_000 : 15 * 60_000;
+      if (Number(r[6]) !== Number(r[0]) + duration - 1) {
+        throw new Error("Invalid candle close timestamp");
+      }
+      return { time: Number(r[0]), close: Number(r[4]), complete: Number(r[6]) < Date.now() };
     });
   };
-  const [minute, quarter] = await Promise.all([
-    get("1m", MINUTE_LIMIT),
-    get("15m", QUARTER_LIMIT),
-  ]);
+  const [minute, quarter] = await Promise.all([get("1m", MINUTE_LIMIT), get("15m", QUARTER_LIMIT)]);
   return { source: "Binance", minute, quarter };
 }
 
@@ -61,13 +62,10 @@ async function okx(symbol: string): Promise<ProviderResult> {
     }
     // OKX returns newest first.
     return body.data
-      .map((r) => ({ time: Number(r[0]), close: Number(r[4]) }))
+      .map((r) => ({ time: Number(r[0]), close: Number(r[4]), complete: r[8] === "1" }))
       .reverse();
   };
-  const [minute, quarter] = await Promise.all([
-    get("1m", MINUTE_LIMIT),
-    get("15m", QUARTER_LIMIT),
-  ]);
+  const [minute, quarter] = await Promise.all([get("1m", MINUTE_LIMIT), get("15m", QUARTER_LIMIT)]);
   return { source: "OKX", minute, quarter };
 }
 
@@ -82,16 +80,17 @@ async function kraken(symbol: string): Promise<ProviderResult> {
     const rows = key ? ((body.result as Record<string, unknown>)[key] as unknown[]) : undefined;
     if (!Array.isArray(rows) || rows.length === 0) throw new Error("empty response");
     return rows
-      .map((row) => {
+      .map((row, index) => {
         const r = row as [number, string, string, string, string];
-        return { time: Number(r[0]) * 1000, close: Number(r[4]) };
+        return {
+          time: Number(r[0]) * 1000,
+          close: Number(r[4]),
+          complete: index < rows.length - 1,
+        };
       })
       .slice(-keep);
   };
-  const [minute, quarter] = await Promise.all([
-    get(1, MINUTE_LIMIT),
-    get(15, QUARTER_LIMIT),
-  ]);
+  const [minute, quarter] = await Promise.all([get(1, MINUTE_LIMIT), get(15, QUARTER_LIMIT)]);
   return { source: "Kraken", minute, quarter };
 }
 
@@ -102,15 +101,18 @@ const PROVIDERS: Array<{ name: string; load: (symbol: string) => Promise<Provide
 ];
 
 export type ProviderOutcome =
-  | { ok: true; result: ProviderResult }
-  | { ok: false; errors: string[] };
+  { ok: true; result: ProviderResult } | { ok: false; errors: string[] };
 
-export async function loadCandles(symbol: string): Promise<ProviderOutcome> {
+export async function loadCandles(
+  symbol: string,
+  validate?: (result: ProviderResult) => void,
+): Promise<ProviderOutcome> {
   const errors: string[] = [];
   for (const provider of PROVIDERS) {
     try {
       const result = await provider.load(symbol);
       if (result.minute.length >= 2 && result.quarter.length >= 2) {
+        validate?.(result);
         return { ok: true, result };
       }
       errors.push(`${provider.name}: insufficient data`);

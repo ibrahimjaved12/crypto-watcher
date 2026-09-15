@@ -1,12 +1,13 @@
 /**
- * Monitoring engine. Runs server-side (scheduled job or manual trigger) and is
- * the single place where threshold rules are evaluated.
+ * Monitoring orchestrator. Runs server-side for scheduled and manual checks.
  *
- * Designed to be extended in later milestones (indicators, news, email/WhatsApp
- * delivery) by adding evaluators alongside `evaluateThreshold`.
+ * The database transaction owns baseline state, directional cooldowns and alert
+ * insertion. Python has the same state transition for future replay/backtesting.
  */
-import { getQuote } from "@/lib/market/quotes.server";
-import { WINDOW_LABELS } from "@/lib/market/symbols";
+import { loadCandles } from "@/lib/market/providers.server";
+import { completedObservation } from "./observation";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/integrations/supabase/types";
 
 export type MonitorSettings = {
   user_id: string;
@@ -32,14 +33,7 @@ export type UserRunResult = {
   error: string | null;
 };
 
-type AdminClient = {
-  from: (table: string) => any;
-};
-
-export function ruleLabel(thresholdPct: number, windowMinutes: number): string {
-  const label = WINDOW_LABELS[windowMinutes] ?? `${windowMinutes}m`;
-  return `abs(change) >= ${thresholdPct}% over ${label}`;
-}
+type AdminClient = Pick<SupabaseClient<Database>, "from" | "rpc">;
 
 export async function runMonitorForUser(
   supabaseAdmin: AdminClient,
@@ -71,65 +65,34 @@ export async function runMonitorForUser(
   const symbols: string[] = (items ?? []).map((i: { symbol: string }) => i.symbol);
   if (symbols.length === 0) return { ...base, status: "skipped" };
 
-  const cooldownSince = new Date(
-    Date.now() - settings.cooldown_minutes * 60 * 1000,
-  ).toISOString();
-  const rule = ruleLabel(settings.threshold_pct, settings.window_minutes);
-
-  const { data: recent } = await supabaseAdmin
-    .from("alerts")
-    .select("symbol, rule, triggered_at")
-    .eq("user_id", userId)
-    .eq("rule", rule)
-    .eq("is_test", false)
-    .gte("triggered_at", cooldownSince);
-
-  const onCooldown = new Set<string>(
-    (recent ?? []).map((a: { symbol: string }) => a.symbol),
-  );
-
   const failures: string[] = [];
   let alertsCreated = 0;
   let source: string | null = null;
 
   for (const symbol of symbols) {
-    const quote = await getQuote(symbol);
-    if (!quote.ok || quote.price == null) {
-      failures.push(`${symbol}: ${quote.error ?? "unavailable"}`);
-      continue;
+    try {
+      const outcome = await loadCandles(symbol, (result) => {
+        completedObservation(result.minute);
+      });
+      if (!outcome.ok) throw new Error(outcome.errors.join(" | "));
+      const observation = completedObservation(outcome.result.minute);
+      source = source ?? outcome.result.source;
+      // Settings are re-read inside the transaction, so a concurrent pause or edit
+      // cannot save an alert using a stale threshold. No in-memory cooldown cache.
+      const { data, error } = await supabaseAdmin.rpc("process_cumulative_observation", {
+        p_user_id: userId,
+        p_symbol: symbol,
+        p_price: observation.price,
+        p_observed_at: observation.observedAt,
+        p_source: outcome.result.source,
+      });
+      if (error) throw new Error(error.message);
+      const status = (data as { status?: string } | null)?.status;
+      if (!status) throw new Error("Missing baseline transition result");
+      if (status === "alerted") alertsCreated += 1;
+    } catch (error) {
+      failures.push(`${symbol}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    source = source ?? quote.source;
-    if (quote.stale) {
-      failures.push(`${symbol}: stale data from ${quote.source}`);
-      continue;
-    }
-
-    const change = quote.changes[settings.window_minutes];
-    if (change == null) {
-      failures.push(`${symbol}: no ${settings.window_minutes}m window available`);
-      continue;
-    }
-    if (Math.abs(change) < settings.threshold_pct) continue;
-    if (onCooldown.has(symbol)) continue;
-
-    const { error: insertError } = await supabaseAdmin.from("alerts").insert({
-      user_id: userId,
-      symbol,
-      change_pct: Number(change.toFixed(4)),
-      window_minutes: settings.window_minutes,
-      threshold_pct: settings.threshold_pct,
-      rule,
-      price: quote.price,
-      data_source: quote.source,
-      is_test: false,
-    });
-
-    if (insertError) {
-      failures.push(`${symbol}: could not save alert (${insertError.message})`);
-      continue;
-    }
-    onCooldown.add(symbol);
-    alertsCreated += 1;
   }
 
   const status: UserRunResult["status"] =
@@ -145,11 +108,8 @@ export async function runMonitorForUser(
   };
 }
 
-export async function recordRun(
-  supabaseAdmin: AdminClient,
-  result: UserRunResult,
-): Promise<void> {
-  await supabaseAdmin.from("monitor_runs").insert({
+export async function recordRun(supabaseAdmin: AdminClient, result: UserRunResult): Promise<void> {
+  const { error } = await supabaseAdmin.from("monitor_runs").insert({
     user_id: result.userId,
     status: result.status,
     symbols_checked: result.symbolsChecked,
@@ -157,4 +117,5 @@ export async function recordRun(
     data_source: result.dataSource,
     error_message: result.error,
   });
+  if (error) throw new Error(`Could not record monitoring run: ${error.message}`);
 }

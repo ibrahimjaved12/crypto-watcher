@@ -1,5 +1,11 @@
 # Isolated Python market analysis
 
+The new `market_analysis.cumulative.observe` function provides a pure state
+transition for cumulative upward/downward monitoring. See the
+[application rule and deployment notes](../docs/cumulative-monitoring.md).
+The one-shot CLI below still reports rolling-window analysis and does not persist
+baselines; its command behavior is unchanged. The full suite now contains 32 tests.
+
 Uses only the Python standard library; no Django, database client, scheduler,
 credentials or third-party dependencies. Reference interpreter is CPython 3.10.12
 in `.python-version`; Python 3.10+ syntax is used. `requirements.txt` explicitly

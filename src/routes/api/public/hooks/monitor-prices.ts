@@ -25,9 +25,7 @@ async function handle(request: Request) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   // Every user with at least one watched symbol gets checked.
-  const { data: watchers, error } = await supabaseAdmin
-    .from("watchlist_items")
-    .select("user_id");
+  const { data: watchers, error } = await supabaseAdmin.from("watchlist_items").select("user_id");
 
   if (error) {
     return Response.json({ ok: false, error: error.message }, { status: 500 });
@@ -35,10 +33,13 @@ async function handle(request: Request) {
 
   const userIds = [...new Set((watchers ?? []).map((w) => w.user_id))];
 
-  const { data: settingsRows } = await supabaseAdmin
+  const { data: settingsRows, error: settingsError } = await supabaseAdmin
     .from("monitor_settings")
     .select("*")
     .in("user_id", userIds.length ? userIds : ["00000000-0000-0000-0000-000000000000"]);
+  if (settingsError) {
+    return Response.json({ ok: false, error: settingsError.message }, { status: 500 });
+  }
 
   const byUser = new Map<string, MonitorSettings>(
     (settingsRows ?? []).map((s) => [s.user_id, s as unknown as MonitorSettings]),

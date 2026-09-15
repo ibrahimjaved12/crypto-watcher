@@ -15,7 +15,11 @@ export type AlertRow = {
   symbol: string;
   triggered_at: string;
   change_pct: number;
-  window_minutes: number;
+  window_minutes: number | null;
+  comparison_mode: string;
+  baseline_price: number | null;
+  baseline_at: string | null;
+  observed_at: string | null;
   threshold_pct: number;
   rule: string;
   price: number | null;
@@ -75,9 +79,7 @@ export async function addSymbol(symbol: string): Promise<void> {
   if ((count ?? 0) >= MAX_WATCHLIST_SIZE) {
     throw new Error(`You can follow at most ${MAX_WATCHLIST_SIZE} pairs.`);
   }
-  const { error } = await supabase
-    .from("watchlist_items")
-    .insert({ user_id: uid, symbol });
+  const { error } = await supabase.from("watchlist_items").insert({ user_id: uid, symbol });
   if (error) throw error;
 }
 
@@ -106,10 +108,7 @@ export async function fetchSettings(): Promise<Settings> {
 
 export async function saveSettings(patch: Partial<Settings>): Promise<void> {
   const uid = await userId();
-  const { error } = await supabase
-    .from("monitor_settings")
-    .update(patch)
-    .eq("user_id", uid);
+  const { error } = await supabase.from("monitor_settings").update(patch).eq("user_id", uid);
   if (error) throw error;
 }
 

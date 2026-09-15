@@ -1,5 +1,9 @@
 # Calculation and rule contract (version 1)
 
+This rolling-analysis contract remains the CLI contract. The app's subsequent
+[saved-baseline alert rule](../docs/cumulative-monitoring.md) has a matching pure
+Python implementation in `market_analysis/cumulative.py` and separate tests.
+
 Derived from `src/lib/market/providers.server.ts`, `quotes.server.ts`,
 `symbols.ts`, and `src/lib/monitor/engine.server.ts` at local commit `c1bcb3c`.
 This is an isolated analytical contract, not a replacement monitor.
