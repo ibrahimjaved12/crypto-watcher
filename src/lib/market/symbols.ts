@@ -9,7 +9,7 @@ export const SUPPORTED_SYMBOLS = [
   "BNBUSDT",
   "AVAXUSDT",
   "LINKUSDT",
-  "MATICUSDT",
+  "POLUSDT",
   "DOTUSDT",
   "LTCUSDT",
   "TRXUSDT",

@@ -89,6 +89,8 @@ function result() {
 
 test("browser input accepts only a symbol, never user identity or baseline overrides", () => {
   assert.equal(analysisInput.safeParse({ symbol: "BTCUSDT" }).success, true);
+  assert.equal(analysisInput.safeParse({ symbol: "POLUSDT" }).success, true);
+  assert.equal(analysisInput.safeParse({ symbol: "MATICUSDT" }).success, false);
   assert.equal(analysisInput.safeParse({ symbol: "BTCUSDT", user_id: "other" }).success, false);
   assert.equal(analysisInput.safeParse({ symbol: "BTCUSDT", baseline: null }).success, false);
   assert.equal(analysisInput.safeParse({ symbol: "INVALID" }).success, false);
