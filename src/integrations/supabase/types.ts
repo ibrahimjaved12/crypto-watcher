@@ -16,10 +16,6 @@ export type Database = {
     Tables: {
       alerts: {
         Row: {
-          comparison_mode: string
-          baseline_price: number | null
-          baseline_at: string | null
-          observed_at: string | null
           change_pct: number
           created_at: string
           data_source: string
@@ -31,13 +27,9 @@ export type Database = {
           threshold_pct: number
           triggered_at: string
           user_id: string
-          window_minutes: number | null
+          window_minutes: number
         }
         Insert: {
-          comparison_mode?: string
-          baseline_price?: number | null
-          baseline_at?: string | null
-          observed_at?: string | null
           change_pct: number
           created_at?: string
           data_source: string
@@ -49,13 +41,9 @@ export type Database = {
           threshold_pct: number
           triggered_at?: string
           user_id: string
-          window_minutes: number | null
+          window_minutes: number
         }
         Update: {
-          comparison_mode?: string
-          baseline_price?: number | null
-          baseline_at?: string | null
-          observed_at?: string | null
           change_pct?: number
           created_at?: string
           data_source?: string
@@ -67,51 +55,9 @@ export type Database = {
           threshold_pct?: number
           triggered_at?: string
           user_id?: string
-          window_minutes?: number | null
+          window_minutes?: number
         }
         Relationships: []
-      }
-      monitor_baselines: {
-        Row: {
-          user_id: string
-          symbol: string
-          baseline_price: number
-          baseline_at: string
-          data_source: string
-          threshold_pct: number
-          last_observed_at: string
-          last_up_alert_at: string | null
-          last_down_alert_at: string | null
-        }
-        Insert: {
-          user_id: string
-          symbol: string
-          baseline_price: number
-          baseline_at: string
-          data_source: string
-          threshold_pct: number
-          last_observed_at: string
-          last_up_alert_at?: string | null
-          last_down_alert_at?: string | null
-        }
-        Update: {
-          user_id?: string
-          symbol?: string
-          baseline_price?: number
-          baseline_at?: string
-          data_source?: string
-          threshold_pct?: number
-          last_observed_at?: string
-          last_up_alert_at?: string | null
-          last_down_alert_at?: string | null
-        }
-        Relationships: [{
-          foreignKeyName: "monitor_baselines_user_id_symbol_fkey"
-          columns: ["user_id", "symbol"]
-          isOneToOne: true
-          referencedRelation: "watchlist_items"
-          referencedColumns: ["user_id", "symbol"]
-        }]
       }
       monitor_runs: {
         Row: {
@@ -232,16 +178,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      process_cumulative_observation: {
-        Args: {
-          p_user_id: string
-          p_symbol: string
-          p_price: number
-          p_observed_at: string
-          p_source: string
-        }
-        Returns: Json
-      }
+      [_ in never]: never
     }
     Enums: {
       [_ in never]: never
