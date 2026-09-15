@@ -9,15 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { fetchRuns, fetchSettings, saveSettings } from "@/lib/db";
-import { CHANGE_WINDOWS, WINDOW_LABELS } from "@/lib/market/symbols";
 
 export const Route = createFileRoute("/_authenticated/settings")({
   head: () => ({
@@ -26,10 +18,10 @@ export const Route = createFileRoute("/_authenticated/settings")({
       {
         name: "description",
         content:
-          "Set your alert threshold, comparison window and cooldown, and review recent scheduled checks.",
+          "Set your cumulative price-change threshold and cooldown, and review recent checks.",
       },
       { property: "og:title", content: "Monitoring settings — Crypto Watch" },
-      { property: "og:description", content: "Threshold, window, cooldown and run history." },
+      { property: "og:description", content: "Cumulative alerts, cooldown and run history." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
@@ -43,14 +35,12 @@ function SettingsPage() {
   const runs = useQuery({ queryKey: ["runs"], queryFn: fetchRuns });
 
   const [threshold, setThreshold] = useState("2");
-  const [window, setWindow] = useState("15");
   const [cooldown, setCooldown] = useState("15");
   const [enabled, setEnabled] = useState(true);
 
   useEffect(() => {
     if (!settings.data) return;
     setThreshold(String(settings.data.threshold_pct));
-    setWindow(String(settings.data.window_minutes));
     setCooldown(String(settings.data.cooldown_minutes));
     setEnabled(settings.data.monitoring_enabled);
   }, [settings.data]);
@@ -59,7 +49,6 @@ function SettingsPage() {
     mutationFn: () =>
       saveSettings({
         threshold_pct: Number(threshold),
-        window_minutes: Number(window),
         cooldown_minutes: Number(cooldown),
         monitoring_enabled: enabled,
       }),
@@ -98,28 +87,27 @@ function SettingsPage() {
               onChange={(e) => setThreshold(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              An alert is saved when the absolute price change reaches this percentage.
+              Alert on a rise or fall of this percentage from the saved baseline, even when the move
+              takes longer than 15 minutes.
+            </p>
+          </div>
+
+          <div className="space-y-2 rounded-md border border-border p-3 text-sm">
+            <p className="font-medium">Comparison: saved baseline</p>
+            <p className="text-muted-foreground">
+              The first successful check sets a baseline for each pair. Each saved alert resets it
+              to the alert price. At 2%, a baseline of 100 USDT alerts at 102 or 98 USDT. Small
+              moves are retained between checks.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Uses completed one-minute candles. Changing the threshold or data source starts a new
+              baseline on the next fresh check. Dashboard percentage windows are separate from this
+              alert rule.
             </p>
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="window">Comparison window</Label>
-            <Select value={window} onValueChange={setWindow}>
-              <SelectTrigger id="window">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CHANGE_WINDOWS.map((w) => (
-                  <SelectItem key={w} value={String(w)}>
-                    {WINDOW_LABELS[w]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="cooldown">Cooldown per pair and rule (minutes)</Label>
+            <Label htmlFor="cooldown">Cooldown per pair and direction (minutes)</Label>
             <Input
               id="cooldown"
               type="number"
@@ -130,7 +118,8 @@ function SettingsPage() {
               onChange={(e) => setCooldown(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              Prevents duplicate alerts for the same pair and rule.
+              An upward alert does not block a downward alert. During cooldown the baseline stays
+              fixed; a further qualifying move can alert on a fresh check after cooldown.
             </p>
           </div>
 

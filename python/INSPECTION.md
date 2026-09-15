@@ -1,5 +1,9 @@
 # Existing monitoring inspection
 
+This report describes the original milestone at `c1bcb3c`. The subsequent
+[cumulative monitor](../docs/cumulative-monitoring.md) changes the alert path,
+state persistence and comparison UI. Deployment remains separate from local code.
+
 Inspected local `c1bcb3c` before implementation. Read root `AGENTS.md`; no history
 rewriting or app changes. The requested branch already existed. User confirmed
 branch readiness after remote fetch was declined. This is a source inspection,

@@ -1,5 +1,9 @@
 # Crypto Watcher
 
+The monitoring algorithm now has a [saved-baseline cumulative rule](docs/cumulative-monitoring.md)
+for gradual rises and falls. Its database migration must be applied before deploying
+the updated monitor; the original milestone brief below remains as project history.
+
 Build a personal crypto monitoring web app called Crypto Watch.
 
 Overall goal:

@@ -47,6 +47,10 @@ function toCsv(rows: AlertRow[]): string {
     "price",
     "data_source",
     "is_test",
+    "comparison_mode",
+    "baseline_price",
+    "baseline_at",
+    "observed_at",
   ];
   const escape = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   return [
@@ -133,7 +137,7 @@ function AlertsPage() {
               <TableHead>Symbol</TableHead>
               <TableHead>Time</TableHead>
               <TableHead>Change</TableHead>
-              <TableHead>Window</TableHead>
+              <TableHead>Comparison</TableHead>
               <TableHead>Rule</TableHead>
               <TableHead>Price</TableHead>
               <TableHead>Source</TableHead>
@@ -161,7 +165,21 @@ function AlertsPage() {
                   {Number(a.change_pct).toFixed(2)}%
                 </TableCell>
                 <TableCell className="num text-xs">
-                  {WINDOW_LABELS[a.window_minutes] ?? `${a.window_minutes}m`}
+                  {a.comparison_mode === "baseline" ? (
+                    <span
+                      title={
+                        a.baseline_at
+                          ? `Baseline at ${new Date(a.baseline_at).toLocaleString()}`
+                          : undefined
+                      }
+                    >
+                      From {Number(a.baseline_price).toLocaleString()} USDT
+                    </span>
+                  ) : a.window_minutes == null ? (
+                    "—"
+                  ) : (
+                    (WINDOW_LABELS[a.window_minutes] ?? `${a.window_minutes}m`)
+                  )}
                 </TableCell>
                 <TableCell className="max-w-[220px] truncate text-xs" title={a.rule}>
                   {a.rule}
