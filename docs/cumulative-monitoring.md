@@ -60,11 +60,11 @@ partial-candle limitations; monitoring no longer uses those rolling values.
 Python's `market_analysis.cumulative.observe` implements the matching pure state
 transition for replay and future backtesting. It assumes one supplied state per
 account/pair, validated completed input and enabled monitoring. The app does not
-execute Python yet: the atomic database function enforces the rule in the existing
-deployment. This avoids introducing a Python service/scheduler solely for this
-change. Future Python integration must retain atomic persistence and match this
-contract. No Django, authentication replacement or database migration to another
-platform is involved.
+use Python to write alerts: the atomic database function still enforces the rule.
+The optional [FastAPI integration](python-api.md) now calls the same Python
+evaluator for read-only dashboard previews, discarding proposed state changes.
+No Django, authentication replacement or database migration to another platform
+is involved.
 
 ## UI and stored alerts
 
