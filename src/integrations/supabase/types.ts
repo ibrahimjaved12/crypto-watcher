@@ -208,6 +208,60 @@ export type Database = {
         }
         Relationships: []
       }
+      ta_signals: {
+        Row: {
+          candle_at: string
+          detected_at: string
+          id: string
+          indicators: Json
+          outcome_at: string | null
+          outcome_price: number | null
+          outcome_status: string
+          patterns: string[]
+          price: number
+          return_pct: number | null
+          source: string
+          symbol: string
+          timeframe: number
+          user_id: string
+          version: string
+        }
+        Insert: {
+          candle_at: string
+          detected_at?: string
+          id?: string
+          indicators: Json
+          outcome_at?: string | null
+          outcome_price?: number | null
+          outcome_status?: string
+          patterns: string[]
+          price: number
+          return_pct?: number | null
+          source: string
+          symbol: string
+          timeframe: number
+          user_id: string
+          version: string
+        }
+        Update: {
+          candle_at?: string
+          detected_at?: string
+          id?: string
+          indicators?: Json
+          outcome_at?: string | null
+          outcome_price?: number | null
+          outcome_status?: string
+          patterns?: string[]
+          price?: number
+          return_pct?: number | null
+          source?: string
+          symbol?: string
+          timeframe?: number
+          user_id?: string
+          version?: string
+        }
+        Relationships: []
+      }
       watchlist_items: {
         Row: {
           created_at: string
