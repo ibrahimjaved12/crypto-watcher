@@ -4,8 +4,6 @@ import { analysisInput, analysisResponse, type AnalysisReply } from "./analysis.
 
 type Env = Record<string, string | undefined>;
 type Client = Pick<SupabaseClient<Database>, "from">;
-type AnalysisStage =
-  "fetch" | "response-status" | "response-text" | "size-guard" | "json-parse" | "schema-validation";
 
 function serviceConfig(env: Env) {
   if (env["PYTHON_ANALYSIS_ENABLED"] !== "true") throw new Error("disabled");
@@ -31,54 +29,6 @@ function milliseconds(value: string | null) {
   const time = Date.parse(value);
   if (!Number.isSafeInteger(time)) throw new Error("Invalid saved baseline time");
   return time;
-}
-
-function safeField(value: unknown, field: "name" | "code" | "message" | "cause") {
-  try {
-    if (typeof value !== "object" || value === null) return undefined;
-    return (value as Record<string, unknown>)[field];
-  } catch {
-    return undefined;
-  }
-}
-
-function sanitizedField(
-  value: unknown,
-  field: "name" | "code" | "message",
-  sensitiveValues: string[],
-) {
-  const candidate = safeField(value, field);
-  if (typeof candidate === "number") return candidate;
-  if (typeof candidate !== "string") return undefined;
-  return sensitiveValues.reduce(
-    (sanitized, sensitive) =>
-      sensitive.length ? sanitized.replaceAll(sensitive, "[redacted]") : sanitized,
-    candidate,
-  );
-}
-
-function logAnalysisError(
-  stage: AnalysisStage,
-  error: unknown,
-  aborted: boolean,
-  httpStatus: number | undefined,
-  sensitiveValues: string[],
-  safeMessage?: string,
-) {
-  const cause = safeField(error, "cause");
-  console.error("[python-analysis]", {
-    stage,
-    errorName: sanitizedField(error, "name", sensitiveValues) ?? "UnknownError",
-    errorMessage:
-      safeMessage ??
-      sanitizedField(error, "message", sensitiveValues) ??
-      "No error message available",
-    causeName: sanitizedField(cause, "name", sensitiveValues),
-    causeCode: sanitizedField(cause, "code", sensitiveValues),
-    causeMessage: sanitizedField(cause, "message", sensitiveValues),
-    aborted,
-    httpStatus,
-  });
 }
 
 /** Receives the verified middleware's user-scoped client, never an admin client.
@@ -169,11 +119,7 @@ export async function analyzeForUser(
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 25_000);
-  let stage: AnalysisStage = "fetch";
-  let responseStatus: number | undefined;
-  let requestBody = "";
   try {
-    requestBody = JSON.stringify(payload);
     const response = await send(config.url, {
       method: "POST",
       redirect: "error",
@@ -185,65 +131,27 @@ export async function analyzeForUser(
         "Cache-Control": "no-store",
         Authorization: `Bearer ${config.token}`,
       },
-      body: requestBody,
+      body: JSON.stringify(payload),
     });
-    stage = "response-status";
-    responseStatus = response.status;
     if (!response.ok) {
       const error =
-        responseStatus === 504
+        response.status === 504
           ? "Python analysis timed out. Please retry."
-          : responseStatus === 422
+          : response.status === 422
             ? "Your saved monitoring state was rejected by Python. Check your settings and try again."
-            : [401, 403].includes(responseStatus)
+            : [401, 403].includes(response.status)
               ? "Python service authentication failed. Its server configuration needs checking."
               : "The Python analysis service is unavailable. Please retry later.";
       return { ok: false, error };
     }
-    stage = "response-text";
     const raw = await response.text();
-    stage = "size-guard";
     if (raw.length > 128_000) throw new Error("oversized response");
-    stage = "json-parse";
-    const json = JSON.parse(raw);
-    stage = "schema-validation";
-    const parsed = analysisResponse.safeParse(json);
+    const parsed = analysisResponse.safeParse(JSON.parse(raw));
     if (!parsed.success || parsed.data.symbol !== symbol) {
-      logAnalysisError(
-        stage,
-        new Error("invalid analysis response"),
-        controller.signal.aborted,
-        responseStatus,
-        [],
-        "Python analysis response failed validation",
-      );
       return { ok: false, error: "The Python service returned an invalid analysis response." };
     }
     return { ok: true, analysis: parsed.data };
-  } catch (error) {
-    const sensitiveValues = [
-      config.token,
-      `Bearer ${config.token}`,
-      config.url,
-      env["PYTHON_ANALYSIS_URL"] ?? "",
-      userId,
-      requestBody,
-      payload.baseline === null ? "" : JSON.stringify(payload.baseline),
-    ].sort((a, b) => b.length - a.length);
-    const safeMessage =
-      stage === "json-parse"
-        ? "Python analysis response was not valid JSON"
-        : stage === "schema-validation"
-          ? "Python analysis response failed validation"
-          : undefined;
-    logAnalysisError(
-      stage,
-      error,
-      controller.signal.aborted,
-      responseStatus,
-      sensitiveValues,
-      safeMessage,
-    );
+  } catch {
     return {
       ok: false,
       error: controller.signal.aborted
