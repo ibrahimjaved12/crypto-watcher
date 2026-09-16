@@ -33,7 +33,14 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
       signal: controller.signal,
       headers: { accept: "application/json" },
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      try {
+        await res.body?.cancel();
+      } catch {
+        // Cleanup must not replace the provider's HTTP error.
+      }
+      throw new Error(`HTTP ${res.status}`);
+    }
     return await res.json();
   } finally {
     clearTimeout(timer);
