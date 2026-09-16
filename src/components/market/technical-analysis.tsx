@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { interpretTA } from "@/lib/ta/interpretation";
 
 export function TechnicalAnalysis() {
   const [frame, setFrame] = useState(15);
@@ -91,9 +92,11 @@ export function TechnicalAnalysis() {
                 {[
                   "Pair / exchange",
                   "Candle (local time)",
+                  "Interpretation",
+                  "TA score",
                   "EMA 20 / 50",
                   "RSI 14",
-                  "ATR 14",
+                  "ATR 14 / %",
                   "Volume change",
                   "Signals",
                   "Forward return",
@@ -106,7 +109,10 @@ export function TechnicalAnalysis() {
             </thead>
             <tbody>
               {history.data.slice(0, 25).map((row) => {
-                const values = row.indicators as Record<string, unknown>;
+                const values = (row.indicators ?? {}) as Record<string, unknown>;
+                const interpretation = interpretTA(row.price, row.indicators, row.patterns);
+                const signed = (v: number | null) =>
+                  v === null ? "Unavailable" : v > 0 ? `+${v}` : String(v);
                 return (
                   <tr key={row.id} className="border-b border-border/50 align-top">
                     <td className="p-2">
@@ -116,11 +122,53 @@ export function TechnicalAnalysis() {
                     <td className="p-2 whitespace-nowrap">
                       {new Date(row.candle_at).toLocaleString()}
                     </td>
+                    <td className="p-2 min-w-52">
+                      <div
+                        className={
+                          interpretation.trend === "Bullish"
+                            ? "text-emerald-400"
+                            : interpretation.trend === "Bearish"
+                              ? "text-rose-400"
+                              : "text-muted-foreground"
+                        }
+                      >
+                        {interpretation.trend} trend
+                      </div>
+                      <div>{interpretation.momentum} momentum</div>
+                      <div className="mt-1 text-muted-foreground">{interpretation.support}</div>
+                    </td>
+                    <td className="p-2 min-w-44">
+                      <details>
+                        <summary className="cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-2">
+                          {signed(interpretation.score)}{" "}
+                          <span className="text-muted-foreground">/ ±100</span>
+                        </summary>
+                        <dl className="mt-2 space-y-1">
+                          {Object.entries(interpretation.contributions).map(([label, points]) => (
+                            <div key={label} className="flex justify-between gap-3">
+                              <dt className="capitalize">{label}</dt>
+                              <dd>{signed(points)}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                        <p className="mt-2 text-muted-foreground">
+                          Rule-based bias, not a probability.
+                        </p>
+                        <span className="text-muted-foreground">{interpretation.version}</span>
+                      </details>
+                    </td>
                     <td className="p-2">
                       {number(values["ema20"])} / {number(values["ema50"])}
                     </td>
                     <td className="p-2">{number(values["rsi14"])}</td>
-                    <td className="p-2">{number(values["atr14"])}</td>
+                    <td className="p-2">
+                      {number(values["atr14"])}
+                      <div className="text-muted-foreground">
+                        {interpretation.atrPct === null
+                          ? "--"
+                          : `${interpretation.atrPct.toFixed(2)}%`}
+                      </div>
+                    </td>
                     <td className="p-2">
                       {values["volume_change_pct"] === null
                         ? "--"
