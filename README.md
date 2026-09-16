@@ -1,5 +1,8 @@
 # Crypto Watcher
 
+Technical Analysis v1 adds OHLCV indicators, numeric candle patterns, and saved
+forward outcomes. See [TA rules and deployment](docs/technical-analysis.md).
+
 The dashboard now supports optional read-only Python analysis through a separate
 FastAPI service. See [Python API setup and hosted testing](docs/python-api.md)
 for the server secrets, local/Docker commands and deployment steps.

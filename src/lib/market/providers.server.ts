@@ -6,7 +6,15 @@
  * region is blocked) we report the failure instead of inventing prices.
  */
 
-export type Candle = { time: number; close: number; complete?: boolean };
+export type Candle = {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  complete?: boolean;
+};
 
 export type ProviderResult = {
   source: string;
@@ -32,7 +40,11 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
   }
 }
 
-async function binance(symbol: string): Promise<ProviderResult> {
+async function binance(
+  symbol: string,
+  intervals: [number, number] = [1, 15],
+  limits: [number, number] = [MINUTE_LIMIT, QUARTER_LIMIT],
+): Promise<ProviderResult> {
   const get = async (interval: string, limit: number): Promise<Candle[]> => {
     const raw = (await fetchJson(
       `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
@@ -40,18 +52,38 @@ async function binance(symbol: string): Promise<ProviderResult> {
     if (!Array.isArray(raw) || raw.length === 0) throw new Error("empty response");
     return raw.map((row) => {
       const r = row as [number, string, string, string, string, string, number];
-      const duration = interval === "1m" ? 60_000 : 15 * 60_000;
+      const duration =
+        (interval.endsWith("h")
+          ? Number(interval.slice(0, -1)) * 60
+          : Number(interval.slice(0, -1))) * 60_000;
       if (Number(r[6]) !== Number(r[0]) + duration - 1) {
         throw new Error("Invalid candle close timestamp");
       }
-      return { time: Number(r[0]), close: Number(r[4]), complete: Number(r[6]) < Date.now() };
+      return {
+        time: Number(r[0]),
+        open: Number(r[1]),
+        high: Number(r[2]),
+        low: Number(r[3]),
+        close: Number(r[4]),
+        volume: Number(r[5]),
+        complete: Number(r[6]) < Date.now(),
+      };
     });
   };
-  const [minute, quarter] = await Promise.all([get("1m", MINUTE_LIMIT), get("15m", QUARTER_LIMIT)]);
+  const format = (m: number) => (m >= 60 ? `${m / 60}h` : `${m}m`);
+  const first = get(format(intervals[0]), limits[0]);
+  const [minute, quarter] = await Promise.all([
+    first,
+    intervals[0] === intervals[1] ? first : get(format(intervals[1]), limits[1]),
+  ]);
   return { source: "Binance", minute, quarter };
 }
 
-async function okx(symbol: string): Promise<ProviderResult> {
+async function okx(
+  symbol: string,
+  intervals: [number, number] = [1, 15],
+  limits: [number, number] = [MINUTE_LIMIT, QUARTER_LIMIT],
+): Promise<ProviderResult> {
   const instId = `${symbol.replace(/USDT$/, "")}-USDT`;
   const get = async (bar: string, limit: number): Promise<Candle[]> => {
     const body = (await fetchJson(
@@ -62,14 +94,31 @@ async function okx(symbol: string): Promise<ProviderResult> {
     }
     // OKX returns newest first.
     return body.data
-      .map((r) => ({ time: Number(r[0]), close: Number(r[4]), complete: r[8] === "1" }))
+      .map((r) => ({
+        time: Number(r[0]),
+        open: Number(r[1]),
+        high: Number(r[2]),
+        low: Number(r[3]),
+        close: Number(r[4]),
+        volume: Number(r[5]),
+        complete: r[8] === "1",
+      }))
       .reverse();
   };
-  const [minute, quarter] = await Promise.all([get("1m", MINUTE_LIMIT), get("15m", QUARTER_LIMIT)]);
+  const format = (m: number) => (m >= 60 ? `${m / 60}H` : `${m}m`);
+  const first = get(format(intervals[0]), limits[0]);
+  const [minute, quarter] = await Promise.all([
+    first,
+    intervals[0] === intervals[1] ? first : get(format(intervals[1]), limits[1]),
+  ]);
   return { source: "OKX", minute, quarter };
 }
 
-async function kraken(symbol: string): Promise<ProviderResult> {
+async function kraken(
+  symbol: string,
+  intervals: [number, number] = [1, 15],
+  limits: [number, number] = [MINUTE_LIMIT, QUARTER_LIMIT],
+): Promise<ProviderResult> {
   const pair = `${symbol.replace(/USDT$/, "")}USDT`;
   const get = async (minutes: number, keep: number): Promise<Candle[]> => {
     const body = (await fetchJson(
@@ -81,24 +130,51 @@ async function kraken(symbol: string): Promise<ProviderResult> {
     if (!Array.isArray(rows) || rows.length === 0) throw new Error("empty response");
     return rows
       .map((row, index) => {
-        const r = row as [number, string, string, string, string];
+        const r = row as [number, string, string, string, string, string, string];
         return {
           time: Number(r[0]) * 1000,
+          open: Number(r[1]),
+          high: Number(r[2]),
+          low: Number(r[3]),
+          volume: Number(r[6]),
           close: Number(r[4]),
           complete: index < rows.length - 1,
         };
       })
       .slice(-keep);
   };
-  const [minute, quarter] = await Promise.all([get(1, MINUTE_LIMIT), get(15, QUARTER_LIMIT)]);
+  const first = get(intervals[0], limits[0]);
+  const [minute, quarter] = await Promise.all([
+    first,
+    intervals[0] === intervals[1] ? first : get(intervals[1], limits[1]),
+  ]);
   return { source: "Kraken", minute, quarter };
 }
 
-const PROVIDERS: Array<{ name: string; load: (symbol: string) => Promise<ProviderResult> }> = [
+const PROVIDERS = [
   { name: "Binance", load: binance },
   { name: "OKX", load: okx },
   { name: "Kraken", load: kraken },
 ];
+
+export async function loadTACandles(
+  symbol: string,
+  minutes: number,
+  validate: (candles: Candle[]) => void,
+  source?: string,
+) {
+  const errors: string[] = [];
+  for (const provider of PROVIDERS.filter((p) => !source || p.name === source)) {
+    try {
+      const result = await provider.load(symbol, [minutes, minutes], [250, 250]);
+      validate(result.minute);
+      return { source: result.source, candles: result.minute };
+    } catch (error) {
+      errors.push(`${provider.name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  throw new Error(errors.join(" | ") || "Unknown data source");
+}
 
 export type ProviderOutcome =
   { ok: true; result: ProviderResult } | { ok: false; errors: string[] };
