@@ -123,9 +123,14 @@ export async function analyzeForUser(
     const response = await send(config.url, {
       method: "POST",
       redirect: "error",
-      cache: "no-store",
       signal: controller.signal,
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.token}` },
+      // RequestInit.cache can throw before network I/O in Worker compatibility modes.
+      // This authenticated POST and Python's no-store response must remain uncached.
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        Authorization: `Bearer ${config.token}`,
+      },
       body: JSON.stringify(payload),
     });
     if (!response.ok) {

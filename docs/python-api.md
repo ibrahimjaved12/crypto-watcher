@@ -170,6 +170,65 @@ never forwarded or logged by the integration. Responses are not cached.
 
 ## Hosted deployment and browser verification (not performed yet)
 
+### Immediate failure before Render receives a request
+
+This is a TanStack Start project, not the older static Lovable stack. Lovable's
+[TanStack runtime documentation](https://lovable.dev/blog/building-apps-using-tanstack-start)
+describes server secrets as request-time Worker bindings. The installed Lovable
+Vite configuration targets Nitro's Cloudflare module handler. The generated server
+imports `node:process` and uses `nodejs_compat` with a recent compatibility date;
+Cloudflare [populates process.env from bindings](https://developers.cloudflare.com/workers/runtime-apis/nodejs/process/)
+in that configuration. `analyzeForUser` reads it at invocation time, not module load.
+An Edge Function migration is therefore not required to access these secrets.
+
+The reported “Could not reach the Python analysis service or read its response”
+message is emitted only after config validation and user-scoped SELECTs succeed.
+A misspelled/missing secret name would instead report incomplete configuration.
+A correctly shaped but wrong token would ordinarily reach Render and return the
+distinct service-authentication error. A valid-looking but wrong hostname can
+still produce the reported network error; the live values were not inspected.
+
+The proxy previously passed `cache: "no-store"` to fetch. Cloudflare documents
+that this can throw before network I/O unless the runtime enables the relevant
+[cache compatibility support](https://developers.cloudflare.com/changelog/post/2024-11-11-cache-no-store/).
+The proxy now sends the standard `Cache-Control: no-store` request header instead;
+the request remains an authenticated POST and Python already marks responses
+`Cache-Control: no-store`. A focused test simulating that Worker rejection fails
+before this change and passes after it. This identifies a compatibility defect
+consistent with the symptoms, **not proof of the live exception**: hosted Worker
+logs/compatibility settings and project secret values were unavailable locally.
+The local production build currently generates compatibility date `2026-09-16`
+with `nodejs_compat`, which supports the original cache option. If the published
+runtime uses equivalent settings, this option is not the cause there; investigate
+the configured hostname, DNS/TLS/egress, redirects, or unreadable upstream response.
+
+For this repair, once the change is separately approved and published:
+
+1. In the project/environment serving the published URL, check exact server-secret
+   names: `PYTHON_ANALYSIS_ENABLED=true`, `PYTHON_ANALYSIS_URL` equal to Render's
+   final HTTPS origin (no `/v1/analysis` path), and `PYTHON_ANALYSIS_TOKEN` equal to
+   Render's token. Do not use `VITE_` names or paste token values into logs/reports.
+2. Open the published app, sign in normally, open browser Network tools and Render
+   logs, then select a watched pair and click **Run Python analysis** once. Expect
+   the TanStack server-function POST in Network and `POST /v1/analysis` in Render
+   logs. The browser should never call Render directly or contain the service token.
+3. Confirm the server-function response contains `ok: true` and analysis with
+   `mode: "read_only"` and the selected symbol. Compare its threshold and baseline
+   with that user's saved settings/baseline using read-only database inspection.
+4. Repeat once. Verify analysis creates no alerts/run records and changes no
+   baselines; distinguish independent scheduled monitor activity by timestamps.
+   Do not pause or modify the scheduler for this check.
+5. If the same immediate failure persists, inspect the Worker exception and verify
+   the configured hostname/DNS/egress. Do not infer a secrets-access problem from
+   this generic error or copy raw headers/tokens into diagnostics. A configuration
+   error points to missing/invalid bindings; a service-authentication error points
+   to token mismatch; Render receiving no request still points to pre-service failure.
+
+No deployment, live-secret changes, or hosted authenticated verification were
+performed as part of this repair.
+
+### Initial deployment checklist
+
 1. Build and deploy the Python image separately, with HTTPS routing to container
    port 8000 and the token supplied as a secret. Use a region able to reach the
    three public exchange APIs. Configure ingress request limits/concurrency for the
