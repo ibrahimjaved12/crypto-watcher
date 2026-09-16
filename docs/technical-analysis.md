@@ -35,6 +35,34 @@ Concurrent and repeated checks preserve the first snapshot and source. The
 version is `ta-v1`; future rule changes must increment it. Downtime is not
 backfilled with signals that the user could not have seen at that time.
 
+## Dashboard interpretation
+
+`interpretation-v1` is calculated from each saved snapshot in the browser. It
+requires no migration or new exchange requests, and applies to existing history.
+It is a descriptive heuristic, not a calibrated probability or a trading strategy.
+Scores are not persisted and must not be treated as historically issued advice.
+
+- Trend: bullish when price > EMA20 > EMA50; bearish when price < EMA20 < EMA50;
+  neutral otherwise, including equality. Contribution: +40, -40, or 0.
+- Momentum: RSI <30 oversold (-20); [30,45) weak (-10); [45,55] neutral (0);
+  (55,70] strong (+10); >70 overbought (+20). Extremes describe current momentum,
+  not an automatic reversal prediction.
+- ATR percent: 100 * ATR14 / saved close. It contributes no directional points.
+- Directional patterns: hammer, bullish engulfing, bullish EMA cross, RSI recovery
+  are bullish; shooting star, bearish engulfing, bearish EMA cross, RSI rejection
+  are bearish. One-sided evidence contributes +20/-20 total, regardless of count.
+  Conflicting evidence, doji, volume spike alone, and unknown patterns score 0.
+- Volume adds +20/-20 only when a directional pattern agrees with the EMA trend
+  and volume is at least the prior 20-bar average (volume change >=0).
+- Pattern support labels distinguish conflicting directions, countertrend or
+  neutral trend, missing inputs, below-average volume, and aligned plus volume
+  supported. This assesses same-candle evidence, not later-candle confirmation.
+- Total score ranges from -100 to +100. Expand a score to see all contributions.
+  Missing/invalid trend, RSI, or volume inputs produce an unavailable score.
+  Missing ATR only affects the volatility display. Movement alerts do not enter
+  this calculation. Historical rows use the currently displayed interpretation
+  version, independently of their original TA calculation version.
+
 ## Outcomes
 
 The target is four intervals after the next timeframe boundary at or after
