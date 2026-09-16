@@ -184,6 +184,42 @@ test("provider mapping preserves OHLCV and rejects bad provider before fallback"
   }
 });
 
+test("provider HTTP failures cancel unused bodies and preserve errors if cleanup fails", async () => {
+  const { loadTACandles } = await import(await moduleUrl("../src/lib/market/providers.server.ts"));
+  const original = globalThis.fetch;
+  try {
+    for (const cleanupFails of [false, true]) {
+      let canceled = 0;
+      globalThis.fetch = async () =>
+        new Response(
+          new ReadableStream({
+            cancel() {
+              canceled++;
+              if (cleanupFails) throw new Error("cleanup failed");
+            },
+          }),
+          { status: 503 },
+        );
+      await assert.rejects(
+        loadTACandles("BTCUSDT", 15, () => {}),
+        {
+          message: "Binance: HTTP 503 | OKX: HTTP 503 | Kraken: HTTP 503",
+        },
+      );
+      assert.equal(canceled, 3);
+    }
+    globalThis.fetch = async () => new Response(null, { status: 503 });
+    await assert.rejects(
+      loadTACandles("BTCUSDT", 15, () => {}, "Binance"),
+      {
+        message: "Binance: HTTP 503",
+      },
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("TA runner isolates frame failures and settles on the recorded exchange only", async () => {
   const core = await moduleUrl("../src/lib/ta/core.ts", {
     technicalindicators: import.meta.resolve("technicalindicators"),
