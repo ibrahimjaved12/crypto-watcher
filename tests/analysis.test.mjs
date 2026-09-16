@@ -268,12 +268,13 @@ test("outbound diagnostics identify every stage without logging private data", a
     );
     assert.equal(reply.ok, false);
     assert.equal(logs.length, 1);
-    assert.equal(logs[0].length, 1);
-    assert.equal(logs[0][0].stage, entry.stage);
-    assert.equal(logs[0][0].httpStatus, entry.status);
-    assert.equal(typeof logs[0][0].errorName, "string");
-    assert.equal(typeof logs[0][0].errorMessage, "string");
-    assert.deepEqual(Object.keys(logs[0][0]).sort(), [
+    assert.equal(logs[0].length, 2);
+    assert.equal(logs[0][0], "[python-analysis]");
+    assert.equal(logs[0][1].stage, entry.stage);
+    assert.equal(logs[0][1].httpStatus, entry.status);
+    assert.equal(typeof logs[0][1].errorName, "string");
+    assert.equal(typeof logs[0][1].errorMessage, "string");
+    assert.deepEqual(Object.keys(logs[0][1]).sort(), [
       "aborted",
       "causeCode",
       "causeMessage",

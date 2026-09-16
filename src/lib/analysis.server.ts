@@ -66,7 +66,7 @@ function logAnalysisError(
   safeMessage?: string,
 ) {
   const cause = safeField(error, "cause");
-  console.error({
+  console.error("[python-analysis]", {
     stage,
     errorName: sanitizedField(error, "name", sensitiveValues) ?? "UnknownError",
     errorMessage:
@@ -222,9 +222,10 @@ export async function analyzeForUser(
     return { ok: true, analysis: parsed.data };
   } catch (error) {
     const sensitiveValues = [
-      ...Object.values(env).filter((value): value is string => typeof value === "string"),
-      `Bearer ${config.token}`,
       config.token,
+      `Bearer ${config.token}`,
+      config.url,
+      env["PYTHON_ANALYSIS_URL"] ?? "",
       userId,
       requestBody,
       payload.baseline === null ? "" : JSON.stringify(payload.baseline),
