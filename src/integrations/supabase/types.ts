@@ -14,22 +14,6 @@ export type Database = {
   }
   public: {
     Tables: {
-      ta_signals: {
-        Row: {
-          id: string; user_id: string; symbol: string; timeframe: number;
-          candle_at: string; detected_at: string; source: string; version: string;
-          price: number; indicators: Json; patterns: string[]; outcome_status: string;
-          outcome_at: string | null; outcome_price: number | null; return_pct: number | null;
-        }
-        Insert: {
-          id?: string; user_id: string; symbol: string; timeframe: number;
-          candle_at: string; detected_at?: string; source: string; version: string;
-          price: number; indicators: Json; patterns: string[]; outcome_status?: string;
-          outcome_at?: string | null; outcome_price?: number | null; return_pct?: number | null;
-        }
-        Update: { outcome_at?: string; outcome_price?: number; return_pct?: number; outcome_status?: string }
-        Relationships: []
-      }
       alerts: {
         Row: {
           baseline_at: string | null
@@ -221,6 +205,60 @@ export type Database = {
           title?: string
           updated_at?: string
           user_id?: string
+        }
+        Relationships: []
+      }
+      ta_signals: {
+        Row: {
+          candle_at: string
+          detected_at: string
+          id: string
+          indicators: Json
+          outcome_at: string | null
+          outcome_price: number | null
+          outcome_status: string
+          patterns: string[]
+          price: number
+          return_pct: number | null
+          source: string
+          symbol: string
+          timeframe: number
+          user_id: string
+          version: string
+        }
+        Insert: {
+          candle_at: string
+          detected_at?: string
+          id?: string
+          indicators: Json
+          outcome_at?: string | null
+          outcome_price?: number | null
+          outcome_status?: string
+          patterns: string[]
+          price: number
+          return_pct?: number | null
+          source: string
+          symbol: string
+          timeframe: number
+          user_id: string
+          version: string
+        }
+        Update: {
+          candle_at?: string
+          detected_at?: string
+          id?: string
+          indicators?: Json
+          outcome_at?: string | null
+          outcome_price?: number | null
+          outcome_status?: string
+          patterns?: string[]
+          price?: number
+          return_pct?: number | null
+          source?: string
+          symbol?: string
+          timeframe?: number
+          user_id?: string
+          version?: string
         }
         Relationships: []
       }
