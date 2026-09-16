@@ -134,7 +134,7 @@ test("authorized reads are scoped to the caller and forward only relevant saved 
     env,
     async (url, options) => {
       assert.equal(url, "https://analysis.example.test/v1/analysis");
-      assert.equal(options.redirect, "error");
+      assert.equal(options.redirect, "manual");
       assert.equal(options.headers.Authorization, `Bearer ${env.PYTHON_ANALYSIS_TOKEN}`);
       const body = JSON.parse(options.body);
       assert.equal(body.settings.threshold_pct, "3");
@@ -181,6 +181,9 @@ test("proxy reaches the service on Workers runtimes that reject RequestInit.cach
     env,
     async (_, options) => {
       // Older/restricted Worker compatibility modes throw before any network I/O.
+      if (!["follow", "manual"].includes(options.redirect)) {
+        throw new TypeError("Invalid redirect value");
+      }
       if ("cache" in options) {
         throw new TypeError("The cache field on RequestInitializerDict is not implemented in fetch");
       }
@@ -193,6 +196,141 @@ test("proxy reaches the service on Workers runtimes that reject RequestInit.cach
   );
   assert.equal(reply.ok, true);
   assert.equal(requests, 1);
+});
+
+test("redirects are never followed and unused error bodies are canceled", async () => {
+  for (const status of [301, 302, 303, 307, 308, 401, 403, 422, 503, 504]) {
+    for (const cleanupFails of [false, true]) {
+      let calls = 0;
+      let canceled = 0;
+      const { value: reply } = await captureDiagnostics(() =>
+        analyzeForUser(db({ watchlist_items: {} }), "user", "BTCUSDT", env, async (_, options) => {
+          calls++;
+          assert.equal(options.redirect, "manual");
+          return new Response(
+            new ReadableStream({
+              cancel() {
+                canceled++;
+                if (cleanupFails) throw new Error("private cleanup failure");
+              },
+            }),
+            { status, headers: { Location: "https://other.example.test" } },
+          );
+        }),
+      );
+      assert.equal(calls, 1);
+      assert.equal(canceled, 1);
+      const expected =
+        status < 400
+          ? "Could not reach the Python analysis service or read its response. Please retry later."
+          : status === 504
+            ? "Python analysis timed out. Please retry."
+            : status === 422
+              ? "Your saved monitoring state was rejected by Python. Check your settings and try again."
+              : [401, 403].includes(status)
+                ? "Python service authentication failed. Its server configuration needs checking."
+                : "The Python analysis service is unavailable. Please retry later.";
+      assert.deepEqual(reply, { ok: false, error: expected });
+    }
+  }
+});
+
+test("outbound diagnostics identify every stage without logging private data", async () => {
+  const privateResponse = "private-response-body";
+  const cases = [
+    {
+      stage: "fetch",
+      send: async (_, options) => {
+        const cause = Object.assign(new Error(`socket ${env.PYTHON_ANALYSIS_TOKEN}`), {
+          code: "ECONNRESET",
+        });
+        throw new TypeError(
+          `fetch failed ${env.PYTHON_ANALYSIS_URL} ${options.headers.Authorization} private-user-id ${options.body}`,
+          { cause },
+        );
+      },
+      status: undefined,
+    },
+    {
+      stage: "response-status",
+      send: async () => ({
+        status: 200,
+        get ok() {
+          throw new TypeError("could not read response status");
+        },
+      }),
+      status: 200,
+    },
+    {
+      stage: "response-text",
+      send: async () => ({
+        status: 200,
+        ok: true,
+        text: async () => {
+          throw new TypeError("could not read response text");
+        },
+      }),
+      status: 200,
+    },
+    {
+      stage: "size-guard",
+      send: async () => new Response(privateResponse.repeat(7_000)),
+      status: 200,
+    },
+    {
+      stage: "json-parse",
+      send: async () => new Response(`<${privateResponse}>`),
+      status: 200,
+    },
+    {
+      stage: "schema-validation",
+      send: async () => Response.json({ privateResponse }),
+      status: 200,
+    },
+  ];
+
+  for (const entry of cases) {
+    const { value: reply, logs } = await captureDiagnostics(() =>
+      analyzeForUser(db({ watchlist_items: {} }), "private-user-id", "BTCUSDT", env, entry.send),
+    );
+    assert.equal(reply.ok, false);
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].length, 2);
+    assert.equal(logs[0][0], "[python-analysis]");
+    assert.equal(logs[0][1].stage, entry.stage);
+    assert.equal(logs[0][1].httpStatus, entry.status);
+    assert.equal(typeof logs[0][1].errorName, "string");
+    assert.equal(typeof logs[0][1].errorMessage, "string");
+    assert.deepEqual(Object.keys(logs[0][1]).sort(), [
+      "aborted",
+      "causeCode",
+      "causeMessage",
+      "causeName",
+      "errorMessage",
+      "errorName",
+      "httpStatus",
+      "stage",
+    ]);
+    const logged = JSON.stringify(logs);
+    assert.equal(logged.includes(env.PYTHON_ANALYSIS_TOKEN), false);
+    assert.equal(logged.includes(env.PYTHON_ANALYSIS_URL), false);
+    assert.equal(logged.includes("Bearer"), false);
+    assert.equal(logged.includes("private-user-id"), false);
+    assert.equal(logged.includes("schema_version"), false);
+    assert.equal(logged.includes("baseline"), false);
+    assert.equal(logged.includes(privateResponse), false);
+  }
+});
+
+test("successful analysis does not emit a diagnostic or change its result", async () => {
+  const expected = result();
+  const { value: reply, logs } = await captureDiagnostics(() =>
+    analyzeForUser(db({ watchlist_items: {} }), "user", "BTCUSDT", env, async () =>
+      Response.json(expected),
+    ),
+  );
+  assert.deepEqual(reply, { ok: true, analysis: expected });
+  assert.deepEqual(logs, []);
 });
 
 test("misspelled secret names fail configuration before reads or outbound requests", async () => {

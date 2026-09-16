@@ -122,7 +122,8 @@ export async function analyzeForUser(
   try {
     const response = await send(config.url, {
       method: "POST",
-      redirect: "error",
+      // Workers support manual redirects; never forward the service token to Location.
+      redirect: "manual",
       signal: controller.signal,
       // RequestInit.cache can throw before network I/O in Worker compatibility modes.
       // This authenticated POST and Python's no-store response must remain uncached.
@@ -134,6 +135,15 @@ export async function analyzeForUser(
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
+      // Release unused bodies without letting cleanup replace the original failure.
+      try {
+        await response.body?.cancel();
+      } catch {
+        // The runtime may already have canceled the response.
+      }
+      if (responseStatus >= 300 && responseStatus < 400) {
+        throw new Error("Python analysis service redirect rejected");
+      }
       const error =
         response.status === 504
           ? "Python analysis timed out. Please retry."
