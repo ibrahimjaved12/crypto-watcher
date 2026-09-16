@@ -172,6 +172,42 @@ test("missing saved baseline/settings stay absent and use documented defaults wi
   assert.equal(reply.ok, true);
 });
 
+test("proxy reaches the service on Workers runtimes that reject RequestInit.cache", async () => {
+  let requests = 0;
+  const reply = await analyzeForUser(
+    db({ watchlist_items: {} }),
+    "verified-user",
+    "BTCUSDT",
+    env,
+    async (_, options) => {
+      // Older/restricted Worker compatibility modes throw before any network I/O.
+      if ("cache" in options) {
+        throw new TypeError("The cache field on RequestInitializerDict is not implemented in fetch");
+      }
+      requests++;
+      assert.equal(options.method, "POST");
+      assert.equal(options.headers["Cache-Control"], "no-store");
+      assert.equal(options.headers.Authorization, `Bearer ${env.PYTHON_ANALYSIS_TOKEN}`);
+      return Response.json(result());
+    },
+  );
+  assert.equal(reply.ok, true);
+  assert.equal(requests, 1);
+});
+
+test("misspelled secret names fail configuration before reads or outbound requests", async () => {
+  for (const name of Object.keys(env)) {
+    const config = { ...env, [name.toLowerCase()]: env[name] };
+    delete config[name];
+    const store = db();
+    const reply = await analyzeForUser(store, "user", "BTCUSDT", config, () => {
+      assert.fail("must not call Python with incomplete configuration");
+    });
+    assert.equal(reply.error, "Python analysis is not enabled or its service configuration is incomplete.");
+    assert.equal(store.queries.length, 0);
+  }
+});
+
 test("database failure cannot become an empty baseline or leak raw details", async () => {
   const store = db({ watchlist_items: {} }, "monitor_baselines");
   const reply = await analyzeForUser(store, "user", "BTCUSDT", env, () => {
