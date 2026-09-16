@@ -6,6 +6,7 @@
  */
 import { loadCandles } from "@/lib/market/providers.server";
 import { completedObservation } from "./observation";
+import { runTA } from "../ta/engine.server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -95,8 +96,15 @@ export async function runMonitorForUser(
     }
   }
 
+  const taErrors: string[] = [];
+  for (const symbol of symbols) taErrors.push(...(await runTA(supabaseAdmin, userId, symbol)));
+
   const status: UserRunResult["status"] =
-    failures.length === 0 ? "success" : failures.length >= symbols.length ? "failed" : "partial";
+    failures.length >= symbols.length
+      ? "failed"
+      : failures.length || taErrors.length
+        ? "partial"
+        : "success";
 
   return {
     userId,
@@ -104,7 +112,7 @@ export async function runMonitorForUser(
     symbolsChecked: symbols.length,
     alertsCreated,
     dataSource: source,
-    error: failures.length ? failures.join(" | ") : null,
+    error: [...failures, ...taErrors].join(" | ") || null,
   };
 }
 

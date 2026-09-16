@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { QuoteCard } from "@/components/market/quote-card";
 import { PythonAnalysisPanel } from "@/components/market/python-analysis";
+import { TechnicalAnalysis } from "@/components/market/technical-analysis";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -82,6 +83,7 @@ function Dashboard() {
       if (result.error) toast.warning(result.error);
       queryClient.invalidateQueries({ queryKey: ["runs"] });
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
+      queryClient.invalidateQueries({ queryKey: ["ta"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -153,6 +155,7 @@ function Dashboard() {
       </div>
 
       <PythonAnalysisPanel symbols={symbols} />
+      <TechnicalAnalysis />
 
       {sourcesDown ? (
         <p className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm">

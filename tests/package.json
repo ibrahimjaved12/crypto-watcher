@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node cumulative.test.mjs && node observation.test.mjs && node analysis.test.mjs"
+    "test": "node cumulative.test.mjs && node observation.test.mjs && node analysis.test.mjs && node ta.test.mjs"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.3.14"
