@@ -1,7 +1,7 @@
-import { EMA, RSI, ATR } from "technicalindicators";
+import { EMA, RSI, ATR, MACD, BollingerBands, ADX } from "technicalindicators";
 import type { Candle } from "../market/providers.server";
 
-export const TA_VERSION = "ta-v1";
+export const TA_VERSION = "ta-v2";
 export const TA_FRAMES = [15, 60, 240] as const;
 
 export function outcomeDue(detectedAt: string, timeframe: number) {
@@ -69,6 +69,25 @@ export function analyze(candles: Candle[]) {
   const close = candles.map((c) => c.close);
   const ema20 = EMA.calculate({ period: 20, values: close });
   const ema50 = EMA.calculate({ period: 50, values: close });
+  const ema200 = EMA.calculate({ period: 200, values: close });
+  const macd = MACD.calculate({
+    values: close,
+    fastPeriod: 12,
+    slowPeriod: 26,
+    signalPeriod: 9,
+    SimpleMAOscillator: false,
+    SimpleMASignal: false,
+  });
+  const bands = BollingerBands.calculate({ period: 20, stdDev: 2, values: close }).at(-1)!;
+  const adx = ADX.calculate({
+    period: 14,
+    high: candles.map((c) => c.high),
+    low: candles.map((c) => c.low),
+    close,
+  }).at(-1);
+  // Flat series can produce undefined ratios; never persist NaN/Infinity.
+  const finite = (value: number | undefined) =>
+    value !== undefined && Number.isFinite(value) ? value : null;
   const rsi = RSI.calculate({ period: 14, values: close });
   const atr = ATR.calculate({
     period: 14,
@@ -78,6 +97,7 @@ export function analyze(candles: Candle[]) {
   });
   const last = candles.at(-1)!;
   const average = candles.slice(-21, -1).reduce((sum, c) => sum + c.volume, 0) / 20;
+  const prior = candles.slice(-21, -1);
   const detected = patterns(last, candles.at(-2)!, candles.at(-2)!.close - candles.at(-5)!.close);
   if (ema20.at(-2)! <= ema50.at(-2)! && ema20.at(-1)! > ema50.at(-1)!)
     detected.push("ema_bullish_cross");
@@ -91,6 +111,36 @@ export function analyze(candles: Candle[]) {
     previous_candle: { ...candles.at(-2)! },
     ema20: ema20.at(-1)!,
     ema50: ema50.at(-1)!,
+    ema200: finite(ema200.at(-1)),
+    macd: {
+      line: finite(macd.at(-1)?.MACD),
+      signal: finite(macd.at(-1)?.signal),
+      histogram: finite(macd.at(-1)?.histogram),
+      previous_histogram: finite(macd.at(-2)?.histogram),
+    },
+    bollinger: {
+      middle: finite(bands.middle),
+      upper: finite(bands.upper),
+      lower: finite(bands.lower),
+      bandwidth_pct: finite(
+        bands.middle > 0 ? ((bands.upper - bands.lower) / bands.middle) * 100 : undefined,
+      ),
+      percent_b: finite(
+        bands.upper > bands.lower
+          ? (last.close - bands.lower) / (bands.upper - bands.lower)
+          : undefined,
+      ),
+    },
+    adx14: finite(adx?.adx),
+    plus_di14: finite(adx?.pdi),
+    minus_di14: finite(adx?.mdi),
+    range20: {
+      low: Math.min(...prior.map((c) => c.low)),
+      high: Math.max(...prior.map((c) => c.high)),
+    },
+    volume_average20: average,
+    volume_ratio: average > 0 ? finite(last.volume / average) : null,
+    candle_count: candles.length,
     rsi14: rsi.at(-1)!,
     atr14: atr.at(-1)!,
     volume_change_pct: average > 0 ? (last.volume / average - 1) * 100 : null,

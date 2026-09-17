@@ -6,10 +6,40 @@ const source = await readFile(new URL("../src/lib/ta/interpretation.ts", import.
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
-const { interpretTA } = await import(
+const { interpretTA, explainTA } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`
 );
 const base = { ema20: 100, ema50: 90, rsi14: 60, atr14: 2, volume_change_pct: 20 };
+test("v2 explanations expose independent context without changing existing scores", () => {
+  const raw = {
+    ...base,
+    ema200: 95,
+    adx14: 25,
+    macd: { line: -1, signal: -2, histogram: 1, previous_histogram: 2 },
+    bollinger: { lower: 90, middle: 100, upper: 110 },
+    range20: { low: 90, high: 110 },
+  };
+  const byLabel = Object.fromEntries(
+    explainTA(110, raw, ["hammer"]).map((row) => [row.label, row]),
+  );
+  assert.match(byLabel["EMA 20 / 50 / 200"].explanation, /EMA200 context: Bullish/);
+  assert.match(byLabel["MACD 12 / 26 / 9"].value, /^Bullish/);
+  assert.match(byLabel["MACD 12 / 26 / 9"].explanation, /falling/);
+  assert.match(byLabel["Bollinger Bands 20 / 2"].value, /^Inside bands/);
+  assert.match(byLabel["ADX 14 / trend strength"].value, /^Trending/);
+  assert.match(byLabel["Prior 20-candle range"].value, /^Inside prior range/);
+  assert.match(byLabel["hammer"].explanation, /twice the body/);
+  assert.deepEqual(interpretTA(110, raw, []), interpretTA(110, base, []));
+  for (const row of explainTA(110, base, [])) {
+    assert.ok(row.explanation.length > 0);
+    assert.equal(row.value.includes("NaN"), false);
+  }
+  assert.match(
+    explainTA(110, base, []).find((r) => r.label === "MACD 12 / 26 / 9").value,
+    /Unavailable/,
+  );
+  assert.match(explainTA(110, null, ["unknown"]).at(-1).explanation, /historical pattern/);
+});
 test("aligned directional evidence yields bounded, transparent scores", () => {
   const up = interpretTA(110, { ...base, rsi14: 80 }, [
     "hammer",

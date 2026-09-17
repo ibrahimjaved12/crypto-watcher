@@ -141,7 +141,7 @@ export async function analyzeForUser(
       } catch {
         // The runtime may already have canceled the response.
       }
-      if (responseStatus >= 300 && responseStatus < 400) {
+      if (response.status >= 300 && response.status < 400) {
         throw new Error("Python analysis service redirect rejected");
       }
       const error =
