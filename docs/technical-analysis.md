@@ -1,4 +1,45 @@
-# Technical Analysis v1
+# Technical Analysis v2
+
+## v2 coverage and architecture
+
+Saved TA runs in the existing TypeScript monitoring pipeline. Python remains the
+separate read-only rolling-price/baseline service; this release does not migrate
+TA to it. The existing pinned indicator library supplies the added calculations.
+No schema migration or extra exchange requests are required: new values use the
+existing `ta_signals.indicators` JSON field. Historical records are not rewritten.
+
+| Feature           | v2 behavior                                                                      |
+| ----------------- | -------------------------------------------------------------------------------- |
+| RSI               | Wilder RSI14 and threshold explanations                                          |
+| Moving averages   | EMA20/50 plus EMA200 long-term price context                                     |
+| MACD              | EMA12 minus EMA26, EMA9 signal, histogram and previous histogram                 |
+| Bollinger Bands   | 20-close SMA ± 2 population standard deviations, bandwidth percent, %B           |
+| Volatility        | Wilder ATR14 and percent of close                                                |
+| Volume            | Latest / previous 20-bar mean ratio and percentage change                        |
+| Timeframes        | 15m, 1h, 4h and an All history filter                                            |
+| Direction         | Existing EMA trend and separate EMA200/MACD bullish, bearish or neutral context  |
+| Explanations      | Expand Indicator explanations for values, formulas, thresholds and pattern rules |
+| Completed candles | Existing aligned, consecutive, fresh OHLCV validation                            |
+| Trend strength    | Wilder ADX14 and +DI/−DI: below 20 weak, 20–25 developing, >=25 trending         |
+| Range context     | Previous 20 candles' lowest low and highest high, excluding the latest candle    |
+
+ADX adds strength context without assigning a direction. Range levels provide
+reference boundaries, not guaranteed support/resistance. Additional oscillators,
+automated divergence, strategy rules and backtesting are deferred. MACD/EMA/RSI
+are correlated, so agreement is not independent confirmation. The added indicators
+do not contribute points to the existing interpretation-v1 score.
+
+MACD bias uses histogram sign: rising negative histogram still means bearish bias
+with improving momentum. Band location does not guarantee reversal. %B is null
+when bands coincide; zero reference volume produces null ratio/change. Undefined
+or nonfinite v2 outputs are stored as null. EMA200 uses finite available history
+(minimum 200 bars), so may differ from a chart initialized with much more history.
+All periods refer to candles, not days. Range breaks require a strictly outside
+close; equality remains inside. ADX thresholds are descriptive heuristics.
+
+New snapshots use ta-v2 and include candle count. Historical v1 values missing
+new fields display unavailable. The All filter shows paginated history rather
+than a synchronized cross-timeframe score; compare close times and sources.
 
 TA runs inside the existing scheduled and manual monitoring pass for enabled
 watchlists. Its records live in `ta_signals`; movement alerts and their baselines
@@ -13,26 +54,27 @@ and does not prevent movement alert calculations.
 - Exclude forming candles. Reject missing or duplicate completed bars.
 - Reject a last close older than one interval plus two minutes.
 - Binance, OKX, then Kraken fallback; never stitch exchanges into one series.
-- EMA 20/50, Wilder RSI 14 and Wilder ATR 14 use `technicalindicators` 3.1.0.
+- EMA20/50/200, MACD12/26/9, Bollinger20/2, Wilder ADX14, RSI14 and ATR14
+  use `technicalindicators` 3.1.0.
 - Volume change compares the latest bar with the mean of the previous 20 bars,
   excluding the current bar. A zero mean produces null, not infinity.
 
 Patterns use explicit v1 definitions; they are observations, not buy/sell orders:
 
-| Pattern | Rule |
-| --- | --- |
-| Doji | Body <= 10% of high-low range; zero-range bars excluded |
-| Hammer | Body > 10% of range, lower wick >= 2 bodies, upper wick <= 0.5 body, preceding three-bar close change negative |
-| Shooting star | Mirrored hammer with positive preceding close change |
-| Bullish/bearish engulfing | Opposite-colored bodies, current body fully covers previous body and is strictly larger |
-| EMA cross | EMA20 crosses EMA50 on the latest completed candle |
-| RSI recovery/rejection | Cross back above 30 or below 70 |
-| Volume spike | Latest volume >= twice the previous 20-bar mean |
+| Pattern                   | Rule                                                                                                           |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Doji                      | Body <= 10% of high-low range; zero-range bars excluded                                                        |
+| Hammer                    | Body > 10% of range, lower wick >= 2 bodies, upper wick <= 0.5 body, preceding three-bar close change negative |
+| Shooting star             | Mirrored hammer with positive preceding close change                                                           |
+| Bullish/bearish engulfing | Opposite-colored bodies, current body fully covers previous body and is strictly larger                        |
+| EMA cross                 | EMA20 crosses EMA50 on the latest completed candle                                                             |
+| RSI recovery/rejection    | Cross back above 30 or below 70                                                                                |
+| Volume spike              | Latest volume >= twice the previous 20-bar mean                                                                |
 
 Each check saves the latest completed candle's snapshot, including observations
 with no pattern. Unique key: user, symbol, timeframe, candle open time, version.
 Concurrent and repeated checks preserve the first snapshot and source. The
-version is `ta-v1`; future rule changes must increment it. Downtime is not
+version is `ta-v2`; future rule changes must increment it. Downtime is not
 backfilled with signals that the user could not have seen at that time.
 
 ## Dashboard interpretation
@@ -82,9 +124,17 @@ per run. No TP/SL, news score, or combined movement/TA score is implemented.
 
 ## Deployment
 
-Apply `supabase/migrations/20260917090000_technical_analysis.sql` in Lovable before
-deploying the app changes. Authenticated users may read only their own records;
+For an installation without TA v1, apply
+`supabase/migrations/20260917090000_technical_analysis.sql` in Lovable before
+deploying the app changes. Upgrading an existing TA v1 installation needs no
+migration. Authenticated users may read only their own records;
 only the server service role may create or update them.
+
+After publication, let the existing monitor complete a check. Verify new ta-v2
+rows in 15m/1h/4h, and expand Indicator explanations to check EMA200, MACD,
+Bollinger, ADX and range values. Compare source and completed-close timestamps;
+use All to inspect frames together. Old ta-v1 rows should remain readable with
+unavailable new fields. Refresh reloads saved history; it does not run analysis.
 
 The existing cron endpoint also runs TA. Confirm the cron HTTP timeout and hosting
 request budget allow the extra exchange requests: three per pair on the happy

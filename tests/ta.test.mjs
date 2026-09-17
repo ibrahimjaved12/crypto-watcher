@@ -13,7 +13,7 @@ async function moduleUrl(path, imports = {}) {
     outputText = outputText.replaceAll(`"${specifier}"`, JSON.stringify(target));
   return `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`;
 }
-const { closedCandles, analyze, patterns, outcomeDue } = await import(
+const { closedCandles, analyze, patterns, outcomeDue, TA_VERSION } = await import(
   await moduleUrl("../src/lib/ta/core.ts", {
     technicalindicators: import.meta.resolve("technicalindicators"),
   })
@@ -84,6 +84,51 @@ test("indicator values on constant and rising prices and zero volume", () => {
   spike.at(-1).volume = 250;
   assert.equal(analyze(spike).volume_change_pct, 150);
   assert.ok(analyze(spike).patterns.includes("volume_spike"));
+});
+
+test("v2 EMA200, MACD, bands, ADX and range agree with independently known series", () => {
+  assert.equal(TA_VERSION, "ta-v2");
+  const rising = series().map((c, i) => ({
+    ...c,
+    open: i + 100,
+    close: i + 101,
+    high: i + 102,
+    low: i + 99,
+  }));
+  const values = analyze(rising);
+  const near = (actual, expected) =>
+    assert.ok(Math.abs(actual - expected) < 1e-8, `${actual} != ${expected}`);
+  near(values.ema200, 349 - 99.5);
+  near(values.macd.line, 7);
+  near(values.macd.signal, 7);
+  near(values.macd.histogram, 0);
+  near(values.bollinger.middle, 339.5);
+  near(values.bollinger.upper, 339.5 + 2 * Math.sqrt(33.25));
+  near(values.bollinger.lower, 339.5 - 2 * Math.sqrt(33.25));
+  near(values.adx14, 100);
+  assert.deepEqual(values.range20, { low: 327, high: 349 });
+  assert.equal(values.volume_ratio, 1);
+  assert.equal(values.volume_average20, 100);
+  const altered = rising.map((c) => ({ ...c }));
+  altered.at(-1).high = 10000;
+  altered.at(-1).volume = 400;
+  assert.deepEqual(analyze(altered).range20, values.range20);
+  assert.equal(analyze(altered).volume_average20, 100);
+  assert.equal(analyze(altered).volume_ratio, 4);
+});
+
+test("v2 flat prices have finite persisted values and forming candles cannot affect indicators", () => {
+  const flat = series().map((c) => ({ ...c, high: 100, low: 100, volume: 0 }));
+  const values = analyze(flat);
+  assert.equal(values.bollinger.bandwidth_pct, 0);
+  assert.equal(values.bollinger.percent_b, null);
+  assert.equal(values.volume_ratio, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(values)), values);
+  const withForming = [
+    ...flat,
+    candle({ time: end, high: 10000, close: 9999, volume: 99999, complete: false }),
+  ];
+  assert.deepEqual(analyze(closedCandles(withForming, 15, now)), values);
 });
 
 test("numeric candle rules, trend context and zero-range bars", () => {
