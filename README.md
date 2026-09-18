@@ -1,6 +1,12 @@
 # Crypto Watcher
 
-Technical Analysis v1 adds OHLCV indicators, numeric candle patterns, and saved
+Crypto Watch is a personal, manual crypto decision-support and evidence system. It
+combines market-movement detection, transparent technical analysis, future news
+context, alerts, and outcome tracking without executing trades. The agreed scope,
+component ownership, staged roadmap, and deployment options are recorded in the
+[product direction and architecture](docs/product-direction.md).
+
+Technical Analysis v2 adds OHLCV indicators, numeric candle patterns, and saved
 forward outcomes. See [TA rules and deployment](docs/technical-analysis.md).
 
 The dashboard now supports optional read-only Python analysis through a separate
@@ -9,7 +15,12 @@ for the server secrets, local/Docker commands and deployment steps.
 
 The monitoring algorithm now has a [saved-baseline cumulative rule](docs/cumulative-monitoring.md)
 for gradual rises and falls. Its database migration must be applied before deploying
-the updated monitor; the original milestone brief below remains as project history.
+the updated monitor.
+
+## Original milestone brief
+
+The following brief is retained as project history. It does not replace the current
+product direction or claim that future milestones are already implemented.
 
 Build a personal crypto monitoring web app called Crypto Watch.
 
