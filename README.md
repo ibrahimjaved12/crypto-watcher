@@ -1,10 +1,23 @@
 # Crypto Watcher
 
-Crypto Watch is a personal, manual crypto decision-support and evidence system. It
-combines market-movement detection, transparent technical analysis, future news
-context, alerts, and outcome tracking without executing trades. The agreed scope,
-component ownership, staged roadmap, and deployment options are recorded in the
-[product direction and architecture](docs/product-direction.md).
+Crypto Watch identifies and evaluates **conditional futures-trade opportunities
+and profitability after costs**. The initial target is **Binance USDⓈ-M,
+USDT-margined perpetual futures, long and short**. The intended lifecycle separates
+current assessment, developing setups, activation, trade management, evaluation,
+historical backtesting, and virtual-wallet paper trading. Real-money trading stays
+manual; no automatic real-money order placement is included in the roadmap.
+
+Read the [product direction and architecture](docs/product-direction.md) for the
+current and proposed data flows, futures evidence rules, news-context limits, and
+service/database ownership. The [implementation and deployment roadmap](docs/roadmap.md)
+links all 32 ordered GitHub issues and their dependencies, distinguishing current,
+proposed, and conditional decisions.
+
+The current implementation still uses **spot-based REST providers** and saved
+TypeScript TA with forward-return outcomes. Futures feeds, conditional trade
+evaluation, backtesting, and paper trading are planned work, not delivered features.
+Background execution also needs verification: [issue #13](https://github.com/ibrahimjaved12/crypto-watcher/issues/13)
+reports an observed disabled cron; repository code alone does not prove a live schedule.
 
 Technical Analysis v2 adds OHLCV indicators, numeric candle patterns, and saved
 forward outcomes. See [TA rules and deployment](docs/technical-analysis.md).
@@ -19,8 +32,10 @@ the updated monitor.
 
 ## Original milestone brief
 
-The following brief is retained as project history. It does not replace the current
-product direction or claim that future milestones are already implemented.
+The following brief is retained as project history. Its original market scope,
+milestone order, and trade-execution wording are superseded by the linked futures
+product direction and roadmap, which include simulated execution only. This brief
+does not claim that future milestones or the deployed schedule are working.
 
 Build a personal crypto monitoring web app called Crypto Watch.
 
