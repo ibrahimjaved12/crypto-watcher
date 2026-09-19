@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { automaticQueryOptions, logActivity } from "@/lib/activity-controls";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
@@ -6,12 +7,18 @@ import { Button } from "@/components/ui/button";
 import { interpretTA, explainTA } from "@/lib/ta/interpretation";
 
 export function TechnicalAnalysis() {
+  const automatic = automaticQueryOptions(import.meta.env["VITE_TA_HISTORY_AUTO_REFRESH_ENABLED"]);
+  useEffect(() => {
+    if (!automatic.enabled)
+      logActivity(import.meta.env["VITE_ACTIVITY_DIAGNOSTICS"], "ta-history", "automatic-paused");
+  }, [automatic.enabled]);
   const [frame, setFrame] = useState(15);
   const [symbol, setSymbol] = useState("");
   const [page, setPage] = useState(0);
   const history = useQuery({
     queryKey: ["ta", frame, symbol, page],
     queryFn: async () => {
+      logActivity(import.meta.env["VITE_ACTIVITY_DIAGNOSTICS"], "ta-history", "request-started");
       let query = supabase
         .from("ta_signals")
         .select("*")
@@ -24,7 +31,7 @@ export function TechnicalAnalysis() {
       if (error) throw error;
       return data;
     },
-    refetchInterval: 60_000,
+    ...automatic,
   });
   const number = (v: unknown) =>
     typeof v === "number" ? v.toLocaleString(undefined, { maximumFractionDigits: 5 }) : "--";
@@ -79,7 +86,14 @@ export function TechnicalAnalysis() {
         rules. New v2 values appear after the next monitor check; older records retain their
         original values.
       </p>
-      {history.isPending ? (
+      {!automatic.enabled && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Automatic TA refresh paused. Press Refresh after changing filters or pages.
+        </p>
+      )}
+      {history.isPending && !history.isFetching && !automatic.enabled ? (
+        <p className="py-4 text-sm">Press Refresh to load analysis.</p>
+      ) : history.isPending ? (
         <p className="py-4 text-sm">Loading analysis...</p>
       ) : history.error ? (
         <p role="alert" className="py-4 text-sm text-destructive">

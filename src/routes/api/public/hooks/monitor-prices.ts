@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { activityEnabled, logActivity } from "@/lib/activity-controls";
 
 import { authenticateCronRequest } from "@/integrations/supabase/cron-auth";
 import {
@@ -20,6 +21,17 @@ async function handle(request: Request) {
   if (!token || bearer !== token) {
     const unauthorized = await authenticateCronRequest(request);
     if (unauthorized) return unauthorized;
+  }
+
+  if (!activityEnabled(process.env["SCHEDULED_MONITOR_ENABLED"])) {
+    logActivity(process.env["ACTIVITY_DIAGNOSTICS"], "scheduled-monitor", "skipped");
+    return Response.json({
+      ok: true,
+      status: "skipped",
+      reason: "Scheduled monitoring disabled",
+      users: 0,
+      results: [],
+    });
   }
 
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
