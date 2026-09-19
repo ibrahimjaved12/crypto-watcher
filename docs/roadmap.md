@@ -7,11 +7,13 @@ for the futures-only product, current/target diagrams, evidence rules, and owner
 ## Status and dependency rules
 
 **Current** means implemented in repository code: dashboard/auth/CRUD, REST spot
-monitoring, TypeScript TA history and forward returns, and optional read-only Python
-analysis. It does not confirm live scheduler health. **Proposed** means agreed
-incremental work below, including external operational storage and public futures
-streaming. **Conditional** means an option requiring evidence, including paid
-hosting, Django, Celery, direct Python database ownership, or full backend migration.
+monitoring, TypeScript TA history and forward returns, temporary workload controls,
+and optional read-only Python analysis. It does not confirm live scheduler health.
+See [activity controls](activity-controls.md) for the current switches. **Proposed**
+means agreed incremental work below, including external operational storage and
+public futures streaming. **Conditional** means an option requiring evidence,
+including paid hosting, Django, Celery, direct Python database ownership, or full
+backend migration.
 
 Ready/Backlog below are the issues' planning labels, not completion claims. Order
 matches their explicit roadmap order, not issue number. The dependency column is
@@ -25,7 +27,7 @@ are called out rather than pretending that all dependencies already exist.
 | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | -------------------------------------------------------------------------------------------- |
 | 1     | [#12 — Update product scope, futures architecture, and deployment roadmap](https://github.com/ibrahimjaved12/crypto-watcher/issues/12)                                  | Ready          | None; records the agreed direction.                                                          |
 | 2     | [#13 — Verify monitoring execution and establish a measured runtime-cost baseline](https://github.com/ibrahimjaved12/crypto-watcher/issues/13)                          | Ready          | #12; measure before claiming savings.                                                        |
-| 3     | [#22 — Add development controls for automatic polling and unnecessary refetches](https://github.com/ibrahimjaved12/crypto-watcher/issues/22)                            | Ready          | #13 measurement plan; repeat comparable windows.                                             |
+| 3     | [#22 — Add activity controls for polling, scheduled monitoring, and TA work](https://github.com/ibrahimjaved12/crypto-watcher/issues/22)                                | Ready          | #13 measurement plan; repeat comparable windows.                                             |
 | 4     | [#14 — Optimize market collection, calculations, and database persistence](https://github.com/ibrahimjaved12/crypto-watcher/issues/14)                                  | Ready          | #13 and #22 baselines; preserve movement semantics.                                          |
 | 5     | [#15 — Separate market collection, analysis, movement alerts, and notification controls](https://github.com/ibrahimjaved12/crypto-watcher/issues/15)                    | Backlog        | #14; define independent pause/resume and catch-up contracts.                                 |
 | 6     | [#16 — Add overlap protection, restart recovery, and freshness reporting](https://github.com/ibrahimjaved12/crypto-watcher/issues/16)                                   | Backlog        | #14–#15; establish ownership/recovery now, complete stream tests with #26.                   |

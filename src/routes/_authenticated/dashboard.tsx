@@ -1,7 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { automaticQueryOptions, logActivity } from "@/lib/activity-controls";
 import { Plus, RefreshCw, PlayCircle } from "lucide-react";
 import { toast } from "sonner";
 
@@ -41,6 +42,11 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
 });
 
 function Dashboard() {
+  const automatic = automaticQueryOptions(import.meta.env["VITE_MARKET_AUTO_REFRESH_ENABLED"]);
+  useEffect(() => {
+    if (!automatic.enabled)
+      logActivity(import.meta.env["VITE_ACTIVITY_DIAGNOSTICS"], "market", "automatic-paused");
+  }, [automatic.enabled]);
   const queryClient = useQueryClient();
   const [pending, setPending] = useState("");
   const runCheck = useServerFn(runMyMonitorCheck);
@@ -51,9 +57,12 @@ function Dashboard() {
 
   const market = useQuery({
     queryKey: ["market", symbols],
-    queryFn: () => loadMarket({ data: { symbols } }),
-    enabled: symbols.length > 0,
-    refetchInterval: 60_000,
+    queryFn: () => {
+      logActivity(import.meta.env["VITE_ACTIVITY_DIAGNOSTICS"], "market", "request-started");
+      return loadMarket({ data: { symbols } });
+    },
+    ...automatic,
+    enabled: automatic.enabled && symbols.length > 0,
   });
 
   const runs = useQuery({ queryKey: ["runs"], queryFn: fetchRuns });
@@ -98,8 +107,10 @@ function Dashboard() {
         <div>
           <h1 className="text-2xl font-semibold">Market dashboard</h1>
           <p className="text-sm text-muted-foreground">
-            {symbols.length}/{MAX_WATCHLIST_SIZE} pairs · prices refresh every minute while this
-            page is open.
+            {symbols.length}/{MAX_WATCHLIST_SIZE} pairs ·{" "}
+            {automatic.enabled
+              ? "prices refresh every minute while this page is active."
+              : "Automatic price refresh paused. Press Refresh to load prices."}
           </p>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -115,7 +126,11 @@ function Dashboard() {
               ))}
             </SelectContent>
           </Select>
-          <Button variant="secondary" onClick={() => market.refetch()} disabled={market.isFetching}>
+          <Button
+            variant="secondary"
+            onClick={() => market.refetch()}
+            disabled={market.isFetching || symbols.length === 0}
+          >
             <RefreshCw
               className={`size-4 ${market.isFetching ? "animate-spin" : ""}`}
               aria-hidden

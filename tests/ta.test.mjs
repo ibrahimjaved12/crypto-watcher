@@ -272,6 +272,7 @@ test("TA runner isolates frame failures and settles on the recorded exchange onl
   const provider = `data:text/javascript,export const loadTACandles = (...args) => globalThis.__taLoad(...args);`;
   const { runTA } = await import(
     await moduleUrl("../src/lib/ta/engine.server.ts", {
+      "../activity-controls": await moduleUrl("../src/lib/activity-controls.ts"),
       "./core": core,
       "../market/providers.server": provider,
     })

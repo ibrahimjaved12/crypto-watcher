@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { activityEnabled, logActivity } from "@/lib/activity-controls";
 
 import { authenticateCronRequest } from "@/integrations/supabase/cron-auth";
 import {
@@ -9,8 +10,8 @@ import {
 } from "@/lib/monitor/engine.server";
 
 /**
- * Scheduled price monitoring. Called by the backend scheduler (every 5 minutes)
- * so monitoring keeps running with no browser open.
+ * Scheduled price monitoring. When explicitly enabled, the backend scheduler can
+ * call this route every five minutes so monitoring runs with no browser open.
  */
 async function handle(request: Request) {
   // The scheduler authenticates with a shared token; the platform cron secret
@@ -20,6 +21,17 @@ async function handle(request: Request) {
   if (!token || bearer !== token) {
     const unauthorized = await authenticateCronRequest(request);
     if (unauthorized) return unauthorized;
+  }
+
+  if (!activityEnabled(process.env["SCHEDULED_MONITOR_ENABLED"], false)) {
+    logActivity(process.env["ACTIVITY_DIAGNOSTICS"], "scheduled-monitor", "skipped");
+    return Response.json({
+      ok: true,
+      status: "skipped",
+      reason: "Scheduled monitoring disabled",
+      users: 0,
+      results: [],
+    });
   }
 
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
