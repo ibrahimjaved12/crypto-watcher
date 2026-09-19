@@ -1,11 +1,14 @@
-/** Unset preserves existing behavior; only an explicit false pauses work. */
-export function activityEnabled(value: string | undefined): boolean {
-  return value?.trim().toLowerCase() !== "false";
+/** Parse an environment flag without letting missing/invalid values override its safe default. */
+export function activityEnabled(value: string | undefined, enabledWhenUnset = true): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  return enabledWhenUnset;
 }
 
 /** enabled:false also blocks mount, focus, reconnect and invalidation fetches. */
 export function automaticQueryOptions(value: string | undefined) {
-  const enabled = activityEnabled(value);
+  const enabled = activityEnabled(value, false);
   return {
     enabled,
     refetchInterval: enabled ? 60_000 : (false as const),

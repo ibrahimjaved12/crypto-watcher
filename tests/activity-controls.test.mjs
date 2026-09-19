@@ -16,11 +16,18 @@ const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toSt
 const controlsUrl = await moduleUrl("../src/lib/activity-controls.ts");
 const { activityEnabled, automaticQueryOptions } = await import(controlsUrl);
 
-test("flags default to existing behavior and accept explicit false", () => {
+test("automatic activity defaults off while TA processing defaults on", () => {
   assert.equal(activityEnabled(undefined), true);
-  assert.equal(activityEnabled("true"), true);
+  assert.equal(activityEnabled(undefined, false), false);
+  assert.equal(activityEnabled("true", false), true);
   assert.equal(activityEnabled(" FALSE "), false);
-  assert.equal(automaticQueryOptions(undefined).refetchInterval, 60_000);
+  assert.equal(activityEnabled("invalid", false), false);
+  assert.deepEqual(automaticQueryOptions(undefined), {
+    enabled: false,
+    refetchInterval: false,
+    retry: false,
+  });
+  assert.equal(automaticQueryOptions("true").refetchInterval, 60_000);
 });
 
 test("paused queries ignore timers, mount, focus, reconnect, invalidation and new keys; manual refresh works", async () => {
@@ -34,7 +41,7 @@ test("paused queries ignore timers, mount, focus, reconnect, invalidation and ne
   const options = (key) => ({
     queryKey: [key],
     queryFn: async () => ++calls,
-    ...automaticQueryOptions("false"),
+    ...automaticQueryOptions(undefined),
     // Even a short timer cannot bypass enabled:false.
     refetchInterval: 5,
   });
@@ -129,7 +136,7 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
   }
 });
 
-test("disabled scheduled endpoint authenticates and skips before loading database client", async () => {
+test("scheduled endpoint defaults disabled, authenticates and skips before database access", async () => {
   const { Route } = await import(
     await moduleUrl("../src/routes/api/public/hooks/monitor-prices.ts", {
       "@tanstack/react-router": stub("export const createFileRoute=()=>x=>x;"),
@@ -145,7 +152,7 @@ test("disabled scheduled endpoint authenticates and skips before loading databas
   );
   const oldFlag = process.env.SCHEDULED_MONITOR_ENABLED;
   const oldToken = process.env.MONITOR_CRON_TOKEN;
-  process.env.SCHEDULED_MONITOR_ENABLED = "false";
+  delete process.env.SCHEDULED_MONITOR_ENABLED;
   process.env.MONITOR_CRON_TOKEN = "test-only";
   try {
     for (const method of ["GET", "POST"]) {

@@ -89,11 +89,11 @@ and app deployment; existing accounts seed on their first fresh check.
 Use the existing single scheduled monitor. Verify the actual job's target URL and
 run logs at deployment; the reported preview target remains unverified locally.
 Drain in-flight checks during cutover to avoid overlapping old and new code.
-`SCHEDULED_MONITOR_ENABLED=false` makes an authenticated endpoint invocation return
-`status: "skipped"` before database access, but it does not stop the external cron
-from making that invocation. Manual checks remain enabled. The actual cron must also
-be disabled when the goal is to eliminate invocations. See
-[activity controls](activity-controls.md).
+Scheduled monitoring defaults to disabled. Unless `SCHEDULED_MONITOR_ENABLED=true`,
+an authenticated endpoint invocation returns `status: "skipped"` before database
+access. This does not stop the external cron from making that invocation, and manual
+checks remain enabled. The actual cron must also be disabled when the goal is to
+eliminate invocations. See [activity controls](activity-controls.md).
 
 Local checks:
 

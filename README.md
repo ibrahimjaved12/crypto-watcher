@@ -32,9 +32,10 @@ the updated monitor.
 
 Temporary [activity controls](docs/activity-controls.md) can make dashboard market
 prices and TA history manual-only, skip authenticated scheduled monitor runs, and
-independently pause TA generation or outcome evaluation. All controls preserve the
-existing behavior when unset; they are operational switches, not evidence of lower
-billing.
+independently pause TA generation or outcome evaluation. Automatic market refresh,
+automatic TA-history refresh, and scheduled monitoring default to disabled; set their
+flags to `true` to enable them. Manual Refresh and Run check now remain available.
+These are operational switches, not evidence of lower billing.
 
 ## Original milestone brief
 

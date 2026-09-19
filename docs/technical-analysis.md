@@ -47,7 +47,8 @@ remain separate. A TA failure is reported in monitoring run errors as `TA ...`
 and does not prevent movement alert calculations. Temporary activity controls can
 independently pause new TA generation (`TA_GENERATION_ENABLED=false`), pending
 outcome evaluation (`TA_OUTCOME_EVALUATION_ENABLED=false`), or automatic browser
-history loading (`VITE_TA_HISTORY_AUTO_REFRESH_ENABLED=false`). See
+history loading. Browser history loading defaults to manual-only and requires
+`VITE_TA_HISTORY_AUTO_REFRESH_ENABLED=true` to run automatically. See
 [activity controls](activity-controls.md) for exact behavior and testing.
 
 ## Calculation contract
