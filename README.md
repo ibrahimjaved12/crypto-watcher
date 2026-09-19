@@ -30,6 +30,12 @@ The monitoring algorithm now has a [saved-baseline cumulative rule](docs/cumulat
 for gradual rises and falls. Its database migration must be applied before deploying
 the updated monitor.
 
+Temporary [activity controls](docs/activity-controls.md) can make dashboard market
+prices and TA history manual-only, skip authenticated scheduled monitor runs, and
+independently pause TA generation or outcome evaluation. All controls preserve the
+existing behavior when unset; they are operational switches, not evidence of lower
+billing.
+
 ## Original milestone brief
 
 The following brief is retained as project history. Its original market scope,

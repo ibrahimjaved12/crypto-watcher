@@ -6,14 +6,14 @@ The dashboard's rolling 5m/15m/1h/4h/24h figures are still available separately.
 
 With threshold 2%:
 
-| Observed close (USDT) | Result |
-| --- | --- |
-| 100 | First check establishes baseline; no alert |
-| 101 | +1% from baseline; keep 100 |
-| 101.99 | +1.99%; keep 100 |
-| 102 | +2%; save upward alert, reset baseline to 102 |
-| 102 | 0% from new baseline; no repeated alert, even after cooldown |
-| 99.96 | -2% from 102; downward alert is eligible despite recent upward alert |
+| Observed close (USDT) | Result                                                               |
+| --------------------- | -------------------------------------------------------------------- |
+| 100                   | First check establishes baseline; no alert                           |
+| 101                   | +1% from baseline; keep 100                                          |
+| 101.99                | +1.99%; keep 100                                                     |
+| 102                   | +2%; save upward alert, reset baseline to 102                        |
+| 102                   | 0% from new baseline; no repeated alert, even after cooldown         |
+| 99.96                 | -2% from 102; downward alert is eligible despite recent upward alert |
 
 This is net endpoint movement, not addition of absolute fluctuations or of rounded
 percentages. For example 100 → 101 → 99 → 100 ends at zero net change. It is also
@@ -89,6 +89,11 @@ and app deployment; existing accounts seed on their first fresh check.
 Use the existing single scheduled monitor. Verify the actual job's target URL and
 run logs at deployment; the reported preview target remains unverified locally.
 Drain in-flight checks during cutover to avoid overlapping old and new code.
+`SCHEDULED_MONITOR_ENABLED=false` makes an authenticated endpoint invocation return
+`status: "skipped"` before database access, but it does not stop the external cron
+from making that invocation. Manual checks remain enabled. The actual cron must also
+be disabled when the goal is to eliminate invocations. See
+[activity controls](activity-controls.md).
 
 Local checks:
 

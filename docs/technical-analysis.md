@@ -44,7 +44,11 @@ than a synchronized cross-timeframe score; compare close times and sources.
 TA runs inside the existing scheduled and manual monitoring pass for enabled
 watchlists. Its records live in `ta_signals`; movement alerts and their baselines
 remain separate. A TA failure is reported in monitoring run errors as `TA ...`
-and does not prevent movement alert calculations.
+and does not prevent movement alert calculations. Temporary activity controls can
+independently pause new TA generation (`TA_GENERATION_ENABLED=false`), pending
+outcome evaluation (`TA_OUTCOME_EVALUATION_ENABLED=false`), or automatic browser
+history loading (`VITE_TA_HISTORY_AUTO_REFRESH_ENABLED=false`). See
+[activity controls](activity-controls.md) for exact behavior and testing.
 
 ## Calculation contract
 
@@ -135,6 +139,8 @@ rows in 15m/1h/4h, and expand Indicator explanations to check EMA200, MACD,
 Bollinger, ADX and range values. Compare source and completed-close timestamps;
 use All to inspect frames together. Old ta-v1 rows should remain readable with
 unavailable new fields. Refresh reloads saved history; it does not run analysis.
+When automatic TA history is disabled, the first load, filter changes, pagination,
+focus/reconnect, and invalidations stay quiet until Refresh is pressed.
 
 The existing cron endpoint also runs TA. Confirm the cron HTTP timeout and hosting
 request budget allow the extra exchange requests: three per pair on the happy

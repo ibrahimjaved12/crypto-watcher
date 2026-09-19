@@ -47,23 +47,62 @@ manual refreshes; there is no idle logging timer. Server diagnostics log skipped
 work when an authenticated caller actually invokes it. React development Strict Mode
 may repeat mount logs. Disable diagnostics after testing to avoid unnecessary logs.
 
-## Verify without live database traffic
+## Steps to test
 
-Run `node --test tests/activity-controls.test.mjs`. Tests use a real QueryObserver
-with stubbed requests to check mount, timer, focus, reconnect, invalidation, filter
-changes and manual refresh. Server tests stub all exchange/database operations and
-assert zero I/O when disabled. No local authentication bypass is needed.
+1. Use the repository's pinned Node 22 runtime, install dependencies if needed, and
+   run the focused tests:
 
-## Optional browser verification
+   ```sh
+   nvm use
+   npm install
+   node --test tests/activity-controls.test.mjs
+   ```
 
-With an existing authenticated session, open DevTools Network (Fetch/XHR) and Console.
-Load the dashboard once. With the browser flags false, expect paused log markers and
-no `ta_signals` request or market snapshot call. Existing auth, watchlist and run reads
-remain expected. Switch tabs, reconnect, change TA filters/pages and wait over a minute:
-the two disabled queries should remain quiet. A manual Refresh performs the selected
-query once (and logs its start); it is a real request and may use hosted resources.
-The disabled queries also disable retries, so a failed manual refresh does not retry.
-Restore flags and rebuild/restart to verify automatic fetching resumes.
+   These tests use a real QueryObserver with stubbed requests to check mount, timer,
+   focus, reconnect, invalidation, filter changes, and manual refresh. Server tests
+   stub all exchange/database operations and assert zero I/O when disabled. No local
+   authentication bypass or live database is used.
+
+2. Run the existing regression checks:
+
+   ```sh
+   npm test --prefix tests
+   npx tsc --noEmit
+   npm run build
+   ```
+
+3. Add the false flags and diagnostics shown in [Configure](#configure) to
+   `.env.local`, then restart `npm run dev`. Sign in using an existing test account
+   and open DevTools Network (Fetch/XHR) and Console.
+
+4. Open the dashboard. Confirm that the page says automatic price refresh is paused,
+   the TA panel says automatic TA refresh is paused, and the console contains fixed
+   `automatic-paused` diagnostic events for `market` and `ta-history`. There should
+   be no market snapshot or `ta_signals` request from those two queries on mount.
+   Auth, watchlist, settings, and run-history requests are still expected.
+
+5. Wait for more than 60 seconds, switch away and back, toggle offline/online, change
+   TA timeframe/symbol/page, and add or remove a watchlist symbol if appropriate for
+   the test account. Confirm neither disabled query runs automatically.
+
+6. Press the market Refresh button and the TA Refresh button. Confirm each performs
+   exactly one request and logs `request-started`. A failed manual request should not
+   retry while the corresponding automatic flag is false.
+
+7. Press **Run check now** with both TA server flags false. Confirm movement checking
+   still completes, while server diagnostics show `ta-generation` and `ta-outcomes`
+   as skipped. The focused automated test separately proves that this combination
+   makes no TA provider or database calls.
+
+8. If testing the scheduled endpoint in a safe environment, invoke it once with its
+   normal valid authentication while `SCHEDULED_MONITOR_ENABLED=false`. Confirm the
+   response has `ok: true`, `status: "skipped"`, `users: 0`, and an empty `results`
+   array, with no new monitor run. An unauthenticated request must still be rejected.
+   This flag does not disable the external cron itself.
+
+9. Remove the false flags (or set them to `true`), restart/rebuild, and confirm the
+   dashboard queries load automatically and resume their one-minute refresh behavior.
+   Disable diagnostic flags after testing.
 
 Use request counts to verify behavior, not console messages alone. A 30-minute interval
 still permits initial/focus/reconnect fetches and is not an isolation test. Avoid commenting
