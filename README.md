@@ -9,9 +9,15 @@ manual; no automatic real-money order placement is included in the roadmap.
 
 Read the [product direction and architecture](docs/product-direction.md) for the
 current and proposed data flows, futures evidence rules, news-context limits, and
-service/database ownership. The [implementation and deployment roadmap](docs/roadmap.md)
-links all 32 ordered GitHub issues and their dependencies, distinguishing current,
-proposed, and conditional decisions.
+service/database ownership. The
+[analysis records, conditional setups, and evaluation specification](docs/analysis-evaluation.md)
+defines current and intended histories, evidence-bound setups, general trade scores,
+score-band reports, and strategy outcomes. The
+[futures paper-trading simulator](docs/futures-simulation.md) defines the automated
+virtual-wallet trader, execution costs, accounting, and historical/live paper runs.
+The [implementation and deployment roadmap](docs/roadmap.md) links all 32 ordered
+GitHub issues and their dependencies, distinguishing current, proposed, and
+conditional decisions.
 
 The current implementation still uses **spot-based REST providers** and saved
 TypeScript TA with forward-return outcomes. Futures feeds, conditional trade

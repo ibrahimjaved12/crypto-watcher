@@ -1,5 +1,12 @@
 # Technical Analysis v2
 
+This document specifies the current descriptive TA implementation. Future strategy
+versions may use these observations as the originating evidence for a conditional
+futures setup. The saved pattern and assessment must remain linked to the setup's
+eligibility, confirmation, continued validity, entry, management, expiry, and
+event-ordered outcome rules defined in the
+[analysis and evaluation specification](analysis-evaluation.md).
+
 ## v2 coverage and architecture
 
 Saved TA runs in the existing TypeScript monitoring pipeline. Python remains the

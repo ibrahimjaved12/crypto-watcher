@@ -3,6 +3,10 @@
 Snapshot: 2026-09-20, based on the revised GitHub issue bodies. This supersedes the
 earlier eight-stage roadmap. See [product direction and architecture](product-direction.md)
 for the futures-only product, current/target diagrams, evidence rules, and ownership.
+See [analysis records and evaluation](analysis-evaluation.md) for histories,
+conditional setups, scores, outcomes, and strategy research. See
+[futures paper-trading simulation](futures-simulation.md) for automated virtual
+wallet execution, accounting, historical runs, and live paper trading.
 
 ## Status and dependency rules
 
@@ -81,10 +85,13 @@ are called out rather than pretending that all dependencies already exist.
    lifecycle outcomes, and reports. The assessment UI can ship before the setup
    engine but cannot present placeholder opportunities as working strategies.
    Earlier outcome reports must identify missing wallet/exchange-cost capabilities.
+   Follow the [analysis and evaluation specification](analysis-evaluation.md).
 5. **Replay and virtual execution (22–27):** acquire point-in-time futures datasets,
    replay the shared engine, build constrained wallet accounting, validate fees,
    funding, fills and liquidation, run reproducible portfolio comparisons, and then
-   drive the same simulation engine with live public streams. No real orders.
+   drive the same simulation engine with live public streams. Wallet, automation,
+   cost, and event-order rules are defined in the
+   [paper-trading simulator specification](futures-simulation.md). No real orders.
 6. **Delivery and evidence-based evolution (28–32):** add email independently of
    analysis, review architecture from operational evidence, run controlled AI/ML
    research, and add WhatsApp after reliable delivery infrastructure. Research can
@@ -135,5 +142,7 @@ value here is a permanent guarantee.
 | Separate current and proposed diagrams                                                     | [Current architecture](product-direction.md#current-architecture-and-data-flow) and [proposed architecture](product-direction.md#proposed-incremental-architecture-and-data-flow) |
 | Explicit service/database responsibilities                                                 | [Ownership table](product-direction.md#service-and-database-ownership)                                                                                                            |
 | News/event context and limits                                                              | [News and event context](product-direction.md#news-and-event-context)                                                                                                             |
+| Current/intended histories, setups, scores, outcomes, and research                         | [Analysis records, conditional setups, and evaluation](analysis-evaluation.md)                                                                                                    |
+| Virtual-wallet automation, accounting, costs, and paper runs                               | [Futures paper-trading simulation](futures-simulation.md)                                                                                                                         |
 | Revised roadmap links to issues                                                            | [Ordered issue map](#ordered-issue-map), covering all 32 roadmap entries                                                                                                          |
 | Documentation-only change                                                                  | README and documentation updates only; no runtime, secret, schedule, or infrastructure changes                                                                                    |

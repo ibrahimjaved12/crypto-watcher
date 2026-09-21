@@ -2,9 +2,12 @@
 
 Decision snapshot: 2026-09-20, implementing [issue #12](https://github.com/ibrahimjaved12/crypto-watcher/issues/12).
 The [staged implementation and deployment roadmap](roadmap.md) separates current,
-proposed, and conditional work. This document changes no runtime behavior, secrets,
-schedules, or infrastructure. “Current” below describes repository code, not proof
-that a deployed service or scheduled job is healthy.
+proposed, and conditional work. [Analysis records and evaluation](analysis-evaluation.md)
+defines saved histories, evidence-bound setups, scoring, and strategy outcomes. The
+[futures paper-trading simulator](futures-simulation.md) separately defines virtual
+wallet automation, execution, costs, and account results. This document changes no
+runtime behavior, secrets, schedules, or infrastructure. “Current” below describes
+repository code, not proof that a deployed service or scheduled job is healthy.
 
 ## Product purpose and boundaries
 
@@ -14,12 +17,14 @@ USDT-margined perpetual futures, both long and short**. Spot, COIN-M, and dated
 futures are outside this initial scope. Current spot inputs are migration debt,
 not an alternative supported product direction.
 
-A prediction means a time-bounded trade path: a setup forms, confirmation activates
-it, an executable entry becomes available, management rules apply, and the trade
-exits, stops out, liquidates, or becomes invalid. An untriggered setup can expire.
-“BTC eventually reaches a target” is insufficient. A later target hit cannot rescue
-a trade that already stopped out. Profitability must include fees, spread, slippage,
-funding, execution latency, and capital constraints, with assumptions visible.
+A prediction means a time-bounded trade path derived from a specific assessment:
+a setup forms, its required pattern and evidence remain valid, confirmation
+activates it, an executable entry becomes available, management rules apply, and
+the trade reaches a terminal state. Price levels are conditional on that premise;
+touching an entry price cannot activate a setup when its required chart, volume,
+movement, news/event, or other condition never occurred. Profitability must include
+fees, spread, slippage, funding, execution latency, and capital constraints, with
+assumptions visible.
 
 Real-money decisions and execution remain manual. **No real-money automatic order
 placement is included in the roadmap.** Planned paper trading can automatically
@@ -45,16 +50,20 @@ For example, a versioned support-bounce setup can require entry into a defined z
 then a completed one-minute candle closing above a confirmation level before expiry.
 Entry uses the next executable price under a recorded fill model. Close 50% at the
 first target; extend the remainder only if a specified breakout confirms before a
-deadline, otherwise use the predefined fallback exit. A stop or liquidation ends
-the remaining position immediately. Numeric levels, quantities, deadlines, trigger
-price types, and evaluation rules must be stored as structured conditions, not
-inferred later from prose or chosen after observing the result. Short strategies
-require equally explicit directional rules.
+deadline, otherwise use the predefined fallback exit. Management transitions must
+track the remaining position quantity and the evidence/trigger responsible for each
+change. Numeric levels, quantities, deadlines, trigger price types, and evaluation
+rules must be stored as structured conditions, not inferred later from prose or
+chosen after observing the result. Short strategies require equally explicit
+directional rules.
 
 Technical, movement-driven, news-driven, and mixed strategies may have different
 confirmation, expiry, management, and evaluation rules. Completed-candle TA is
 separate from intrabar movement detection: waiting for a 4h candle close must not
 be mistaken for the only way to detect rapid movement.
+
+The complete state transitions and a numeric support-bounce example are specified
+in [analysis and evaluation](analysis-evaluation.md#concrete-conditional-setup-example).
 
 ## News and event context
 
@@ -88,6 +97,9 @@ Keep signal/assessment/setup records, evaluation outcomes, and the simulation le
 original conclusion. A setup can be evaluated independently of whether a particular
 wallet had enough capital to execute it. Existing `ta_signals` rows and their
 forward-return fields are a legacy implementation, not this proposed record model.
+The detailed record fields and separate activity, effectiveness, and wallet-history
+views are specified in
+[the intended record model](analysis-evaluation.md#intended-record-model-and-histories).
 
 ## Futures semantics and evidence contract
 
@@ -121,7 +133,9 @@ leverage, long/short positions, partial fills/exits, and risk-at-stop sizing. Ma
 is committed collateral, not an immediate expense. Track wallet/available balance,
 margin, exposure, unrealized/realized P&L, costs, and equity separately. A high score
 does not automatically increase leverage. Detailed exchange modeling is planned
-in [#37](https://github.com/ibrahimjaved12/crypto-watcher/issues/37).
+in [#37](https://github.com/ibrahimjaved12/crypto-watcher/issues/37); the numeric
+wallet example and accounting boundary are in
+[virtual wallet and sizing](futures-simulation.md#virtual-wallet-and-sizing).
 
 Evaluation consumes events chronologically. Use finer data when a candle cannot
 prove whether entry, stop, target, or liquidation happened first; otherwise mark
