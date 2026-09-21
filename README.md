@@ -1,3 +1,5 @@
+Local setup and hosted profiles: [Environment setup](docs/environments.md).
+
 # Crypto Watcher
 
 Crypto Watch identifies and evaluates **conditional futures-trade opportunities
