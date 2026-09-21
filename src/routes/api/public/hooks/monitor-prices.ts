@@ -59,7 +59,11 @@ async function handle(request: Request) {
 
   const results = [];
   for (const userId of userIds) {
-    const settings = byUser.get(userId) ?? { user_id: userId, ...DEFAULT_SETTINGS };
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      ...byUser.get(userId),
+      user_id: userId,
+    };
     try {
       const result = await runMonitorForUser(supabaseAdmin, userId, settings);
       if (result.status !== "skipped") await recordRun(supabaseAdmin, result);

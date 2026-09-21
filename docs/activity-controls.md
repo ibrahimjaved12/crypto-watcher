@@ -22,6 +22,12 @@ writes and run records, remains available through manual checks. Authentication,
 watchlist/settings actions, initial watchlist/run reads and manual Python analysis
 are not disabled. These are workload controls, not a blanket database shutdown.
 
+They are deployment-level overrides. The separate user-facing
+[independent activity controls](activity-domains.md) gate market collection,
+movement alerts, and completed-candle TA for scheduled and manual monitoring runs.
+An operation runs only when both its applicable deployment control and user control
+permit it; neither layer silently changes the other layer's saved value.
+
 ## Configure
 
 There are two environment boundaries because the dashboard code runs in the browser

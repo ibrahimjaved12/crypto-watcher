@@ -43,6 +43,11 @@ automatic TA-history refresh, and scheduled monitoring default to disabled; set 
 flags to `true` to enable them. Manual Refresh and Run check now remain available.
 These are operational switches, not evidence of lower billing.
 
+User-scoped [independent activity controls](docs/activity-domains.md) separately gate
+market-data access, movement-alert generation, and completed-candle TA while preserving
+pause/resume semantics. Future setup, paper-trading, email, and WhatsApp domains remain
+fail-closed and are clearly labeled as unavailable.
+
 ## Original milestone brief
 
 The following brief is retained as project history. Its original market scope,

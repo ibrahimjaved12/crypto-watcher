@@ -22,6 +22,7 @@ before(async () => {
   for (const name of [
     "20260913170352_3d6925ba-68c4-4528-aea1-da9439eb127e.sql",
     "20260915090000_cumulative_monitor.sql",
+    "20260921090000_activity_domains.sql",
   ]) {
     await db.exec(
       await readFile(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"),
@@ -42,6 +43,13 @@ after(() => db.close());
 async function observe(price, step, source = "Binance", uid = user) {
   const { rows } = await db.query(
     "SELECT public.process_cumulative_observation($1,'BTCUSDT',$2,$3,$4) AS result",
+    [uid, price, new Date(start + step * 60_000).toISOString(), source],
+  );
+  return rows[0].result;
+}
+async function checkpoint(price, step, source = "Binance", uid = user) {
+  const { rows } = await db.query(
+    "SELECT public.record_market_data_checkpoint($1,'BTCUSDT',$2,$3,$4) AS result",
     [uid, price, new Date(start + step * 60_000).toISOString(), source],
   );
   return rows[0].result;
@@ -153,6 +161,88 @@ test("pause, watchlist deletion and re-addition", async () => {
   assert.equal((await observe("102", 1)).status, "initialized");
 });
 
+test("movement and collection controls pause alerts without changing the baseline", async () => {
+  await observe("100", 0);
+  await db.query(
+    "INSERT INTO monitor_settings(user_id,movement_alerts_enabled) VALUES ($1,false)",
+    [user],
+  );
+  assert.equal((await observe("102", 1)).status, "disabled");
+  assert.equal(Number((await state()).baseline_price), 100);
+
+  await db.query(
+    "UPDATE monitor_settings SET movement_alerts_enabled=true, market_data_collection_enabled=false WHERE user_id=$1",
+    [user],
+  );
+  assert.equal((await observe("102", 2)).status, "disabled");
+  assert.equal((await checkpoint("102", 2)).status, "disabled");
+  assert.equal(Number((await state()).baseline_price), 100);
+
+  await db.query(
+    "UPDATE monitor_settings SET market_data_collection_enabled=true WHERE user_id=$1",
+    [user],
+  );
+  assert.equal((await observe("102", 3)).status, "alerted");
+});
+
+test("market collection checkpoints advance independently and reject older observations", async () => {
+  assert.equal((await checkpoint("100", 0)).status, "recorded");
+  assert.equal((await checkpoint("102", 2, "OKX")).status, "recorded");
+  assert.equal((await checkpoint("101", 1)).status, "already_processed");
+  const row = (await db.query("SELECT * FROM market_data_checkpoints WHERE user_id=$1", [user]))
+    .rows[0];
+  assert.equal(Number(row.price), 102);
+  assert.equal(row.data_source, "OKX");
+
+  await db.query("DELETE FROM watchlist_items WHERE user_id=$1", [user]);
+  assert.equal(
+    (await db.query("SELECT count(*) FROM market_data_checkpoints WHERE user_id=$1", [user]))
+      .rows[0].count,
+    0,
+  );
+  assert.equal((await checkpoint("103", 3)).status, "not_watched");
+});
+
+test("current activities default on and future execution controls fail closed", async () => {
+  await db.query("INSERT INTO monitor_settings(user_id) VALUES ($1)", [user]);
+  const settings = (
+    await db.query(
+      `SELECT market_data_collection_enabled, completed_candle_ta_enabled,
+        movement_alerts_enabled, developing_setup_evaluation_enabled,
+        paper_trading_enabled FROM monitor_settings WHERE user_id=$1`,
+      [user],
+    )
+  ).rows[0];
+  assert.equal(settings.market_data_collection_enabled, true);
+  assert.equal(settings.completed_candle_ta_enabled, true);
+  assert.equal(settings.movement_alerts_enabled, true);
+  assert.equal(settings.developing_setup_evaluation_enabled, false);
+  assert.equal(settings.paper_trading_enabled, false);
+});
+
+test("notification delivery preferences are channel-specific and account-scoped", async () => {
+  await db.query("SELECT set_config('request.jwt.claim.sub',$1,false)", [user]);
+  await db.exec("SET ROLE authenticated");
+  try {
+    await db.query(
+      "INSERT INTO notification_channel_preferences(user_id,channel,delivery_enabled) VALUES ($1,'email',true)",
+      [user],
+    );
+    await assert.rejects(
+      db.query(
+        "INSERT INTO notification_channel_preferences(user_id,channel,delivery_enabled) VALUES ($1,'whatsapp',true)",
+        [other],
+      ),
+      /row-level security/,
+    );
+    const rows = (await db.query("SELECT * FROM notification_channel_preferences")).rows;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].channel, "email");
+  } finally {
+    await db.exec("RESET ROLE");
+  }
+});
+
 test("invalid, future, stale observations and invalid settings fail closed", async () => {
   for (const price of ["0", "-1", "NaN", "Infinity"]) {
     await assert.rejects(observe(price, 0), /Invalid or stale/);
@@ -167,17 +257,21 @@ test("invalid, future, stale observations and invalid settings fail closed", asy
 test("state is account-scoped and authenticated users cannot write state or call RPC", async () => {
   await observe("100", 0);
   await observe("200", 0, "Binance", other);
+  await checkpoint("100", 0);
+  await checkpoint("200", 0, "Binance", other);
   await db.query("SELECT set_config('request.jwt.claim.sub',$1,false)", [user]);
   await db.exec("SET ROLE authenticated");
   try {
     const rows = (await db.query("SELECT * FROM monitor_baselines")).rows;
     assert.equal(rows.length, 1);
     assert.equal(rows[0].user_id, user);
+    assert.equal((await db.query("SELECT * FROM market_data_checkpoints")).rows.length, 1);
     await assert.rejects(
       db.query("UPDATE monitor_baselines SET baseline_price=1"),
       /permission denied/,
     );
     await assert.rejects(observe("102", 1), /permission denied/);
+    await assert.rejects(checkpoint("102", 1), /permission denied/);
   } finally {
     await db.exec("RESET ROLE");
   }

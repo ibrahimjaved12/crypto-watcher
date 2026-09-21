@@ -71,6 +71,41 @@ export type Database = {
         }
         Relationships: []
       }
+      market_data_checkpoints: {
+        Row: {
+          data_source: string
+          observed_at: string
+          price: number
+          symbol: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          data_source: string
+          observed_at: string
+          price: number
+          symbol: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          data_source?: string
+          observed_at?: string
+          price?: number
+          symbol?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "market_data_checkpoints_user_id_symbol_fkey"
+            columns: ["user_id", "symbol"]
+            isOneToOne: true
+            referencedRelation: "watchlist_items"
+            referencedColumns: ["user_id", "symbol"]
+          },
+        ]
+      }
       monitor_baselines: {
         Row: {
           baseline_at: string
@@ -150,31 +185,70 @@ export type Database = {
       }
       monitor_settings: {
         Row: {
+          completed_candle_ta_enabled: boolean
           cooldown_minutes: number
           created_at: string
+          developing_setup_evaluation_enabled: boolean
+          market_data_collection_enabled: boolean
           monitoring_enabled: boolean
+          movement_alerts_enabled: boolean
+          paper_trading_enabled: boolean
           threshold_pct: number
           updated_at: string
           user_id: string
           window_minutes: number
         }
         Insert: {
+          completed_candle_ta_enabled?: boolean
           cooldown_minutes?: number
           created_at?: string
+          developing_setup_evaluation_enabled?: boolean
+          market_data_collection_enabled?: boolean
           monitoring_enabled?: boolean
+          movement_alerts_enabled?: boolean
+          paper_trading_enabled?: boolean
           threshold_pct?: number
           updated_at?: string
           user_id: string
           window_minutes?: number
         }
         Update: {
+          completed_candle_ta_enabled?: boolean
           cooldown_minutes?: number
           created_at?: string
+          developing_setup_evaluation_enabled?: boolean
+          market_data_collection_enabled?: boolean
           monitoring_enabled?: boolean
+          movement_alerts_enabled?: boolean
+          paper_trading_enabled?: boolean
           threshold_pct?: number
           updated_at?: string
           user_id?: string
           window_minutes?: number
+        }
+        Relationships: []
+      }
+      notification_channel_preferences: {
+        Row: {
+          channel: string
+          created_at: string
+          delivery_enabled: boolean
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          channel: string
+          created_at?: string
+          delivery_enabled?: boolean
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          channel?: string
+          created_at?: string
+          delivery_enabled?: boolean
+          updated_at?: string
+          user_id?: string
         }
         Relationships: []
       }
@@ -289,6 +363,16 @@ export type Database = {
     }
     Functions: {
       process_cumulative_observation: {
+        Args: {
+          p_observed_at: string
+          p_price: number
+          p_source: string
+          p_symbol: string
+          p_user_id: string
+        }
+        Returns: Json
+      }
+      record_market_data_checkpoint: {
         Args: {
           p_observed_at: string
           p_price: number

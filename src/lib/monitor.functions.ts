@@ -24,6 +24,17 @@ export const runMyMonitorCheck = createServerFn({ method: "POST" })
       window_minutes: settings?.window_minutes ?? DEFAULT_SETTINGS.window_minutes,
       cooldown_minutes: settings?.cooldown_minutes ?? DEFAULT_SETTINGS.cooldown_minutes,
       monitoring_enabled: settings?.monitoring_enabled ?? DEFAULT_SETTINGS.monitoring_enabled,
+      market_data_collection_enabled:
+        settings?.market_data_collection_enabled ?? DEFAULT_SETTINGS.market_data_collection_enabled,
+      completed_candle_ta_enabled:
+        settings?.completed_candle_ta_enabled ?? DEFAULT_SETTINGS.completed_candle_ta_enabled,
+      movement_alerts_enabled:
+        settings?.movement_alerts_enabled ?? DEFAULT_SETTINGS.movement_alerts_enabled,
+      developing_setup_evaluation_enabled:
+        settings?.developing_setup_evaluation_enabled ??
+        DEFAULT_SETTINGS.developing_setup_evaluation_enabled,
+      paper_trading_enabled:
+        settings?.paper_trading_enabled ?? DEFAULT_SETTINGS.paper_trading_enabled,
     });
 
     if (result.status !== "skipped") await recordRun(supabaseAdmin, result);
