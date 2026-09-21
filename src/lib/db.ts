@@ -9,6 +9,11 @@ export type Settings = {
   window_minutes: number;
   cooldown_minutes: number;
   monitoring_enabled: boolean;
+  market_data_collection_enabled: boolean;
+  completed_candle_ta_enabled: boolean;
+  movement_alerts_enabled: boolean;
+  developing_setup_evaluation_enabled: boolean;
+  paper_trading_enabled: boolean;
 };
 export type AlertRow = {
   id: string;

@@ -18,10 +18,13 @@ export const Route = createFileRoute("/_authenticated/settings")({
       {
         name: "description",
         content:
-          "Set your cumulative price-change threshold and cooldown, and review recent checks.",
+          "Control market collection, movement alerts and technical analysis, and review recent checks.",
       },
       { property: "og:title", content: "Monitoring settings — Crypto Watch" },
-      { property: "og:description", content: "Cumulative alerts, cooldown and run history." },
+      {
+        property: "og:description",
+        content: "Independent monitoring activities, cumulative alerts and run history.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
@@ -37,12 +40,18 @@ function SettingsPage() {
   const [threshold, setThreshold] = useState("2");
   const [cooldown, setCooldown] = useState("15");
   const [enabled, setEnabled] = useState(true);
+  const [marketDataEnabled, setMarketDataEnabled] = useState(true);
+  const [technicalAnalysisEnabled, setTechnicalAnalysisEnabled] = useState(true);
+  const [movementAlertsEnabled, setMovementAlertsEnabled] = useState(true);
 
   useEffect(() => {
     if (!settings.data) return;
     setThreshold(String(settings.data.threshold_pct));
     setCooldown(String(settings.data.cooldown_minutes));
     setEnabled(settings.data.monitoring_enabled);
+    setMarketDataEnabled(settings.data.market_data_collection_enabled ?? true);
+    setTechnicalAnalysisEnabled(settings.data.completed_candle_ta_enabled ?? true);
+    setMovementAlertsEnabled(settings.data.movement_alerts_enabled ?? true);
   }, [settings.data]);
 
   const save = useMutation({
@@ -51,6 +60,9 @@ function SettingsPage() {
         threshold_pct: Number(threshold),
         cooldown_minutes: Number(cooldown),
         monitoring_enabled: enabled,
+        market_data_collection_enabled: marketDataEnabled,
+        completed_candle_ta_enabled: technicalAnalysisEnabled,
+        movement_alerts_enabled: movementAlertsEnabled,
       }),
     onSuccess: () => {
       toast.success("Settings saved.");
@@ -63,7 +75,8 @@ function SettingsPage() {
     <AppShell>
       <h1 className="text-2xl font-semibold">Monitoring settings</h1>
       <p className="text-sm text-muted-foreground">
-        The backend checks your watchlist every 5 minutes, with or without your browser open.
+        Control each monitoring activity separately. These settings apply to scheduled runs and Run
+        check now.
       </p>
 
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
@@ -125,11 +138,85 @@ function SettingsPage() {
 
           <div className="flex items-center justify-between rounded-md border border-border p-3">
             <div>
-              <Label htmlFor="enabled">Scheduled monitoring</Label>
-              <p className="text-xs text-muted-foreground">Pause without losing your settings.</p>
+              <Label htmlFor="enabled">Monitoring master switch</Label>
+              <p className="text-xs text-muted-foreground">
+                Pause every activity below without losing its individual setting or saved state.
+              </p>
             </div>
             <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
           </div>
+
+          <fieldset className="space-y-3 rounded-md border border-border p-3">
+            <legend className="px-1 text-sm font-medium">Current monitoring activities</legend>
+
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <Label htmlFor="market-data">Market-data collection</Label>
+                <p className="text-xs text-muted-foreground">
+                  Fetches and checkpoints the latest completed one-minute candle even if the two
+                  activities below are paused. Turning this off also pauses both of them.
+                </p>
+              </div>
+              <Switch
+                id="market-data"
+                checked={marketDataEnabled}
+                onCheckedChange={setMarketDataEnabled}
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-3">
+              <div>
+                <Label htmlFor="movement-alerts">Movement-alert generation</Label>
+                <p className="text-xs text-muted-foreground">
+                  Applies the saved-baseline threshold and cooldown, then saves qualifying alerts.
+                </p>
+              </div>
+              <Switch
+                id="movement-alerts"
+                checked={movementAlertsEnabled}
+                onCheckedChange={setMovementAlertsEnabled}
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-3">
+              <div>
+                <Label htmlFor="technical-analysis">Completed-candle technical analysis</Label>
+                <p className="text-xs text-muted-foreground">
+                  Saves 15m, 1h and 4h indicator snapshots and evaluates their pending outcomes.
+                </p>
+              </div>
+              <Switch
+                id="technical-analysis"
+                checked={technicalAnalysisEnabled}
+                onCheckedChange={setTechnicalAnalysisEnabled}
+              />
+            </div>
+          </fieldset>
+
+          <section className="space-y-3 rounded-md border border-dashed border-border p-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-medium">Future activities</p>
+              <Badge variant="outline">Not available yet</Badge>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              These remain off until their roadmap features exist. They are status rows, not working
+              switches.
+            </p>
+            {[
+              "Developing-setup and strategy evaluation",
+              "Paper-trading execution",
+              "Email notification delivery",
+              "WhatsApp notification delivery",
+            ].map((label) => (
+              <div
+                key={label}
+                className="flex items-center justify-between gap-3 border-t border-border/70 pt-3 text-sm"
+              >
+                <span>{label}</span>
+                <Badge variant="secondary">Planned</Badge>
+              </div>
+            ))}
+          </section>
 
           <Button type="submit" disabled={save.isPending}>
             Save settings

@@ -50,13 +50,17 @@ than a synchronized cross-timeframe score; compare close times and sources.
 
 TA runs inside the existing scheduled and manual monitoring pass for enabled
 watchlists. Its records live in `ta_signals`; movement alerts and their baselines
-remain separate. A TA failure is reported in monitoring run errors as `TA ...`
+remain separate. The user-scoped Completed-candle technical analysis control can
+pause both new snapshots and pending outcome work without pausing movement alerts;
+market-data collection and the monitoring master switch remain prerequisites. A TA
+failure is reported in monitoring run errors as `TA ...`
 and does not prevent movement alert calculations. Temporary activity controls can
 independently pause new TA generation (`TA_GENERATION_ENABLED=false`), pending
 outcome evaluation (`TA_OUTCOME_EVALUATION_ENABLED=false`), or automatic browser
 history loading. Browser history loading defaults to manual-only and requires
 `VITE_TA_HISTORY_AUTO_REFRESH_ENABLED=true` to run automatically. See
-[activity controls](activity-controls.md) for exact behavior and testing.
+[activity controls](activity-controls.md) for deployment flags and
+[independent activity controls](activity-domains.md) for user settings.
 
 ## Calculation contract
 

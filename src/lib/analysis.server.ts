@@ -71,7 +71,9 @@ export async function analyzeForUser(
     const [settings, baseline] = await Promise.all([
       supabase
         .from("monitor_settings")
-        .select("threshold_pct,cooldown_minutes,monitoring_enabled")
+        .select(
+          "threshold_pct,cooldown_minutes,monitoring_enabled,market_data_collection_enabled,movement_alerts_enabled",
+        )
         .eq("user_id", userId)
         .abortSignal(dbController.signal)
         .maybeSingle(),
@@ -93,7 +95,13 @@ export async function analyzeForUser(
       settings: {
         threshold_pct: String(settings.data?.threshold_pct ?? 2),
         cooldown_minutes: settings.data?.cooldown_minutes ?? 15,
-        monitoring_enabled: settings.data?.monitoring_enabled ?? true,
+        // Schema v1 has one eligibility switch. Collapse the three relevant
+        // controls so the read-only preview cannot claim alert eligibility while
+        // collection or movement-alert generation is paused.
+        monitoring_enabled:
+          (settings.data?.monitoring_enabled ?? true) &&
+          (settings.data?.market_data_collection_enabled ?? true) &&
+          (settings.data?.movement_alerts_enabled ?? true),
       },
       baseline: b
         ? {

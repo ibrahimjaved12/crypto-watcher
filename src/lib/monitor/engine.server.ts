@@ -16,6 +16,11 @@ export type MonitorSettings = {
   window_minutes: number;
   cooldown_minutes: number;
   monitoring_enabled: boolean;
+  market_data_collection_enabled: boolean;
+  completed_candle_ta_enabled: boolean;
+  movement_alerts_enabled: boolean;
+  developing_setup_evaluation_enabled: boolean;
+  paper_trading_enabled: boolean;
 };
 
 export const DEFAULT_SETTINGS = {
@@ -23,6 +28,12 @@ export const DEFAULT_SETTINGS = {
   window_minutes: 15,
   cooldown_minutes: 15,
   monitoring_enabled: true,
+  market_data_collection_enabled: true,
+  completed_candle_ta_enabled: true,
+  movement_alerts_enabled: true,
+  // These fail closed until their later roadmap issues add real engines.
+  developing_setup_evaluation_enabled: false,
+  paper_trading_enabled: false,
 };
 
 export type UserRunResult = {
@@ -54,6 +65,10 @@ export async function runMonitorForUser(
     return { ...base, status: "skipped" };
   }
 
+  if (!settings.market_data_collection_enabled) {
+    return { ...base, status: "skipped" };
+  }
+
   const { data: items, error: itemsError } = await supabaseAdmin
     .from("watchlist_items")
     .select("symbol")
@@ -78,33 +93,56 @@ export async function runMonitorForUser(
       if (!outcome.ok) throw new Error(outcome.errors.join(" | "));
       const observation = completedObservation(outcome.result.minute);
       source = source ?? outcome.result.source;
-      // Settings are re-read inside the transaction, so a concurrent pause or edit
-      // cannot save an alert using a stale threshold. No in-memory cooldown cache.
-      const { data, error } = await supabaseAdmin.rpc("process_cumulative_observation", {
-        p_user_id: userId,
-        p_symbol: symbol,
-        p_price: observation.price,
-        p_observed_at: observation.observedAt,
-        p_source: outcome.result.source,
-      });
-      if (error) throw new Error(error.message);
-      const status = (data as { status?: string } | null)?.status;
-      if (!status) throw new Error("Missing baseline transition result");
-      if (status === "alerted") alertsCreated += 1;
+
+      const { data: checkpoint, error: checkpointError } = await supabaseAdmin.rpc(
+        "record_market_data_checkpoint",
+        {
+          p_user_id: userId,
+          p_symbol: symbol,
+          p_price: observation.price,
+          p_observed_at: observation.observedAt,
+          p_source: outcome.result.source,
+        },
+      );
+      if (checkpointError) throw new Error(checkpointError.message);
+      const checkpointStatus = (checkpoint as { status?: string } | null)?.status;
+      if (!checkpointStatus) throw new Error("Missing market checkpoint result");
+      if (checkpointStatus === "not_watched" || checkpointStatus === "disabled") continue;
+
+      if (settings.movement_alerts_enabled) {
+        // Settings are re-read inside the transaction, so a concurrent pause or edit
+        // cannot save an alert using a stale threshold. No in-memory cooldown cache.
+        const { data, error } = await supabaseAdmin.rpc("process_cumulative_observation", {
+          p_user_id: userId,
+          p_symbol: symbol,
+          p_price: observation.price,
+          p_observed_at: observation.observedAt,
+          p_source: outcome.result.source,
+        });
+        if (error) throw new Error(error.message);
+        const status = (data as { status?: string } | null)?.status;
+        if (!status) throw new Error("Missing baseline transition result");
+        if (status === "alerted") alertsCreated += 1;
+      }
     } catch (error) {
       failures.push(`${symbol}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   const taErrors: string[] = [];
-  for (const symbol of symbols) taErrors.push(...(await runTA(supabaseAdmin, userId, symbol)));
+  if (settings.completed_candle_ta_enabled) {
+    for (const symbol of symbols) taErrors.push(...(await runTA(supabaseAdmin, userId, symbol)));
+  }
 
-  const status: UserRunResult["status"] =
-    failures.length >= symbols.length
-      ? "failed"
-      : failures.length || taErrors.length
-        ? "partial"
-        : "success";
+  const collectionPathFailed = failures.length >= symbols.length;
+  const taFailed = settings.completed_candle_ta_enabled && taErrors.length >= symbols.length * 3;
+  const allEnabledWorkFailed =
+    collectionPathFailed && (!settings.completed_candle_ta_enabled || taFailed);
+  const status: UserRunResult["status"] = allEnabledWorkFailed
+    ? "failed"
+    : failures.length || taErrors.length
+      ? "partial"
+      : "success";
 
   return {
     userId,

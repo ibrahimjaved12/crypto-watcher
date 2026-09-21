@@ -36,7 +36,8 @@ does not trigger this 2% rule. Capturing swings from local peaks/troughs is a se
 - Source or threshold changes establish a new baseline on the next newer close,
   preserving directional cooldown times. This avoids comparing different venues'
   prices. Frequent fallback changes can therefore interrupt accumulation.
-- Pausing preserves the baseline; resuming measures net change across the pause.
+- Pausing either the monitoring master, market-data collection, or movement-alert
+  generation preserves the baseline; resuming measures net change across the pause.
   Removing/re-adding the watchlist entry clears state through a foreign key cascade.
 - Stale/unavailable input leaves state unchanged. Older or equal observation times
   are ignored, including retries after cooldown. A recovered feed can compare its
@@ -50,6 +51,9 @@ state atomically. Failed writes roll back all state changes. Baselines are
 readable only by their owner and writable only through trusted server privileges.
 Deleting a historical alert does not reset cooldown. The existing scheduler and
 manual entry points use the same path; there is no additional scheduler.
+The transaction re-reads all three relevant user controls so a concurrent pause
+cannot insert an alert or advance its baseline. See
+[independent activity controls](activity-domains.md) for their UI and catch-up rules.
 
 `src/lib/monitor/observation.ts` selects the newest completed 1m close, honors
 provider completion flags and rejects duplicate, malformed, future or more than

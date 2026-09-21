@@ -152,6 +152,32 @@ test("authorized reads are scoped to the caller and forward only relevant saved 
   assert.equal(JSON.stringify(reply).includes(env.PYTHON_ANALYSIS_TOKEN), false);
 });
 
+test("read-only baseline eligibility respects independent collection and movement pauses", async () => {
+  for (const paused of ["market_data_collection_enabled", "movement_alerts_enabled"]) {
+    const reply = await analyzeForUser(
+      db({
+        watchlist_items: { symbol: "BTCUSDT" },
+        monitor_settings: {
+          threshold_pct: 2,
+          cooldown_minutes: 15,
+          monitoring_enabled: true,
+          market_data_collection_enabled: true,
+          movement_alerts_enabled: true,
+          [paused]: false,
+        },
+      }),
+      "user",
+      "BTCUSDT",
+      env,
+      async (_, options) => {
+        assert.equal(JSON.parse(options.body).settings.monitoring_enabled, false);
+        return Response.json(result());
+      },
+    );
+    assert.equal(reply.ok, true);
+  }
+});
+
 test("missing saved baseline/settings stay absent and use documented defaults without writes", async () => {
   const reply = await analyzeForUser(
     db({ watchlist_items: {} }),
