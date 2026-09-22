@@ -17,7 +17,7 @@ defines current and intended histories, evidence-bound setups, general trade sco
 score-band reports, and strategy outcomes. The
 [futures paper-trading simulator](docs/futures-simulation.md) defines the automated
 virtual-wallet trader, execution costs, accounting, and historical/live paper runs.
-The [implementation and deployment roadmap](docs/roadmap.md) links all 39 ordered
+The [implementation and deployment roadmap](docs/roadmap.md) links all 40 ordered
 GitHub issues and their dependencies, distinguishing current, proposed, and
 conditional decisions.
 
