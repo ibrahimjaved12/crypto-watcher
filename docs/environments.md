@@ -16,16 +16,14 @@ Prerequisites on Ubuntu (the current workspace runs Ubuntu 22.04):
    Confirm `docker info` and `docker run --rm hello-world` work without sudo.
    Docker group membership grants root-level access. If this is WSL, use Docker
    Desktop's WSL integration or install Engine inside your Linux environment.
-3. **Supabase CLI.** Install it as a project dependency using the commands below.
-   This adds it to package.json/package-lock.json; subsequent setups only need
-   `npm ci`. A bare `supabase` command is not installed globally by this method.
+3. **Supabase CLI.** It is pinned as a project development dependency and installed
+   by `npm ci`. Run it through `npx`; a global `supabase` command is not installed.
    [Official CLI setup](https://supabase.com/docs/guides/local-development/cli/getting-started).
 
 Run from the repository root after Docker is ready:
 
 ```sh
 npm ci
-npm install --save-dev --save-exact supabase
 npx supabase --version
 npx supabase start
 npm run env:local
