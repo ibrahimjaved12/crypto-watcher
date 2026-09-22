@@ -50,6 +50,27 @@ market-data access, movement-alert generation, and completed-candle TA while pre
 pause/resume semantics. Future setup, paper-trading, email, and WhatsApp domains remain
 fail-closed and are clearly labeled as unavailable.
 
+## Production activity variables
+
+| Setting                                         | Trigger and effect                                                                                                                        |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Lovable Cloud Job (not an environment variable) | Sends the scheduled monitor request every 5 minutes when the Job is enabled. A disabled Job sends nothing.                                |
+| `SCHEDULED_MONITOR_ENABLED=true`                | Allows an authenticated scheduled request to run. It does not create a timer; with the Lovable Job disabled, it causes no periodic calls. |
+| `VITE_MARKET_AUTO_REFRESH_ENABLED=true`         | Loads market prices when the dashboard opens and every 60 seconds while active. Uses the TanStack server and public exchange APIs.        |
+| `VITE_TA_HISTORY_AUTO_REFRESH_ENABLED=true`     | Reads saved TA history when the dashboard opens and every 60 seconds while active.                                                        |
+| `TA_GENERATION_ENABLED=false`                   | Skips new TA calculations during manual and scheduled monitoring runs. Unset defaults to enabled.                                         |
+| `TA_OUTCOME_EVALUATION_ENABLED=false`           | Skips pending TA-outcome evaluation during manual and scheduled monitoring runs. Unset defaults to enabled.                               |
+| `PYTHON_ANALYSIS_ENABLED=true`                  | Enables the explicit **Run Python analysis** action. It does not create a background loop.                                                |
+
+The user monitoring master switch gates manual and scheduled monitoring work. It does
+not stop the Lovable Job from calling the endpoint or stop either browser 60-second
+refresh loop. `MONITOR_CRON_TOKEN` and Lovable's cron secret authenticate scheduled
+requests; they do not schedule them.
+
+Set `VITE_*` values in the committed `.env.production` and republish. Configure
+non-`VITE_*` values in the production server environment. See
+[environment setup](docs/environments.md) for the complete variable list.
+
 ## Original milestone brief
 
 The following brief is retained as project history. Its original market scope,
