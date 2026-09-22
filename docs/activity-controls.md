@@ -36,7 +36,7 @@ and monitoring/TA processing runs on the server:
 | Environment                       | Configuration location               | Applies to                                                          |
 | --------------------------------- | ------------------------------------ | ------------------------------------------------------------------- |
 | Local development                 | Ignored `.env.local`                 | All five controls; restart `npm run dev` after changes.             |
-| Lovable preview/published browser | Committed `.env`                     | The two public `VITE_*` controls; publish/rebuild after changes.    |
+| Lovable preview/published browser | Committed `.env.production`                     | The two public `VITE_*` controls; publish/rebuild after changes.    |
 | Lovable TanStack server           | Project server configuration/secrets | The three non-`VITE_*` runtime controls read through `process.env`. |
 | Lovable scheduler                 | More → Cloud → Jobs                  | Whether the five-minute job invokes the endpoint at all.            |
 
@@ -60,7 +60,7 @@ ACTIVITY_DIAGNOSTICS=true
 
 Browser variables are embedded by Vite at build time and are visible in the client
 bundle, so they are configuration rather than secrets. Lovable requires `VITE_*`
-values in the committed `.env`, not its Secrets manager. Server variables must reach
+values in the committed `.env.production`, not its Secrets manager. Server variables must reach
 the TanStack server's request-time environment (`process.env`); configure them in the
 Lovable environment serving the app. Local `.env.local` changes do not change the
 deployed app. Keep the actual Lovable job disabled as well when the goal is to avoid
@@ -93,7 +93,7 @@ may repeat mount logs. Disable diagnostics after testing to avoid unnecessary lo
 
    ```sh
    nvm use
-   npm install
+   npm ci
    node --test tests/activity-controls.test.mjs
    ```
 

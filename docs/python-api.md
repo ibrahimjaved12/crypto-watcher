@@ -242,9 +242,8 @@ performed as part of this repair.
    That app server must allow outbound HTTPS and about 30 seconds for this request.
    Platform request-duration/egress limits are not verified by local builds.
 4. Ensure the existing baseline table and owner-read RLS are applied in the database
-   used by that environment. No new migration is required. The repository currently
-   contains two migrations creating the cumulative schema; do not blindly replay
-   both on a fresh database. Reconcile deployment history separately if needed.
+   used by that environment. No new migration is required. The repository migration
+   chain replays cleanly with `npx supabase db reset --local`.
 5. Sign in normally on Lovable, select a watched pair and use **Run Python analysis**.
    Check rolling versus baseline results, timestamps, loading/errors and cooldown
    labels. Repeat the request and confirm baseline/alert/run records are unchanged
@@ -260,9 +259,12 @@ Verification commands from the repo root:
 ```sh
 npm ci --prefix tests --ignore-scripts
 npm test --prefix tests
-node node_modules/typescript/bin/tsc --noEmit
-npx --yes bun --bun run build
+npx tsc --noEmit
+npm run build
 ```
+
+The aggregate Node suite currently has three unrelated diagnostics-test failures
+tracked in [issue #57](https://github.com/ibrahimjaved12/crypto-watcher/issues/57).
 
 API tests use fixed candles and mocked HTTP transport, not mock login. Bridge tests
 exercise user-scoped SELECTs, rejection paths, payload minimization and response

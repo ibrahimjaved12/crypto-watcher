@@ -1,6 +1,6 @@
 # Implementation and deployment roadmap
 
-Snapshot: 2026-09-20, based on the revised GitHub issue bodies. This supersedes the
+Snapshot: 2026-09-22, based on the revised GitHub issue bodies. This supersedes the
 earlier eight-stage roadmap. See [product direction and architecture](product-direction.md)
 for the futures-only product, current/target diagrams, evidence rules, and ownership.
 See [analysis records and evaluation](analysis-evaluation.md) for histories,
@@ -61,6 +61,13 @@ are called out rather than pretending that all dependencies already exist.
 | 30    | [#42 — Add AI-assisted strategy review and controlled improvement experiments](https://github.com/ibrahimjaved12/crypto-watcher/issues/42)                              | Backlog        | #33 and #38 reproducible experiments; explicit review before promotion.                      |
 | 31    | [#43 — Evaluate an ML baseline against the existing strategy rules](https://github.com/ibrahimjaved12/crypto-watcher/issues/43)                                         | Backlog        | #31 rule baseline, #34–#38 datasets/experiments; chronological holdouts.                     |
 | 32    | [#44 — Add WhatsApp delivery and channel-specific notification preferences](https://github.com/ibrahimjaved12/crypto-watcher/issues/44)                                 | Backlog        | #40 reliable email/outbox foundation; official-provider and consent review.                  |
+| 33    | [#47 — Prevent local development from targeting hosted services by default](https://github.com/ibrahimjaved12/crypto-watcher/issues/47)                                 | Ready          | Establish the safe local/hosted environment boundary.                                        |
+| 34    | [#48 — Make the database reproducible with the local Supabase CLI](https://github.com/ibrahimjaved12/crypto-watcher/issues/48)                                          | Ready          | #47; finish deterministic bootstrap, users, RLS/RPC smoke tests, and CI reset coverage.      |
+| 35    | [#50 — Provide reliable local authentication without Lovable Cloud](https://github.com/ibrahimjaved12/crypto-watcher/issues/50)                                         | Ready          | #48 reproducible local database and Auth services.                                           |
+| 36    | [#49 — Add a safe local monitoring runner and end-to-end cycle test](https://github.com/ibrahimjaved12/crypto-watcher/issues/49)                                        | Backlog        | #47, #48, and #50; require loopback targets and mocked market data.                          |
+| 37    | [#51 — Restore one green offline local verification command](https://github.com/ibrahimjaved12/crypto-watcher/issues/51)                                                | Backlog        | #47–#50 local environment, database, authentication, and monitoring paths.                   |
+| 38    | [#52 — Configure optional Google OAuth integration testing](https://github.com/ibrahimjaved12/crypto-watcher/issues/52)                                                 | Backlog        | #50 local auth boundary; email/password remains the default.                                 |
+| 39    | [#53 — Provision a shared external Supabase staging environment](https://github.com/ibrahimjaved12/crypto-watcher/issues/53)                                            | Backlog        | #47 and #48; keep staging explicit and isolated from production.                             |
 
 ## Stages and completion gates
 
@@ -96,6 +103,10 @@ are called out rather than pretending that all dependencies already exist.
    analysis, review architecture from operational evidence, run controlled AI/ML
    research, and add WhatsApp after reliable delivery infrastructure. Research can
    recommend versioned changes; it cannot silently rewrite live strategy rules.
+7. **Safe local and staging environments (33–39):** isolate local development from
+   hosted services, reproduce the database and Auth stack, add a local monitoring
+   cycle, consolidate offline verification, and keep OAuth and shared staging
+   explicit. No default command may access staging or production.
 
 ## Deployment and cost decisions
 
@@ -144,5 +155,5 @@ value here is a permanent guarantee.
 | News/event context and limits                                                              | [News and event context](product-direction.md#news-and-event-context)                                                                                                             |
 | Current/intended histories, setups, scores, outcomes, and research                         | [Analysis records, conditional setups, and evaluation](analysis-evaluation.md)                                                                                                    |
 | Virtual-wallet automation, accounting, costs, and paper runs                               | [Futures paper-trading simulation](futures-simulation.md)                                                                                                                         |
-| Revised roadmap links to issues                                                            | [Ordered issue map](#ordered-issue-map), covering all 32 roadmap entries                                                                                                          |
+| Revised roadmap links to issues                                                            | [Ordered issue map](#ordered-issue-map), covering all 39 roadmap entries                                                                                                          |
 | Documentation-only change                                                                  | README and documentation updates only; no runtime, secret, schedule, or infrastructure changes                                                                                    |
