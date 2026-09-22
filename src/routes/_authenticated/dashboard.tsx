@@ -19,7 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { addSymbol, fetchRuns, fetchWatchlist, removeSymbol } from "@/lib/db";
+import { addSymbol, fetchRuns, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db";
 import { getMarketSnapshot } from "@/lib/market.functions";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
@@ -53,7 +53,11 @@ function Dashboard() {
   const loadMarket = useServerFn(getMarketSnapshot);
 
   const watchlist = useQuery({ queryKey: ["watchlist"], queryFn: fetchWatchlist });
+  const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
   const symbols = (watchlist.data ?? []).map((w) => w.symbol);
+  const monitoringPaused =
+    settings.data !== undefined &&
+    (!settings.data.monitoring_enabled || !settings.data.market_data_collection_enabled);
 
   const market = useQuery({
     queryKey: ["market", symbols],
@@ -137,9 +141,17 @@ function Dashboard() {
             />
             Refresh
           </Button>
-          <Button onClick={() => check.mutate()} disabled={check.isPending}>
+          <Button
+            onClick={() => check.mutate()}
+            disabled={check.isPending || settings.isPending || settings.isError || monitoringPaused}
+            title={
+              monitoringPaused
+                ? "Enable monitoring and market-data collection in Settings"
+                : undefined
+            }
+          >
             <PlayCircle className="size-4" aria-hidden />
-            Run check now
+            {monitoringPaused ? "Monitoring paused" : "Run check now"}
           </Button>
         </div>
       </div>
