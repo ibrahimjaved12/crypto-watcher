@@ -93,7 +93,7 @@ may repeat mount logs. Disable diagnostics after testing to avoid unnecessary lo
 
    ```sh
    nvm use
-   npm install
+   npm ci
    node --test tests/activity-controls.test.mjs
    ```
 

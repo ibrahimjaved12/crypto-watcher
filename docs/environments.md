@@ -26,6 +26,7 @@ Run from the repository root after Docker is ready:
 npm ci
 npx supabase --version
 npx supabase start
+npx supabase db reset --local
 npm run env:local
 npm run dev
 ```
@@ -37,10 +38,9 @@ so skip `supabase init`. No Supabase account, login, hosted link, or Lovable Clo
 is required. `npm run env:local` can find the project-installed CLI because npm
 adds `node_modules/.bin` to PATH.
 
-Open the app URL printed by Vite. Create a **local email/password account** using
-the app's sign-up form; hosted accounts are not copied into the local database.
-Google sign-in requires separate OAuth provisioning. Use `npx supabase status`
-for the local Studio and email-inbox URLs if email confirmation is needed.
+Open the app URL printed by Vite. Local email/password provisioning and account
+isolation are tracked in [issue #50](https://github.com/ibrahimjaved12/crypto-watcher/issues/50);
+Google sign-in requires separate OAuth provisioning.
 
 **Environment values:** Nothing needs manual filling for the basic app:
 `npm run env:local` writes both profiles, both loopback URLs, both anon keys,
@@ -55,9 +55,9 @@ On later sessions, run `npx supabase start` then `npm run dev`; keep the existin
 The generator reads `supabase status -o json`, writes a mode-0600, gitignored
 `.env.local`, and refuses to overwrite an existing file. It does not link, push,
 seed, or access a hosted project. For existing local files, update values using
-`supabase status`; never paste its secret output into commits or logs. Local schema
-migration failures are separate from environment setup and must be resolved before
-using the app. OAuth provisioning and seed data are outside this setup.
+`supabase status`; never paste its secret output into commits or logs. The committed
+migrations replay cleanly with `npx supabase db reset --local`; deterministic users
+and seed data remain part of [issue #48](https://github.com/ibrahimjaved12/crypto-watcher/issues/48).
 
 Vite loads `.env`, `.env.local`, then mode-specific files; shell variables have
 highest priority. Restart after changes. Local URLs must be HTTP(S) origins using

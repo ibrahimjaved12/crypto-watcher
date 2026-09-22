@@ -17,7 +17,7 @@ defines current and intended histories, evidence-bound setups, general trade sco
 score-band reports, and strategy outcomes. The
 [futures paper-trading simulator](docs/futures-simulation.md) defines the automated
 virtual-wallet trader, execution costs, accounting, and historical/live paper runs.
-The [implementation and deployment roadmap](docs/roadmap.md) links all 32 ordered
+The [implementation and deployment roadmap](docs/roadmap.md) links all 39 ordered
 GitHub issues and their dependencies, distinguishing current, proposed, and
 conditional decisions.
 
@@ -159,19 +159,23 @@ Continue developing this project in the [Lovable editor](https://lovable.dev/pro
 
 ## Development
 
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
+Prefer working locally? Install Node.js with
+[nvm](https://github.com/nvm-sh/nvm#installing-and-updating) and install Docker as
+described in the [environment setup](docs/environments.md).
 
 ```sh
 git clone <this-repository-url>
 cd <repository-name>
 nvm install
 nvm use
-npm i
+npm ci
+npx supabase start
+npx supabase db reset --local
+npm run env:local
 npm run dev
 ```
 
-The repository pins Node 22 in `.nvmrc`; use that version for development and
-production builds.
+The repository pins Node 22 in `.nvmrc` and the Supabase CLI in `package-lock.json`.
 
 ## Python analysis milestone
 
