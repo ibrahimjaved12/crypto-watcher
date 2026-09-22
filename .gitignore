@@ -16,6 +16,7 @@ dist-ssr
 .nitro
 *.local
 supabase/.temp/
+supabase/.branches/
 
 # Wrangler / Cloudflare
 .wrangler/
