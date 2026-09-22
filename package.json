@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "vite dev",
+    "dev:local": "node scripts/dev-local.mjs",
+    "dev:local:stop": "supabase stop",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",

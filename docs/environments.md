@@ -25,18 +25,23 @@ Run from the repository root after Docker is ready:
 ```sh
 npm ci
 npx supabase --version
-npx supabase start
-npx supabase db reset --local
-npm run env:local
-npm run dev
+python3 -m venv python/.venv
+python/.venv/bin/python -m pip install -r python/requirements.txt
+npm run dev:local
 ```
 
-`supabase start` downloads and starts the local database, auth, and other services
+`npm run dev:local` starts local Supabase if needed, creates `.env.local` when it is
+missing, starts FastAPI when `PYTHON_ANALYSIS_ENABLED=true`, and then starts the
+application. `supabase start` downloads the local database, auth, and other services
 in Docker; you do not install Postgres separately. The first run needs internet
-access for container images. This repository already has `supabase/config.toml`,
-so skip `supabase init`. No Supabase account, login, hosted link, or Lovable Cloud
-is required. `npm run env:local` can find the project-installed CLI because npm
-adds `node_modules/.bin` to PATH.
+access for container images. This repository already has `supabase/config.toml`, so
+skip `supabase init`. No Supabase account, login, hosted link, or Lovable Cloud is
+required. npm adds the project-installed Supabase CLI to `PATH` for this command.
+
+Ctrl+C stops the application and any FastAPI process started by the launcher.
+Supabase stays running so later starts are fast and local data remains available.
+Run `npm run dev:local:stop` when you want to stop its containers. The launcher
+reuses an already healthy FastAPI process instead of starting a duplicate.
 
 Open the app URL printed by Vite. Local email/password provisioning and account
 isolation are tracked in [issue #50](https://github.com/ibrahimjaved12/crypto-watcher/issues/50);
@@ -49,8 +54,9 @@ generates a Python token but leaves Python analysis disabled. Leave cron secrets
 unset and scheduled monitoring disabled. Do not copy hosted keys into this file.
 The root `.env.example` is a reference, not a file you must copy first.
 
-On later sessions, run `npx supabase start` then `npm run dev`; keep the existing
-`.env.local`. Stop the app with Ctrl+C and the database with `npx supabase stop`.
+On later sessions, run only `npm run dev:local`; keep the existing `.env.local`.
+Use `npm run dev` only when you intentionally want the application without managing
+Supabase or FastAPI.
 
 The generator reads `supabase status -o json`, writes a mode-0600, gitignored
 `.env.local`, and refuses to overwrite an existing file. It does not link, push,
@@ -66,8 +72,8 @@ profile, and public key (even localhost/127.0.0.1 aliases must match).
 
 Optional Python analysis: follow [Python setup](../python/README.md), give FastAPI
 the same `PYTHON_ANALYSIS_TOKEN` generated in `.env.local`, and set
-`PYTHON_ANALYSIS_ENABLED=true` for TanStack. FastAPI does not automatically load the
-root dotenv file. It needs only its token, not Supabase credentials.
+`PYTHON_ANALYSIS_ENABLED=true` for TanStack. `npm run dev:local` passes that token to
+FastAPI. FastAPI needs only its token, not Supabase credentials.
 
 ## Hosted production and shared staging
 
@@ -132,6 +138,7 @@ well as Supabase secret/service-role keys used as publishable keys.
 | Run check now / enabled scheduled checks | Selected Supabase reads/writes and public exchange prices/candles |
 | Refresh TA history | Selected Supabase |
 | Manual Python analysis | Selected Supabase reads → configured FastAPI → public exchange APIs; local FastAPI by default |
+| `npm run dev:local` | Local Docker/Supabase, optional local FastAPI, and the application server |
 | `supabase start`, `npm run env:local` | Local Docker/Supabase; startup may download container images |
 | Production build | Compiles explicit hosted configuration; does not itself run monitoring or seed data |
 

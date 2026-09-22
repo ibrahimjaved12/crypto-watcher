@@ -37,7 +37,7 @@ try {
       .join("\n") + "\n",
     { flag: "wx", mode: 0o600 },
   );
-  console.log("Created .env.local from local Supabase status. Run npm run dev.");
+  console.log("Created .env.local from local Supabase status. Run npm run dev:local.");
 } catch {
   console.error(
     "Could not create .env.local. Start local Supabase (supabase start), ensure its CLI is on PATH, and ensure .env.local does not already exist. Existing files are never overwritten.",
