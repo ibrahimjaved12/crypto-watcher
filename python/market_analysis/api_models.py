@@ -5,11 +5,18 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .providers import SUPPORTED_SYMBOLS, instrument_id
+from .technical import (
+    FuturesInstrument,
+    TechnicalCandle,
+    TechnicalConfig,
+    TechnicalInput,
+)
 
 Timestamp = Annotated[int, Field(strict=True, ge=0, le=4102444800000)]
 Price = Annotated[Decimal, Field(gt=0, le=Decimal("1e20"), max_digits=40, decimal_places=20)]
 Threshold = Annotated[Decimal, Field(ge=Decimal("0.1"), le=100)]
 Source = Literal["binance-usdm", "okx-usdt-swap", "kraken-futures"]
+Nonnegative = Annotated[Decimal, Field(ge=0, le=Decimal("1e30"), max_digits=40, decimal_places=20)]
 
 
 class InputModel(BaseModel):
@@ -59,3 +66,84 @@ class AnalysisRequest(InputModel):
         if self.instrument_id != instrument_id(self.symbol):
             raise ValueError("instrument identity does not match symbol")
         return self
+
+
+class TechnicalInstrumentRequest(InputModel):
+    instrument_id: str = Field(min_length=3, max_length=128)
+    exchange: Source
+    native_symbol: str = Field(min_length=2, max_length=64)
+    market_type: Literal["futures"]
+    contract_type: Literal["perpetual"]
+
+    @model_validator(mode="after")
+    def exact_identity(self):
+        if self.instrument_id != f"{self.exchange}:{self.native_symbol}":
+            raise ValueError("instrument identity does not match exchange contract")
+        return self
+
+
+class TechnicalCandleRequest(InputModel):
+    open_ms: Timestamp
+    open: Price
+    high: Price
+    low: Price
+    close: Price
+    volume: Nonnegative
+    complete: bool = Field(strict=True)
+
+    def domain(self):
+        return TechnicalCandle(
+            open_ms=self.open_ms,
+            open=float(self.open),
+            high=float(self.high),
+            low=float(self.low),
+            close=float(self.close),
+            volume=float(self.volume),
+            complete=self.complete,
+        )
+
+
+class TechnicalConfigurationRequest(InputModel):
+    ta_version: Literal["ta-v2"]
+    interpretation_version: Literal["interpretation-v1"]
+    minimum_history: Literal[200]
+
+
+class TechnicalAnalysisRequest(InputModel):
+    schema_version: Literal[1]
+    instrument: TechnicalInstrumentRequest
+    timeframe_minutes: Literal[15, 60, 240]
+    candles: tuple[TechnicalCandleRequest, ...]
+    warmup_candles: tuple[TechnicalCandleRequest, ...] = ()
+    missing_open_times_ms: tuple[Timestamp, ...] = ()
+    source: Source
+    source_event_time_ms: Timestamp
+    evaluation_time_ms: Timestamp
+    detection_time_ms: Timestamp
+    price_type: Literal["trade", "mark", "index"]
+    config: TechnicalConfigurationRequest
+
+    @model_validator(mode="after")
+    def ordered_and_matching(self):
+        if self.source != self.instrument.exchange:
+            raise ValueError("candle source does not match the futures contract")
+        if self.source_event_time_ms > self.evaluation_time_ms:
+            raise ValueError("source event time must not follow evaluation time")
+        if self.detection_time_ms > self.evaluation_time_ms:
+            raise ValueError("detection time must not follow evaluation time")
+        return self
+
+    def calculation_input(self):
+        return TechnicalInput(
+            instrument=FuturesInstrument(**self.instrument.model_dump()),
+            timeframe_minutes=self.timeframe_minutes,
+            candles=tuple(candle.domain() for candle in self.candles),
+            warmup_candles=tuple(candle.domain() for candle in self.warmup_candles),
+            missing_open_times_ms=self.missing_open_times_ms,
+            source=self.source,
+            source_event_time_ms=self.source_event_time_ms,
+            evaluation_time_ms=self.evaluation_time_ms,
+            detection_time_ms=self.detection_time_ms,
+            price_type=self.price_type,
+            config=TechnicalConfig(**self.config.model_dump()),
+        )
