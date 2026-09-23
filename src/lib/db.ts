@@ -52,7 +52,22 @@ export type MonitorRun = {
   alerts_created: number;
   data_source: string | null;
   error_message: string | null;
+  duration_ms: number | null;
+  metrics: {
+    exchangeRequests?: number;
+    candleRows?: number;
+    marketCacheHits?: number;
+    taCalculations?: number;
+    taSignalsSaved?: number;
+    taOutcomesUpdated?: number;
+    databaseReads?: number;
+    databaseWriteAttempts?: number;
+    databaseNoOps?: number;
+  };
 };
+
+const SETTINGS_COLUMNS =
+  "user_id, threshold_pct, window_minutes, cooldown_minutes, monitoring_enabled, market_data_collection_enabled, completed_candle_ta_enabled, movement_alerts_enabled, developing_setup_evaluation_enabled, paper_trading_enabled";
 
 async function userId(): Promise<string> {
   const { data } = await supabase.auth.getUser();
@@ -108,7 +123,7 @@ export async function fetchSettings(): Promise<Settings> {
   const uid = await userId();
   const { data, error } = await supabase
     .from("monitor_settings")
-    .select("*")
+    .select(SETTINGS_COLUMNS)
     .eq("user_id", uid)
     .maybeSingle();
   if (error) throw error;
@@ -116,7 +131,7 @@ export async function fetchSettings(): Promise<Settings> {
   const created = await supabase
     .from("monitor_settings")
     .insert({ user_id: uid })
-    .select("*")
+    .select(SETTINGS_COLUMNS)
     .single();
   if (created.error) throw created.error;
   return created.data as unknown as Settings;
@@ -131,7 +146,9 @@ export async function saveSettings(patch: Partial<Settings>): Promise<void> {
 export async function fetchAlerts(): Promise<AlertRow[]> {
   const { data, error } = await supabase
     .from("alerts")
-    .select("*")
+    .select(
+      "id, symbol, triggered_at, change_pct, window_minutes, comparison_mode, baseline_price, baseline_at, observed_at, threshold_pct, rule, price, data_source, is_test",
+    )
     .order("triggered_at", { ascending: false })
     .limit(500);
   if (error) throw error;
@@ -164,7 +181,7 @@ export async function deleteAlert(id: string): Promise<void> {
 export async function fetchNotes(): Promise<NoteRow[]> {
   const { data, error } = await supabase
     .from("notes")
-    .select("*")
+    .select("id, symbol, title, body, created_at, updated_at")
     .order("updated_at", { ascending: false });
   if (error) throw error;
   return (data ?? []) as unknown as NoteRow[];
@@ -192,7 +209,9 @@ export async function deleteNote(id: string): Promise<void> {
 export async function fetchRuns(): Promise<MonitorRun[]> {
   const { data, error } = await supabase
     .from("monitor_runs")
-    .select("*")
+    .select(
+      "id, ran_at, status, symbols_checked, alerts_created, data_source, error_message, duration_ms, metrics",
+    )
     .order("ran_at", { ascending: false })
     .limit(25);
   if (error) throw error;

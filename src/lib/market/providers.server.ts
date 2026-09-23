@@ -40,6 +40,20 @@ export type ProviderResult = {
   quarter: Candle[];
 };
 
+export type TACandleResult = {
+  source: MarketSource;
+  instrument: FuturesContract;
+  endpoint: string;
+  priceType: typeof MARKET_PRICE_TYPE;
+  retrievedAt: string;
+  candles: Candle[];
+};
+
+export type ProviderObserver = {
+  request(source: MarketSource, kind: "metadata" | "candles", timeframe?: number): void;
+  candleRows(source: MarketSource, timeframe: number, rows: number): void;
+};
+
 export type FuturesSnapshot = {
   source: typeof MARKET_SOURCE;
   instrument: FuturesContract;
@@ -115,10 +129,11 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
   }
 }
 
-async function cachedJson(url: string): Promise<unknown> {
+async function cachedJson(url: string, onMiss?: () => void): Promise<unknown> {
   const now = Date.now();
   const cached = metadataCache.get(url);
   if (cached && cached.expiresAt > now) return cached.body;
+  onMiss?.();
   const body = await fetchJson(url);
   metadataCache.set(url, { expiresAt: now + METADATA_TTL_MS, body });
   return body;
@@ -168,7 +183,11 @@ function fallbackContract(symbol: string): FuturesContract {
   };
 }
 
-async function resolveInstrument(source: MarketSource, symbol: string): Promise<FuturesContract> {
+async function resolveInstrument(
+  source: MarketSource,
+  symbol: string,
+  observer?: ProviderObserver,
+): Promise<FuturesContract> {
   const normalized = symbol.toUpperCase();
   if (!isSupportedSymbol(normalized))
     throw new Error(`unsupported futures contract: ${normalized}`);
@@ -178,7 +197,10 @@ async function resolveInstrument(source: MarketSource, symbol: string): Promise<
   if (source === "okx-usdt-swap") {
     const native = providerSymbol(source, normalized);
     const url = `${BASE_URLS[source]}/api/v5/public/instruments?instType=SWAP&instId=${encodeURIComponent(native)}`;
-    const body = (await cachedJson(url)) as { code?: string; data?: OkxInstrument[] };
+    const body = (await cachedJson(url, () => observer?.request(source, "metadata"))) as {
+      code?: string;
+      data?: OkxInstrument[];
+    };
     const item = body.code === "0" && Array.isArray(body.data) ? body.data[0] : undefined;
     if (
       !item ||
@@ -202,7 +224,9 @@ async function resolveInstrument(source: MarketSource, symbol: string): Promise<
     };
   }
 
-  const body = (await cachedJson(`${BASE_URLS[source]}/fapi/v1/exchangeInfo`)) as {
+  const body = (await cachedJson(`${BASE_URLS[source]}/fapi/v1/exchangeInfo`, () =>
+    observer?.request(source, "metadata"),
+  )) as {
     symbols?: BinanceSymbol[];
   };
   if (!Array.isArray(body.symbols)) throw new Error("invalid exchange information");
@@ -313,24 +337,32 @@ async function klines(
   symbol: string,
   minutes: number,
   limit: number,
+  observer?: ProviderObserver,
 ): Promise<Candle[]> {
   const native = providerSymbol(source, symbol);
+  observer?.request(source, "candles", minutes);
+  let candles: Candle[];
   if (source === "okx-usdt-swap") {
     const bar = minutes >= 60 ? `${minutes / 60}H` : `${minutes}m`;
     const query = new URLSearchParams({ instId: native, bar, limit: String(limit) });
-    return parseOkx(await fetchJson(`${BASE_URLS[source]}${ENDPOINTS[source]}?${query}`), minutes);
-  }
-  if (source === "kraken-futures") {
+    candles = parseOkx(
+      await fetchJson(`${BASE_URLS[source]}${ENDPOINTS[source]}?${query}`),
+      minutes,
+    );
+  } else if (source === "kraken-futures") {
     const resolution = minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`;
     const path = `/api/charts/v1/trade/${encodeURIComponent(native)}/${resolution}`;
-    return parseKraken(await fetchJson(`${BASE_URLS[source]}${path}?count=${limit}`), minutes);
+    candles = parseKraken(await fetchJson(`${BASE_URLS[source]}${path}?count=${limit}`), minutes);
+  } else {
+    const interval = minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`;
+    const query = new URLSearchParams({ symbol: native, interval, limit: String(limit) });
+    candles = parseBinance(
+      await fetchJson(`${BASE_URLS[source]}${ENDPOINTS[source]}?${query}`),
+      minutes,
+    );
   }
-  const interval = minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`;
-  const query = new URLSearchParams({ symbol: native, interval, limit: String(limit) });
-  return parseBinance(
-    await fetchJson(`${BASE_URLS[source]}${ENDPOINTS[source]}?${query}`),
-    minutes,
-  );
+  observer?.candleRows(source, minutes, candles.length);
+  return candles;
 }
 
 async function load(
@@ -338,12 +370,15 @@ async function load(
   symbol: string,
   intervals: [number, number],
   limits: [number, number],
+  observer?: ProviderObserver,
 ): Promise<ProviderResult> {
-  const instrument = await resolveInstrument(source, symbol);
-  const first = klines(source, symbol, intervals[0], limits[0]);
+  const instrument = await resolveInstrument(source, symbol, observer);
+  const first = klines(source, symbol, intervals[0], limits[0], observer);
   const [minute, quarter] = await Promise.all([
     first,
-    intervals[0] === intervals[1] ? first : klines(source, symbol, intervals[1], limits[1]),
+    intervals[0] === intervals[1]
+      ? first
+      : klines(source, symbol, intervals[1], limits[1], observer),
   ]);
   return {
     source,
@@ -361,7 +396,8 @@ export async function loadTACandles(
   minutes: number,
   validate: (candles: Candle[]) => void,
   requestedSource?: string,
-) {
+  observer?: ProviderObserver,
+): Promise<TACandleResult> {
   let sources: readonly MarketSource[] = MARKET_SOURCES;
   if (requestedSource) {
     if (!isMarketSource(requestedSource))
@@ -371,7 +407,7 @@ export async function loadTACandles(
   const errors: string[] = [];
   for (const source of sources) {
     try {
-      const result = await load(source, symbol, [minutes, minutes], [250, 250]);
+      const result = await load(source, symbol, [minutes, minutes], [250, 250], observer);
       validate(result.minute);
       return {
         source: result.source,
@@ -394,13 +430,34 @@ export type ProviderOutcome =
 export async function loadCandles(
   symbol: string,
   validate?: (result: ProviderResult) => void,
+  observer?: ProviderObserver,
 ): Promise<ProviderOutcome> {
   const errors: string[] = [];
   for (const source of MARKET_SOURCES) {
     try {
-      const result = await load(source, symbol, [1, 15], [MINUTE_LIMIT, QUARTER_LIMIT]);
+      const result = await load(source, symbol, [1, 15], [MINUTE_LIMIT, QUARTER_LIMIT], observer);
       if (result.minute.length < 2 || result.quarter.length < 2)
         throw new Error("insufficient data");
+      validate?.(result);
+      return { ok: true, result };
+    } catch (error) {
+      errors.push(`${source}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return { ok: false, errors };
+}
+
+/** Monitoring needs only the completed 1m observation, not the dashboard's 15m chart. */
+export async function loadObservationCandles(
+  symbol: string,
+  validate?: (result: ProviderResult) => void,
+  observer?: ProviderObserver,
+): Promise<ProviderOutcome> {
+  const errors: string[] = [];
+  for (const source of MARKET_SOURCES) {
+    try {
+      const result = await load(source, symbol, [1, 1], [MINUTE_LIMIT, MINUTE_LIMIT], observer);
+      if (result.minute.length < 2) throw new Error("insufficient data");
       validate?.(result);
       return { ok: true, result };
     } catch (error) {

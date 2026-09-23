@@ -13,7 +13,9 @@ export const runMyMonitorCheck = createServerFn({ method: "POST" })
     const userId = context.userId;
     const { data: settings, error: settingsError } = await context.supabase
       .from("monitor_settings")
-      .select("*")
+      .select(
+        "threshold_pct, window_minutes, cooldown_minutes, monitoring_enabled, market_data_collection_enabled, completed_candle_ta_enabled, movement_alerts_enabled, developing_setup_evaluation_enabled, paper_trading_enabled",
+      )
       .eq("user_id", userId)
       .maybeSingle();
     if (settingsError) throw new Error(settingsError.message);
@@ -45,5 +47,7 @@ export const runMyMonitorCheck = createServerFn({ method: "POST" })
       alertsCreated: result.alertsCreated,
       dataSource: result.dataSource,
       error: result.error,
+      durationMs: result.durationMs,
+      metrics: result.metrics,
     };
   });

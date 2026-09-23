@@ -73,6 +73,7 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
   let fetches = 0;
   let inserts = 0;
   let reads = 0;
+  let outcomeWrites = 0;
   globalThis.__activityFetch = () => {
     fetches++;
     return {
@@ -80,39 +81,48 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
       instrument: { id: "binance-usdm:BTCUSDT" },
       endpoint: "/fapi/v1/klines",
       priceType: "trade",
-      candles: [{ time: 0, close: 100 }],
+      candles: Array.from({ length: 200 }, (_, time) => ({ time, close: 100 })),
     };
   };
   const { runTA } = await import(
     await moduleUrl("../src/lib/ta/engine.server.ts", {
       "../activity-controls": controlsUrl,
-      "../market/providers.server": stub(
-        "export const loadTACandles = async () => globalThis.__activityFetch();",
-      ),
+      "../monitor/run-context": stub(`
+        const metrics=()=>({exchangeRequests:0,candleRows:0,marketCacheHits:0,taCalculations:0,taSignalsSaved:0,taOutcomesUpdated:0,databaseReads:0,databaseWriteAttempts:0,databaseNoOps:0});
+        export const createMonitorRunContext=()=>({metrics:metrics(),ta:async()=>globalThis.__activityFetch()});
+      `),
       "./core": stub(
         "export const TA_FRAMES=[15,60,240], TA_VERSION='test'; export const closedCandles=x=>x; export const analyze=()=>({patterns:[]}); export const outcomeDue=()=>0;",
       ),
     })
   );
   const db = {
+    async rpc(name, args) {
+      if (name === "get_ta_due_work") {
+        reads++;
+        const rows = [];
+        if (args.p_include_outcomes) {
+          for (const timeframe of [15, 60, 240])
+            rows.push({
+              work_kind: "outcome",
+              id: `due-${timeframe}`,
+              timeframe,
+              candle_at: new Date(0).toISOString(),
+              source: "binance-usdm",
+              detected_at: new Date(0).toISOString(),
+              price: 100,
+            });
+        }
+        return { data: rows, error: null };
+      }
+      outcomeWrites++;
+      return { data: 0, error: null };
+    },
     from() {
       return {
-        async upsert() {
+        upsert() {
           inserts++;
-          return {};
-        },
-        select() {
-          reads++;
-          return this;
-        },
-        eq() {
-          return this;
-        },
-        order() {
-          return this;
-        },
-        async limit() {
-          return { data: [] };
+          return { select: async () => ({ data: [{ id: "saved" }], error: null }) };
         },
       };
     },
@@ -126,13 +136,14 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
       [false, true],
       [true, true],
     ]) {
-      fetches = inserts = reads = 0;
+      fetches = inserts = reads = outcomeWrites = 0;
       process.env.TA_GENERATION_ENABLED = String(generation);
       process.env.TA_OUTCOME_EVALUATION_ENABLED = String(outcomes);
       assert.deepEqual(await runTA(db, "user", "BTCUSDT"), []);
       assert.equal(fetches, generation || outcomes ? 3 : 0);
       assert.equal(inserts, generation ? 3 : 0);
-      assert.equal(reads, outcomes ? 3 : 0);
+      assert.equal(reads, generation || outcomes ? 1 : 0);
+      assert.equal(outcomeWrites, outcomes ? 3 : 0);
     }
   } finally {
     names.forEach((name, i) =>
@@ -152,6 +163,9 @@ test("scheduled endpoint defaults disabled, authenticates and skips before datab
       ),
       "@/lib/monitor/engine.server": stub(
         "export const DEFAULT_SETTINGS={}; export const recordRun=()=>{throw Error('must not write')}; export const runMonitorForUser=()=>{throw Error('must not run')};",
+      ),
+      "@/lib/monitor/run-context": stub(
+        "export const createMonitorRunContext=()=>{throw Error('must not create context')};",
       ),
       "@/integrations/supabase/client.server": stub("throw Error('must not load database');"),
     })

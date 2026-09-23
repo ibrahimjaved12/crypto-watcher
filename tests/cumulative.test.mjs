@@ -25,6 +25,7 @@ before(async () => {
     "20260917090000_technical_analysis.sql",
     "20260921090000_activity_domains.sql",
     "20260923090000_binance_usdm_futures.sql",
+    "20260924090000_monitor_efficiency.sql",
   ]) {
     await db.exec(
       await readFile(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"),
@@ -32,7 +33,7 @@ before(async () => {
   }
 });
 beforeEach(async () => {
-  await db.exec("RESET ROLE; DELETE FROM auth.users;");
+  await db.exec("RESET ROLE; DELETE FROM monitor_runs; DELETE FROM auth.users;");
   await db.query("INSERT INTO auth.users VALUES ($1), ($2)", [user, other]);
   await db.query(
     `INSERT INTO public.watchlist_items(user_id,symbol,instrument_id)
@@ -287,6 +288,40 @@ test("state is account-scoped and authenticated users cannot write state or call
   await db.exec("SET ROLE service_role");
   try {
     assert.equal((await observe("102", 1)).status, "alerted");
+  } finally {
+    await db.exec("RESET ROLE");
+  }
+});
+
+test("operational monitor runs retain only the newest 1000 rows per account", async () => {
+  await db.query(
+    `INSERT INTO monitor_runs(user_id,status,ran_at)
+     SELECT $1,'success',clock_timestamp()-(n || ' seconds')::interval
+     FROM generate_series(1,1005) AS n`,
+    [user],
+  );
+  await db.exec("SET ROLE service_role");
+  try {
+    const saved = await db.query(
+      `SELECT record_monitor_run($1,'success',1,0,NULL,NULL,4,$2::jsonb) AS id`,
+      [user, JSON.stringify({ exchangeRequests: 1 })],
+    );
+    assert.ok(saved.rows[0].id);
+    assert.equal(
+      (await db.query("SELECT count(*) FROM monitor_runs WHERE user_id=$1", [user])).rows[0].count,
+      1000,
+    );
+  } finally {
+    await db.exec("RESET ROLE");
+  }
+
+  await db.query("SELECT set_config('request.jwt.claim.sub',$1,false)", [user]);
+  await db.exec("SET ROLE authenticated");
+  try {
+    await assert.rejects(
+      db.query(`SELECT record_monitor_run($1,'success',1,0,NULL,NULL,4,'{}'::jsonb)`, [user]),
+      /permission denied/,
+    );
   } finally {
     await db.exec("RESET ROLE");
   }

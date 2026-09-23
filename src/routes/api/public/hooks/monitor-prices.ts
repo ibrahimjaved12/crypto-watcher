@@ -8,6 +8,7 @@ import {
   runMonitorForUser,
   type MonitorSettings,
 } from "@/lib/monitor/engine.server";
+import { createMonitorRunContext } from "@/lib/monitor/run-context";
 
 /**
  * Scheduled price monitoring. When explicitly enabled, the backend scheduler can
@@ -47,7 +48,9 @@ async function handle(request: Request) {
 
   const { data: settingsRows, error: settingsError } = await supabaseAdmin
     .from("monitor_settings")
-    .select("*")
+    .select(
+      "user_id, threshold_pct, window_minutes, cooldown_minutes, monitoring_enabled, market_data_collection_enabled, completed_candle_ta_enabled, movement_alerts_enabled, developing_setup_evaluation_enabled, paper_trading_enabled",
+    )
     .in("user_id", userIds.length ? userIds : ["00000000-0000-0000-0000-000000000000"]);
   if (settingsError) {
     return Response.json({ ok: false, error: settingsError.message }, { status: 500 });
@@ -58,6 +61,7 @@ async function handle(request: Request) {
   );
 
   const results = [];
+  const runContext = createMonitorRunContext();
   for (const userId of userIds) {
     const settings = {
       ...DEFAULT_SETTINGS,
@@ -65,7 +69,7 @@ async function handle(request: Request) {
       user_id: userId,
     };
     try {
-      const result = await runMonitorForUser(supabaseAdmin, userId, settings);
+      const result = await runMonitorForUser(supabaseAdmin, userId, settings, runContext);
       if (result.status !== "skipped") await recordRun(supabaseAdmin, result);
       results.push(result);
     } catch (err) {
@@ -76,6 +80,18 @@ async function handle(request: Request) {
         alertsCreated: 0,
         dataSource: null,
         error: err instanceof Error ? err.message : String(err),
+        durationMs: 0,
+        metrics: {
+          exchangeRequests: 0,
+          candleRows: 0,
+          marketCacheHits: 0,
+          taCalculations: 0,
+          taSignalsSaved: 0,
+          taOutcomesUpdated: 0,
+          databaseReads: 0,
+          databaseWriteAttempts: 0,
+          databaseNoOps: 0,
+        },
       };
       await recordRun(supabaseAdmin, result);
       results.push(result);
