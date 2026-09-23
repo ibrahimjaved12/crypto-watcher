@@ -200,6 +200,7 @@ npx supabase start
 npx supabase db reset --local
 npm run env:local
 npm run dev
+npm run dev:local
 ```
 
 The repository pins Node 22 in `.nvmrc` and the Supabase CLI in `package-lock.json`.
