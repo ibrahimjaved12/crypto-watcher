@@ -10,8 +10,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import httpx
 
-from .api_models import AnalysisRequest
+from .api_models import AnalysisRequest, TechnicalAnalysisRequest
 from .service import analyze_request
+from .technical import calculate_technical_analysis
 
 
 def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
@@ -62,6 +63,10 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
         except Exception:
             # No raw provider error, URL, token or baseline payload in responses/logs.
             raise HTTPException(502, "Analysis could not be completed") from None
+
+    @app.post("/v1/technical-analysis", dependencies=[Depends(authorize)])
+    async def technical_analysis(body: TechnicalAnalysisRequest):
+        return calculate_technical_analysis(body.calculation_input())
 
     return app
 

@@ -9,6 +9,9 @@ from market_analysis.core import Candle, MINUTE, analyze, analyze_window, percen
 from market_analysis.providers import (KRAKEN_SOURCE, OKX_SOURCE, PROVIDERS, SOURCE,
                                        instrument, parse, request_url, validate_exchange_info)
 from market_analysis.__main__ import run
+from market_analysis.replay import replay_technical_analysis
+from market_analysis.technical import (FuturesInstrument, TechnicalCandle, TechnicalInput,
+                                       calculate_technical_analysis, interpret_indicators)
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/candles.json").read_text())
 AS_OF = FIXTURE["as_of_ms"]
@@ -117,6 +120,50 @@ class CalculationTests(unittest.TestCase):
 
     def test_order_independent(self):
         self.assertEqual(self.window(), self.window(list(reversed(CANDLES))))
+
+
+class TechnicalAnalysisTests(unittest.TestCase):
+    def request(self):
+        duration = 15 * MINUTE
+        end = 1800000000000 // duration * duration
+        candles = tuple(
+            TechnicalCandle(end - (249 - index) * duration,
+                            index + 100, index + 102, index + 99, index + 101, 100)
+            for index in range(249)
+        )
+        return TechnicalInput(
+            instrument=FuturesInstrument("binance-usdm:BTCUSDT", "binance-usdm", "BTCUSDT"),
+            timeframe_minutes=15, candles=candles, source="binance-usdm",
+            source_event_time_ms=end, evaluation_time_ms=end, detection_time_ms=end,
+        )
+
+    def test_v2_fixture_and_replay_have_no_lookahead(self):
+        request = self.request()
+        result = calculate_technical_analysis(request)
+        self.assertEqual((result["status"], result["ta_version"], result["score"]),
+                         ("ok", "ta-v2", 60))
+        self.assertEqual(result["indicators"]["ema200"], 249.5)
+        self.assertEqual(result["indicators"]["macd"]["line"], 7)
+        self.assertEqual(result["indicators"]["adx14"], 100)
+        self.assertEqual(result["factor_breakdown"]["trend"]["contribution"], 40)
+        future = TechnicalCandle(request.evaluation_time_ms, 1, 10000, 1, 9999, 99999, False)
+        with_future = replace(request, candles=request.candles + (future,))
+        self.assertEqual(calculate_technical_analysis(with_future), result)
+        first = request.candles[198].open_ms + 15 * MINUTE
+        replay = replay_technical_analysis(with_future, (first, request.evaluation_time_ms))
+        self.assertEqual(replay[0]["status"], "insufficient")
+        self.assertEqual(replay[1], result)
+
+    def test_interpretation_boundaries_and_contract_identity(self):
+        base = {"ema20": 100, "ema50": 90, "rsi14": 70,
+                "atr14": 2, "volume_change_pct": 0}
+        value = interpret_indicators(110, base, ["hammer"])
+        self.assertEqual((value["score"], value["classification"]), (90, "bullish"))
+        self.assertEqual(value["factor_breakdown"]["volume"]["contribution"], 20)
+        request = self.request()
+        spot = replace(request, instrument=replace(request.instrument, market_type="spot"))
+        self.assertEqual(calculate_technical_analysis(spot)["reason"],
+                         "invalid_futures_contract_identity")
 
 
 class ProviderTests(unittest.TestCase):

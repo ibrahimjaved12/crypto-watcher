@@ -34,3 +34,22 @@ The one-shot CLI does not inspect cooldown history or authorize an alert. A thre
 match is descriptive analysis only.
 
 Official references: [Binance USDⓈ-M](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data), [OKX](https://www.okx.com/docs-v5/en/), and [Kraken Futures](https://docs.kraken.com/api/docs/futures-api/charts/candles).
+
+## Deterministic TA v2 contract
+
+`market_analysis.technical.calculate_technical_analysis` accepts an immutable
+`TechnicalInput`: exact perpetual-futures identity and source, timeframe, completed
+OHLCV plus separate warm-up candles, explicit gap markers, source/evaluation/detection
+timestamps, price type, and calculation versions. It supports 15m, 1h, and 4h and
+never reads the clock or performs I/O.
+
+The result preserves TA v2 indicators and interpretation-v1 scoring and adds a
+compact status, bullish/bearish/neutral classification and direction, factor reason
+tags, caller timestamps, and provenance. Fewer than 200 visible completed candles is
+`insufficient`; malformed, gapped, stale, mismatched spot/futures, or unsupported
+versioned input is `unavailable`. Forming and future candles are not visible to a
+calculation. The offline replay adapter additionally removes them before every
+chronological step.
+
+This port does not change the TypeScript scheduled monitor or its database writes.
+That implementation remains active until the planned scheduling cutover.

@@ -8,7 +8,20 @@ The new `market_analysis.cumulative.observe` function provides a pure state
 transition for cumulative upward/downward monitoring. See the
 [application rule and deployment notes](../docs/cumulative-monitoring.md).
 The one-shot CLI below still reports rolling-window analysis and does not persist
-baselines; its command behavior is unchanged. The full suite now contains 45 tests.
+baselines; its command behavior is unchanged.
+
+`market_analysis.technical.calculate_technical_analysis` is the pure, canonical
+TA v2 calculation entry point. The authenticated `/v1/technical-analysis` route
+and `market_analysis.replay` both call it with explicit versioned inputs. Neither
+path reads a database, contacts an exchange, uses wall-clock time, or writes a
+result. The replay runner accepts a fixed JSON `TechnicalInput` fixture:
+
+```sh
+.venv/bin/python -m market_analysis.replay path/to/fixture.json
+```
+
+It evaluates the fixture chronologically and passes only candles completed at each
+evaluation timestamp to the shared calculator.
 
 The calculation core uses only the Python standard library, with no Django,
 database client or scheduler. The FastAPI service adds locked HTTP/API dependencies

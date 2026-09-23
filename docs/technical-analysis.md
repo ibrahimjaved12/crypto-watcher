@@ -168,3 +168,12 @@ API, LLM key, or Python deployment is required for this module.
 References: [technicalindicators](https://github.com/anandanand84/technicalindicators),
 [OKX candles](https://www.okx.com/docs-v5/en/), and
 [Kraken Futures candles](https://docs.kraken.com/api/docs/futures-api/charts/candles).
+
+## Shared Python calculation package
+
+The deterministic Python port is available through
+`market_analysis.technical.calculate_technical_analysis`. FastAPI's authenticated
+`/v1/technical-analysis` adapter and the offline chronological replay runner use the
+same pure function and explicit futures identity, candles, timestamps, price type,
+gap markers, and versions. The existing TypeScript scheduler and writers remain the
+production path until their separate cutover.

@@ -25,6 +25,29 @@ def payload():
                          "last_up_alert_ms": None, "last_down_alert_ms": None}}
 
 
+def technical_payload():
+    duration = 15 * MINUTE
+    candles = [
+        {"open_ms": NOW - (200 - index) * duration,
+         "open": str(index + 100), "high": str(index + 102),
+         "low": str(index + 99), "close": str(index + 101),
+         "volume": "100", "complete": True}
+        for index in range(200)
+    ]
+    return {
+        "schema_version": 1,
+        "instrument": {"instrument_id": "binance-usdm:BTCUSDT",
+                       "exchange": "binance-usdm", "native_symbol": "BTCUSDT",
+                       "market_type": "futures", "contract_type": "perpetual"},
+        "timeframe_minutes": 15, "candles": candles, "warmup_candles": [],
+        "missing_open_times_ms": [], "source": "binance-usdm",
+        "source_event_time_ms": NOW, "evaluation_time_ms": NOW,
+        "detection_time_ms": NOW, "price_type": "trade",
+        "config": {"ta_version": "ta-v2", "interpretation_version": "interpretation-v1",
+                   "minimum_history": 200},
+    }
+
+
 def series(price="102"):
     return {interval: [Candle(NOW - n * interval * MINUTE, Decimal(price))
                        for n in range(count, -1, -1)]
@@ -64,6 +87,14 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(
             self.request(app, "POST", "/v1/analysis", json=payload(), headers=HEADERS).status_code,
             200)
+
+    def test_fastapi_uses_shared_technical_calculator(self):
+        app = create_app(TOKEN, analyzer_for())
+        response = self.request(app, "POST", "/v1/technical-analysis",
+                                json=technical_payload(), headers=HEADERS)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(response.json()["score"], 60)
 
     def test_missing_configuration_fails_closed(self):
         app = create_app("")
