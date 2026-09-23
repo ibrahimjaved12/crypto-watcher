@@ -534,19 +534,6 @@ export type Database = {
         }
         Returns: Json
       }
-      record_monitor_run: {
-        Args: {
-          p_alerts_created: number
-          p_data_source: string | null
-          p_duration_ms: number
-          p_error_message: string | null
-          p_metrics: Json
-          p_status: string
-          p_symbols_checked: number
-          p_user_id: string
-        }
-        Returns: string
-      }
       record_market_data_checkpoint: {
         Args: {
           p_observed_at: string

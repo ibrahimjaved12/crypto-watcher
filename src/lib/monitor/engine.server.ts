@@ -187,15 +187,15 @@ export async function runMonitorForUser(
 export async function recordRun(supabaseAdmin: AdminClient, result: UserRunResult): Promise<void> {
   // Include the operational log write itself in the saved measurement.
   result.metrics.databaseWriteAttempts += 1;
-  const { error } = await supabaseAdmin.rpc("record_monitor_run", {
-    p_user_id: result.userId,
-    p_status: result.status,
-    p_symbols_checked: result.symbolsChecked,
-    p_alerts_created: result.alertsCreated,
-    p_data_source: result.dataSource,
-    p_error_message: result.error,
-    p_duration_ms: result.durationMs,
-    p_metrics: result.metrics,
+  const { error } = await supabaseAdmin.from("monitor_runs").insert({
+    user_id: result.userId,
+    status: result.status,
+    symbols_checked: result.symbolsChecked,
+    alerts_created: result.alertsCreated,
+    data_source: result.dataSource,
+    error_message: result.error,
+    duration_ms: result.durationMs,
+    metrics: result.metrics,
   });
   if (error) throw new Error(`Could not record monitoring run: ${error.message}`);
 }

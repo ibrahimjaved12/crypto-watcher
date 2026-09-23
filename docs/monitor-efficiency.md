@@ -22,17 +22,15 @@ Lovable credit saving.
   skipping history or treating stale data as current.
 - Due outcome rows are selected in the database, capped at 500 per pair/timeframe, and their
   idempotent pending-to-final transitions are applied in one batch per timeframe.
-- Run metrics are stored on `monitor_runs` with duration, and operational run logs
-  are capped at the newest 1,000 rows per account. Immutable alert and TA history
-  is not pruned with those logs. Metrics count exchange HTTP
+- Run metrics are stored on `monitor_runs` with duration. No run history, alerts,
+  or TA research records are pruned by this change. Metrics count exchange HTTP
   attempts, transferred candle rows, shared-cache hits, TA calculations, saved TA
   signals, updated outcomes, database reads, write attempts, and known no-op
   decisions. Provider failures remain visible and their attempted requests are counted.
 
 The database migration is
 `supabase/migrations/20260924090000_monitor_efficiency.sql`. It adds the metrics
-columns and the service-role-only `get_ta_due_work`, `apply_ta_outcomes`, and
-`record_monitor_run` RPCs.
+columns and the service-role-only `get_ta_due_work` and `apply_ta_outcomes` RPCs.
 
 ## Deterministic before/after request model
 

@@ -121,7 +121,6 @@ export async function runTA(
               price_type: generationMarket!.priceType,
               version: TA_VERSION,
               candle_at: new Date(candle.time).toISOString(),
-              detected_at: new Date(candle.time + duration).toISOString(),
               price: candle.close,
               indicators: indicators as unknown as Json,
               patterns: indicators.patterns,
