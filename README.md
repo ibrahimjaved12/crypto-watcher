@@ -39,6 +39,11 @@ The monitoring algorithm now has a [saved-baseline cumulative rule](docs/cumulat
 for gradual rises and falls. Its database migration must be applied before deploying
 the updated monitor.
 
+Market collection and completed-candle work now use request-scoped sharing,
+due-work gating, bounded catch-up, batched outcomes, and locally measurable run
+metrics. See the [monitor efficiency report](docs/monitor-efficiency.md). This local
+evidence does not claim a Lovable billing reduction while the hosted cron is paused.
+
 The futures cutover migration `20260923090000_binance_usdm_futures.sql` is destructive:
 it clears watchlists, notes, alerts, baselines, checkpoints, TA snapshots, and monitor
 runs, while preserving accounts and monitoring settings. Fresh watchlists are seeded

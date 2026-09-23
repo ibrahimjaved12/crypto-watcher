@@ -189,6 +189,7 @@ test("TA persistence deduplicates futures snapshots and enforces user read isola
       "20260917090000_technical_analysis.sql",
       "20260921090000_activity_domains.sql",
       "20260923090000_binance_usdm_futures.sql",
+      "20260924090000_monitor_efficiency.sql",
     ]) {
       await db.exec(
         await readFile(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"),
@@ -213,6 +214,53 @@ test("TA persistence deduplicates futures snapshots and enforces user read isola
     assert.equal((await db.query("SELECT * FROM ta_signals")).rows.length, 1);
     await assert.rejects(db.exec(insert), /permission denied/);
     await assert.rejects(db.exec("UPDATE ta_signals SET price=1"), /permission denied/);
+
+    await db.exec("RESET ROLE; SET ROLE service_role");
+    await db.exec("UPDATE ta_signals SET detected_at='2026-01-01T00:00:00Z'");
+    const due = await db.query(
+      `SELECT * FROM get_ta_due_work(
+        '00000000-0000-0000-0000-000000000001','BTCUSDT','ta-v2',
+        '2026-01-01T02:00:00Z',true,true)`,
+    );
+    assert.deepEqual(due.rows.map((row) => row.work_kind).sort(), ["latest", "outcome"]);
+    const signalId = due.rows.find((row) => row.work_kind === "outcome").id;
+    const batch = JSON.stringify([
+      {
+        id: signalId,
+        outcome_status: "measured",
+        outcome_at: "2026-01-01T01:00:00Z",
+        outcome_price: 102,
+        return_pct: 2,
+      },
+    ]);
+    assert.equal(
+      (
+        await db.query("SELECT apply_ta_outcomes($1,$2::jsonb) AS changed", [
+          "00000000-0000-0000-0000-000000000001",
+          batch,
+        ])
+      ).rows[0].changed,
+      1,
+    );
+    assert.equal(
+      (
+        await db.query("SELECT apply_ta_outcomes($1,$2::jsonb) AS changed", [
+          "00000000-0000-0000-0000-000000000001",
+          batch,
+        ])
+      ).rows[0].changed,
+      0,
+    );
+    await db.exec(
+      "RESET ROLE; SET ROLE authenticated; SET request.jwt.claim.sub = '00000000-0000-0000-0000-000000000001'",
+    );
+    await assert.rejects(
+      db.query("SELECT apply_ta_outcomes($1,$2::jsonb)", [
+        "00000000-0000-0000-0000-000000000001",
+        batch,
+      ]),
+      /permission denied/,
+    );
   } finally {
     await db.close();
   }
@@ -222,7 +270,8 @@ test("futures provider preserves OHLCV and contract identity", async () => {
   const providerUrl = await moduleUrl("../src/lib/market/providers.server.ts", {
     "./symbols": await moduleUrl("../src/lib/market/symbols.ts"),
   });
-  const { clearExchangeInfoCache, loadFuturesSnapshot, loadTACandles } = await import(providerUrl);
+  const { clearExchangeInfoCache, loadFuturesSnapshot, loadObservationCandles, loadTACandles } =
+    await import(providerUrl);
   const original = globalThis.fetch;
   try {
     const calls = [];
@@ -256,6 +305,35 @@ test("futures provider preserves OHLCV and contract identity", async () => {
       [snapshot.lastPrice, snapshot.markPrice, snapshot.indexPrice, snapshot.fundingRate],
       [101, 100.5, 100.4, 0.0001],
     );
+
+    clearExchangeInfoCache();
+    calls.length = 0;
+    const observed = { requests: 0, rows: 0 };
+    const minuteEnd = Math.floor(Date.now() / 60_000) * 60_000;
+    globalThis.fetch = async (url) => {
+      calls.push(url);
+      if (url.endsWith("/fapi/v1/exchangeInfo")) {
+        return Response.json({ symbols: [futuresMetadata()] });
+      }
+      return Response.json([
+        [minuteEnd - 120_000, "100", "102", "98", "101", "35", minuteEnd - 60_001],
+        [minuteEnd - 60_000, "101", "103", "99", "102", "40", minuteEnd - 1],
+      ]);
+    };
+    const observation = await loadObservationCandles("BTCUSDT", undefined, {
+      request() {
+        observed.requests++;
+      },
+      candleRows(_source, _timeframe, rows) {
+        observed.rows += rows;
+      },
+    });
+    assert.equal(observation.ok, true);
+    assert.equal(calls.filter((url) => url.includes("/klines?")).length, 1);
+    assert.ok(calls.find((url) => url.includes("interval=1m")));
+    assert.ok(!calls.find((url) => url.includes("interval=15m")));
+    assert.deepEqual(observed, { requests: 2, rows: 2 });
+
     await assert.rejects(
       loadTACandles("BTCUSDT", 15, () => {}, "OKX"),
       /Unknown data source/,
@@ -316,6 +394,151 @@ test("provider HTTP failures cancel unused bodies and preserve errors if cleanup
   }
 });
 
+test("run context shares only identity-equivalent market inputs", async () => {
+  globalThis.__contextCalls = { observation: 0, ta: [] };
+  const provider = `data:text/javascript,${encodeURIComponent(`
+    export async function loadObservationCandles(symbol,validate,observer) {
+      globalThis.__contextCalls.observation++;
+      observer.request('binance-usdm','candles',1);
+      observer.candleRows('binance-usdm',1,2);
+      return {ok:true,result:{source:'binance-usdm',minute:[],quarter:[]}};
+    }
+    export async function loadTACandles(symbol,timeframe,validate,source,observer) {
+      globalThis.__contextCalls.ta.push({symbol,timeframe,source});
+      observer.request('binance-usdm','candles',timeframe);
+      observer.candleRows('binance-usdm',timeframe,250);
+      return {source:source??'binance-usdm',instrument:{id:'binance-usdm:'+symbol},endpoint:'/fapi/v1/klines',priceType:'trade',candles:[]};
+    }
+  `)}`;
+  const { createMonitorRunContext } = await import(
+    await moduleUrl("../src/lib/monitor/run-context.ts", {
+      "../market/providers.server": provider,
+    })
+  );
+  try {
+    const context = createMonitorRunContext();
+    await context.observation("BTCUSDT");
+    await context.observation("BTCUSDT");
+    await context.ta("BTCUSDT", 15, () => {});
+    await context.ta("BTCUSDT", 15, () => {});
+    await context.ta("BTCUSDT", 15, () => {}, "binance-usdm");
+    await context.ta("BTCUSDT", 15, () => {}, "okx-usdt-swap");
+    assert.equal(globalThis.__contextCalls.observation, 1);
+    assert.deepEqual(globalThis.__contextCalls.ta, [
+      { symbol: "BTCUSDT", timeframe: 15, source: undefined },
+      { symbol: "BTCUSDT", timeframe: 15, source: "okx-usdt-swap" },
+    ]);
+    assert.equal(context.metrics.marketCacheHits, 3);
+    assert.equal(context.metrics.exchangeRequests, 3);
+    assert.equal(context.metrics.candleRows, 502);
+  } finally {
+    delete globalThis.__contextCalls;
+  }
+});
+
+test("TA due gating skips completed work and bounds catch-up batches", async () => {
+  const now = 1_800_000_000_000;
+  const oldNow = Date.now;
+  Date.now = () => now;
+  const core = `data:text/javascript,${encodeURIComponent(`
+    export const TA_FRAMES=[15,60,240],TA_VERSION='ta-v2';
+    export const closedCandles=(candles)=>candles;
+    export const analyze=()=>({patterns:[]});
+    export const outcomeDue=()=>0;
+  `)}`;
+  const contextModule = `data:text/javascript,${encodeURIComponent(`
+    export const createMonitorRunContext=()=>{throw Error('explicit context required')};
+  `)}`;
+  const { latestCompletedCandleAt, runTA, TA_CATCH_UP_LIMIT } = await import(
+    await moduleUrl("../src/lib/ta/engine.server.ts", {
+      "../activity-controls": await moduleUrl("../src/lib/activity-controls.ts"),
+      "./core": core,
+      "../monitor/run-context": contextModule,
+    })
+  );
+  const zero = () => ({
+    exchangeRequests: 0,
+    candleRows: 0,
+    marketCacheHits: 0,
+    taCalculations: 0,
+    taSignalsSaved: 0,
+    taOutcomesUpdated: 0,
+    databaseReads: 0,
+    databaseWriteAttempts: 0,
+    databaseNoOps: 0,
+  });
+  const oldOutcomes = process.env.TA_OUTCOME_EVALUATION_ENABLED;
+  process.env.TA_OUTCOME_EVALUATION_ENABLED = "false";
+  try {
+    let providerCalls = 0;
+    const upserts = [];
+    let latestOffset = 0;
+    const db = {
+      async rpc(name) {
+        assert.equal(name, "get_ta_due_work");
+        return {
+          error: null,
+          data: [15, 60, 240].map((timeframe) => ({
+            work_kind: "latest",
+            timeframe,
+            candle_at: new Date(
+              latestCompletedCandleAt(timeframe, now) - latestOffset * timeframe * 60_000,
+            ).toISOString(),
+          })),
+        };
+      },
+      from() {
+        return {
+          upsert(rows) {
+            upserts.push(rows);
+            return { select: async () => ({ data: rows.map((_, id) => ({ id })), error: null }) };
+          },
+        };
+      },
+    };
+    const context = {
+      metrics: zero(),
+      async ta(symbol, timeframe) {
+        providerCalls++;
+        const end = latestCompletedCandleAt(timeframe, now);
+        const duration = timeframe * 60_000;
+        return {
+          source: "binance-usdm",
+          instrument: { id: `binance-usdm:${symbol}` },
+          endpoint: "/fapi/v1/klines",
+          priceType: "trade",
+          candles: Array.from({ length: 220 }, (_, index) => ({
+            time: end - (219 - index) * duration,
+            open: 100,
+            high: 101,
+            low: 99,
+            close: 100,
+            volume: 1,
+            complete: true,
+          })),
+        };
+      },
+    };
+
+    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context), []);
+    assert.equal(providerCalls, 0);
+    assert.equal(upserts.length, 0);
+    assert.equal(context.metrics.databaseNoOps, 3);
+
+    latestOffset = 10;
+    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context), []);
+    assert.equal(providerCalls, 3);
+    assert.equal(upserts.length, 3);
+    assert.ok(upserts.every((rows) => rows.length === TA_CATCH_UP_LIMIT));
+    assert.equal(context.metrics.taCalculations, TA_CATCH_UP_LIMIT * 3);
+    assert.equal(context.metrics.taSignalsSaved, TA_CATCH_UP_LIMIT * 3);
+  } finally {
+    Date.now = oldNow;
+    if (oldOutcomes === undefined) delete process.env.TA_OUTCOME_EVALUATION_ENABLED;
+    else process.env.TA_OUTCOME_EVALUATION_ENABLED = oldOutcomes;
+  }
+});
+
 test("TA runner isolates frame failures and settles on the recorded futures source", async () => {
   const core = await moduleUrl("../src/lib/ta/core.ts", {
     technicalindicators: import.meta.resolve("technicalindicators"),
@@ -326,11 +549,15 @@ test("TA runner isolates frame failures and settles on the recorded futures sour
       "../activity-controls": await moduleUrl("../src/lib/activity-controls.ts"),
       "./core": core,
       "../market/providers.server": provider,
+      "../monitor/run-context": `data:text/javascript,${encodeURIComponent(`
+        const zero=()=>({exchangeRequests:0,candleRows:0,marketCacheHits:0,taCalculations:0,taSignalsSaved:0,taOutcomesUpdated:0,databaseReads:0,databaseWriteAttempts:0,databaseNoOps:0});
+        export const createMonitorRunContext=()=>({metrics:zero(),ta:(...args)=>globalThis.__taLoad(...args)});
+      `)}`,
     })
   );
   const calls = [],
     writes = [],
-    updates = [];
+    outcomeBatches = [];
   globalThis.__taLoad = async (symbol, frame, validate, source) => {
     calls.push({ frame, source });
     if (frame === 60) throw new Error("feed down");
@@ -352,69 +579,47 @@ test("TA runner isolates frame failures and settles on the recorded futures sour
     };
   };
   const db = {
+    async rpc(name, args) {
+      if (name === "get_ta_due_work") {
+        const rows = [];
+        for (const frame of [15, 60, 240]) {
+          const step = frame * 60000;
+          const boundary = Math.floor(Date.now() / step) * step;
+          rows.push(
+            {
+              work_kind: "outcome",
+              id: `due-${frame}`,
+              timeframe: frame,
+              candle_at: new Date(boundary - 10 * step).toISOString(),
+              source: "binance-usdm",
+              detected_at: new Date(boundary - 10 * step).toISOString(),
+              price: 100,
+            },
+            {
+              work_kind: "outcome",
+              id: `expired-${frame}`,
+              timeframe: frame,
+              candle_at: new Date(boundary - 500 * step).toISOString(),
+              source: "binance-usdm",
+              detected_at: new Date(boundary - 500 * step).toISOString(),
+              price: 100,
+            },
+          );
+        }
+        return { data: rows, error: null };
+      }
+      assert.equal(name, "apply_ta_outcomes");
+      outcomeBatches.push(args);
+      return { data: args.p_outcomes.length, error: null };
+    },
     from(table) {
       assert.equal(table, "ta_signals");
-      const filters = {};
-      let mode, patch;
-      const q = {
-        upsert(row, options) {
-          writes.push({ row, options });
-          return Promise.resolve({ error: null });
-        },
-        select() {
-          mode = "read";
-          return q;
-        },
-        update(value) {
-          mode = "update";
-          patch = value;
-          return q;
-        },
-        eq(key, value) {
-          filters[key] = value;
-          return q;
-        },
-        order() {
-          return q;
-        },
-        limit() {
-          return q;
-        },
-        then(resolve) {
-          if (mode === "update") {
-            updates.push({ filters, patch });
-            return Promise.resolve(resolve({ error: null }));
-          }
-          const step = filters.timeframe * 60000;
-          const boundary = Math.floor(Date.now() / step) * step;
-          return Promise.resolve(
-            resolve({
-              error: null,
-              data: [
-                {
-                  id: `due-${filters.timeframe}`,
-                  source: "binance-usdm",
-                  detected_at: new Date(boundary - 10 * step).toISOString(),
-                  price: 100,
-                },
-                {
-                  id: `expired-${filters.timeframe}`,
-                  source: "binance-usdm",
-                  detected_at: new Date(boundary - 500 * step).toISOString(),
-                  price: 100,
-                },
-                {
-                  id: `new-${filters.timeframe}`,
-                  source: "binance-usdm",
-                  detected_at: new Date().toISOString(),
-                  price: 100,
-                },
-              ],
-            }),
-          );
+      return {
+        upsert(rows, options) {
+          writes.push({ rows, options });
+          return { select: async () => ({ data: rows.map((_, id) => ({ id })), error: null }) };
         },
       };
-      return q;
     },
   };
   try {
@@ -422,16 +627,20 @@ test("TA runner isolates frame failures and settles on the recorded futures sour
     assert.equal(errors.length, 1);
     assert.match(errors[0], /60m.*feed down/);
     assert.equal(writes.length, 2);
-    assert.ok(writes.every((w) => w.options.ignoreDuplicates && w.row.user_id === "owner"));
-    assert.equal(calls.filter((c) => c.source === "binance-usdm").length, 0);
-    assert.equal(updates.length, 4);
     assert.ok(
-      updates.every((u) => u.filters.user_id === "owner" && u.filters.outcome_status === "pending"),
+      writes.every(
+        (w) => w.options.ignoreDuplicates && w.rows.length === 1 && w.rows[0].user_id === "owner",
+      ),
     );
-    assert.equal(updates.filter((u) => u.patch.outcome_status === "unavailable").length, 2);
-    for (const u of updates.filter((u) => u.patch.outcome_status === "measured")) {
-      assert.equal(u.patch.outcome_price, 101);
-      assert.ok(Math.abs(u.patch.return_pct - 1) < 1e-9);
+    assert.equal(calls.filter((c) => c.source === "binance-usdm").length, 0);
+    assert.equal(outcomeBatches.length, 2);
+    assert.ok(outcomeBatches.every((batch) => batch.p_user_id === "owner"));
+    const updates = outcomeBatches.flatMap((batch) => batch.p_outcomes);
+    assert.equal(updates.length, 4);
+    assert.equal(updates.filter((u) => u.outcome_status === "unavailable").length, 2);
+    for (const update of updates.filter((u) => u.outcome_status === "measured")) {
+      assert.equal(update.outcome_price, 101);
+      assert.ok(Math.abs(update.return_pct - 1) < 1e-9);
     }
   } finally {
     delete globalThis.__taLoad;

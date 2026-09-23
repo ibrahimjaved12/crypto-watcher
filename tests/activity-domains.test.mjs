@@ -23,6 +23,18 @@ const { DEFAULT_SETTINGS, runMonitorForUser } = await import(
         return {ok:true,result:{source:'binance-usdm',minute:[],quarter:[]}};
       }
     `),
+    "./run-context": stub(`
+      const zero=()=>({exchangeRequests:0,candleRows:0,marketCacheHits:0,taCalculations:0,taSignalsSaved:0,taOutcomesUpdated:0,databaseReads:0,databaseWriteAttempts:0,databaseNoOps:0});
+      export const createMonitorRunContext=()=>({
+        metrics:zero(),
+        async observation(symbol) {
+          globalThis.__domains.market.push(symbol);
+          return {ok:true,result:{source:'binance-usdm',minute:[],quarter:[]}};
+        }
+      });
+      export const metricsSnapshot=(value)=>({...value});
+      export const metricsSince=(current,previous)=>Object.fromEntries(Object.keys(current).map(key=>[key,current[key]-previous[key]]));
+    `),
     "./observation": stub(`
       export const completedObservation=()=>({price:100,observedAt:'2026-09-21T00:00:00.000Z'});
     `),

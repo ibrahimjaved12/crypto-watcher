@@ -245,8 +245,10 @@ export type Database = {
         Row: {
           alerts_created: number
           data_source: string | null
+          duration_ms: number | null
           error_message: string | null
           id: string
+          metrics: Json
           ran_at: string
           status: string
           symbols_checked: number
@@ -255,8 +257,10 @@ export type Database = {
         Insert: {
           alerts_created?: number
           data_source?: string | null
+          duration_ms?: number | null
           error_message?: string | null
           id?: string
+          metrics?: Json
           ran_at?: string
           status: string
           symbols_checked?: number
@@ -265,8 +269,10 @@ export type Database = {
         Update: {
           alerts_created?: number
           data_source?: string | null
+          duration_ms?: number | null
           error_message?: string | null
           id?: string
+          metrics?: Json
           ran_at?: string
           status?: string
           symbols_checked?: number
@@ -492,6 +498,32 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      apply_ta_outcomes: {
+        Args: {
+          p_outcomes: Json
+          p_user_id: string
+        }
+        Returns: number
+      }
+      get_ta_due_work: {
+        Args: {
+          p_include_generation: boolean
+          p_include_outcomes: boolean
+          p_now: string
+          p_symbol: string
+          p_user_id: string
+          p_version: string
+        }
+        Returns: {
+          candle_at: string
+          detected_at: string
+          id: string
+          price: number
+          source: string
+          timeframe: number
+          work_kind: string
+        }[]
+      }
       process_cumulative_observation: {
         Args: {
           p_observed_at: string

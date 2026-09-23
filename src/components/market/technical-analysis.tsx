@@ -21,7 +21,9 @@ export function TechnicalAnalysis() {
       logActivity(import.meta.env["VITE_ACTIVITY_DIAGNOSTICS"], "ta-history", "request-started");
       let query = supabase
         .from("ta_signals")
-        .select("*")
+        .select(
+          "id, symbol, timeframe, candle_at, source, version, price, indicators, patterns, outcome_status, return_pct",
+        )
         .order("candle_at", { ascending: false })
         .order("id", { ascending: false })
         .range(page * 25, page * 25 + 25);

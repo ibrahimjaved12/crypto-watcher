@@ -251,6 +251,15 @@ function SettingsPage() {
                     {r.data_source ? ` · ${r.data_source}` : ""}
                   </span>
                 </div>
+                <p className="num mt-2 text-xs text-muted-foreground">
+                  {r.duration_ms ?? 0} ms · {r.metrics.exchangeRequests ?? 0} exchange requests ·{" "}
+                  {r.metrics.candleRows ?? 0} candle rows · {r.metrics.taCalculations ?? 0} TA
+                  calculations · {r.metrics.taSignalsSaved ?? 0} TA signals ·{" "}
+                  {r.metrics.taOutcomesUpdated ?? 0} outcomes · {r.metrics.databaseReads ?? 0} DB
+                  reads · {r.metrics.databaseWriteAttempts ?? 0} DB write attempts ·{" "}
+                  {r.metrics.databaseNoOps ?? 0} no-ops · {r.metrics.marketCacheHits ?? 0} shared
+                  inputs
+                </p>
                 {r.error_message ? (
                   <p className="mt-2 text-xs text-destructive">{r.error_message}</p>
                 ) : null}

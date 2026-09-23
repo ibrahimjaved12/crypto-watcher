@@ -91,7 +91,15 @@ Each check saves the latest completed candle's snapshot, including observations
 with no pattern. Unique key: user, symbol, timeframe, candle open time, version.
 Concurrent and repeated checks preserve the first snapshot and source. The
 version is `ta-v2`; future rule changes must increment it. Downtime is not
-backfilled with signals that the user could not have seen at that time.
+silently skipped: a delayed runner recovers at most eight missing completed
+candles per timeframe per pass, oldest first. Gaps older than the available
+250-candle provider history fail explicitly.
+
+Before downloading candles, the monitor asks the database for the latest saved
+candle/version and outcomes whose evaluation time is due. A repeated run for the
+same completed candle does not download TA history, calculate indicators, or
+attempt a duplicate snapshot write. Compatible outcome transitions are committed
+in one idempotent batch. See the [local efficiency report](monitor-efficiency.md).
 
 ## Dashboard interpretation
 
@@ -141,9 +149,9 @@ per run. No TP/SL, news score, or combined movement/TA score is implemented.
 ## Deployment
 
 For an installation without TA v1, apply
-`supabase/migrations/20260917090000_technical_analysis.sql` in Lovable before
-deploying the app changes. Upgrading an existing TA v1 installation needs no
-migration. Authenticated users may read only their own records;
+`supabase/migrations/20260917090000_technical_analysis.sql`, followed by the later
+repository migrations including `20260924090000_monitor_efficiency.sql`, before
+deploying the app changes. Authenticated users may read only their own records;
 only the server service role may create or update them.
 
 After publication, let the existing monitor complete a check. Verify new ta-v2
@@ -155,8 +163,9 @@ When automatic TA history is disabled, the first load, filter changes, paginatio
 focus/reconnect, and invalidations stay quiet until Refresh is pressed.
 
 The existing cron endpoint also runs TA. Confirm the cron HTTP timeout and hosting
-request budget allow the extra exchange requests: three per pair on the happy
-path, with more on fallback or when settling a different exchange's outcomes.
+request budget allow due exchange requests, with more on fallback or when settling
+a different exchange's outcomes. Identical inputs are shared within one invocation,
+but never across invocations.
 The default pg_net timeout can be too short. Configure the existing job's
 `net.http_post` timeout for the measured deployed runtime, without creating a
 second overlapping job. Inspect HTTP results and `monitor_runs` after deployment.
