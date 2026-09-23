@@ -1,5 +1,6 @@
 """Public perpetual-futures providers with ordered exchange fallback."""
 import json
+from math import isfinite
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
@@ -9,6 +10,7 @@ SOURCE = "binance-usdm"
 OKX_SOURCE = "okx-usdt-swap"
 KRAKEN_SOURCE = "kraken-futures"
 PROVIDERS = (SOURCE, OKX_SOURCE, KRAKEN_SOURCE)
+ANALYSIS_PROVIDERS = (SOURCE, KRAKEN_SOURCE, OKX_SOURCE)
 SUPPORTED_SYMBOLS = frozenset(
     "BTCUSDT ETHUSDT DOGEUSDT SOLUSDT XRPUSDT ADAUSDT BNBUSDT AVAXUSDT "
     "LINKUSDT POLUSDT DOTUSDT LTCUSDT TRXUSDT ATOMUSDT NEARUSDT APTUSDT "
@@ -70,9 +72,9 @@ def exchange_info_url(provider=SOURCE, symbol=None):
     raise ValueError("unknown provider")
 
 
-def request_url(provider, symbol, interval):
+def request_url(provider, symbol, interval, limit=None):
     native = native_symbol(provider, symbol)
-    limit = 62 if interval == 1 else 98
+    limit = limit or (62 if interval == 1 else 98)
     if provider == OKX_SOURCE:
         resolution = f"{interval // 60}H" if interval >= 60 else f"{interval}m"
         return BASE_URLS[provider] + ENDPOINTS[provider] + "?" + urlencode(
@@ -163,6 +165,61 @@ def parse(provider, body, interval):
             raise ValueError("invalid exchange timestamp")
         candles.append(Candle(int(timestamp), positive(close), True))
     return sorted(candles, key=lambda candle: candle.open_ms)
+
+
+def source_instrument(provider, symbol):
+    native = native_symbol(provider, symbol)
+    return {"instrument_id": f"{provider}:{native}", "exchange": provider,
+            "native_symbol": native, "market_type": "futures",
+            "contract_type": "perpetual"}
+
+
+def parse_technical(provider, body, interval):
+    """Parse provider OHLCV without converting one provider into another."""
+    if provider not in PROVIDERS:
+        raise ValueError("unknown provider")
+    if provider == OKX_SOURCE:
+        rows = body.get("data") if isinstance(body, dict) and body.get("code") == "0" else None
+    elif provider == KRAKEN_SOURCE:
+        rows = body.get("candles") if isinstance(body, dict) else None
+    else:
+        rows = body
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("empty or invalid candle response")
+    duration = interval * MINUTE
+    candles = []
+    for row in rows:
+        if provider == KRAKEN_SOURCE:
+            if not isinstance(row, dict):
+                raise ValueError("invalid candle row")
+            opened = row.get("time")
+            values = (row.get("open"), row.get("high"), row.get("low"),
+                      row.get("close"), row.get("volume"))
+            complete = True
+        else:
+            if not isinstance(row, list) or len(row) < (9 if provider == OKX_SOURCE else 7):
+                raise ValueError("invalid candle row")
+            opened = row[0]
+            values = (row[1], row[2], row[3], row[4], row[6] if provider == OKX_SOURCE else row[5])
+            complete = row[8] == "1" if provider == OKX_SOURCE else True
+            if provider == SOURCE and int(row[6]) != int(opened) + duration - 1:
+                raise ValueError("unexpected Binance futures close timestamp")
+            if provider == OKX_SOURCE and row[8] not in ("0", "1"):
+                raise ValueError("invalid OKX candle state")
+        timestamp = str(opened)
+        if not timestamp.isdigit() or int(timestamp) % duration:
+            raise ValueError("invalid exchange timestamp")
+        try:
+            open_price, high, low, close = (float(positive(value)) for value in values[:4])
+            volume = float(values[4])
+        except (TypeError, ValueError, ArithmeticError):
+            raise ValueError("invalid OHLCV") from None
+        if not isfinite(volume) or volume < 0:
+            raise ValueError("invalid OHLCV")
+        from .technical import TechnicalCandle
+        candles.append(TechnicalCandle(int(timestamp), open_price, high, low, close,
+                                       volume, complete))
+    return tuple(sorted(candles, key=lambda candle: candle.open_ms))
 
 
 def load(provider, symbol, fetch=fetch_json):

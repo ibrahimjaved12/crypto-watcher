@@ -7,8 +7,9 @@ import httpx
 
 from market_analysis.api import create_app
 from market_analysis.core import Candle, MINUTE
-from market_analysis.service import analyze_request, load_series
-from market_analysis.providers import PROVIDERS, SOURCE
+from market_analysis.service import analyze_request, load_series, load_workload
+from market_analysis.providers import ANALYSIS_PROVIDERS, SOURCE, source_instrument
+from market_analysis.technical import TechnicalCandle
 
 NOW = 1704153600000
 TOKEN = "test-service-token-" + "x" * 32
@@ -54,8 +55,29 @@ def series(price="102"):
             for interval, count in ((1, 61), (15, 97))}
 
 
-async def fixture_loader(*args):
-    return series()
+def workload(provider=SOURCE, symbol="BTCUSDT", price="102"):
+    value = float(price)
+    technical = {}
+    for timeframe in (15, 60, 240):
+        duration = timeframe * MINUTE
+        technical[timeframe] = tuple(
+            TechnicalCandle(
+                NOW - (200 - index) * duration,
+                value,
+                value + 1,
+                value - 1,
+                value,
+                100,
+                True,
+            )
+            for index in range(200)
+        )
+    return {"rolling": series(price), "technical": technical,
+            "source_instrument": source_instrument(provider, symbol)}
+
+
+async def fixture_loader(client, provider, symbol):
+    return workload(provider, symbol)
 
 
 def analyzer_for(loader=fixture_loader):
@@ -117,6 +139,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(data["baseline"]["status"], "eligible")
         self.assertTrue(data["baseline"]["alert_eligible"])
         self.assertTrue(data["baseline"]["cooldown_evaluated"])
+        self.assertEqual(set(data["technical"]), {"15", "60", "240"})
+        self.assertTrue(all(row["status"] == "ok" for row in data["technical"].values()))
+        self.assertEqual(data["source_instrument"]["instrument_id"],
+                         "binance-usdm:BTCUSDT")
+        self.assertTrue(all(row["factor_breakdown"] for row in data["technical"].values()))
         self.assertEqual(body, original)
 
     def test_missing_and_changed_baseline_are_not_reset(self):
@@ -141,8 +168,8 @@ class ApiTests(unittest.TestCase):
     def test_downward_reversal_ignores_upward_cooldown(self):
         body = payload()
         body["baseline"]["last_up_alert_ms"] = NOW - MINUTE
-        async def falling(*args):
-            return series("98")
+        async def falling(client, provider, symbol):
+            return workload(provider, symbol, "98")
         data = self.post(body, falling).json()["baseline"]
         self.assertEqual(data["direction"], "down")
         self.assertEqual(Decimal(data["change_pct"]), -2)
@@ -156,31 +183,47 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(data["alert_eligible"])
         body["settings"]["monitoring_enabled"] = False
         self.assertEqual(self.post(body).json()["baseline"]["status"], "disabled")
-        async def below(*args):
-            return series("101.99")
+        async def below(client, provider, symbol):
+            return workload(provider, symbol, "101.99")
         data = self.post(loader=below).json()["baseline"]
         self.assertEqual(data["status"], "below_threshold")
         self.assertFalse(data["cooldown_evaluated"])
 
     def test_partial_history_preserves_independent_baseline_analysis(self):
-        async def partial(*args):
-            value = series()
-            value[15] = value[15][-2:]
+        async def partial(client, provider, symbol):
+            value = workload(provider, symbol)
+            value["rolling"][15] = value["rolling"][15][-2:]
             return value
         data = self.post(loader=partial).json()
         self.assertEqual(data["status"], "partial")
         self.assertEqual(data["rolling"]["1440"]["status"], "unavailable")
         self.assertTrue(data["baseline"]["alert_eligible"])
 
+    def test_insufficient_ta_history_is_explicit(self):
+        async def insufficient(client, provider, symbol):
+            value = workload(provider, symbol)
+            value["technical"][60] = value["technical"][60][-10:]
+            return value
+        data = self.post(loader=insufficient).json()
+        self.assertEqual(data["status"], "partial")
+        self.assertEqual(data["failure_category"], "insufficient_history")
+        self.assertEqual(data["technical"]["60"]["status"], "insufficient")
+        self.assertEqual(data["technical"]["60"]["reason"], "insufficient_history")
+
     def test_stale_data_and_provider_errors_have_no_eligibility(self):
-        async def stale(*args):
-            return {interval: [Candle(c.open_ms - 20 * MINUTE, c.close, c.complete)
-                               for c in candles] for interval, candles in series().items()}
+        async def stale(client, provider, symbol):
+            value = workload(provider, symbol)
+            value["rolling"] = {
+                interval: [Candle(c.open_ms - 20 * MINUTE, c.close, c.complete)
+                           for c in candles]
+                for interval, candles in value["rolling"].items()
+            }
+            return value
         data = self.post(loader=stale).json()
         self.assertEqual(data["status"], "unavailable")
         self.assertFalse(data["baseline"]["eligibility_evaluated"])
         self.assertIsNone(data["baseline"]["alert_eligible"])
-        self.assertEqual(len(data["attempts"]), len(PROVIDERS))
+        self.assertEqual(len(data["attempts"]), len(ANALYSIS_PROVIDERS))
 
     def test_provider_failure_redacts_errors(self):
         async def unavailable(client, provider, symbol):
@@ -189,7 +232,7 @@ class ApiTests(unittest.TestCase):
         self.assertIsNone(response.json()["source"])
         self.assertEqual(response.json()["attempts"],
                          [{"source": source, "reason": "provider_unavailable"}
-                          for source in PROVIDERS])
+                          for source in ANALYSIS_PROVIDERS])
         self.assertNotIn("private-provider-details", response.text)
 
     def test_validation_rejects_unknown_fields_symbols_and_bad_state(self):
@@ -241,6 +284,34 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(loaded[1][0].close, Decimal("102"))
             self.assertTrue(any("limit=62" in url for url in urls))
             self.assertTrue(any("limit=98" in url for url in urls))
+        asyncio.run(check())
+
+    def test_workload_adapter_fetches_all_ta_frames_from_one_provider(self):
+        async def check():
+            intervals = []
+            def handler(request):
+                if request.url.path.endswith("/exchangeInfo"):
+                    return httpx.Response(200, json={"symbols": [{
+                        "symbol": "BTCUSDT", "pair": "BTCUSDT", "contractType": "PERPETUAL",
+                        "status": "TRADING", "baseAsset": "BTC", "quoteAsset": "USDT",
+                        "marginAsset": "USDT", "onboardDate": 1569398400000,
+                        "deliveryDate": 4133404800000, "filters": [
+                            {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                            {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
+                            {"filterType": "MIN_NOTIONAL", "notional": "100"}]}]})
+                text = request.url.params["interval"]
+                interval = int(text[:-1]) * (60 if text.endswith("h") else 1)
+                intervals.append((interval, request.url.params["limit"]))
+                opened = NOW - interval * MINUTE
+                return httpx.Response(200, json=[
+                    [opened, "100", "102", "99", "101", "10",
+                     opened + interval * MINUTE - 1]
+                ])
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                loaded = await load_workload(client, SOURCE, "BTCUSDT")
+            self.assertEqual(intervals, [(1, "62"), (15, "250"), (60, "250"), (240, "250")])
+            self.assertEqual(set(loaded["technical"]), {15, 60, 240})
+            self.assertEqual(loaded["source_instrument"]["native_symbol"], "BTCUSDT")
         asyncio.run(check())
 
 

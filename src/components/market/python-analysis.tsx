@@ -28,14 +28,17 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
   const analysis = useMutation({
     mutationFn: async (pair: string) => {
       const reply = await call({ data: { symbol: pair } });
-      if (!reply.ok) throw new Error(reply.error);
-      return reply.analysis;
+      if (!reply.ok) {
+        throw Object.assign(new Error(reply.error), { category: reply.category });
+      }
+      return { result: reply.analysis, metrics: reply.metrics };
     },
   });
   const result =
-    !analysis.isPending && !analysis.isError && analysis.data?.symbol === symbol
-      ? analysis.data
+    !analysis.isPending && !analysis.isError && analysis.data?.result.symbol === symbol
+      ? analysis.data.result
       : undefined;
+  const metrics = result ? analysis.data?.metrics : undefined;
   return (
     <section
       className="panel mt-5 space-y-3 p-4"
@@ -83,7 +86,8 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
       )}
       {analysis.isError && (
         <p role="alert" className="text-sm text-destructive">
-          {analysis.error.message}
+          {analysis.error.message} Failure category:{" "}
+          {String((analysis.error as Error & { category?: string }).category ?? "unknown")}.
         </p>
       )}
       {result && (
@@ -94,6 +98,63 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
             {result.price !== null &&
               ` · ${result.price} USDT · candle closed ${at(result.observed_at_ms)}`}
           </p>
+          <p className="num text-xs text-muted-foreground">
+            Requested {result.instrument.id} · source contract{" "}
+            {result.source_instrument?.instrument_id ?? "unavailable"} ·{" "}
+            {result.endpoint ?? "no endpoint"} · {result.price_type} price · retrieved{" "}
+            {at(result.retrieved_at_ms)}
+            {result.observed_at_ms !== null &&
+              ` · source age ${Math.max(0, result.as_of_ms - result.observed_at_ms)} ms`}
+          </p>
+          {metrics && (
+            <p className="num text-xs text-muted-foreground">
+              Request {metrics.duration_ms} ms · payload {metrics.request_bytes} B sent /{" "}
+              {metrics.response_bytes} B received
+            </p>
+          )}
+          {result.failure_category && (
+            <p className="text-xs text-muted-foreground">
+              Failure category: {result.failure_category.replaceAll("_", " ")}.
+            </p>
+          )}
+          <div>
+            <h3 className="text-sm font-medium">Completed-candle technical analysis</h3>
+            <div className="mt-2 grid gap-3 md:grid-cols-3">
+              {Object.entries(result.technical).map(([timeframe, row]) => (
+                <div key={timeframe} className="rounded border border-border p-2 text-xs">
+                  <p className="font-medium">
+                    {Number(timeframe) === 15 ? "15m" : `${Number(timeframe) / 60}h`} · {row.status}
+                  </p>
+                  <p>
+                    {row.classification} · score {row.score ?? "—"}
+                  </p>
+                  <p className="text-muted-foreground">
+                    {row.reason?.replaceAll("_", " ") ?? row.reasons.join(", ")} · candle closed{" "}
+                    {at(row.candle_close_time_ms)} · source event {at(row.source_event_time_ms)}
+                  </p>
+                  {row.factor_breakdown && (
+                    <p className="text-muted-foreground">
+                      {Object.entries(row.factor_breakdown)
+                        .map(
+                          ([name, factor]) =>
+                            `${name}: ${factor.classification} (${factor.contribution ?? "—"}; ${factor.reason})`,
+                        )
+                        .join(" · ")}
+                    </p>
+                  )}
+                  <p className="text-muted-foreground">
+                    {row.ta_version} · {row.strategy_version}
+                  </p>
+                </div>
+              ))}
+              {!Object.keys(result.technical).length && (
+                <p className="text-sm">Technical analysis unavailable.</p>
+              )}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Rule-based score, not a calibrated win probability.
+            </p>
+          </div>
           <div>
             <h3 className="text-sm font-medium">
               Rolling windows — threshold {result.threshold_pct}%

@@ -15,8 +15,10 @@ No Python service or hosted app was deployed during implementation.
 4. TanStack calls `POST /v1/analysis` using a separate service bearer token. Only the
    selected symbol, rule settings and baseline/cooldown timestamps are sent. No user
    ID, session JWT, database URL or database credentials are forwarded to Python.
-5. Python obtains public candles and returns rolling results and a baseline preview.
-   TanStack validates the response schema/symbol before returning it to the browser.
+5. Python obtains one provider's public 1m, 15m, 1h, and 4h futures candles and
+   returns completed-candle TA, rolling movement results, and a baseline preview.
+   TanStack validates the response schema, instrument, and source provenance before
+   returning it to the browser.
 
 The existing monitor remains the sole writer of alerts and baselines. Python calls
 the existing `cumulative.observe` function but **discards its proposed state**.
@@ -135,6 +137,10 @@ match the symbol.
 Results have `mode: "read_only"`, the canonical instrument identity, source,
 endpoint, price type, retrieval/analysis/observation times and:
 
+- **Technical:** compact TA v2 results for completed 15m, 1h, and 4h candles,
+  including exact source-native contract provenance, candle/source/evaluation times,
+  score, versions, factor reasons, and explicit unavailable/insufficient states.
+  Scores are rule-based descriptions, not calibrated win probabilities.
 - **Rolling:** existing completed, contiguous 5m/15m/1h/4h/24h calculations. Each
   window reports its own start/end close time and validity. These windows can end
   at different times. A rolling threshold match is not cumulative alert eligibility.
@@ -155,10 +161,15 @@ This is advisory against the loaded state. Settings and baselines may change dur
 the request. An eligible
 preview neither reserves nor guarantees a future alert.
 
-Python tries public Binance USDⓈ-M, OKX USDT swap, then Kraken perpetual-futures
-trade candles. Fresh valid minute data can return **partial** rolling
+Python tries public Binance USDⓈ-M, Kraken perpetual-futures, then OKX USDT-swap
+trade candles. A selected provider supplies the entire workload; histories are never
+combined across providers. Fresh valid minute data can return **partial** rolling or TA
 history while still evaluating the baseline. Missing, stale, inactive, or unsupported
 data is reported without invented values.
+
+The dashboard displays source freshness, source-native identity, failure category,
+request duration, and request/response byte counts for the hosted trial. It does not
+persist those measurements or any analysis result.
 
 Database reads have a 5-second abort timer. Exchange HTTP operations have 5-second
 timeouts; Python imposes an 18-second total analysis deadline, and TanStack aborts

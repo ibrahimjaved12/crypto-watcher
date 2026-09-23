@@ -5,7 +5,8 @@ rule remains documented in [cumulative monitoring](../docs/cumulative-monitoring
 
 ## Instrument and provider
 
-- Sources, in order: `binance-usdm`, `okx-usdt-swap`, `kraken-futures`.
+- Manual API sources, in order: `binance-usdm`, `kraken-futures`, `okx-usdt-swap`.
+  The existing CLI and scheduled TypeScript provider order is unchanged.
 - Market: perpetual futures only.
 - Identity: `binance-usdm:<native symbol>`, for example
   `binance-usdm:BTCUSDT`.
@@ -16,8 +17,8 @@ rule remains documented in [cumulative monitoring](../docs/cumulative-monitoring
 
 ## Candle and calculation rules
 
-- Request 62 one-minute and 98 fifteen-minute rows so a forming row can be removed
-  while retaining the required completed history.
+- The manual API requests 62 one-minute rows plus 250 rows for each of 15m, 1h,
+  and 4h from one provider. The 15m response is shared with movement analysis.
 - Binance close time must equal `open + interval - 1`; other provider timestamps must align.
 - Use completed, aligned, contiguous candles only. Reject duplicates, gaps, future
   opens, and nonfinite or nonpositive prices.
@@ -53,3 +54,8 @@ chronological step.
 
 This port does not change the TypeScript scheduled monitor or its database writes.
 That implementation remains active until the planned scheduling cutover.
+
+`POST /v1/analysis` runs this calculator for all three timeframes after loading one
+provider's complete workload. Its compact response includes canonical and source-native
+instrument identities, timestamps, versions, scores, factor reasons, movement context,
+and explicit incomplete-data categories. It remains read-only.

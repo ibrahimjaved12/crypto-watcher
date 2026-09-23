@@ -41,9 +41,13 @@ export async function analyzeForUser(
   env: Env = process.env,
   send: typeof fetch = fetch,
 ): Promise<AnalysisReply> {
-  if (!userId) return { ok: false, error: "Sign in to request analysis." };
+  if (!userId) return { ok: false, error: "Sign in to request analysis.", category: "auth" };
   if (!analysisInput.safeParse({ symbol }).success) {
-    return { ok: false, error: "Choose a supported pair from your watchlist." };
+    return {
+      ok: false,
+      error: "Choose a supported pair from your watchlist.",
+      category: "invalid_contract",
+    };
   }
   let config;
   try {
@@ -52,6 +56,7 @@ export async function analyzeForUser(
     return {
       ok: false,
       error: "Python analysis is not enabled or its service configuration is incomplete.",
+      category: "configuration",
     };
   }
 
@@ -68,7 +73,12 @@ export async function analyzeForUser(
       .abortSignal(dbController.signal)
       .maybeSingle();
     if (watched.error) throw new Error("watchlist unavailable");
-    if (!watched.data) return { ok: false, error: "This pair is not in your watchlist." };
+    if (!watched.data)
+      return {
+        ok: false,
+        error: "This pair is not in your watchlist.",
+        category: "not_watched",
+      };
     expectedInstrumentId = watched.data.instrument_id;
     const [settings, baseline] = await Promise.all([
       supabase
@@ -123,6 +133,7 @@ export async function analyzeForUser(
       ok: false,
       error:
         "Could not read your monitoring settings or baseline. Please retry; the baseline database setup may need checking.",
+      category: "database",
     };
   } finally {
     clearTimeout(dbTimer);
@@ -130,6 +141,9 @@ export async function analyzeForUser(
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 25_000);
+  const requestBody = JSON.stringify(payload);
+  const requestBytes = new TextEncoder().encode(requestBody).byteLength;
+  const startedAt = Date.now();
   try {
     const response = await send(config.url, {
       method: "POST",
@@ -143,7 +157,7 @@ export async function analyzeForUser(
         "Cache-Control": "no-store",
         Authorization: `Bearer ${config.token}`,
       },
-      body: JSON.stringify(payload),
+      body: requestBody,
     });
     if (!response.ok) {
       // Release unused bodies without letting cleanup replace the original failure.
@@ -155,18 +169,25 @@ export async function analyzeForUser(
       if (response.status >= 300 && response.status < 400) {
         throw new Error("Python analysis service redirect rejected");
       }
-      const error =
+      const [error, category] =
         response.status === 504
-          ? "Python analysis timed out. Please retry."
+          ? ["Python analysis timed out. Please retry.", "timeout"]
           : response.status === 422
-            ? "Your saved monitoring state was rejected by Python. Check your settings and try again."
+            ? [
+                "Your saved monitoring state was rejected by Python. Check your settings and try again.",
+                "invalid_request",
+              ]
             : [401, 403].includes(response.status)
-              ? "Python service authentication failed. Its server configuration needs checking."
-              : "The Python analysis service is unavailable. Please retry later.";
-      return { ok: false, error };
+              ? [
+                  "Python service authentication failed. Its server configuration needs checking.",
+                  "service_auth",
+                ]
+              : ["The Python analysis service is unavailable. Please retry later.", "service"];
+      return { ok: false, error, category };
     }
     const raw = await response.text();
-    if (raw.length > 128_000) throw new Error("oversized response");
+    const responseBytes = new TextEncoder().encode(raw).byteLength;
+    if (responseBytes > 128_000) throw new Error("oversized response");
     const parsed = analysisResponse.safeParse(JSON.parse(raw));
     if (
       !parsed.success ||
@@ -174,15 +195,28 @@ export async function analyzeForUser(
       parsed.data.instrument.id !== expectedInstrumentId ||
       parsed.data.instrument.native_symbol !== symbol
     ) {
-      return { ok: false, error: "The Python service returned an invalid analysis response." };
+      return {
+        ok: false,
+        error: "The Python service returned an invalid analysis response.",
+        category: "invalid_response",
+      };
     }
-    return { ok: true, analysis: parsed.data };
+    return {
+      ok: true,
+      analysis: parsed.data,
+      metrics: {
+        duration_ms: Math.max(0, Date.now() - startedAt),
+        request_bytes: requestBytes,
+        response_bytes: responseBytes,
+      },
+    };
   } catch {
     return {
       ok: false,
       error: controller.signal.aborted
         ? "Python analysis timed out. Please retry."
         : "Could not reach the Python analysis service or read its response. Please retry later.",
+      category: controller.signal.aborted ? "timeout" : "network_or_response",
     };
   } finally {
     clearTimeout(timer);
