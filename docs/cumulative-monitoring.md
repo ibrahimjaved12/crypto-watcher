@@ -56,8 +56,9 @@ cannot insert an alert or advance its baseline. See
 [independent activity controls](activity-domains.md) for their UI and catch-up rules.
 
 `src/lib/monitor/observation.ts` selects the newest completed 1m close, honors
-provider completion flags and rejects duplicate, malformed, future or more than
-10-minute-old observations. Bad data tries the next provider. Dashboard quote
+provider candle timestamps and rejects duplicate, malformed, future or more than
+10-minute-old observations. Bad or unavailable data fails visibly after the Binance,
+OKX, and Kraken futures chain. Dashboard quote
 calculations remain the prior rolling implementation, including their documented
 partial-candle limitations; monitoring no longer uses those rolling values.
 

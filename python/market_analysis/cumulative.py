@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
 
 from .core import MINUTE, percentage_change, positive
+from .providers import PROVIDERS
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,7 @@ def observe(state, price, observed_ms, source, now_ms, threshold="2", cooldown_m
     if (type(cooldown_minutes) is not int or type(observed_ms) is not int
             or observed_ms % MINUTE or observed_ms > now_ms
             or now_ms - observed_ms > 10 * MINUTE
-            or source not in ("Binance", "OKX", "Kraken")):
+            or source not in PROVIDERS):
         raise ValueError("invalid or stale completed-candle observation")
     if state is None:
         return Baseline(price, observed_ms, source, threshold, observed_ms), {"status": "initialized"}

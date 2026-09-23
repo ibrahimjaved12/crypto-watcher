@@ -1,8 +1,13 @@
 /** Client-side data access. RLS keeps every row scoped to the signed-in user. */
 import { supabase } from "@/integrations/supabase/client";
-import { DEFAULT_SYMBOLS, MAX_WATCHLIST_SIZE } from "@/lib/market/symbols";
+import { DEFAULT_SYMBOLS, instrumentId, MAX_WATCHLIST_SIZE } from "@/lib/market/symbols";
 
-export type WatchlistItem = { id: string; symbol: string; created_at: string };
+export type WatchlistItem = {
+  id: string;
+  instrument_id: string;
+  symbol: string;
+  created_at: string;
+};
 export type Settings = {
   user_id: string;
   threshold_pct: number;
@@ -60,17 +65,21 @@ export async function fetchWatchlist(): Promise<WatchlistItem[]> {
   const uid = await userId();
   const { data, error } = await supabase
     .from("watchlist_items")
-    .select("id, symbol, created_at")
+    .select("id, instrument_id, symbol, created_at")
     .order("created_at", { ascending: true });
   if (error) throw error;
   if (data && data.length > 0) return data as WatchlistItem[];
 
-  await supabase
-    .from("watchlist_items")
-    .insert(DEFAULT_SYMBOLS.map((symbol) => ({ user_id: uid, symbol })));
+  await supabase.from("watchlist_items").insert(
+    DEFAULT_SYMBOLS.map((symbol) => ({
+      user_id: uid,
+      symbol,
+      instrument_id: instrumentId(symbol),
+    })),
+  );
   const seeded = await supabase
     .from("watchlist_items")
-    .select("id, symbol, created_at")
+    .select("id, instrument_id, symbol, created_at")
     .order("created_at", { ascending: true });
   if (seeded.error) throw seeded.error;
   return (seeded.data ?? []) as WatchlistItem[];
@@ -84,7 +93,9 @@ export async function addSymbol(symbol: string): Promise<void> {
   if ((count ?? 0) >= MAX_WATCHLIST_SIZE) {
     throw new Error(`You can follow at most ${MAX_WATCHLIST_SIZE} pairs.`);
   }
-  const { error } = await supabase.from("watchlist_items").insert({ user_id: uid, symbol });
+  const { error } = await supabase
+    .from("watchlist_items")
+    .insert({ user_id: uid, symbol, instrument_id: instrumentId(symbol) });
   if (error) throw error;
 }
 
@@ -132,12 +143,14 @@ export async function createTestAlert(symbol: string): Promise<void> {
   const { error } = await supabase.from("alerts").insert({
     user_id: uid,
     symbol,
+    instrument_id: instrumentId(symbol),
     change_pct: 0,
     window_minutes: 15,
     threshold_pct: 0,
     rule: "Manual test alert (not a market event)",
     price: null,
     data_source: "test",
+    price_type: "not_applicable",
     is_test: true,
   });
   if (error) throw error;
@@ -163,7 +176,11 @@ export async function createNote(input: {
   symbol: string | null;
 }): Promise<void> {
   const uid = await userId();
-  const { error } = await supabase.from("notes").insert({ user_id: uid, ...input });
+  const { error } = await supabase.from("notes").insert({
+    user_id: uid,
+    ...input,
+    instrument_id: input.symbol ? instrumentId(input.symbol) : null,
+  });
   if (error) throw error;
 }
 

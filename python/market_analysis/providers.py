@@ -1,33 +1,89 @@
-"""Public GET requests only. Preserve app exchange order and USDT symbols."""
+"""Public perpetual-futures providers with ordered exchange fallback."""
 import json
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from .core import Candle, MINUTE, positive
 
-PROVIDERS = ("Binance", "OKX", "Kraken")
+SOURCE = "binance-usdm"
+OKX_SOURCE = "okx-usdt-swap"
+KRAKEN_SOURCE = "kraken-futures"
+PROVIDERS = (SOURCE, OKX_SOURCE, KRAKEN_SOURCE)
 SUPPORTED_SYMBOLS = frozenset(
     "BTCUSDT ETHUSDT DOGEUSDT SOLUSDT XRPUSDT ADAUSDT BNBUSDT AVAXUSDT "
-    "LINKUSDT MATICUSDT DOTUSDT LTCUSDT TRXUSDT ATOMUSDT NEARUSDT APTUSDT "
+    "LINKUSDT POLUSDT DOTUSDT LTCUSDT TRXUSDT ATOMUSDT NEARUSDT APTUSDT "
     "ARBUSDT OPUSDT SUIUSDT TONUSDT".split()
 )
+BASE_URLS = {
+    SOURCE: "https://fapi.binance.com",
+    OKX_SOURCE: "https://www.okx.com",
+    KRAKEN_SOURCE: "https://futures.kraken.com",
+}
+ENDPOINTS = {
+    SOURCE: "/fapi/v1/klines",
+    OKX_SOURCE: "/api/v5/market/candles",
+    KRAKEN_SOURCE: "/api/charts/v1/trade/:symbol/:resolution",
+}
+
+
+def instrument_id(symbol):
+    if symbol not in SUPPORTED_SYMBOLS:
+        raise ValueError("unsupported futures contract")
+    return f"{SOURCE}:{symbol}"
+
+
+def instrument(symbol):
+    return {"id": instrument_id(symbol), "exchange": "binance", "native_symbol": symbol,
+            "market_type": "futures", "contract_type": "perpetual",
+            "base_asset": symbol.removesuffix("USDT"), "quote_asset": "USDT",
+            "margin_asset": "USDT", "settlement_asset": "USDT", "linear": True,
+            "contract_multiplier": 1}
+
+
+def native_symbol(provider, symbol):
+    if provider not in PROVIDERS:
+        raise ValueError("unknown provider")
+    base = symbol.removesuffix("USDT")
+    if provider == OKX_SOURCE:
+        return f"{base}-USDT-SWAP"
+    if provider == KRAKEN_SOURCE:
+        return f"PF_{'XBT' if base == 'BTC' else base}USD"
+    return symbol
+
+
+def provider_endpoint(provider):
+    try:
+        return ENDPOINTS[provider]
+    except KeyError:
+        raise ValueError("unknown provider") from None
+
+
+def exchange_info_url(provider=SOURCE, symbol=None):
+    if provider == SOURCE:
+        return BASE_URLS[provider] + "/fapi/v1/exchangeInfo"
+    if provider == OKX_SOURCE:
+        native = native_symbol(provider, symbol)
+        return BASE_URLS[provider] + "/api/v5/public/instruments?" + urlencode(
+            {"instType": "SWAP", "instId": native})
+    if provider == KRAKEN_SOURCE:
+        return None
+    raise ValueError("unknown provider")
 
 
 def request_url(provider, symbol, interval):
-    # One extra row versus TypeScript because the current candle is discarded.
+    native = native_symbol(provider, symbol)
     limit = 62 if interval == 1 else 98
-    if provider == "Binance":
-        base, params = "https://api.binance.com/api/v3/klines", {
-            "symbol": symbol, "interval": f"{interval}m", "limit": limit}
-    elif provider == "OKX":
-        base, params = "https://www.okx.com/api/v5/market/candles", {
-            "instId": symbol[:-4] + "-USDT", "bar": f"{interval}m", "limit": limit}
-    elif provider == "Kraken":
-        base, params = "https://api.kraken.com/0/public/OHLC", {
-            "pair": symbol, "interval": interval}
-    else:
-        raise ValueError("unknown provider")
-    return base + "?" + urlencode(params)
+    if provider == OKX_SOURCE:
+        resolution = f"{interval // 60}H" if interval >= 60 else f"{interval}m"
+        return BASE_URLS[provider] + ENDPOINTS[provider] + "?" + urlencode(
+            {"instId": native, "bar": resolution, "limit": limit})
+    if provider == KRAKEN_SOURCE:
+        resolution = f"{interval // 60}h" if interval >= 60 else f"{interval}m"
+        return (BASE_URLS[provider] + f"/api/charts/v1/trade/{quote(native)}/{resolution}?"
+                + urlencode({"count": limit}))
+    resolution = f"{interval // 60}h" if interval >= 60 else f"{interval}m"
+    return BASE_URLS[provider] + ENDPOINTS[provider] + "?" + urlencode(
+        {"symbol": native, "interval": resolution, "limit": limit})
 
 
 def fetch_json(url):
@@ -37,47 +93,81 @@ def fetch_json(url):
         return json.load(response)
 
 
-def parse(provider, body, interval):
-    if provider == "Binance":
-        rows = body
-    elif provider == "OKX":
-        if body.get("code") != "0":
-            raise ValueError(f"OKX: {body.get('msg', 'API error')}")
-        rows = body.get("data")
-    elif provider == "Kraken":
-        if body.get("error"):
-            raise ValueError("Kraken: " + ", ".join(body["error"]))
-        result = body.get("result", {})
-        keys = [key for key in result if key != "last"]
-        if len(keys) != 1:
-            raise ValueError("expected exactly one Kraken pair")
-        rows = result[keys[0]]
-    else:
+def validate_exchange_info(body, symbol, provider=SOURCE):
+    expected = instrument(symbol)
+    if provider == KRAKEN_SOURCE:
+        return expected
+    if provider == OKX_SOURCE:
+        if (not isinstance(body, dict) or body.get("code") != "0"
+                or not isinstance(body.get("data"), list) or not body["data"]):
+            raise ValueError("invalid exchange information")
+        item = body["data"][0]
+        if (item.get("instId") != native_symbol(provider, symbol)
+                or item.get("instType") != "SWAP" or item.get("ctType") != "linear"
+                or item.get("settleCcy") != "USDT" or item.get("state") != "live"):
+            raise ValueError("inactive or incompatible futures contract")
+        return expected
+    if provider != SOURCE:
         raise ValueError("unknown provider")
+    if not isinstance(body, dict) or not isinstance(body.get("symbols"), list):
+        raise ValueError("invalid exchange information")
+    item = next((value for value in body["symbols"] if value.get("symbol") == symbol), None)
+    if (not item or item.get("status") != "TRADING"
+            or item.get("contractType") != "PERPETUAL" or item.get("pair") != symbol
+            or item.get("baseAsset") != expected["base_asset"]
+            or item.get("quoteAsset") != "USDT" or item.get("marginAsset") != "USDT"):
+        raise ValueError("inactive or incompatible futures contract")
+    filters = {value.get("filterType"): value for value in item.get("filters", [])
+               if isinstance(value, dict)}
+    try:
+        rules = {"price_tick": str(positive(filters["PRICE_FILTER"]["tickSize"])),
+                 "quantity_step": str(positive(filters["LOT_SIZE"]["stepSize"])),
+                 "min_quantity": str(positive(filters["LOT_SIZE"]["minQty"])),
+                 "min_notional": str(positive(filters["MIN_NOTIONAL"]["notional"]))}
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("invalid futures contract filters") from None
+    if type(item.get("onboardDate")) is not int or type(item.get("deliveryDate")) is not int:
+        raise ValueError("invalid futures contract dates")
+    return dict(expected, status="TRADING", listed_at=item["onboardDate"],
+                expires_at=None if item["deliveryDate"] >= 4102444800000 else item["deliveryDate"],
+                **rules)
+
+
+def parse(provider, body, interval):
+    if provider not in PROVIDERS:
+        raise ValueError("unknown provider")
+    if provider == OKX_SOURCE:
+        rows = body.get("data") if isinstance(body, dict) and body.get("code") == "0" else None
+    elif provider == KRAKEN_SOURCE:
+        rows = body.get("candles") if isinstance(body, dict) else None
+    else:
+        rows = body
     if not isinstance(rows, list) or not rows:
         raise ValueError("empty or invalid candle response")
     candles = []
-    for index, row in enumerate(rows):
-        # int() must not silently truncate a fractional timestamp.
-        timestamp = str(row[0])
-        if not timestamp.isdigit():
-            raise ValueError("invalid exchange timestamp")
-        opened = int(timestamp) * (1000 if provider == "Kraken" else 1)
-        complete = True
-        if provider == "Binance":
-            if int(row[6]) != opened + interval * MINUTE - 1:
-                raise ValueError("unexpected Binance close timestamp")
-        elif provider == "OKX":
-            if row[8] not in ("0", "1"):
-                raise ValueError("invalid OKX completion flag")
-            complete = row[8] == "1"
+    for row in rows:
+        if provider == KRAKEN_SOURCE:
+            if not isinstance(row, dict):
+                raise ValueError("invalid candle row")
+            opened, close = row.get("time"), row.get("close")
         else:
-            # Kraken documents its final row as always uncommitted.
-            complete = index != len(rows) - 1
-        candles.append(Candle(opened, positive(row[4]), complete))
+            if not isinstance(row, list) or len(row) < (9 if provider == OKX_SOURCE else 7):
+                raise ValueError("invalid candle row")
+            opened, close = row[0], row[4]
+            if provider == SOURCE and int(row[6]) != int(opened) + interval * MINUTE - 1:
+                raise ValueError("unexpected Binance futures close timestamp")
+            if provider == OKX_SOURCE and row[8] not in ("0", "1"):
+                raise ValueError("invalid OKX candle state")
+        timestamp = str(opened)
+        if not timestamp.isdigit() or int(timestamp) % (interval * MINUTE):
+            raise ValueError("invalid exchange timestamp")
+        candles.append(Candle(int(timestamp), positive(close), True))
     return sorted(candles, key=lambda candle: candle.open_ms)
 
 
 def load(provider, symbol, fetch=fetch_json):
+    metadata_url = exchange_info_url(provider, symbol)
+    if metadata_url:
+        validate_exchange_info(fetch(metadata_url), symbol, provider)
     return {interval: parse(provider, fetch(request_url(provider, symbol, interval)), interval)
             for interval in (1, 15)}

@@ -10,7 +10,7 @@ START = 1704067200000
 class CumulativeTests(unittest.TestCase):
     def advance(self, state, price, minute, **kwargs):
         now = START + minute * MINUTE
-        return observe(state, price, now, kwargs.pop("source", "Binance"), now, **kwargs)
+        return observe(state, price, now, kwargs.pop("source", "binance-usdm"), now, **kwargs)
 
     def test_slow_rise_beyond_fifteen_minutes(self):
         state = None
@@ -61,11 +61,11 @@ class CumulativeTests(unittest.TestCase):
             self.assertEqual(result["status"], "below_threshold")
             self.assertEqual(state.price, 100)
 
-    def test_provider_or_threshold_change_reinitializes_without_alert(self):
+    def test_non_futures_source_is_rejected_and_threshold_change_reinitializes(self):
         state, _ = self.advance(None, "100", 0)
-        state, result = self.advance(state, "120", 5, source="OKX")
-        self.assertEqual(result["status"], "reinitialized")
-        state, result = self.advance(state, "150", 10, source="OKX", threshold="3")
+        with self.assertRaises(ValueError):
+            self.advance(state, "120", 5, source="unknown-source")
+        state, result = self.advance(state, "150", 10, threshold="3")
         self.assertEqual(result["status"], "reinitialized")
 
     def test_replayed_or_older_observation_ignored(self):
@@ -81,7 +81,7 @@ class CumulativeTests(unittest.TestCase):
                 self.advance(None, price, 0)
         for observed in (START - 11 * MINUTE, START + MINUTE, START + 1):
             with self.assertRaises(ValueError):
-                observe(None, "100", observed, "Binance", START)
+                observe(None, "100", observed, "binance-usdm", START)
 
 
 if __name__ == "__main__":

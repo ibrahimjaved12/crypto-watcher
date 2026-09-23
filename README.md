@@ -21,9 +21,10 @@ The [implementation and deployment roadmap](docs/roadmap.md) links all 40 ordere
 GitHub issues and their dependencies, distinguishing current, proposed, and
 conditional decisions.
 
-The current implementation still uses **spot-based REST providers** and saved
-TypeScript TA with forward-return outcomes. Futures feeds, conditional trade
-evaluation, backtesting, and paper trading are planned work, not delivered features.
+The current implementation tries public futures REST data in order: **Binance USDⓈ-M,
+OKX USDT perpetual swaps, then Kraken perpetual futures**.
+Saved TypeScript TA includes forward-return outcomes; conditional trade evaluation,
+backtesting, and paper trading remain planned work.
 Background execution also needs verification: [issue #13](https://github.com/ibrahimjaved12/crypto-watcher/issues/13)
 reports an observed disabled cron; repository code alone does not prove a live schedule.
 
@@ -37,6 +38,11 @@ for the server secrets, local/Docker commands and deployment steps.
 The monitoring algorithm now has a [saved-baseline cumulative rule](docs/cumulative-monitoring.md)
 for gradual rises and falls. Its database migration must be applied before deploying
 the updated monitor.
+
+The futures cutover migration `20260923090000_binance_usdm_futures.sql` is destructive:
+it clears watchlists, notes, alerts, baselines, checkpoints, TA snapshots, and monitor
+runs, while preserving accounts and monitoring settings. Fresh watchlists are seeded
+with Binance USDⓈ-M perpetual instruments on first use.
 
 Temporary [activity controls](docs/activity-controls.md) can make dashboard market
 prices and TA history manual-only, skip authenticated scheduled monitor runs, and

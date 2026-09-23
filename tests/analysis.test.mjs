@@ -50,8 +50,12 @@ function db(rows = {}, failTable = "") {
           return query;
         },
         async maybeSingle() {
+          const value = rows[table] ?? null;
           return {
-            data: rows[table] ?? null,
+            data:
+              table === "watchlist_items" && value
+                ? { instrument_id: "binance-usdm:BTCUSDT", ...value }
+                : value,
             error: table === failTable ? { message: "private-db-detail" } : null,
           };
         },
@@ -67,6 +71,22 @@ function result() {
     symbol: "BTCUSDT",
     status: "unavailable",
     source: null,
+    instrument: {
+      id: "binance-usdm:BTCUSDT",
+      exchange: "binance",
+      native_symbol: "BTCUSDT",
+      market_type: "futures",
+      contract_type: "perpetual",
+      base_asset: "BTC",
+      quote_asset: "USDT",
+      margin_asset: "USDT",
+      settlement_asset: "USDT",
+      linear: true,
+      contract_multiplier: 1,
+    },
+    price_type: "trade",
+    endpoint: "/fapi/v1/klines",
+    retrieved_at_ms: 1704153600000,
     as_of_ms: 1704153600000,
     price: null,
     observed_at_ms: null,
@@ -111,7 +131,7 @@ test("missing session context, disabled config and unwatched pairs never call Py
 
 test("authorized reads are scoped to the caller and forward only relevant saved state", async () => {
   const store = db({
-    watchlist_items: { symbol: "BTCUSDT" },
+    watchlist_items: { symbol: "BTCUSDT", instrument_id: "binance-usdm:BTCUSDT" },
     monitor_settings: {
       threshold_pct: 3,
       cooldown_minutes: 20,
@@ -120,7 +140,7 @@ test("authorized reads are scoped to the caller and forward only relevant saved 
     monitor_baselines: {
       baseline_price: 100,
       baseline_at: "2024-01-01T00:00:00Z",
-      data_source: "OKX",
+      data_source: "binance-usdm",
       threshold_pct: 3,
       last_observed_at: "2024-01-01T00:05:00Z",
       last_up_alert_at: "2024-01-01T00:04:00Z",
@@ -138,7 +158,8 @@ test("authorized reads are scoped to the caller and forward only relevant saved 
       assert.equal(options.headers.Authorization, `Bearer ${env.PYTHON_ANALYSIS_TOKEN}`);
       const body = JSON.parse(options.body);
       assert.equal(body.settings.threshold_pct, "3");
-      assert.equal(body.baseline.source, "OKX");
+      assert.equal(body.instrument_id, "binance-usdm:BTCUSDT");
+      assert.equal(body.baseline.source, "binance-usdm");
       assert.equal(body.baseline.last_up_alert_ms, Date.parse("2024-01-01T00:04:00Z"));
       assert.equal(body.baseline.last_down_alert_ms, null);
       assert.equal(body.user_id, undefined);
@@ -211,7 +232,9 @@ test("proxy reaches the service on Workers runtimes that reject RequestInit.cach
         throw new TypeError("Invalid redirect value");
       }
       if ("cache" in options) {
-        throw new TypeError("The cache field on RequestInitializerDict is not implemented in fetch");
+        throw new TypeError(
+          "The cache field on RequestInitializerDict is not implemented in fetch",
+        );
       }
       requests++;
       assert.equal(options.method, "POST");
@@ -367,7 +390,10 @@ test("misspelled secret names fail configuration before reads or outbound reques
     const reply = await analyzeForUser(store, "user", "BTCUSDT", config, () => {
       assert.fail("must not call Python with incomplete configuration");
     });
-    assert.equal(reply.error, "Python analysis is not enabled or its service configuration is incomplete.");
+    assert.equal(
+      reply.error,
+      "Python analysis is not enabled or its service configuration is incomplete.",
+    );
     assert.equal(store.queries.length, 0);
   }
 });
@@ -397,6 +423,10 @@ test("HTTP authentication errors, unavailable services, malformed and mismatched
     new Response("<html>error</html>"),
     Response.json({}),
     Response.json({ ...result(), symbol: "ETHUSDT" }),
+    Response.json({
+      ...result(),
+      instrument: { ...result().instrument, id: "binance-usdm:ETHUSDT" },
+    }),
   ]) {
     assert.equal(
       (

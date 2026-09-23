@@ -20,7 +20,7 @@ const { DEFAULT_SETTINGS, runMonitorForUser } = await import(
     "@/lib/market/providers.server": stub(`
       export async function loadCandles(symbol) {
         globalThis.__domains.market.push(symbol);
-        return {ok:true,result:{source:'Binance',minute:[],quarter:[]}};
+        return {ok:true,result:{source:'binance-usdm',minute:[],quarter:[]}};
       }
     `),
     "./observation": stub(`

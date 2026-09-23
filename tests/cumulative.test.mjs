@@ -22,7 +22,9 @@ before(async () => {
   for (const name of [
     "20260913170352_3d6925ba-68c4-4528-aea1-da9439eb127e.sql",
     "20260915090000_cumulative_monitor.sql",
+    "20260917090000_technical_analysis.sql",
     "20260921090000_activity_domains.sql",
+    "20260923090000_binance_usdm_futures.sql",
   ]) {
     await db.exec(
       await readFile(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"),
@@ -33,21 +35,22 @@ beforeEach(async () => {
   await db.exec("RESET ROLE; DELETE FROM auth.users;");
   await db.query("INSERT INTO auth.users VALUES ($1), ($2)", [user, other]);
   await db.query(
-    "INSERT INTO public.watchlist_items(user_id,symbol) VALUES ($1,'BTCUSDT'),($2,'BTCUSDT')",
+    `INSERT INTO public.watchlist_items(user_id,symbol,instrument_id)
+      VALUES ($1,'BTCUSDT','binance-usdm:BTCUSDT'),($2,'BTCUSDT','binance-usdm:BTCUSDT')`,
     [user, other],
   );
   start = Math.floor(Date.now() / 60_000) * 60_000 - 9 * 60_000;
 });
 after(() => db.close());
 
-async function observe(price, step, source = "Binance", uid = user) {
+async function observe(price, step, source = "binance-usdm", uid = user) {
   const { rows } = await db.query(
     "SELECT public.process_cumulative_observation($1,'BTCUSDT',$2,$3,$4) AS result",
     [uid, price, new Date(start + step * 60_000).toISOString(), source],
   );
   return rows[0].result;
 }
-async function checkpoint(price, step, source = "Binance", uid = user) {
+async function checkpoint(price, step, source = "binance-usdm", uid = user) {
   const { rows } = await db.query(
     "SELECT public.record_market_data_checkpoint($1,'BTCUSDT',$2,$3,$4) AS result",
     [uid, price, new Date(start + step * 60_000).toISOString(), source],
@@ -124,11 +127,11 @@ test("unchanged elevated price produces no repeated level alert", async () => {
   assert.equal((await observe("102", 2)).status, "below_threshold");
 });
 
-test("provider and threshold changes reinitialize without comparing unlike baselines", async () => {
+test("non-futures sources are rejected and threshold changes reinitialize", async () => {
   await observe("100", 0);
-  assert.equal((await observe("150", 1, "OKX")).status, "reinitialized");
+  await assert.rejects(observe("150", 1, "OKX"), /completed futures candle/);
   await db.query("INSERT INTO monitor_settings(user_id,threshold_pct) VALUES ($1,3)", [user]);
-  assert.equal((await observe("200", 2, "OKX")).status, "reinitialized");
+  assert.equal((await observe("200", 2)).status, "reinitialized");
   assert.equal(Number((await state()).baseline_price), 200);
 });
 
@@ -157,7 +160,10 @@ test("pause, watchlist deletion and re-addition", async () => {
   assert.equal(await state(), undefined);
   assert.equal((await observe("102", 1)).status, "not_watched");
   await db.query("UPDATE monitor_settings SET monitoring_enabled=true WHERE user_id=$1", [user]);
-  await db.query("INSERT INTO watchlist_items(user_id,symbol) VALUES ($1,'BTCUSDT')", [user]);
+  await db.query(
+    "INSERT INTO watchlist_items(user_id,symbol,instrument_id) VALUES ($1,'BTCUSDT','binance-usdm:BTCUSDT')",
+    [user],
+  );
   assert.equal((await observe("102", 1)).status, "initialized");
 });
 
@@ -187,12 +193,15 @@ test("movement and collection controls pause alerts without changing the baselin
 
 test("market collection checkpoints advance independently and reject older observations", async () => {
   assert.equal((await checkpoint("100", 0)).status, "recorded");
-  assert.equal((await checkpoint("102", 2, "OKX")).status, "recorded");
+  await assert.rejects(checkpoint("102", 2, "OKX"), /completed futures candle/);
+  assert.equal((await checkpoint("102", 2)).status, "recorded");
   assert.equal((await checkpoint("101", 1)).status, "already_processed");
   const row = (await db.query("SELECT * FROM market_data_checkpoints WHERE user_id=$1", [user]))
     .rows[0];
   assert.equal(Number(row.price), 102);
-  assert.equal(row.data_source, "OKX");
+  assert.equal(row.data_source, "binance-usdm");
+  assert.equal(row.instrument_id, "binance-usdm:BTCUSDT");
+  assert.equal(row.price_type, "trade");
 
   await db.query("DELETE FROM watchlist_items WHERE user_id=$1", [user]);
   assert.equal(
@@ -256,9 +265,9 @@ test("invalid, future, stale observations and invalid settings fail closed", asy
 
 test("state is account-scoped and authenticated users cannot write state or call RPC", async () => {
   await observe("100", 0);
-  await observe("200", 0, "Binance", other);
+  await observe("200", 0, "binance-usdm", other);
   await checkpoint("100", 0);
-  await checkpoint("200", 0, "Binance", other);
+  await checkpoint("200", 0, "binance-usdm", other);
   await db.query("SELECT set_config('request.jwt.claim.sub',$1,false)", [user]);
   await db.exec("SET ROLE authenticated");
   try {

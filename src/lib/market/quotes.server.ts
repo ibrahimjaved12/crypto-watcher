@@ -38,7 +38,7 @@ export async function getQuote(symbol: string): Promise<SymbolQuote> {
       chart: [],
       lastCandleAt: null,
       stale: true,
-      error: `No exchange reachable — ${outcome.errors.join(" | ")}`,
+      error: `Futures data unavailable — ${outcome.errors.join(" | ")}`,
       fetchedAt,
     };
   }
