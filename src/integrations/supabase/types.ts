@@ -22,10 +22,13 @@ export type Database = {
           comparison_mode: string
           created_at: string
           data_source: string
+          endpoint: string
           id: string
+          instrument_id: string
           is_test: boolean
           observed_at: string | null
           price: number | null
+          price_type: string
           rule: string
           symbol: string
           threshold_pct: number
@@ -40,10 +43,13 @@ export type Database = {
           comparison_mode?: string
           created_at?: string
           data_source: string
+          endpoint?: string
           id?: string
+          instrument_id: string
           is_test?: boolean
           observed_at?: string | null
           price?: number | null
+          price_type?: string
           rule: string
           symbol: string
           threshold_pct: number
@@ -58,10 +64,13 @@ export type Database = {
           comparison_mode?: string
           created_at?: string
           data_source?: string
+          endpoint?: string
           id?: string
+          instrument_id?: string
           is_test?: boolean
           observed_at?: string | null
           price?: number | null
+          price_type?: string
           rule?: string
           symbol?: string
           threshold_pct?: number
@@ -69,34 +78,58 @@ export type Database = {
           user_id?: string
           window_minutes?: number | null
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "alerts_instrument_identity_fkey"
+            columns: ["instrument_id", "symbol"]
+            isOneToOne: false
+            referencedRelation: "market_instruments"
+            referencedColumns: ["id", "native_symbol"]
+          },
+        ]
       }
       market_data_checkpoints: {
         Row: {
           data_source: string
+          endpoint: string
+          instrument_id: string
           observed_at: string
           price: number
+          price_type: string
           symbol: string
           updated_at: string
           user_id: string
         }
         Insert: {
           data_source: string
+          endpoint?: string
+          instrument_id: string
           observed_at: string
           price: number
+          price_type?: string
           symbol: string
           updated_at?: string
           user_id: string
         }
         Update: {
           data_source?: string
+          endpoint?: string
+          instrument_id?: string
           observed_at?: string
           price?: number
+          price_type?: string
           symbol?: string
           updated_at?: string
           user_id?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "market_data_checkpoints_instrument_identity_fkey"
+            columns: ["instrument_id", "symbol"]
+            isOneToOne: false
+            referencedRelation: "market_instruments"
+            referencedColumns: ["id", "native_symbol"]
+          },
           {
             foreignKeyName: "market_data_checkpoints_user_id_symbol_fkey"
             columns: ["user_id", "symbol"]
@@ -106,14 +139,59 @@ export type Database = {
           },
         ]
       }
+      market_instruments: {
+        Row: {
+          base_asset: string
+          contract_multiplier: number
+          contract_type: string
+          exchange: string
+          id: string
+          is_linear: boolean
+          margin_asset: string
+          market_type: string
+          native_symbol: string
+          quote_asset: string
+          settlement_asset: string
+        }
+        Insert: {
+          base_asset: string
+          contract_multiplier: number
+          contract_type: string
+          exchange: string
+          id: string
+          is_linear: boolean
+          margin_asset: string
+          market_type: string
+          native_symbol: string
+          quote_asset: string
+          settlement_asset: string
+        }
+        Update: {
+          base_asset?: string
+          contract_multiplier?: number
+          contract_type?: string
+          exchange?: string
+          id?: string
+          is_linear?: boolean
+          margin_asset?: string
+          market_type?: string
+          native_symbol?: string
+          quote_asset?: string
+          settlement_asset?: string
+        }
+        Relationships: []
+      }
       monitor_baselines: {
         Row: {
           baseline_at: string
           baseline_price: number
           data_source: string
+          endpoint: string
+          instrument_id: string
           last_down_alert_at: string | null
           last_observed_at: string
           last_up_alert_at: string | null
+          price_type: string
           symbol: string
           threshold_pct: number
           user_id: string
@@ -122,9 +200,12 @@ export type Database = {
           baseline_at: string
           baseline_price: number
           data_source: string
+          endpoint?: string
+          instrument_id: string
           last_down_alert_at?: string | null
           last_observed_at: string
           last_up_alert_at?: string | null
+          price_type?: string
           symbol: string
           threshold_pct: number
           user_id: string
@@ -133,14 +214,24 @@ export type Database = {
           baseline_at?: string
           baseline_price?: number
           data_source?: string
+          endpoint?: string
+          instrument_id?: string
           last_down_alert_at?: string | null
           last_observed_at?: string
           last_up_alert_at?: string | null
+          price_type?: string
           symbol?: string
           threshold_pct?: number
           user_id?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "monitor_baselines_instrument_identity_fkey"
+            columns: ["instrument_id", "symbol"]
+            isOneToOne: false
+            referencedRelation: "market_instruments"
+            referencedColumns: ["id", "native_symbol"]
+          },
           {
             foreignKeyName: "monitor_baselines_user_id_symbol_fkey"
             columns: ["user_id", "symbol"]
@@ -257,6 +348,7 @@ export type Database = {
           body: string
           created_at: string
           id: string
+          instrument_id: string | null
           symbol: string | null
           title: string
           updated_at: string
@@ -266,6 +358,7 @@ export type Database = {
           body?: string
           created_at?: string
           id?: string
+          instrument_id?: string | null
           symbol?: string | null
           title: string
           updated_at?: string
@@ -275,24 +368,36 @@ export type Database = {
           body?: string
           created_at?: string
           id?: string
+          instrument_id?: string | null
           symbol?: string | null
           title?: string
           updated_at?: string
           user_id?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "notes_instrument_identity_fkey"
+            columns: ["instrument_id", "symbol"]
+            isOneToOne: false
+            referencedRelation: "market_instruments"
+            referencedColumns: ["id", "native_symbol"]
+          },
+        ]
       }
       ta_signals: {
         Row: {
           candle_at: string
           detected_at: string
+          endpoint: string
           id: string
           indicators: Json
+          instrument_id: string
           outcome_at: string | null
           outcome_price: number | null
           outcome_status: string
           patterns: string[]
           price: number
+          price_type: string
           return_pct: number | null
           source: string
           symbol: string
@@ -303,13 +408,16 @@ export type Database = {
         Insert: {
           candle_at: string
           detected_at?: string
+          endpoint?: string
           id?: string
           indicators: Json
+          instrument_id: string
           outcome_at?: string | null
           outcome_price?: number | null
           outcome_status?: string
           patterns: string[]
           price: number
+          price_type?: string
           return_pct?: number | null
           source: string
           symbol: string
@@ -320,13 +428,16 @@ export type Database = {
         Update: {
           candle_at?: string
           detected_at?: string
+          endpoint?: string
           id?: string
           indicators?: Json
+          instrument_id?: string
           outcome_at?: string | null
           outcome_price?: number | null
           outcome_status?: string
           patterns?: string[]
           price?: number
+          price_type?: string
           return_pct?: number | null
           source?: string
           symbol?: string
@@ -334,28 +445,47 @@ export type Database = {
           user_id?: string
           version?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "ta_signals_instrument_identity_fkey"
+            columns: ["instrument_id", "symbol"]
+            isOneToOne: false
+            referencedRelation: "market_instruments"
+            referencedColumns: ["id", "native_symbol"]
+          },
+        ]
       }
       watchlist_items: {
         Row: {
           created_at: string
           id: string
+          instrument_id: string
           symbol: string
           user_id: string
         }
         Insert: {
           created_at?: string
           id?: string
+          instrument_id: string
           symbol: string
           user_id: string
         }
         Update: {
           created_at?: string
           id?: string
+          instrument_id?: string
           symbol?: string
           user_id?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "watchlist_instrument_identity_fkey"
+            columns: ["instrument_id", "symbol"]
+            isOneToOne: false
+            referencedRelation: "market_instruments"
+            referencedColumns: ["id", "native_symbol"]
+          },
+        ]
       }
     }
     Views: {

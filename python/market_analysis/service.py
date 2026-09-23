@@ -6,10 +6,18 @@ import httpx
 
 from .core import MINUTE, analyze, percentage_change, positive
 from .cumulative import Baseline, observe
-from .providers import PROVIDERS, parse, request_url
+from .providers import (PROVIDERS, exchange_info_url, instrument,
+                        parse, provider_endpoint, request_url, validate_exchange_info)
 
 
 async def load_series(client, provider, symbol):
+    metadata_url = exchange_info_url(provider, symbol)
+    if metadata_url:
+        metadata = await client.get(metadata_url)
+        metadata.raise_for_status()
+        if len(metadata.content) > 4_000_000:
+            raise ValueError("oversized exchange information response")
+        validate_exchange_info(metadata.json(), symbol, provider)
     async def get(interval):
         response = await client.get(request_url(provider, symbol, interval))
         response.raise_for_status()
@@ -90,6 +98,8 @@ async def analyze_request(request, client, loader=load_series, clock=lambda: tim
                     "status": "ok" if all(w["status"] == "ok" for w in rolling.values()) else "partial",
                     "source": provider, "as_of_ms": now_ms, "price": str(last.close),
                     "observed_at_ms": last.open_ms + MINUTE,
+                    "instrument": instrument(request.symbol), "price_type": "trade",
+                    "endpoint": provider_endpoint(provider), "retrieved_at_ms": now_ms,
                     "threshold_pct": str(request.settings.threshold_pct),
                     "rolling": rolling, "baseline": baseline, "attempts": attempts}
         except httpx.TimeoutException:
@@ -102,5 +112,7 @@ async def analyze_request(request, client, loader=load_series, clock=lambda: tim
     return {"schema_version": 1, "mode": "read_only", "symbol": request.symbol,
             "status": "unavailable", "source": None, "as_of_ms": now_ms,
             "price": None, "observed_at_ms": None,
+            "instrument": instrument(request.symbol), "price_type": "trade",
+            "endpoint": "/fapi/v1/klines", "retrieved_at_ms": now_ms,
             "threshold_pct": str(request.settings.threshold_pct), "rolling": {},
             "baseline": baseline_preview(request, None, None, None, now_ms), "attempts": attempts}

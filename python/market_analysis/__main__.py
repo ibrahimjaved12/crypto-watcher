@@ -4,7 +4,7 @@ import json
 import time
 
 from .core import WINDOWS, analyze, positive
-from .providers import PROVIDERS, SUPPORTED_SYMBOLS, load
+from .providers import PROVIDERS, SUPPORTED_SYMBOLS, instrument, load, provider_endpoint
 
 
 def run(symbol, threshold, window, loader=load, now=lambda: time.time_ns() // 1_000_000):
@@ -20,6 +20,8 @@ def run(symbol, threshold, window, loader=load, now=lambda: time.time_ns() // 1_
                 continue
             return {"schema_version": 1, "mode": "analysis_only", "ok": True,
                     "symbol": symbol, "quote_asset": "USDT", "source": provider,
+                    "instrument": instrument(symbol), "price_type": "trade",
+                    "endpoint": provider_endpoint(provider), "retrieved_at_ms": as_of,
                     "as_of_ms": as_of, "candle_policy": "completed_contiguous",
                     "threshold_pct": str(threshold), "selected_window_minutes": window,
                     "threshold_met": windows[str(window)]["threshold_met"],
@@ -27,7 +29,8 @@ def run(symbol, threshold, window, loader=load, now=lambda: time.time_ns() // 1_
         except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
             attempts.append({"source": provider, "error": str(exc)})
     return {"schema_version": 1, "mode": "analysis_only", "ok": False,
-            "symbol": symbol, "as_of_ms": now(), "attempts": attempts}
+            "symbol": symbol, "instrument": instrument(symbol), "price_type": "trade",
+            "endpoint": "/fapi/v1/klines", "as_of_ms": now(), "attempts": attempts}
 
 
 def main():

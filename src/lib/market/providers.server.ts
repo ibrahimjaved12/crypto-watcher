@@ -1,10 +1,14 @@
-/**
- * Public exchange data providers. Server-only.
- *
- * No API keys are required for these public market endpoints. Providers are
- * tried in order; if every provider fails (for example because the hosting
- * region is blocked) we report the failure instead of inventing prices.
- */
+/** Public perpetual-futures data. Server-only; no API key is required. */
+import {
+  futuresInstrument,
+  isMarketSource,
+  isSupportedSymbol,
+  MARKET_PRICE_TYPE,
+  MARKET_SOURCE,
+  MARKET_SOURCES,
+  type FuturesInstrument,
+  type MarketSource,
+} from "./symbols";
 
 export type Candle = {
   time: number;
@@ -16,14 +20,78 @@ export type Candle = {
   complete?: boolean;
 };
 
-export type ProviderResult = {
-  source: string;
-  minute: Candle[]; // 1m candles, oldest -> newest
-  quarter: Candle[]; // 15m candles, oldest -> newest
+export type FuturesContract = FuturesInstrument & {
+  status: "TRADING";
+  listedAt: number;
+  expiresAt: number | null;
+  priceTick: string | null;
+  quantityStep: string | null;
+  minQuantity: string | null;
+  minNotional: string | null;
 };
 
-const MINUTE_LIMIT = 61; // covers 5m / 15m / 1h
-const QUARTER_LIMIT = 97; // covers 4h / 24h and the chart
+export type ProviderResult = {
+  source: MarketSource;
+  instrument: FuturesContract;
+  endpoint: string;
+  priceType: typeof MARKET_PRICE_TYPE;
+  retrievedAt: string;
+  minute: Candle[];
+  quarter: Candle[];
+};
+
+export type FuturesSnapshot = {
+  source: typeof MARKET_SOURCE;
+  instrument: FuturesContract;
+  lastPrice: number;
+  lastPriceAt: number;
+  markPrice: number;
+  indexPrice: number;
+  fundingRate: number | null;
+  fundingAt: number | null;
+  retrievedAt: string;
+};
+
+const BASE_URLS: Record<MarketSource, string> = {
+  "binance-usdm": "https://fapi.binance.com",
+  "okx-usdt-swap": "https://www.okx.com",
+  "kraken-futures": "https://futures.kraken.com",
+};
+const ENDPOINTS: Record<MarketSource, string> = {
+  "binance-usdm": "/fapi/v1/klines",
+  "okx-usdt-swap": "/api/v5/market/candles",
+  "kraken-futures": "/api/charts/v1/trade/:symbol/:resolution",
+};
+const MINUTE_LIMIT = 61;
+const QUARTER_LIMIT = 97;
+const METADATA_TTL_MS = 5 * 60_000;
+
+type BinanceSymbol = {
+  symbol?: string;
+  pair?: string;
+  contractType?: string;
+  status?: string;
+  baseAsset?: string;
+  quoteAsset?: string;
+  marginAsset?: string;
+  onboardDate?: number;
+  deliveryDate?: number;
+  filters?: Array<Record<string, unknown>>;
+};
+
+type OkxInstrument = {
+  instId?: string;
+  instType?: string;
+  ctType?: string;
+  settleCcy?: string;
+  state?: string;
+  listTime?: string;
+  tickSz?: string;
+  lotSz?: string;
+  minSz?: string;
+};
+
+let metadataCache = new Map<string, { expiresAt: number; body: unknown }>();
 
 async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
   const controller = new AbortController();
@@ -37,7 +105,7 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
       try {
         await res.body?.cancel();
       } catch {
-        // Cleanup must not replace the provider's HTTP error.
+        // Cleanup must not replace the HTTP error.
       }
       throw new Error(`HTTP ${res.status}`);
     }
@@ -47,140 +115,277 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
   }
 }
 
-async function binance(
-  symbol: string,
-  intervals: [number, number] = [1, 15],
-  limits: [number, number] = [MINUTE_LIMIT, QUARTER_LIMIT],
-): Promise<ProviderResult> {
-  const get = async (interval: string, limit: number): Promise<Candle[]> => {
-    const raw = (await fetchJson(
-      `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-    )) as unknown[];
-    if (!Array.isArray(raw) || raw.length === 0) throw new Error("empty response");
-    return raw.map((row) => {
-      const r = row as [number, string, string, string, string, string, number];
-      const duration =
-        (interval.endsWith("h")
-          ? Number(interval.slice(0, -1)) * 60
-          : Number(interval.slice(0, -1))) * 60_000;
-      if (Number(r[6]) !== Number(r[0]) + duration - 1) {
-        throw new Error("Invalid candle close timestamp");
+async function cachedJson(url: string): Promise<unknown> {
+  const now = Date.now();
+  const cached = metadataCache.get(url);
+  if (cached && cached.expiresAt > now) return cached.body;
+  const body = await fetchJson(url);
+  metadataCache.set(url, { expiresAt: now + METADATA_TTL_MS, body });
+  return body;
+}
+
+/** Clears process-wide provider metadata for deterministic tests. */
+export function clearExchangeInfoCache(): void {
+  metadataCache = new Map();
+}
+
+function positiveDecimal(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^\d+(\.\d+)?$/.test(value) || Number(value) <= 0) {
+    throw new Error(`invalid ${label}`);
+  }
+  return value;
+}
+
+function finiteNumber(value: unknown, label: string): number {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) throw new Error(`invalid ${label}`);
+  return number;
+}
+
+function finiteNonnegative(value: unknown, label: string): number {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) throw new Error(`invalid ${label}`);
+  return number;
+}
+
+function providerSymbol(source: MarketSource, symbol: string): string {
+  const base = symbol.replace(/USDT$/, "");
+  if (source === "okx-usdt-swap") return `${base}-USDT-SWAP`;
+  if (source === "kraken-futures") return `PF_${base === "BTC" ? "XBT" : base}USD`;
+  return symbol;
+}
+
+function fallbackContract(symbol: string): FuturesContract {
+  return {
+    ...futuresInstrument(symbol),
+    status: "TRADING",
+    listedAt: 0,
+    expiresAt: null,
+    priceTick: null,
+    quantityStep: null,
+    minQuantity: null,
+    minNotional: null,
+  };
+}
+
+async function resolveInstrument(source: MarketSource, symbol: string): Promise<FuturesContract> {
+  const normalized = symbol.toUpperCase();
+  if (!isSupportedSymbol(normalized))
+    throw new Error(`unsupported futures contract: ${normalized}`);
+  const canonical = fallbackContract(normalized);
+
+  if (source === "kraken-futures") return canonical;
+  if (source === "okx-usdt-swap") {
+    const native = providerSymbol(source, normalized);
+    const url = `${BASE_URLS[source]}/api/v5/public/instruments?instType=SWAP&instId=${encodeURIComponent(native)}`;
+    const body = (await cachedJson(url)) as { code?: string; data?: OkxInstrument[] };
+    const item = body.code === "0" && Array.isArray(body.data) ? body.data[0] : undefined;
+    if (
+      !item ||
+      item.instId !== native ||
+      item.instType !== "SWAP" ||
+      item.ctType !== "linear" ||
+      item.settleCcy !== "USDT" ||
+      item.state !== "live"
+    ) {
+      throw new Error(`inactive or incompatible futures contract: ${normalized}`);
+    }
+    const listedAt = Number(item.listTime);
+    if (!Number.isSafeInteger(listedAt))
+      throw new Error(`invalid futures contract dates: ${normalized}`);
+    return {
+      ...canonical,
+      listedAt,
+      priceTick: positiveDecimal(item.tickSz, "price tick"),
+      quantityStep: positiveDecimal(item.lotSz, "quantity step"),
+      minQuantity: positiveDecimal(item.minSz, "minimum quantity"),
+    };
+  }
+
+  const body = (await cachedJson(`${BASE_URLS[source]}/fapi/v1/exchangeInfo`)) as {
+    symbols?: BinanceSymbol[];
+  };
+  if (!Array.isArray(body.symbols)) throw new Error("invalid exchange information");
+  const item = body.symbols.find((entry) => entry.symbol === normalized);
+  if (
+    !item ||
+    item.status !== "TRADING" ||
+    item.contractType !== "PERPETUAL" ||
+    item.pair !== normalized ||
+    item.baseAsset !== canonical.baseAsset ||
+    item.quoteAsset !== "USDT" ||
+    item.marginAsset !== "USDT"
+  ) {
+    throw new Error(`inactive or incompatible futures contract: ${normalized}`);
+  }
+  const filter = (type: string) => item.filters?.find((value) => value["filterType"] === type);
+  const priceFilter = filter("PRICE_FILTER");
+  const lotFilter = filter("LOT_SIZE");
+  const notionalFilter = filter("MIN_NOTIONAL");
+  if (!Number.isSafeInteger(item.onboardDate) || !Number.isSafeInteger(item.deliveryDate)) {
+    throw new Error(`invalid futures contract dates: ${normalized}`);
+  }
+  return {
+    ...canonical,
+    listedAt: item.onboardDate!,
+    expiresAt: item.deliveryDate! >= 4_102_444_800_000 ? null : item.deliveryDate!,
+    priceTick: positiveDecimal(priceFilter?.["tickSize"], "price tick"),
+    quantityStep: positiveDecimal(lotFilter?.["stepSize"], "quantity step"),
+    minQuantity: positiveDecimal(lotFilter?.["minQty"], "minimum quantity"),
+    minNotional: positiveDecimal(notionalFilter?.["notional"], "minimum notional"),
+  };
+}
+
+function parseBinance(raw: unknown, minutes: number): Candle[] {
+  if (!Array.isArray(raw) || raw.length === 0) throw new Error("empty kline response");
+  const duration = minutes * 60_000;
+  return raw.map((row) => {
+    if (!Array.isArray(row) || row.length < 7) throw new Error("invalid kline row");
+    const time = Number(row[0]);
+    const closeTime = Number(row[6]);
+    if (!Number.isSafeInteger(time) || closeTime !== time + duration - 1) {
+      throw new Error("invalid candle timestamp");
+    }
+    return {
+      time,
+      open: finiteNumber(row[1], "open price"),
+      high: finiteNumber(row[2], "high price"),
+      low: finiteNumber(row[3], "low price"),
+      close: finiteNumber(row[4], "close price"),
+      volume: finiteNonnegative(row[5], "volume"),
+      complete: closeTime < Date.now(),
+    };
+  });
+}
+
+function parseOkx(raw: unknown, minutes: number): Candle[] {
+  const body = raw as { code?: string; data?: unknown[] };
+  if (body?.code !== "0" || !Array.isArray(body.data) || body.data.length === 0) {
+    throw new Error("empty kline response");
+  }
+  const duration = minutes * 60_000;
+  return body.data
+    .map((row) => {
+      if (!Array.isArray(row) || row.length < 9) throw new Error("invalid kline row");
+      const time = Number(row[0]);
+      if (!Number.isSafeInteger(time) || time % duration !== 0 || !["0", "1"].includes(row[8])) {
+        throw new Error("invalid candle timestamp");
       }
       return {
-        time: Number(r[0]),
-        open: Number(r[1]),
-        high: Number(r[2]),
-        low: Number(r[3]),
-        close: Number(r[4]),
-        volume: Number(r[5]),
-        complete: Number(r[6]) < Date.now(),
+        time,
+        open: finiteNumber(row[1], "open price"),
+        high: finiteNumber(row[2], "high price"),
+        low: finiteNumber(row[3], "low price"),
+        close: finiteNumber(row[4], "close price"),
+        volume: finiteNonnegative(row[6], "volume"),
+        complete: row[8] === "1",
       };
-    });
-  };
-  const format = (m: number) => (m >= 60 ? `${m / 60}h` : `${m}m`);
-  const first = get(format(intervals[0]), limits[0]);
-  const [minute, quarter] = await Promise.all([
-    first,
-    intervals[0] === intervals[1] ? first : get(format(intervals[1]), limits[1]),
-  ]);
-  return { source: "Binance", minute, quarter };
+    })
+    .sort((a, b) => a.time - b.time);
 }
 
-async function okx(
+function parseKraken(raw: unknown, minutes: number): Candle[] {
+  const rows = (raw as { candles?: unknown[] })?.candles;
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error("empty kline response");
+  const duration = minutes * 60_000;
+  return rows
+    .map((value) => {
+      const row = value as Record<string, unknown>;
+      const time = Number(row["time"]);
+      if (!Number.isSafeInteger(time) || time % duration !== 0) {
+        throw new Error("invalid candle timestamp");
+      }
+      return {
+        time,
+        open: finiteNumber(row["open"], "open price"),
+        high: finiteNumber(row["high"], "high price"),
+        low: finiteNumber(row["low"], "low price"),
+        close: finiteNumber(row["close"], "close price"),
+        volume: finiteNonnegative(row["volume"], "volume"),
+        complete: time + duration <= Date.now(),
+      };
+    })
+    .sort((a, b) => a.time - b.time);
+}
+
+async function klines(
+  source: MarketSource,
   symbol: string,
-  intervals: [number, number] = [1, 15],
-  limits: [number, number] = [MINUTE_LIMIT, QUARTER_LIMIT],
-): Promise<ProviderResult> {
-  const instId = `${symbol.replace(/USDT$/, "")}-USDT`;
-  const get = async (bar: string, limit: number): Promise<Candle[]> => {
-    const body = (await fetchJson(
-      `https://www.okx.com/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`,
-    )) as { code?: string; msg?: string; data?: string[][] };
-    if (body.code !== "0" || !body.data?.length) {
-      throw new Error(body.msg || "empty response");
-    }
-    // OKX returns newest first.
-    return body.data
-      .map((r) => ({
-        time: Number(r[0]),
-        open: Number(r[1]),
-        high: Number(r[2]),
-        low: Number(r[3]),
-        close: Number(r[4]),
-        volume: Number(r[5]),
-        complete: r[8] === "1",
-      }))
-      .reverse();
-  };
-  const format = (m: number) => (m >= 60 ? `${m / 60}H` : `${m}m`);
-  const first = get(format(intervals[0]), limits[0]);
-  const [minute, quarter] = await Promise.all([
-    first,
-    intervals[0] === intervals[1] ? first : get(format(intervals[1]), limits[1]),
-  ]);
-  return { source: "OKX", minute, quarter };
+  minutes: number,
+  limit: number,
+): Promise<Candle[]> {
+  const native = providerSymbol(source, symbol);
+  if (source === "okx-usdt-swap") {
+    const bar = minutes >= 60 ? `${minutes / 60}H` : `${minutes}m`;
+    const query = new URLSearchParams({ instId: native, bar, limit: String(limit) });
+    return parseOkx(await fetchJson(`${BASE_URLS[source]}${ENDPOINTS[source]}?${query}`), minutes);
+  }
+  if (source === "kraken-futures") {
+    const resolution = minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`;
+    const path = `/api/charts/v1/trade/${encodeURIComponent(native)}/${resolution}`;
+    return parseKraken(await fetchJson(`${BASE_URLS[source]}${path}?count=${limit}`), minutes);
+  }
+  const interval = minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`;
+  const query = new URLSearchParams({ symbol: native, interval, limit: String(limit) });
+  return parseBinance(
+    await fetchJson(`${BASE_URLS[source]}${ENDPOINTS[source]}?${query}`),
+    minutes,
+  );
 }
 
-async function kraken(
+async function load(
+  source: MarketSource,
   symbol: string,
-  intervals: [number, number] = [1, 15],
-  limits: [number, number] = [MINUTE_LIMIT, QUARTER_LIMIT],
+  intervals: [number, number],
+  limits: [number, number],
 ): Promise<ProviderResult> {
-  const pair = `${symbol.replace(/USDT$/, "")}USDT`;
-  const get = async (minutes: number, keep: number): Promise<Candle[]> => {
-    const body = (await fetchJson(
-      `https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=${minutes}`,
-    )) as { error?: string[]; result?: Record<string, unknown> };
-    if (body.error?.length) throw new Error(body.error.join(", "));
-    const key = Object.keys(body.result ?? {}).find((k) => k !== "last");
-    const rows = key ? ((body.result as Record<string, unknown>)[key] as unknown[]) : undefined;
-    if (!Array.isArray(rows) || rows.length === 0) throw new Error("empty response");
-    return rows
-      .map((row, index) => {
-        const r = row as [number, string, string, string, string, string, string];
-        return {
-          time: Number(r[0]) * 1000,
-          open: Number(r[1]),
-          high: Number(r[2]),
-          low: Number(r[3]),
-          volume: Number(r[6]),
-          close: Number(r[4]),
-          complete: index < rows.length - 1,
-        };
-      })
-      .slice(-keep);
-  };
-  const first = get(intervals[0], limits[0]);
+  const instrument = await resolveInstrument(source, symbol);
+  const first = klines(source, symbol, intervals[0], limits[0]);
   const [minute, quarter] = await Promise.all([
     first,
-    intervals[0] === intervals[1] ? first : get(intervals[1], limits[1]),
+    intervals[0] === intervals[1] ? first : klines(source, symbol, intervals[1], limits[1]),
   ]);
-  return { source: "Kraken", minute, quarter };
+  return {
+    source,
+    instrument,
+    endpoint: ENDPOINTS[source],
+    priceType: MARKET_PRICE_TYPE,
+    retrievedAt: new Date().toISOString(),
+    minute,
+    quarter,
+  };
 }
-
-const PROVIDERS = [
-  { name: "Binance", load: binance },
-  { name: "OKX", load: okx },
-  { name: "Kraken", load: kraken },
-];
 
 export async function loadTACandles(
   symbol: string,
   minutes: number,
   validate: (candles: Candle[]) => void,
-  source?: string,
+  requestedSource?: string,
 ) {
+  let sources: readonly MarketSource[] = MARKET_SOURCES;
+  if (requestedSource) {
+    if (!isMarketSource(requestedSource))
+      throw new Error(`Unknown data source: ${requestedSource}`);
+    sources = [requestedSource];
+  }
   const errors: string[] = [];
-  for (const provider of PROVIDERS.filter((p) => !source || p.name === source)) {
+  for (const source of sources) {
     try {
-      const result = await provider.load(symbol, [minutes, minutes], [250, 250]);
+      const result = await load(source, symbol, [minutes, minutes], [250, 250]);
       validate(result.minute);
-      return { source: result.source, candles: result.minute };
+      return {
+        source: result.source,
+        instrument: result.instrument,
+        endpoint: result.endpoint,
+        priceType: result.priceType,
+        retrievedAt: result.retrievedAt,
+        candles: result.minute,
+      };
     } catch (error) {
-      errors.push(`${provider.name}: ${error instanceof Error ? error.message : String(error)}`);
+      errors.push(`${source}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  throw new Error(errors.join(" | ") || "Unknown data source");
+  throw new Error(errors.join(" | "));
 }
 
 export type ProviderOutcome =
@@ -191,17 +396,51 @@ export async function loadCandles(
   validate?: (result: ProviderResult) => void,
 ): Promise<ProviderOutcome> {
   const errors: string[] = [];
-  for (const provider of PROVIDERS) {
+  for (const source of MARKET_SOURCES) {
     try {
-      const result = await provider.load(symbol);
-      if (result.minute.length >= 2 && result.quarter.length >= 2) {
-        validate?.(result);
-        return { ok: true, result };
-      }
-      errors.push(`${provider.name}: insufficient data`);
+      const result = await load(source, symbol, [1, 15], [MINUTE_LIMIT, QUARTER_LIMIT]);
+      if (result.minute.length < 2 || result.quarter.length < 2)
+        throw new Error("insufficient data");
+      validate?.(result);
+      return { ok: true, result };
     } catch (error) {
-      errors.push(`${provider.name}: ${error instanceof Error ? error.message : String(error)}`);
+      errors.push(`${source}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return { ok: false, errors };
+}
+
+/** Binance-only trade, mark, index and funding snapshot helper. */
+export async function loadFuturesSnapshot(symbol: string): Promise<FuturesSnapshot> {
+  const instrument = await resolveInstrument(MARKET_SOURCE, symbol);
+  const encoded = encodeURIComponent(instrument.nativeSymbol);
+  const [tickerRaw, premiumRaw, fundingRaw] = await Promise.all([
+    fetchJson(`${BASE_URLS[MARKET_SOURCE]}/fapi/v2/ticker/price?symbol=${encoded}`),
+    fetchJson(`${BASE_URLS[MARKET_SOURCE]}/fapi/v1/premiumIndex?symbol=${encoded}`),
+    fetchJson(`${BASE_URLS[MARKET_SOURCE]}/fapi/v1/fundingRate?symbol=${encoded}&limit=1`),
+  ]);
+  const ticker = tickerRaw as { symbol?: string; price?: string; time?: number };
+  const premium = premiumRaw as { symbol?: string; markPrice?: string; indexPrice?: string };
+  const funding = Array.isArray(fundingRaw)
+    ? (fundingRaw[0] as { fundingRate?: string; fundingTime?: number } | undefined)
+    : undefined;
+  if (ticker.symbol !== instrument.nativeSymbol || premium.symbol !== instrument.nativeSymbol) {
+    throw new Error("mismatched futures snapshot identity");
+  }
+  if (!Number.isSafeInteger(Number(ticker.time))) throw new Error("invalid last price time");
+  return {
+    source: MARKET_SOURCE,
+    instrument,
+    lastPrice: finiteNumber(ticker.price, "last price"),
+    lastPriceAt: Number(ticker.time),
+    markPrice: finiteNumber(premium.markPrice, "mark price"),
+    indexPrice: finiteNumber(premium.indexPrice, "index price"),
+    fundingRate:
+      funding && Number.isFinite(Number(funding.fundingRate)) ? Number(funding.fundingRate) : null,
+    fundingAt:
+      funding && Number.isSafeInteger(Number(funding.fundingTime))
+        ? Number(funding.fundingTime)
+        : null,
+    retrievedAt: new Date().toISOString(),
+  };
 }

@@ -30,8 +30,11 @@ export async function runTA(db: Client, userId: string, symbol: string) {
             {
               user_id: userId,
               symbol,
+              instrument_id: market.instrument.id,
               timeframe,
               source: market.source,
+              endpoint: market.endpoint,
+              price_type: market.priceType,
               version: TA_VERSION,
               candle_at: new Date(last.time).toISOString(),
               price: last.close,
@@ -55,7 +58,7 @@ export async function runTA(db: Client, userId: string, symbol: string) {
           .order("detected_at")
           .limit(500);
         if (readError) throw new Error(readError.message);
-        // Never evaluate a fallback exchange against the original exchange's price.
+        // Evaluate every outcome against the exact source saved with the signal.
         for (const source of new Set((pending ?? []).map((row) => row.source))) {
           const relevant = (pending ?? []).filter((row) => row.source === source);
           const duration = timeframe * 60_000;

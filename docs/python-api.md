@@ -26,12 +26,12 @@ are part of this integration.
 
 ## Configuration
 
-| Where | Variable | Value |
-| --- | --- | --- |
-| Python service secret | `PYTHON_ANALYSIS_TOKEN` | Random URL-safe token, 32–256 characters (`A-Z`, `a-z`, digits, `_`, `-`) |
-| Lovable app server secret | `PYTHON_ANALYSIS_TOKEN` | The same value as the Python service |
-| Lovable app server configuration | `PYTHON_ANALYSIS_URL` | Python's HTTPS origin, e.g. `https://analysis.example.com` (no path, credentials, query or fragment) |
-| Lovable app server configuration | `PYTHON_ANALYSIS_ENABLED` | Exactly `true` to enable; unset or any other value disables requests |
+| Where                            | Variable                  | Value                                                                                                |
+| -------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Python service secret            | `PYTHON_ANALYSIS_TOKEN`   | Random URL-safe token, 32–256 characters (`A-Z`, `a-z`, digits, `_`, `-`)                            |
+| Lovable app server secret        | `PYTHON_ANALYSIS_TOKEN`   | The same value as the Python service                                                                 |
+| Lovable app server configuration | `PYTHON_ANALYSIS_URL`     | Python's HTTPS origin, e.g. `https://analysis.example.com` (no path, credentials, query or fragment) |
+| Lovable app server configuration | `PYTHON_ANALYSIS_ENABLED` | Exactly `true` to enable; unset or any other value disables requests                                 |
 
 These must be runtime **server** environment variables, never `VITE_*` values or
 browser configuration. Neither token nor service URL is returned to the browser.
@@ -117,6 +117,7 @@ Example body (state is normally supplied by TanStack, not entered by the user):
 {
   "schema_version": 1,
   "symbol": "BTCUSDT",
+  "instrument_id": "binance-usdm:BTCUSDT",
   "settings": {
     "threshold_pct": "2",
     "cooldown_minutes": 15,
@@ -128,9 +129,11 @@ Example body (state is normally supplied by TanStack, not entered by the user):
 
 When present, `baseline` contains `price`, `at_ms`, `source`, `threshold`,
 `last_observed_ms`, `last_up_alert_ms`, `last_down_alert_ms`. Prices/thresholds are
-decimal strings and timestamps are UTC epoch milliseconds. No identity is accepted.
+decimal strings and timestamps are UTC epoch milliseconds. The instrument ID must
+match the symbol.
 
-Results have `mode: "read_only"`, source, analysis/observation times and:
+Results have `mode: "read_only"`, the canonical instrument identity, source,
+endpoint, price type, retrieval/analysis/observation times and:
 
 - **Rolling:** existing completed, contiguous 5m/15m/1h/4h/24h calculations. Each
   window reports its own start/end close time and validity. These windows can end
@@ -149,21 +152,19 @@ Fresh qualifying moves preserve the existing inclusive boundary and exact cooldo
 expiry rules for increases and decreases.
 
 This is advisory against the loaded state. Settings and baselines may change during
-the request, and the existing monitor may select another provider. An eligible
+the request. An eligible
 preview neither reserves nor guarantees a future alert.
 
-Providers retain the existing Binance → OKX → Kraken order, USDT symbol conventions
-and parsers. Each provider's two intervals are fetched concurrently, never mixed
-across exchanges. A provider with fresh valid minute data can return **partial**
-rolling history while still evaluating the baseline. This intentional service
-behavior differs from the original CLI, which requires all windows before accepting
-a provider. Missing/stale data is reported without invented values.
+Python tries public Binance USDⓈ-M, OKX USDT swap, then Kraken perpetual-futures
+trade candles. Fresh valid minute data can return **partial** rolling
+history while still evaluating the baseline. Missing, stale, inactive, or unsupported
+data is reported without invented values.
 
 Database reads have a 5-second abort timer. Exchange HTTP operations have 5-second
 timeouts; Python imposes an 18-second total analysis deadline, and TanStack aborts
 the service request after 25 seconds. Thus a full app request may take up to roughly
 30 seconds including state reads. Timed-out Python work is cancelled. No application
-retry loops or new scheduler are added. All-provider failure returns an unavailable
+retry loops or new scheduler are added. Provider failure returns an unavailable
 result with safe reason codes; timeout returns 504, invalid request 422, bad token
 401, and unexpected service failure 502. Raw upstream errors and credentials are
 never forwarded or logged by the integration. Responses are not cached.

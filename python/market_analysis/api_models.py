@@ -4,12 +4,12 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .providers import SUPPORTED_SYMBOLS
+from .providers import SUPPORTED_SYMBOLS, instrument_id
 
 Timestamp = Annotated[int, Field(strict=True, ge=0, le=4102444800000)]
 Price = Annotated[Decimal, Field(gt=0, le=Decimal("1e20"), max_digits=40, decimal_places=20)]
 Threshold = Annotated[Decimal, Field(ge=Decimal("0.1"), le=100)]
-Source = Literal["Binance", "OKX", "Kraken"]
+Source = Literal["binance-usdm", "okx-usdt-swap", "kraken-futures"]
 
 
 class InputModel(BaseModel):
@@ -43,6 +43,7 @@ class SavedBaseline(InputModel):
 class AnalysisRequest(InputModel):
     schema_version: Literal[1]
     symbol: str = Field(min_length=5, max_length=16)
+    instrument_id: str = Field(min_length=10, max_length=64)
     settings: AnalysisSettings
     baseline: SavedBaseline | None
 
@@ -52,3 +53,9 @@ class AnalysisRequest(InputModel):
         if value not in SUPPORTED_SYMBOLS:
             raise ValueError("unsupported USDT symbol")
         return value
+
+    @model_validator(mode="after")
+    def matching_instrument(self):
+        if self.instrument_id != instrument_id(self.symbol):
+            raise ValueError("instrument identity does not match symbol")
+        return self

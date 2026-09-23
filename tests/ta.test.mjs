@@ -33,6 +33,22 @@ const candle = (patch = {}) => ({
 });
 const series = () =>
   Array.from({ length: 249 }, (_, i) => candle({ time: end - (249 - i) * duration }));
+const futuresMetadata = (status = "TRADING") => ({
+  symbol: "BTCUSDT",
+  pair: "BTCUSDT",
+  contractType: "PERPETUAL",
+  status,
+  baseAsset: "BTC",
+  quoteAsset: "USDT",
+  marginAsset: "USDT",
+  onboardDate: 1569398400000,
+  deliveryDate: 4133404800000,
+  filters: [
+    { filterType: "PRICE_FILTER", tickSize: "0.10" },
+    { filterType: "LOT_SIZE", stepSize: "0.001", minQty: "0.001" },
+    { filterType: "MIN_NOTIONAL", notional: "100" },
+  ],
+});
 
 test("completed candles reject bad prices, gaps, duplicates, insufficient history and stale data", () => {
   const bars = series();
@@ -159,31 +175,36 @@ test("outcome is four complete intervals beyond detection, never a pre-detection
   assert.equal(outcomeDue(new Date(end + 1).toISOString(), 15), end + 5 * duration);
 });
 
-test("TA persistence deduplicates snapshots, retains first source and enforces user read isolation", async () => {
+test("TA persistence deduplicates futures snapshots and enforces user read isolation", async () => {
   const db = new PGlite();
   try {
-    await db.exec(`CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS;
+    await db.exec(`CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS;
       CREATE SCHEMA auth; CREATE TABLE auth.users(id uuid PRIMARY KEY);
       CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql AS 'SELECT current_setting(''request.jwt.claim.sub'')::uuid';
       GRANT USAGE ON SCHEMA public,auth TO authenticated,service_role;
       INSERT INTO auth.users VALUES ('00000000-0000-0000-0000-000000000001'),('00000000-0000-0000-0000-000000000002');`);
-    await db.exec(
-      await readFile(
-        new URL("../supabase/migrations/20260917090000_technical_analysis.sql", import.meta.url),
-        "utf8",
-      ),
-    );
-    const insert = `INSERT INTO ta_signals(user_id,symbol,timeframe,candle_at,source,version,price,indicators,patterns)
-      VALUES ('00000000-0000-0000-0000-000000000001','BTCUSDT',15,now(),'Binance','ta-v1',100,'{}','{doji}')`;
+    for (const name of [
+      "20260913170352_3d6925ba-68c4-4528-aea1-da9439eb127e.sql",
+      "20260915090000_cumulative_monitor.sql",
+      "20260917090000_technical_analysis.sql",
+      "20260921090000_activity_domains.sql",
+      "20260923090000_binance_usdm_futures.sql",
+    ]) {
+      await db.exec(
+        await readFile(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"),
+      );
+    }
+    await db.exec(`INSERT INTO watchlist_items(user_id,symbol,instrument_id) VALUES
+      ('00000000-0000-0000-0000-000000000001','BTCUSDT','binance-usdm:BTCUSDT')`);
+    const insert = `INSERT INTO ta_signals(user_id,symbol,instrument_id,timeframe,candle_at,source,version,price,indicators,patterns)
+      VALUES ('00000000-0000-0000-0000-000000000001','BTCUSDT','binance-usdm:BTCUSDT',15,now(),'binance-usdm','ta-v2',100,'{}','{doji}')`;
     await db.exec("BEGIN");
     await db.exec(insert);
-    await db.exec(
-      insert.replace("'Binance'", "'OKX'") +
-        " ON CONFLICT(user_id,symbol,timeframe,candle_at,version) DO NOTHING",
-    );
+    await db.exec(insert + " ON CONFLICT(user_id,symbol,timeframe,candle_at,version) DO NOTHING");
     const { rows } = await db.query("SELECT * FROM ta_signals");
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].source, "Binance");
+    assert.equal(rows[0].source, "binance-usdm");
+    assert.equal(rows[0].instrument_id, "binance-usdm:BTCUSDT");
     await db.exec(
       "COMMIT; SET ROLE authenticated; SET request.jwt.claim.sub = '00000000-0000-0000-0000-000000000002'",
     );
@@ -197,43 +218,73 @@ test("TA persistence deduplicates snapshots, retains first source and enforces u
   }
 });
 
-test("provider mapping preserves OHLCV and rejects bad provider before fallback", async () => {
-  const { loadTACandles } = await import(await moduleUrl("../src/lib/market/providers.server.ts"));
+test("futures provider preserves OHLCV and contract identity", async () => {
+  const providerUrl = await moduleUrl("../src/lib/market/providers.server.ts", {
+    "./symbols": await moduleUrl("../src/lib/market/symbols.ts"),
+  });
+  const { clearExchangeInfoCache, loadFuturesSnapshot, loadTACandles } = await import(providerUrl);
   const original = globalThis.fetch;
   try {
     const calls = [];
     globalThis.fetch = async (url) => {
       calls.push(url);
-      if (url.includes("binance"))
-        return Response.json([[end - duration, "100", "102", "98", "101", "35", end - 1]]);
-      return Response.json({
-        code: "0",
-        data: [[String(end - duration), "100", "102", "98", "101", "35", "0", "0", "1"]],
-      });
+      if (url.endsWith("/fapi/v1/exchangeInfo"))
+        return Response.json({ symbols: [futuresMetadata()] });
+      if (url.includes("/fapi/v2/ticker/price"))
+        return Response.json({ symbol: "BTCUSDT", price: "101", time: end });
+      if (url.includes("/fapi/v1/premiumIndex"))
+        return Response.json({ symbol: "BTCUSDT", markPrice: "100.5", indexPrice: "100.4" });
+      if (url.includes("/fapi/v1/fundingRate"))
+        return Response.json([{ symbol: "BTCUSDT", fundingRate: "0.0001", fundingTime: end }]);
+      return Response.json([[end - duration, "100", "102", "98", "101", "35", end - 1]]);
     };
     const result = await loadTACandles("BTCUSDT", 15, () => {});
     assert.deepEqual(
       result.candles[0],
       candle({ close: 101, volume: 35, complete: end < Date.now() }),
     );
-    assert.equal(calls.length, 1);
-    let validations = 0;
-    const fallback = await loadTACandles("BTCUSDT", 15, () => {
-      if (++validations === 1) throw new Error("bad feed");
-    });
-    assert.equal(fallback.source, "OKX");
-    assert.equal(fallback.candles[0].volume, 35);
-    assert.equal(fallback.candles[0].complete, true);
+    assert.equal(result.source, "binance-usdm");
+    assert.equal(result.instrument.id, "binance-usdm:BTCUSDT");
+    assert.equal(result.endpoint, "/fapi/v1/klines");
+    assert.equal(result.priceType, "trade");
+    assert.equal(result.instrument.priceTick, "0.10");
+    assert.equal(result.instrument.quantityStep, "0.001");
+    assert.equal(result.instrument.minNotional, "100");
+    assert.equal(calls.length, 2);
+    const snapshot = await loadFuturesSnapshot("BTCUSDT");
+    assert.deepEqual(
+      [snapshot.lastPrice, snapshot.markPrice, snapshot.indexPrice, snapshot.fundingRate],
+      [101, 100.5, 100.4, 0.0001],
+    );
+    await assert.rejects(
+      loadTACandles("BTCUSDT", 15, () => {}, "OKX"),
+      /Unknown data source/,
+    );
+    clearExchangeInfoCache();
+    globalThis.fetch = async (url) => {
+      if (url.endsWith("/fapi/v1/exchangeInfo"))
+        return Response.json({ symbols: [futuresMetadata("BREAK")] });
+      assert.fail("inactive contract must fail before requesting candles");
+    };
+    await assert.rejects(
+      loadTACandles("BTCUSDT", 15, () => {}, "binance-usdm"),
+      /inactive or incompatible/,
+    );
   } finally {
     globalThis.fetch = original;
   }
 });
 
 test("provider HTTP failures cancel unused bodies and preserve errors if cleanup fails", async () => {
-  const { loadTACandles } = await import(await moduleUrl("../src/lib/market/providers.server.ts"));
+  const { clearExchangeInfoCache, loadTACandles } = await import(
+    await moduleUrl("../src/lib/market/providers.server.ts", {
+      "./symbols": await moduleUrl("../src/lib/market/symbols.ts"),
+    })
+  );
   const original = globalThis.fetch;
   try {
     for (const cleanupFails of [false, true]) {
+      clearExchangeInfoCache();
       let canceled = 0;
       globalThis.fetch = async () =>
         new Response(
@@ -246,18 +297,18 @@ test("provider HTTP failures cancel unused bodies and preserve errors if cleanup
           { status: 503 },
         );
       await assert.rejects(
-        loadTACandles("BTCUSDT", 15, () => {}),
+        loadTACandles("BTCUSDT", 15, () => {}, "binance-usdm"),
         {
-          message: "Binance: HTTP 503 | OKX: HTTP 503 | Kraken: HTTP 503",
+          message: "binance-usdm: HTTP 503",
         },
       );
-      assert.equal(canceled, 3);
+      assert.equal(canceled, 1);
     }
     globalThis.fetch = async () => new Response(null, { status: 503 });
     await assert.rejects(
-      loadTACandles("BTCUSDT", 15, () => {}, "Binance"),
+      loadTACandles("BTCUSDT", 15, () => {}, "binance-usdm"),
       {
-        message: "Binance: HTTP 503",
+        message: "binance-usdm: HTTP 503",
       },
     );
   } finally {
@@ -265,7 +316,7 @@ test("provider HTTP failures cancel unused bodies and preserve errors if cleanup
   }
 });
 
-test("TA runner isolates frame failures and settles on the recorded exchange only", async () => {
+test("TA runner isolates frame failures and settles on the recorded futures source", async () => {
   const core = await moduleUrl("../src/lib/ta/core.ts", {
     technicalindicators: import.meta.resolve("technicalindicators"),
   });
@@ -288,11 +339,17 @@ test("TA runner isolates frame failures and settles on the recorded exchange onl
     const candles = Array.from({ length: 249 }, (_, i) =>
       candle({
         time: boundary - (249 - i) * step,
-        close: source === "Binance" ? 101 : 100,
+        close: 101,
       }),
     );
     validate(candles);
-    return { source: source || "OKX", candles };
+    return {
+      source: "binance-usdm",
+      instrument: { id: "binance-usdm:BTCUSDT" },
+      endpoint: "/fapi/v1/klines",
+      priceType: "trade",
+      candles,
+    };
   };
   const db = {
     from(table) {
@@ -336,19 +393,19 @@ test("TA runner isolates frame failures and settles on the recorded exchange onl
               data: [
                 {
                   id: `due-${filters.timeframe}`,
-                  source: "Binance",
+                  source: "binance-usdm",
                   detected_at: new Date(boundary - 10 * step).toISOString(),
                   price: 100,
                 },
                 {
                   id: `expired-${filters.timeframe}`,
-                  source: "Binance",
+                  source: "binance-usdm",
                   detected_at: new Date(boundary - 500 * step).toISOString(),
                   price: 100,
                 },
                 {
                   id: `new-${filters.timeframe}`,
-                  source: "OKX",
+                  source: "binance-usdm",
                   detected_at: new Date().toISOString(),
                   price: 100,
                 },
@@ -366,7 +423,7 @@ test("TA runner isolates frame failures and settles on the recorded exchange onl
     assert.match(errors[0], /60m.*feed down/);
     assert.equal(writes.length, 2);
     assert.ok(writes.every((w) => w.options.ignoreDuplicates && w.row.user_id === "owner"));
-    assert.equal(calls.filter((c) => c.source === "Binance").length, 2);
+    assert.equal(calls.filter((c) => c.source === "binance-usdm").length, 0);
     assert.equal(updates.length, 4);
     assert.ok(
       updates.every((u) => u.filters.user_id === "owner" && u.filters.outcome_status === "pending"),

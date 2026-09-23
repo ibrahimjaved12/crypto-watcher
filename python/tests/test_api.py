@@ -3,12 +3,12 @@ from copy import deepcopy
 from decimal import Decimal
 import unittest
 
-from fastapi.testclient import TestClient
 import httpx
 
 from market_analysis.api import create_app
 from market_analysis.core import Candle, MINUTE
 from market_analysis.service import analyze_request, load_series
+from market_analysis.providers import PROVIDERS, SOURCE
 
 NOW = 1704153600000
 TOKEN = "test-service-token-" + "x" * 32
@@ -17,9 +17,10 @@ HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 
 def payload():
     return {"schema_version": 1, "symbol": "BTCUSDT",
+            "instrument_id": "binance-usdm:BTCUSDT",
             "settings": {"threshold_pct": "2", "cooldown_minutes": 15, "monitoring_enabled": True},
             "baseline": {"price": "100", "at_ms": NOW - 60 * MINUTE,
-                         "source": "Binance", "threshold": "2",
+                         "source": SOURCE, "threshold": "2",
                          "last_observed_ms": NOW - 5 * MINUTE,
                          "last_up_alert_ms": None, "last_down_alert_ms": None}}
 
@@ -41,22 +42,35 @@ def analyzer_for(loader=fixture_loader):
 
 
 class ApiTests(unittest.TestCase):
+    def request(self, app, method, path, **kwargs):
+        async def send():
+            async with app.router.lifespan_context(app):
+                transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+                async with httpx.AsyncClient(transport=transport,
+                                              base_url="http://testserver") as client:
+                    return await client.request(method, path, **kwargs)
+        return asyncio.run(send())
+
     def post(self, body=None, loader=fixture_loader):
-        with TestClient(create_app(TOKEN, analyzer_for(loader))) as client:
-            return client.post("/v1/analysis", json=body or payload(), headers=HEADERS)
+        return self.request(create_app(TOKEN, analyzer_for(loader)), "POST", "/v1/analysis",
+                            json=body or payload(), headers=HEADERS)
 
     def test_health_and_authentication(self):
-        with TestClient(create_app(TOKEN, analyzer_for())) as client:
-            self.assertEqual(client.get("/health").status_code, 200)
-            for headers in ({}, {"Authorization": "Bearer wrong"}, {"Authorization": "Basic abc"}):
-                response = client.post("/v1/analysis", json=payload(), headers=headers)
-                self.assertEqual(response.status_code, 401)
-            self.assertEqual(client.post("/v1/analysis", json=payload(), headers=HEADERS).status_code, 200)
+        app = create_app(TOKEN, analyzer_for())
+        self.assertEqual(self.request(app, "GET", "/health").status_code, 200)
+        for headers in ({}, {"Authorization": "Bearer wrong"}, {"Authorization": "Basic abc"}):
+            response = self.request(app, "POST", "/v1/analysis", json=payload(), headers=headers)
+            self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            self.request(app, "POST", "/v1/analysis", json=payload(), headers=HEADERS).status_code,
+            200)
 
     def test_missing_configuration_fails_closed(self):
-        with TestClient(create_app("")) as client:
-            self.assertEqual(client.get("/health").status_code, 503)
-            self.assertEqual(client.post("/v1/analysis", json=payload(), headers=HEADERS).status_code, 503)
+        app = create_app("")
+        self.assertEqual(self.request(app, "GET", "/health").status_code, 503)
+        self.assertEqual(
+            self.request(app, "POST", "/v1/analysis", json=payload(), headers=HEADERS).status_code,
+            503)
 
     def test_rolling_and_baseline_use_different_comparisons(self):
         body = payload()
@@ -76,7 +90,6 @@ class ApiTests(unittest.TestCase):
 
     def test_missing_and_changed_baseline_are_not_reset(self):
         for baseline, expected in ((None, "baseline_required"),
-                                   ({**payload()["baseline"], "source": "OKX"}, "baseline_reset_required"),
                                    ({**payload()["baseline"], "threshold": "3"}, "baseline_reset_required")):
             with self.subTest(expected=expected):
                 data = self.post({**payload(), "baseline": baseline}).json()["baseline"]
@@ -136,19 +149,22 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(data["status"], "unavailable")
         self.assertFalse(data["baseline"]["eligibility_evaluated"])
         self.assertIsNone(data["baseline"]["alert_eligible"])
-        self.assertEqual(len(data["attempts"]), 3)
+        self.assertEqual(len(data["attempts"]), len(PROVIDERS))
 
-    def test_provider_fallback_and_redacted_errors(self):
-        async def fallback(client, provider, symbol):
-            if provider == "Binance":
-                raise httpx.ConnectError("private-provider-details")
-            return series()
-        response = self.post(loader=fallback)
-        self.assertEqual(response.json()["source"], "OKX")
+    def test_provider_failure_redacts_errors(self):
+        async def unavailable(client, provider, symbol):
+            raise httpx.ConnectError("private-provider-details")
+        response = self.post(loader=unavailable)
+        self.assertIsNone(response.json()["source"])
+        self.assertEqual(response.json()["attempts"],
+                         [{"source": source, "reason": "provider_unavailable"}
+                          for source in PROVIDERS])
         self.assertNotIn("private-provider-details", response.text)
 
     def test_validation_rejects_unknown_fields_symbols_and_bad_state(self):
-        bodies = [{**payload(), "symbol": "UNKNOWNUSDT"}, {**payload(), "user_id": "private-user"}]
+        bodies = [{**payload(), "symbol": "UNKNOWNUSDT"},
+                  {**payload(), "instrument_id": "binance-usdm:ETHUSDT"},
+                  {**payload(), "user_id": "private-user"}]
         for value in ("0", "NaN", "Infinity", "101"):
             bodies.append({**payload(), "settings": {**payload()["settings"], "threshold_pct": value}})
         for value in (0, 1441, 1.5, True):
@@ -166,21 +182,31 @@ class ApiTests(unittest.TestCase):
         async def broken(*args):
             raise RuntimeError("private-token-content")
         for analyzer, expected in ((slow, 504), (broken, 502)):
-            with TestClient(create_app(TOKEN, analyzer, analysis_timeout=0.01)) as client:
-                response = client.post("/v1/analysis", json=payload(), headers=HEADERS)
-                self.assertEqual(response.status_code, expected)
-                self.assertNotIn("private-token-content", response.text)
+            app = create_app(TOKEN, analyzer, analysis_timeout=0.01)
+            response = self.request(app, "POST", "/v1/analysis",
+                                    json=payload(), headers=HEADERS)
+            self.assertEqual(response.status_code, expected)
+            self.assertNotIn("private-token-content", response.text)
 
     def test_async_http_adapter_reuses_provider_conventions(self):
         async def check():
             urls = []
             def handler(request):
                 urls.append(str(request.url))
+                if request.url.path.endswith("/exchangeInfo"):
+                    return httpx.Response(200, json={"symbols": [{
+                        "symbol": "BTCUSDT", "pair": "BTCUSDT", "contractType": "PERPETUAL",
+                        "status": "TRADING", "baseAsset": "BTC", "quoteAsset": "USDT",
+                        "marginAsset": "USDT", "onboardDate": 1569398400000,
+                        "deliveryDate": 4133404800000, "filters": [
+                            {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                            {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
+                            {"filterType": "MIN_NOTIONAL", "notional": "100"}]}]})
                 interval = 1 if request.url.params["interval"] == "1m" else 15
                 row = [NOW - interval * MINUTE, "100", "102", "100", "102", "1", NOW - 1]
                 return httpx.Response(200, json=[row])
             async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-                loaded = await load_series(client, "Binance", "BTCUSDT")
+                loaded = await load_series(client, SOURCE, "BTCUSDT")
             self.assertEqual(loaded[1][0].close, Decimal("102"))
             self.assertTrue(any("limit=62" in url for url in urls))
             self.assertTrue(any("limit=98" in url for url in urls))

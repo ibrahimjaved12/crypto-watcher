@@ -58,16 +58,18 @@ export async function analyzeForUser(
   const dbController = new AbortController();
   const dbTimer = setTimeout(() => dbController.abort(), 5_000);
   let payload;
+  let expectedInstrumentId = "";
   try {
     const watched = await supabase
       .from("watchlist_items")
-      .select("symbol")
+      .select("symbol,instrument_id")
       .eq("user_id", userId)
       .eq("symbol", symbol)
       .abortSignal(dbController.signal)
       .maybeSingle();
     if (watched.error) throw new Error("watchlist unavailable");
     if (!watched.data) return { ok: false, error: "This pair is not in your watchlist." };
+    expectedInstrumentId = watched.data.instrument_id;
     const [settings, baseline] = await Promise.all([
       supabase
         .from("monitor_settings")
@@ -92,6 +94,7 @@ export async function analyzeForUser(
     payload = {
       schema_version: 1,
       symbol,
+      instrument_id: watched.data.instrument_id,
       settings: {
         threshold_pct: String(settings.data?.threshold_pct ?? 2),
         cooldown_minutes: settings.data?.cooldown_minutes ?? 15,
@@ -165,7 +168,12 @@ export async function analyzeForUser(
     const raw = await response.text();
     if (raw.length > 128_000) throw new Error("oversized response");
     const parsed = analysisResponse.safeParse(JSON.parse(raw));
-    if (!parsed.success || parsed.data.symbol !== symbol) {
+    if (
+      !parsed.success ||
+      parsed.data.symbol !== symbol ||
+      parsed.data.instrument.id !== expectedInstrumentId ||
+      parsed.data.instrument.native_symbol !== symbol
+    ) {
       return { ok: false, error: "The Python service returned an invalid analysis response." };
     }
     return { ok: true, analysis: parsed.data };

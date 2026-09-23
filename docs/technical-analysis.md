@@ -64,12 +64,12 @@ history loading. Browser history loading defaults to manual-only and requires
 
 ## Calculation contract
 
-- Timeframes: 15m, 1h, 4h, using exchange-native spot USDT candles.
+- Timeframes: 15m, 1h, 4h, using perpetual-futures trade-price candles.
 - Fetch 250 bars per timeframe. Require at least 200 completed, consecutive,
   aligned candles with valid OHLC and nonnegative base-asset volume.
 - Exclude forming candles. Reject missing or duplicate completed bars.
 - Reject a last close older than one interval plus two minutes.
-- Binance, OKX, then Kraken fallback; never stitch exchanges into one series.
+- Try Binance USDⓈ-M, OKX USDT swaps, then Kraken perpetuals.
 - EMA20/50/200, MACD12/26/9, Bollinger20/2, Wilder ADX14, RSI14 and ATR14
   use `technicalindicators` 3.1.0.
 - Volume change compares the latest bar with the mean of the previous 20 bars,
@@ -130,8 +130,8 @@ a 15m observation detected at 12:05 is evaluated at 13:15.
 
 This is a descriptive forward price change, not a simulated executable trade,
 direction-adjusted win rate, or profit after fees, slippage, and funding.
-The starting close may precede detection. The original exchange alone is used
-for outcomes, including when the current signal uses a fallback exchange.
+The starting close may precede detection. Outcomes use the same
+`binance-usdm:<symbol>` contract and trade-price candle source as the saved signal.
 Missing target history becomes `unavailable`; provider failures leave it pending
 and are retried. Outcomes are processed while the pair remains watched and
 monitoring is enabled. Removing or pausing a pair preserves history but pauses
@@ -166,4 +166,5 @@ The dashboard displays saved history with timeframe and symbol filters. No paid
 API, LLM key, or Python deployment is required for this module.
 
 References: [technicalindicators](https://github.com/anandanand84/technicalindicators),
-[OKX candle format](https://app.okx.com/docs-v5/en).
+[OKX candles](https://www.okx.com/docs-v5/en/), and
+[Kraken Futures candles](https://docs.kraken.com/api/docs/futures-api/charts/candles).

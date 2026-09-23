@@ -13,7 +13,20 @@ const decimal = z
   .regex(/^-?\d+(\.\d+)?(E[+-]?\d+)?$/i)
   .refine((value) => Number.isFinite(Number(value)));
 const timestamp = z.number().int().min(0).max(4102444800000);
-const source = z.enum(["Binance", "OKX", "Kraken"]);
+const source = z.enum(["binance-usdm", "okx-usdt-swap", "kraken-futures"]);
+const instrument = z.object({
+  id: z.string().max(64),
+  exchange: z.literal("binance"),
+  native_symbol: z.string().max(16),
+  market_type: z.literal("futures"),
+  contract_type: z.literal("perpetual"),
+  base_asset: z.string().max(16),
+  quote_asset: z.literal("USDT"),
+  margin_asset: z.literal("USDT"),
+  settlement_asset: z.literal("USDT"),
+  linear: z.literal(true),
+  contract_multiplier: z.literal(1),
+});
 const windowResult = z.object({
   window_minutes: z.number().int(),
   interval_minutes: z.number().int(),
@@ -31,6 +44,14 @@ export const analysisResponse = z.object({
   symbol: z.string().max(16),
   status: z.enum(["ok", "partial", "unavailable"]),
   source: source.nullable(),
+  instrument,
+  price_type: z.literal("trade"),
+  endpoint: z.enum([
+    "/fapi/v1/klines",
+    "/api/v5/market/candles",
+    "/api/charts/v1/trade/:symbol/:resolution",
+  ]),
+  retrieved_at_ms: timestamp,
   as_of_ms: timestamp,
   price: decimal.nullable(),
   observed_at_ms: timestamp.nullable(),

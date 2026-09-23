@@ -75,7 +75,13 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
   let reads = 0;
   globalThis.__activityFetch = () => {
     fetches++;
-    return { source: "test", candles: [{ time: 0, close: 100 }] };
+    return {
+      source: "binance-usdm",
+      instrument: { id: "binance-usdm:BTCUSDT" },
+      endpoint: "/fapi/v1/klines",
+      priceType: "trade",
+      candles: [{ time: 0, close: 100 }],
+    };
   };
   const { runTA } = await import(
     await moduleUrl("../src/lib/ta/engine.server.ts", {
