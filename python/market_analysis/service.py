@@ -6,8 +6,12 @@ import httpx
 
 from .core import MINUTE, analyze, percentage_change, positive
 from .cumulative import Baseline, observe
-from .providers import (PROVIDERS, exchange_info_url, instrument,
-                        parse, provider_endpoint, request_url, validate_exchange_info)
+from .providers import (ANALYSIS_PROVIDERS, exchange_info_url, instrument, parse,
+                        parse_technical, provider_endpoint, request_url,
+                        source_instrument, validate_exchange_info)
+from .technical import (MINIMUM_HISTORY, SUPPORTED_TIMEFRAMES, TA_VERSION,
+                        INTERPRETATION_VERSION, FuturesInstrument, TechnicalConfig,
+                        TechnicalInput, calculate_technical_analysis)
 
 
 async def load_series(client, provider, symbol):
@@ -29,6 +33,38 @@ async def load_series(client, provider, symbol):
         if isinstance(result, BaseException):
             raise result
     return dict(zip((1, 15), results))
+
+
+async def load_workload(client, provider, symbol):
+    """Fetch one provider's complete movement and TA workload concurrently."""
+    metadata_url = exchange_info_url(provider, symbol)
+    if metadata_url:
+        metadata = await client.get(metadata_url)
+        metadata.raise_for_status()
+        if len(metadata.content) > 4_000_000:
+            raise ValueError("oversized exchange information response")
+        validate_exchange_info(metadata.json(), symbol, provider)
+
+    async def get(interval, limit):
+        response = await client.get(request_url(provider, symbol, interval, limit))
+        response.raise_for_status()
+        if len(response.content) > 2_000_000:
+            raise ValueError("oversized provider response")
+        return response.json()
+
+    intervals = ((1, 62), (15, 250), (60, 250), (240, 250))
+    bodies = await asyncio.gather(*(get(interval, limit) for interval, limit in intervals),
+                                  return_exceptions=True)
+    for result in bodies:
+        if isinstance(result, BaseException):
+            raise result
+    raw = dict(zip((interval for interval, _ in intervals), bodies))
+    return {
+        "rolling": {1: parse(provider, raw[1], 1), 15: parse(provider, raw[15], 15)},
+        "technical": {timeframe: parse_technical(provider, raw[timeframe], timeframe)
+                      for timeframe in SUPPORTED_TIMEFRAMES},
+        "source_instrument": source_instrument(provider, symbol),
+    }
 
 
 def latest_close(candles, now_ms):
@@ -85,34 +121,96 @@ def baseline_preview(request, price, observed_ms, source, now_ms):
     return result
 
 
-async def analyze_request(request, client, loader=load_series, clock=lambda: time.time_ns() // 1_000_000):
+def compact_technical(result):
+    return {key: result[key] for key in (
+        "schema_version", "status", "reason", "classification", "direction", "score",
+        "factor_breakdown", "reasons", "patterns", "timeframe_minutes",
+        "candle_open_time_ms", "candle_close_time_ms", "source_event_time_ms",
+        "evaluation_time_ms", "detection_time_ms", "ta_version", "strategy_version",
+        "provenance")}
+
+
+def technical_results(candles_by_frame, provider, symbol, now_ms):
+    identity = source_instrument(provider, symbol)
+    contract = FuturesInstrument(**identity)
+    output = {}
+    for timeframe in SUPPORTED_TIMEFRAMES:
+        candles = candles_by_frame[timeframe]
+        duration = timeframe * MINUTE
+        completed_closes = [c.open_ms + duration for c in candles
+                            if c.complete and c.open_ms + duration <= now_ms]
+        source_time = max(completed_closes, default=0)
+        request = TechnicalInput(
+            instrument=contract,
+            timeframe_minutes=timeframe,
+            candles=candles,
+            source=provider,
+            source_event_time_ms=source_time,
+            evaluation_time_ms=now_ms,
+            detection_time_ms=now_ms,
+            price_type="trade",
+            config=TechnicalConfig(ta_version=TA_VERSION,
+                                   interpretation_version=INTERPRETATION_VERSION,
+                                   minimum_history=MINIMUM_HISTORY),
+        )
+        output[str(timeframe)] = compact_technical(calculate_technical_analysis(request))
+    return output
+
+
+def incomplete_category(rolling, technical):
+    reasons = [row.get("reason") for row in rolling.values() if row.get("status") != "ok"]
+    reasons += [row.get("reason") for row in technical.values() if row.get("status") != "ok"]
+    if any(reason in ("stale", "stale_candles") for reason in reasons):
+        return "stale_data"
+    if any(reason in ("insufficient_history", "missing_candles", "no_completed_candles")
+           for reason in reasons):
+        return "insufficient_history"
+    return "invalid_data" if reasons else None
+
+
+async def analyze_request(request, client, loader=load_workload,
+                          clock=lambda: time.time_ns() // 1_000_000):
     attempts = []
-    for provider in PROVIDERS:
+    for provider in ANALYSIS_PROVIDERS:
         try:
-            series = await loader(client, provider, request.symbol)
+            workload = await loader(client, provider, request.symbol)
             now_ms = clock()
+            series = workload["rolling"]
             last = latest_close(series[1], now_ms)
             rolling = analyze(series, now_ms, request.settings.threshold_pct)
+            technical = technical_results(workload["technical"], provider, request.symbol, now_ms)
             baseline = baseline_preview(request, last.close, last.open_ms + MINUTE, provider, now_ms)
+            status = "ok" if (all(w["status"] == "ok" for w in rolling.values())
+                              and all(w["status"] == "ok" for w in technical.values())) else "partial"
             return {"schema_version": 1, "mode": "read_only", "symbol": request.symbol,
-                    "status": "ok" if all(w["status"] == "ok" for w in rolling.values()) else "partial",
+                    "status": status,
                     "source": provider, "as_of_ms": now_ms, "price": str(last.close),
                     "observed_at_ms": last.open_ms + MINUTE,
                     "instrument": instrument(request.symbol), "price_type": "trade",
+                    "source_instrument": workload["source_instrument"],
                     "endpoint": provider_endpoint(provider), "retrieved_at_ms": now_ms,
                     "threshold_pct": str(request.settings.threshold_pct),
-                    "rolling": rolling, "baseline": baseline, "attempts": attempts}
+                    "rolling": rolling, "technical": technical, "baseline": baseline,
+                    "failure_category": incomplete_category(rolling, technical),
+                    "attempts": attempts}
         except httpx.TimeoutException:
             attempts.append({"source": provider, "reason": "provider_timeout"})
         except httpx.HTTPError:
             attempts.append({"source": provider, "reason": "provider_unavailable"})
-        except (ValueError, TypeError, KeyError, IndexError, AttributeError, ArithmeticError):
-            attempts.append({"source": provider, "reason": "invalid_or_stale_data"})
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError, ArithmeticError) as error:
+            message = str(error).lower()
+            reason = ("stale_data" if "stale" in message
+                      else "insufficient_history" if "no completed" in message
+                      else "invalid_data")
+            attempts.append({"source": provider, "reason": reason})
     now_ms = clock()
     return {"schema_version": 1, "mode": "read_only", "symbol": request.symbol,
             "status": "unavailable", "source": None, "as_of_ms": now_ms,
             "price": None, "observed_at_ms": None,
             "instrument": instrument(request.symbol), "price_type": "trade",
-            "endpoint": "/fapi/v1/klines", "retrieved_at_ms": now_ms,
-            "threshold_pct": str(request.settings.threshold_pct), "rolling": {},
-            "baseline": baseline_preview(request, None, None, None, now_ms), "attempts": attempts}
+            "source_instrument": None,
+            "endpoint": None, "retrieved_at_ms": now_ms,
+            "threshold_pct": str(request.settings.threshold_pct), "rolling": {}, "technical": {},
+            "baseline": baseline_preview(request, None, None, None, now_ms),
+            "failure_category": attempts[-1]["reason"] if attempts else "provider_unavailable",
+            "attempts": attempts}

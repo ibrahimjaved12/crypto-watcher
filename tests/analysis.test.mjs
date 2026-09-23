@@ -71,6 +71,7 @@ function result() {
     symbol: "BTCUSDT",
     status: "unavailable",
     source: null,
+    source_instrument: null,
     instrument: {
       id: "binance-usdm:BTCUSDT",
       exchange: "binance",
@@ -85,13 +86,15 @@ function result() {
       contract_multiplier: 1,
     },
     price_type: "trade",
-    endpoint: "/fapi/v1/klines",
+    endpoint: null,
     retrieved_at_ms: 1704153600000,
     as_of_ms: 1704153600000,
     price: null,
     observed_at_ms: null,
     threshold_pct: "2",
     rolling: {},
+    technical: {},
+    failure_category: "provider_unavailable",
     attempts: [],
     baseline: {
       status: "unavailable",
@@ -279,7 +282,17 @@ test("redirects are never followed and unused error bodies are canceled", async 
               : [401, 403].includes(status)
                 ? "Python service authentication failed. Its server configuration needs checking."
                 : "The Python analysis service is unavailable. Please retry later.";
-      assert.deepEqual(reply, { ok: false, error: expected });
+      const category =
+        status < 400
+          ? "network_or_response"
+          : status === 504
+            ? "timeout"
+            : status === 422
+              ? "invalid_request"
+              : [401, 403].includes(status)
+                ? "service_auth"
+                : "service";
+      assert.deepEqual(reply, { ok: false, error: expected, category });
     }
   }
 });
@@ -371,14 +384,18 @@ test("outbound diagnostics identify every stage without logging private data", a
   }
 });
 
-test("successful analysis does not emit a diagnostic or change its result", async () => {
+test("successful analysis returns transport measurements", async () => {
   const expected = result();
   const { value: reply, logs } = await captureDiagnostics(() =>
     analyzeForUser(db({ watchlist_items: {} }), "user", "BTCUSDT", env, async () =>
       Response.json(expected),
     ),
   );
-  assert.deepEqual(reply, { ok: true, analysis: expected });
+  assert.equal(reply.ok, true);
+  assert.deepEqual(reply.analysis, expected);
+  assert.ok(reply.metrics.duration_ms >= 0);
+  assert.ok(reply.metrics.request_bytes > 0);
+  assert.ok(reply.metrics.response_bytes > 0);
   assert.deepEqual(logs, []);
 });
 
