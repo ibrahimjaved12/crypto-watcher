@@ -43,6 +43,9 @@ const disabledStore: OperationalStore = {
   async listMonitorRuns() {
     return [];
   },
+  async latestCheckpoint() {
+    return null;
+  },
   async diagnostics() {
     return {
       recent_candle_rows: 0,
@@ -182,6 +185,17 @@ export function createOperationalStore(
         .limit(Math.min(Math.max(limit, 1), 100));
       rpcError(error, "monitor-run read");
       return (data ?? []) as unknown as OperationalMonitorRun[];
+    },
+    async latestCheckpoint(userId) {
+      const { data, error } = await client
+        .from("market_data_checkpoints")
+        .select("observed_at")
+        .eq("user_id", userId)
+        .order("observed_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      rpcError(error, "latest checkpoint read");
+      return (data as { observed_at?: string } | null)?.observed_at ?? null;
     },
     async diagnostics(userId) {
       const { data, error } = await client.rpc("get_storage_diagnostics", {

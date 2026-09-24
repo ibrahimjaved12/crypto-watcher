@@ -412,6 +412,30 @@ export type Database = {
         }
         Relationships: []
       }
+      monitor_run_leases: {
+        Row: {
+          acquired_at: string
+          leased_until: string
+          owner_id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          acquired_at?: string
+          leased_until: string
+          owner_id: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          acquired_at?: string
+          leased_until?: string
+          owner_id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       monitor_settings: {
         Row: {
           completed_candle_ta_enabled: boolean
@@ -667,6 +691,14 @@ export type Database = {
         }
         Returns: number
       }
+      claim_monitor_run_lease: {
+        Args: {
+          p_lease_seconds?: number
+          p_owner_id: string
+          p_user_id: string
+        }
+        Returns: boolean
+      }
       get_ta_due_work: {
         Args: {
           p_include_generation: boolean
@@ -695,6 +727,21 @@ export type Database = {
           p_user_id: string
         }
         Returns: Json
+      }
+      release_monitor_run_lease: {
+        Args: {
+          p_owner_id: string
+          p_user_id: string
+        }
+        Returns: undefined
+      }
+      renew_monitor_run_lease: {
+        Args: {
+          p_lease_seconds?: number
+          p_owner_id: string
+          p_user_id: string
+        }
+        Returns: boolean
       }
       record_market_data_checkpoint: {
         Args: {

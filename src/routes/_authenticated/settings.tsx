@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { fetchSettings, saveSettings } from "@/lib/db";
+import { timestampFreshness, type FreshnessState } from "@/lib/freshness";
 import { getOperationalState } from "@/lib/operational.functions";
 import type { CollectorHealthStatus } from "@/lib/operational/types";
 import { useServerFn } from "@tanstack/react-start";
@@ -62,6 +63,12 @@ function collectorBadgeVariant(status: CollectorHealthStatus) {
   return "outline" as const;
 }
 
+function freshnessBadgeVariant(status: FreshnessState) {
+  if (status === "UNAVAILABLE") return "destructive" as const;
+  if (status === "FRESH") return "secondary" as const;
+  return "outline" as const;
+}
+
 function SettingsPage() {
   const loadOperationalState = useServerFn(getOperationalState);
   const queryClient = useQueryClient();
@@ -73,6 +80,8 @@ function SettingsPage() {
   const runs = { data: operational.data?.runs };
   const collectorHealth = operational.data?.collectorHealth ?? [];
   const overallCollectorStatus = collectorOverallStatus(collectorHealth);
+  const activityFreshness = operational.data?.activityFreshness;
+  const freshnessNow = operational.dataUpdatedAt || Date.now();
 
   const [threshold, setThreshold] = useState("2");
   const [cooldown, setCooldown] = useState("15");
@@ -291,12 +300,13 @@ function SettingsPage() {
               </div>
 
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[620px] text-left text-xs">
+                <table className="w-full min-w-[760px] text-left text-xs">
                   <thead className="text-muted-foreground">
                     <tr className="border-b border-border/60">
                       <th className="py-2 pr-3 font-medium">Symbol</th>
                       <th className="py-2 pr-3 font-medium">Interval</th>
                       <th className="py-2 pr-3 font-medium">Status</th>
+                      <th className="py-2 pr-3 font-medium">Latest source event</th>
                       <th className="py-2 pr-3 font-medium">Latest completed</th>
                       <th className="py-2 pr-3 font-medium">Lag</th>
                       <th className="py-2 font-medium">Reconnects</th>
@@ -314,6 +324,9 @@ function SettingsPage() {
                           <Badge variant={collectorBadgeVariant(row.status)}>{row.status}</Badge>
                         </td>
                         <td className="num py-2 pr-3">
+                          {row.last_event_at ? new Date(row.last_event_at).toLocaleString() : "—"}
+                        </td>
+                        <td className="num py-2 pr-3">
                           {row.last_completed_open_time
                             ? new Date(row.last_completed_open_time).toLocaleString()
                             : "—"}
@@ -325,6 +338,79 @@ function SettingsPage() {
                   </tbody>
                 </table>
               </div>
+            </div>
+          ) : null}
+          {activityFreshness ? (
+            <div className="mt-3 space-y-2 border-t border-border/60 pt-3 text-xs">
+              <p className="text-sm font-medium">Activity freshness</p>
+              {collectorHealth.length === 0
+                ? (() => {
+                    const status = timestampFreshness(
+                      activityFreshness.marketCheckpoint.observedAt,
+                      {
+                        available: activityFreshness.marketCheckpoint.available,
+                        now: freshnessNow,
+                        freshForMs: 10 * 60_000,
+                        delayedForMs: 30 * 60_000,
+                      },
+                    );
+                    return (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
+                        <span className="text-muted-foreground">Latest market checkpoint</span>
+                        <span className="num ml-auto">
+                          {activityFreshness.marketCheckpoint.observedAt
+                            ? new Date(
+                                activityFreshness.marketCheckpoint.observedAt,
+                              ).toLocaleString()
+                            : "—"}
+                        </span>
+                      </div>
+                    );
+                  })()
+                : null}
+              {(() => {
+                const status = timestampFreshness(activityFreshness.movement.evaluatedThrough, {
+                  available: activityFreshness.movement.available,
+                  now: freshnessNow,
+                  freshForMs: 10 * 60_000,
+                  delayedForMs: 30 * 60_000,
+                });
+                return (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
+                    <span className="text-muted-foreground">Movement evaluated through</span>
+                    <span className="num ml-auto">
+                      {activityFreshness.movement.evaluatedThrough
+                        ? new Date(activityFreshness.movement.evaluatedThrough).toLocaleString()
+                        : "—"}
+                    </span>
+                  </div>
+                );
+              })()}
+              {activityFreshness.ta.map((entry) => {
+                const duration = entry.timeframeMinutes * 60_000;
+                const status = timestampFreshness(entry.evaluatedAt, {
+                  available: entry.available,
+                  now: freshnessNow,
+                  freshForMs: duration * 2,
+                  delayedForMs: duration * 3,
+                });
+                return (
+                  <div key={entry.timeframeMinutes} className="flex flex-wrap items-center gap-2">
+                    <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
+                    <span className="text-muted-foreground">
+                      Last successful {formatInterval(entry.timeframeMinutes)} TA
+                    </span>
+                    <span className="num ml-auto">
+                      {entry.evaluatedAt ? new Date(entry.evaluatedAt).toLocaleString() : "—"}
+                      {entry.completedCandleAt
+                        ? ` · candle ${new Date(entry.completedCandleAt).toLocaleString()}`
+                        : ""}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           ) : null}
           <ul className="mt-4 space-y-2">

@@ -75,3 +75,27 @@ runtime; the operational lease elects one collector across instances. Disable th
 whole fleet to roll back without simultaneous writers. Health (`LIVE`, `RECOVERING`, `STALE`, or
 `UNAVAILABLE`) is returned only through the authenticated operational-state server function and is
 filtered to the caller's watchlist.
+
+## Monitor overlap and freshness
+
+Manual and scheduled monitor batches use the same renewable, per-user lease in Lovable. The lease
+stores a run owner ID and expires after three minutes unless renewed every minute. Normal completion
+releases it; a crashed process is recoverable after expiry. A competing request returns `skipped`
+without doing market, movement, or TA work. Existing database idempotency remains the final defense:
+`process_cumulative_observation` still owns the atomic baseline/cooldown/alert transition, while TA
+uses the unique `(user_id, symbol, timeframe, candle_at, version)` identity and pending-only outcome
+updates. Collector mode still disables the request-driven TA trigger; disabling collector mode keeps
+that path available.
+
+Apply `supabase/migrations/20260926090000_monitor_run_leases.sql` through the normal Lovable/main
+database migration chain. It does not belong in the external operational migration chain.
+
+Settings reports the collector's exchange source-event time and latest completed candle separately,
+plus movement progress, successful TA evaluation/candle times by timeframe, and monitor results.
+Freshness labels are derived from those persisted domain timestamps; browser refresh time is never
+shown as market freshness. The synchronization outbox remains dormant infrastructure with no current
+durable result domain, so no synchronization timestamp is presented.
+
+Paper trading is still out of scope. Before issue #39 enables simulated positions, that domain must
+add its own durable single-owner/fencing mechanism; the monitor-run and collector leases do not grant
+paper-position ownership.
