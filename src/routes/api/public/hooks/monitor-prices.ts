@@ -5,7 +5,7 @@ import { authenticateCronRequest } from "@/integrations/supabase/cron-auth";
 import {
   DEFAULT_SETTINGS,
   recordRun,
-  runMonitorForUser,
+  runLeasedMonitorForUser,
   type MonitorSettings,
 } from "@/lib/monitor/engine.server";
 import { createMonitorRunContext } from "@/lib/monitor/run-context";
@@ -69,7 +69,7 @@ async function handle(request: Request) {
       user_id: userId,
     };
     try {
-      const result = await runMonitorForUser(supabaseAdmin, userId, settings, runContext);
+      const result = await runLeasedMonitorForUser(supabaseAdmin, userId, settings, runContext);
       if (result.status !== "skipped") await recordRun(supabaseAdmin, result);
       results.push(result);
     } catch (err) {

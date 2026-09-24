@@ -204,7 +204,7 @@ test("scheduled endpoint defaults disabled, authenticates and skips before datab
         "export const authenticateCronRequest=async()=>new Response('Unauthorized',{status:401});",
       ),
       "@/lib/monitor/engine.server": stub(
-        "export const DEFAULT_SETTINGS={}; export const recordRun=()=>{throw Error('must not write')}; export const runMonitorForUser=()=>{throw Error('must not run')};",
+        "export const DEFAULT_SETTINGS={}; export const recordRun=()=>{throw Error('must not write')}; export const runLeasedMonitorForUser=()=>{throw Error('must not run')};",
       ),
       "@/lib/monitor/run-context": stub(
         "export const createMonitorRunContext=()=>{throw Error('must not create context')};",

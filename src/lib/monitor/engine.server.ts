@@ -57,6 +57,9 @@ export type UserRunResult = {
 
 type AdminClient = Pick<SupabaseClient<Database>, "from" | "rpc">;
 
+const MONITOR_LEASE_SECONDS = 180;
+const MONITOR_LEASE_RENEW_MS = 60_000;
+
 export async function runMonitorForUser(
   supabaseAdmin: AdminClient,
   userId: string,
@@ -224,6 +227,106 @@ export async function runMonitorForUser(
     dataSource: source,
     error: [...failures, ...taErrors].join(" | ") || null,
   });
+}
+
+/** Shared durable ownership boundary for both manual and scheduled monitor runs. */
+export async function runLeasedMonitorForUser(
+  supabaseAdmin: AdminClient,
+  userId: string,
+  settings: MonitorSettings,
+  context: MonitorRunContext = createMonitorRunContext(),
+  operationalStore: OperationalStore = getOperationalStore(),
+): Promise<UserRunResult> {
+  const startedAt = performance.now();
+  const startingMetrics = metricsSnapshot(context.metrics);
+  const ownerId = crypto.randomUUID();
+  const leaseResult = (status: UserRunResult["status"], error: string | null): UserRunResult => ({
+    userId,
+    status,
+    symbolsChecked: 0,
+    alertsCreated: 0,
+    dataSource: null,
+    error,
+    durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+    metrics: metricsSince(context.metrics, startingMetrics),
+  });
+
+  context.metrics.databaseWriteAttempts += 1;
+  try {
+    const { data: claimed, error: claimError } = await supabaseAdmin.rpc(
+      "claim_monitor_run_lease",
+      {
+        p_user_id: userId,
+        p_owner_id: ownerId,
+        p_lease_seconds: MONITOR_LEASE_SECONDS,
+      },
+    );
+    if (claimError) {
+      return leaseResult("failed", `Monitor lease unavailable: ${claimError.message}`);
+    }
+    if (!claimed) {
+      context.metrics.databaseNoOps += 1;
+      return leaseResult("skipped", "A monitor run is already in progress for this account.");
+    }
+  } catch (error) {
+    return leaseResult(
+      "failed",
+      `Monitor lease unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  let leaseFailure: string | null = null;
+  let renewal: Promise<void> | null = null;
+  const renew = async () => {
+    context.metrics.databaseWriteAttempts += 1;
+    try {
+      const { data, error } = await supabaseAdmin.rpc("renew_monitor_run_lease", {
+        p_user_id: userId,
+        p_owner_id: ownerId,
+        p_lease_seconds: MONITOR_LEASE_SECONDS,
+      });
+      if (error || !data) {
+        leaseFailure = `Monitor lease renewal failed: ${error?.message ?? "ownership lost"}`;
+      }
+    } catch (error) {
+      leaseFailure = `Monitor lease renewal failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  };
+  const timer = setInterval(() => {
+    if (renewal || leaseFailure) return;
+    renewal = renew().finally(() => {
+      renewal = null;
+    });
+  }, MONITOR_LEASE_RENEW_MS);
+  timer.unref?.();
+
+  let result: UserRunResult;
+  try {
+    result = await runMonitorForUser(supabaseAdmin, userId, settings, context, operationalStore);
+  } finally {
+    clearInterval(timer);
+    if (renewal) await renewal;
+    context.metrics.databaseWriteAttempts += 1;
+    try {
+      const { error } = await supabaseAdmin.rpc("release_monitor_run_lease", {
+        p_user_id: userId,
+        p_owner_id: ownerId,
+      });
+      if (error) leaseFailure ??= `Monitor lease release failed: ${error.message}`;
+    } catch (error) {
+      leaseFailure ??= `Monitor lease release failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
+  }
+
+  if (!leaseFailure) return result;
+  return {
+    ...result,
+    status: result.status === "success" ? "partial" : result.status,
+    error: [result.error, leaseFailure].filter(Boolean).join(" | "),
+    metrics: metricsSince(context.metrics, startingMetrics),
+  };
 }
 
 export async function recordRun(

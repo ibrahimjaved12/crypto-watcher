@@ -111,6 +111,7 @@ export interface OperationalStore {
     run: Omit<OperationalMonitorRun, "id" | "ran_at">,
   ): Promise<void>;
   listMonitorRuns(userId: string, limit?: number): Promise<OperationalMonitorRun[]>;
+  latestCheckpoint(userId: string): Promise<string | null>;
   diagnostics(userId: string): Promise<StorageDiagnostics>;
   recordCollectorCandles(candles: CollectorCandle[]): Promise<string[]>;
   recordCollectorHealth(input: {

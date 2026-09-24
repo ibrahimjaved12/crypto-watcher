@@ -15,7 +15,7 @@ async function moduleUrl(path, imports = {}) {
 
 const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 
-const { DEFAULT_SETTINGS, recordRun, runMonitorForUser } = await import(
+const { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser, runMonitorForUser } = await import(
   await moduleUrl("../src/lib/monitor/engine.server.ts", {
     "@/lib/market/providers.server": stub(`
       export async function loadCandles(symbol) {
@@ -123,6 +123,43 @@ test("the master and collection controls stop work before provider or database I
       ta: [],
     });
   }
+});
+
+test("the shared monitor lease skips work already owned by another run", async () => {
+  const context = {
+    metrics: {
+      exchangeRequests: 0,
+      candleRows: 0,
+      marketCacheHits: 0,
+      taCalculations: 0,
+      taSignalsSaved: 0,
+      taOutcomesUpdated: 0,
+      databaseReads: 0,
+      databaseWriteAttempts: 0,
+      databaseNoOps: 0,
+    },
+    observation() {
+      throw new Error("monitor work must not start");
+    },
+  };
+  const result = await runLeasedMonitorForUser(
+    {
+      from() {
+        throw new Error("watchlist must not be read");
+      },
+      async rpc(name) {
+        assert.equal(name, "claim_monitor_run_lease");
+        return { data: false, error: null };
+      },
+    },
+    "user",
+    settings(),
+    context,
+    { enabled: false },
+  );
+  assert.equal(result.status, "skipped");
+  assert.match(result.error, /already in progress/);
+  assert.equal(context.metrics.databaseNoOps, 1);
 });
 
 test("the feature flag selects one checkpoint writer without dual writes", async () => {

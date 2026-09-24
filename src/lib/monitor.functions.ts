@@ -7,7 +7,7 @@ export const runMyMonitorCheck = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { DEFAULT_SETTINGS, recordRun, runMonitorForUser } =
+    const { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser } =
       await import("@/lib/monitor/engine.server");
 
     const userId = context.userId;
@@ -20,7 +20,7 @@ export const runMyMonitorCheck = createServerFn({ method: "POST" })
       .maybeSingle();
     if (settingsError) throw new Error(settingsError.message);
 
-    const result = await runMonitorForUser(supabaseAdmin, userId, {
+    const result = await runLeasedMonitorForUser(supabaseAdmin, userId, {
       user_id: userId,
       threshold_pct: Number(settings?.threshold_pct ?? DEFAULT_SETTINGS.threshold_pct),
       window_minutes: settings?.window_minutes ?? DEFAULT_SETTINGS.window_minutes,
