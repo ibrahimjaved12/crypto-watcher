@@ -13,10 +13,8 @@ async function moduleUrl(path, imports = {}) {
     outputText = outputText.replaceAll(`"${specifier}"`, JSON.stringify(target));
   return `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`;
 }
-const { closedCandles, analyze, patterns, outcomeDue, TA_VERSION } = await import(
-  await moduleUrl("../src/lib/ta/core.ts", {
-    technicalindicators: import.meta.resolve("technicalindicators"),
-  })
+const { completedCandles, outcomeDue, TA_VERSION } = await import(
+  await moduleUrl("../src/lib/ta/schedule.ts")
 );
 const duration = 15 * 60_000;
 const now = 1800000000000;
@@ -33,6 +31,50 @@ const candle = (patch = {}) => ({
 });
 const series = () =>
   Array.from({ length: 249 }, (_, i) => candle({ time: end - (249 - i) * duration }));
+const pythonResults = async (requests) =>
+  requests.map((request) => {
+    const selected = request.candles.find(
+      (value) => value.open_ms === request.target_candle_open_time_ms,
+    );
+    const candleCount =
+      request.candles.findIndex((value) => value.open_ms === request.target_candle_open_time_ms) +
+      1;
+    const factors = Object.fromEntries(
+      ["trend", "momentum", "patterns", "volume"].map((name) => [
+        name,
+        { classification: "neutral", contribution: 0, reason: `${name}_neutral` },
+      ]),
+    );
+    return {
+      schema_version: 1,
+      status: "ok",
+      reason: null,
+      classification: "neutral",
+      direction: "neutral",
+      score: 0,
+      atr_pct: 1,
+      factor_breakdown: factors,
+      reasons: Object.values(factors).map((value) => value.reason),
+      indicators: { candle: selected, candle_count: candleCount, patterns: [] },
+      patterns: [],
+      timeframe_minutes: request.timeframe_minutes,
+      candle_open_time_ms: request.target_candle_open_time_ms,
+      candle_close_time_ms: request.target_candle_open_time_ms + request.timeframe_minutes * 60_000,
+      source_event_time_ms: request.source_event_time_ms,
+      evaluation_time_ms: request.evaluation_time_ms,
+      detection_time_ms: request.detection_time_ms,
+      ta_version: "ta-v2",
+      strategy_version: "interpretation-v1",
+      provenance: {
+        ...request.instrument,
+        source: request.source,
+        price_type: request.price_type,
+        candle_count: candleCount,
+        warmup_candle_count: 0,
+        missing_open_times_ms: [],
+      },
+    };
+  });
 const futuresMetadata = (status = "TRADING") => ({
   symbol: "BTCUSDT",
   pair: "BTCUSDT",
@@ -50,127 +92,26 @@ const futuresMetadata = (status = "TRADING") => ({
   ],
 });
 
-test("completed candles reject bad prices, gaps, duplicates, insufficient history and stale data", () => {
+test("TA scheduling accepts only aligned completed history and uses the Python version", () => {
   const bars = series();
   assert.equal(
-    closedCandles([...bars, candle({ time: end, high: 99999, complete: false })], 15, now).length,
+    completedCandles([...bars, candle({ time: end, high: 99999, complete: false })], 15, now)
+      .length,
     249,
   );
-  assert.equal(closedCandles([...bars].reverse(), 15, now).length, 249);
-  assert.throws(() => closedCandles(bars.slice(60), 15, now), /200/);
-  assert.throws(() => closedCandles([...bars, bars.at(-1)], 15, now), /duplicate/);
+  assert.equal(completedCandles([...bars].reverse(), 15, now).length, 249);
+  assert.throws(() => completedCandles(bars.slice(60), 15, now), /200/);
+  assert.throws(() => completedCandles([...bars, bars.at(-1)], 15, now), /duplicate/);
   assert.throws(
     () =>
-      closedCandles(
+      completedCandles(
         bars.filter((_, i) => i !== 100),
         15,
         now,
       ),
     /gap/,
   );
-  assert.throws(() => closedCandles(bars, 15, now + 2 * duration), /Stale/);
-  for (const patch of [
-    { volume: -1 },
-    { high: 99 },
-    { low: 101 },
-    { open: NaN },
-    { close: Infinity },
-  ]) {
-    assert.throws(() => closedCandles([...bars.slice(0, -1), candle(patch)], 15, now), /Invalid/);
-  }
-});
-
-test("indicator values on constant and rising prices and zero volume", () => {
-  const values = analyze(series());
-  assert.equal(values.ema20, 100);
-  assert.equal(values.ema50, 100);
-  assert.equal(values.atr14, 4);
-  assert.equal(values.volume_change_pct, 0);
-  const rising = series().map((c, i) => ({
-    ...c,
-    open: i + 100,
-    close: i + 101,
-    high: i + 102,
-    low: i + 99,
-  }));
-  assert.equal(analyze(rising).rsi14, 100);
-  assert.ok(Math.abs(analyze(rising).ema20 - (349 - 9.5)) < 1e-8);
-  assert.equal(analyze(series().map((c) => ({ ...c, volume: 0 }))).volume_change_pct, null);
-  const spike = series();
-  spike.at(-1).volume = 250;
-  assert.equal(analyze(spike).volume_change_pct, 150);
-  assert.ok(analyze(spike).patterns.includes("volume_spike"));
-});
-
-test("v2 EMA200, MACD, bands, ADX and range agree with independently known series", () => {
   assert.equal(TA_VERSION, "ta-v2");
-  const rising = series().map((c, i) => ({
-    ...c,
-    open: i + 100,
-    close: i + 101,
-    high: i + 102,
-    low: i + 99,
-  }));
-  const values = analyze(rising);
-  const near = (actual, expected) =>
-    assert.ok(Math.abs(actual - expected) < 1e-8, `${actual} != ${expected}`);
-  near(values.ema200, 349 - 99.5);
-  near(values.macd.line, 7);
-  near(values.macd.signal, 7);
-  near(values.macd.histogram, 0);
-  near(values.bollinger.middle, 339.5);
-  near(values.bollinger.upper, 339.5 + 2 * Math.sqrt(33.25));
-  near(values.bollinger.lower, 339.5 - 2 * Math.sqrt(33.25));
-  near(values.adx14, 100);
-  assert.deepEqual(values.range20, { low: 327, high: 349 });
-  assert.equal(values.volume_ratio, 1);
-  assert.equal(values.volume_average20, 100);
-  const altered = rising.map((c) => ({ ...c }));
-  altered.at(-1).high = 10000;
-  altered.at(-1).volume = 400;
-  assert.deepEqual(analyze(altered).range20, values.range20);
-  assert.equal(analyze(altered).volume_average20, 100);
-  assert.equal(analyze(altered).volume_ratio, 4);
-});
-
-test("v2 flat prices have finite persisted values and forming candles cannot affect indicators", () => {
-  const flat = series().map((c) => ({ ...c, high: 100, low: 100, volume: 0 }));
-  const values = analyze(flat);
-  assert.equal(values.bollinger.bandwidth_pct, 0);
-  assert.equal(values.bollinger.percent_b, null);
-  assert.equal(values.volume_ratio, null);
-  assert.deepEqual(JSON.parse(JSON.stringify(values)), values);
-  const withForming = [
-    ...flat,
-    candle({ time: end, high: 10000, close: 9999, volume: 99999, complete: false }),
-  ];
-  assert.deepEqual(analyze(closedCandles(withForming, 15, now)), values);
-});
-
-test("numeric candle rules, trend context and zero-range bars", () => {
-  assert.deepEqual(patterns(candle({ high: 100, low: 100 }), candle(), 0), []);
-  assert.ok(patterns(candle(), candle(), 0).includes("doji"));
-  const hammer = candle({ open: 100, close: 101, low: 97, high: 101.3 });
-  assert.ok(patterns(hammer, candle(), -1).includes("hammer"));
-  assert.ok(!patterns(hammer, candle(), 1).includes("hammer"));
-  assert.ok(
-    patterns(candle({ open: 100, close: 101, low: 99.7, high: 104 }), candle(), 1).includes(
-      "shooting_star",
-    ),
-  );
-  assert.ok(
-    patterns(candle({ open: 98, close: 102 }), candle({ open: 101, close: 99 }), 0).includes(
-      "bullish_engulfing",
-    ),
-  );
-  assert.ok(
-    patterns(candle({ open: 102, close: 98 }), candle({ open: 99, close: 101 }), 0).includes(
-      "bearish_engulfing",
-    ),
-  );
-});
-
-test("outcome is four complete intervals beyond detection, never a pre-detection target", () => {
   assert.equal(outcomeDue(new Date(end).toISOString(), 15), end + 4 * duration);
   assert.equal(outcomeDue(new Date(end + 1).toISOString(), 15), end + 5 * duration);
 });
@@ -190,6 +131,7 @@ test("TA persistence deduplicates futures snapshots and enforces user read isola
       "20260921090000_activity_domains.sql",
       "20260923090000_binance_usdm_futures.sql",
       "20260924090000_monitor_efficiency.sql",
+      "20260924120000_python_scheduled_ta.sql",
     ]) {
       await db.exec(
         await readFile(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"),
@@ -197,8 +139,18 @@ test("TA persistence deduplicates futures snapshots and enforces user read isola
     }
     await db.exec(`INSERT INTO watchlist_items(user_id,symbol,instrument_id) VALUES
       ('00000000-0000-0000-0000-000000000001','BTCUSDT','binance-usdm:BTCUSDT')`);
-    const insert = `INSERT INTO ta_signals(user_id,symbol,instrument_id,timeframe,candle_at,source,version,price,indicators,patterns)
-      VALUES ('00000000-0000-0000-0000-000000000001','BTCUSDT','binance-usdm:BTCUSDT',15,now(),'binance-usdm','ta-v2',100,'{}','{doji}')`;
+    const insert = `INSERT INTO ta_signals(
+      user_id,symbol,instrument_id,source_instrument_id,source_native_symbol,
+      timeframe,candle_at,source_event_at,evaluated_at,detected_at,source,version,
+      strategy_version,classification,score,atr_pct,factor_breakdown,reasons,
+      price,indicators,patterns
+    ) VALUES (
+      '00000000-0000-0000-0000-000000000001','BTCUSDT','binance-usdm:BTCUSDT',
+      'binance-usdm:BTCUSDT','BTCUSDT',15,'2025-12-31T23:00:00Z',
+      '2025-12-31T23:15:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',
+      'binance-usdm','ta-v2','interpretation-v1','neutral',0,1,'{}','{trend_neutral}',
+      100,'{}','{doji}'
+    )`;
     await db.exec("BEGIN");
     await db.exec(insert);
     await db.exec(insert + " ON CONFLICT(user_id,symbol,timeframe,candle_at,version) DO NOTHING");
@@ -216,7 +168,14 @@ test("TA persistence deduplicates futures snapshots and enforces user read isola
     await assert.rejects(db.exec("UPDATE ta_signals SET price=1"), /permission denied/);
 
     await db.exec("RESET ROLE; SET ROLE service_role");
-    await db.exec("UPDATE ta_signals SET detected_at='2026-01-01T00:00:00Z'");
+    await assert.rejects(
+      db.exec("UPDATE ta_signals SET score=10"),
+      /conclusion and provenance are immutable/,
+    );
+    await assert.rejects(
+      db.exec("DELETE FROM ta_signals"),
+      /conclusion and provenance are immutable/,
+    );
     const due = await db.query(
       `SELECT * FROM get_ta_due_work(
         '00000000-0000-0000-0000-000000000001','BTCUSDT','ta-v2',
@@ -440,19 +399,17 @@ test("TA due gating skips completed work and bounds catch-up batches", async () 
   const now = 1_800_000_000_000;
   const oldNow = Date.now;
   Date.now = () => now;
-  const core = `data:text/javascript,${encodeURIComponent(`
-    export const TA_FRAMES=[15,60,240],TA_VERSION='ta-v2';
-    export const closedCandles=(candles)=>candles;
-    export const analyze=()=>({patterns:[]});
-    export const outcomeDue=()=>0;
-  `)}`;
   const contextModule = `data:text/javascript,${encodeURIComponent(`
     export const createMonitorRunContext=()=>{throw Error('explicit context required')};
   `)}`;
   const { latestCompletedCandleAt, runTA, TA_CATCH_UP_LIMIT } = await import(
     await moduleUrl("../src/lib/ta/engine.server.ts", {
       "../activity-controls": await moduleUrl("../src/lib/activity-controls.ts"),
-      "./core": core,
+      "./python-client.server": "data:text/javascript,export const calculateTechnicalBatch=()=>{};",
+      "./python-contract": await moduleUrl("../src/lib/ta/python-contract.ts", {
+        zod: import.meta.resolve("zod"),
+      }),
+      "./schedule": await moduleUrl("../src/lib/ta/schedule.ts"),
       "../monitor/run-context": contextModule,
     })
   );
@@ -520,13 +477,13 @@ test("TA due gating skips completed work and bounds catch-up batches", async () 
       },
     };
 
-    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context), []);
+    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, pythonResults), []);
     assert.equal(providerCalls, 0);
     assert.equal(upserts.length, 0);
     assert.equal(context.metrics.databaseNoOps, 3);
 
     latestOffset = 10;
-    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context), []);
+    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, pythonResults), []);
     assert.equal(providerCalls, 3);
     assert.equal(upserts.length, 3);
     assert.ok(upserts.every((rows) => rows.length === TA_CATCH_UP_LIMIT));
@@ -540,15 +497,14 @@ test("TA due gating skips completed work and bounds catch-up batches", async () 
 });
 
 test("TA runner isolates frame failures and settles on the recorded futures source", async () => {
-  const core = await moduleUrl("../src/lib/ta/core.ts", {
-    technicalindicators: import.meta.resolve("technicalindicators"),
-  });
-  const provider = `data:text/javascript,export const loadTACandles = (...args) => globalThis.__taLoad(...args);`;
   const { runTA } = await import(
     await moduleUrl("../src/lib/ta/engine.server.ts", {
       "../activity-controls": await moduleUrl("../src/lib/activity-controls.ts"),
-      "./core": core,
-      "../market/providers.server": provider,
+      "./python-client.server": "data:text/javascript,export const calculateTechnicalBatch=()=>{};",
+      "./python-contract": await moduleUrl("../src/lib/ta/python-contract.ts", {
+        zod: import.meta.resolve("zod"),
+      }),
+      "./schedule": await moduleUrl("../src/lib/ta/schedule.ts"),
       "../monitor/run-context": `data:text/javascript,${encodeURIComponent(`
         const zero=()=>({exchangeRequests:0,candleRows:0,marketCacheHits:0,taCalculations:0,taSignalsSaved:0,taOutcomesUpdated:0,databaseReads:0,databaseWriteAttempts:0,databaseNoOps:0});
         export const createMonitorRunContext=()=>({metrics:zero(),ta:(...args)=>globalThis.__taLoad(...args)});
@@ -623,7 +579,7 @@ test("TA runner isolates frame failures and settles on the recorded futures sour
     },
   };
   try {
-    const errors = await runTA(db, "owner", "BTCUSDT");
+    const errors = await runTA(db, "owner", "BTCUSDT", undefined, pythonResults);
     assert.equal(errors.length, 1);
     assert.match(errors[0], /60m.*feed down/);
     assert.equal(writes.length, 2);

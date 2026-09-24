@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
-import { interpretTA, explainTA } from "@/lib/ta/interpretation";
+import { explainTA } from "@/lib/ta/interpretation";
 
 export function TechnicalAnalysis() {
   const automatic = automaticQueryOptions(import.meta.env["VITE_TA_HISTORY_AUTO_REFRESH_ENABLED"]);
@@ -22,7 +22,7 @@ export function TechnicalAnalysis() {
       let query = supabase
         .from("ta_signals")
         .select(
-          "id, symbol, timeframe, candle_at, source, version, price, indicators, patterns, outcome_status, return_pct",
+          "id, symbol, timeframe, candle_at, source, source_native_symbol, version, strategy_version, price, classification, score, atr_pct, factor_breakdown, reasons, indicators, patterns, outcome_status, return_pct",
         )
         .order("candle_at", { ascending: false })
         .order("id", { ascending: false })
@@ -133,14 +133,26 @@ export function TechnicalAnalysis() {
             <tbody>
               {history.data.slice(0, 25).map((row) => {
                 const values = (row.indicators ?? {}) as Record<string, unknown>;
-                const interpretation = interpretTA(row.price, row.indicators, row.patterns);
+                const factors = (row.factor_breakdown ?? {}) as Record<string, unknown>;
+                const factor = (name: string) => {
+                  const value = factors[name];
+                  return value && typeof value === "object" && !Array.isArray(value)
+                    ? (value as Record<string, unknown>)
+                    : {};
+                };
+                const label = (value: unknown) =>
+                  typeof value === "string"
+                    ? value.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())
+                    : "Unavailable";
                 const signed = (v: number | null) =>
                   v === null ? "Unavailable" : v > 0 ? `+${v}` : String(v);
                 return (
                   <tr key={row.id} className="border-b border-border/50 align-top">
                     <td className="p-2">
                       {row.symbol}
-                      <div className="text-muted-foreground">{row.source}</div>
+                      <div className="text-muted-foreground">
+                        {row.source} · {row.source_native_symbol}
+                      </div>
                       <div className="text-muted-foreground">
                         {row.timeframe === 15 ? "15m" : `${row.timeframe / 60}h`} · {row.version}
                       </div>
@@ -157,17 +169,19 @@ export function TechnicalAnalysis() {
                     <td className="p-2 min-w-52">
                       <div
                         className={
-                          interpretation.trend === "Bullish"
+                          row.classification === "bullish"
                             ? "text-emerald-400"
-                            : interpretation.trend === "Bearish"
+                            : row.classification === "bearish"
                               ? "text-rose-400"
                               : "text-muted-foreground"
                         }
                       >
-                        {interpretation.trend} trend
+                        {label(factor("trend")["classification"])} trend
                       </div>
-                      <div>{interpretation.momentum} momentum</div>
-                      <div className="mt-1 text-muted-foreground">{interpretation.support}</div>
+                      <div>{label(factor("momentum")["classification"])} momentum</div>
+                      <div className="mt-1 text-muted-foreground">
+                        {label(factor("patterns")["classification"])}
+                      </div>
                       <details className="mt-2 max-w-md">
                         <summary className="cursor-pointer">Indicator explanations</summary>
                         <dl className="mt-2 space-y-3">
@@ -185,23 +199,34 @@ export function TechnicalAnalysis() {
                     <td className="p-2 min-w-44">
                       <details>
                         <summary className="cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-2">
-                          {signed(interpretation.score)}{" "}
-                          <span className="text-muted-foreground">/ ±100</span>
+                          {signed(row.score)} <span className="text-muted-foreground">/ ±100</span>
                         </summary>
                         <dl className="mt-2 space-y-1">
-                          {Object.entries(interpretation.contributions).map(([label, points]) => (
-                            <div key={label} className="flex justify-between gap-3">
-                              <dt className="capitalize">{label}</dt>
-                              <dd>{signed(points)}</dd>
-                            </div>
-                          ))}
+                          {Object.entries(factors).map(([name, raw]) => {
+                            const value =
+                              raw && typeof raw === "object" && !Array.isArray(raw)
+                                ? (raw as Record<string, unknown>)
+                                : {};
+                            const points =
+                              typeof value["contribution"] === "number"
+                                ? value["contribution"]
+                                : null;
+                            return (
+                              <div key={name} className="flex justify-between gap-3">
+                                <dt className="capitalize" title={label(value["reason"])}>
+                                  {name}
+                                </dt>
+                                <dd>{signed(points)}</dd>
+                              </div>
+                            );
+                          })}
                         </dl>
                         <p className="mt-2 text-muted-foreground">
                           Rule-based bias, not a probability. Uses EMA20/50 trend, RSI, patterns and
                           volume only. MACD, EMA200, bands, ADX and range provide separate context
                           and add no points.
                         </p>
-                        <span className="text-muted-foreground">{interpretation.version}</span>
+                        <span className="text-muted-foreground">{row.strategy_version}</span>
                       </details>
                     </td>
                     <td className="p-2">
@@ -212,9 +237,7 @@ export function TechnicalAnalysis() {
                     <td className="p-2">
                       {number(values["atr14"])}
                       <div className="text-muted-foreground">
-                        {interpretation.atrPct === null
-                          ? "--"
-                          : `${interpretation.atrPct.toFixed(2)}%`}
+                        {row.atr_pct === null ? "--" : `${row.atr_pct.toFixed(2)}%`}
                       </div>
                     </td>
                     <td className="p-2">

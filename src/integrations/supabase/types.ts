@@ -524,9 +524,13 @@ export type Database = {
       }
       ta_signals: {
         Row: {
+          atr_pct: number | null
           candle_at: string
+          classification: string
           detected_at: string
           endpoint: string
+          evaluated_at: string
+          factor_breakdown: Json
           id: string
           indicators: Json
           instrument_id: string
@@ -536,17 +540,27 @@ export type Database = {
           patterns: string[]
           price: number
           price_type: string
+          reasons: string[]
           return_pct: number | null
+          score: number | null
           source: string
+          source_event_at: string
+          source_instrument_id: string
+          source_native_symbol: string
+          strategy_version: string
           symbol: string
           timeframe: number
           user_id: string
           version: string
         }
         Insert: {
+          atr_pct?: number | null
           candle_at: string
-          detected_at?: string
+          classification: string
+          detected_at: string
           endpoint?: string
+          evaluated_at: string
+          factor_breakdown: Json
           id?: string
           indicators: Json
           instrument_id: string
@@ -556,17 +570,27 @@ export type Database = {
           patterns: string[]
           price: number
           price_type?: string
+          reasons: string[]
           return_pct?: number | null
+          score?: number | null
           source: string
+          source_event_at: string
+          source_instrument_id: string
+          source_native_symbol: string
+          strategy_version: string
           symbol: string
           timeframe: number
           user_id: string
           version: string
         }
         Update: {
+          atr_pct?: number | null
           candle_at?: string
+          classification?: string
           detected_at?: string
           endpoint?: string
+          evaluated_at?: string
+          factor_breakdown?: Json
           id?: string
           indicators?: Json
           instrument_id?: string
@@ -576,8 +600,14 @@ export type Database = {
           patterns?: string[]
           price?: number
           price_type?: string
+          reasons?: string[]
           return_pct?: number | null
+          score?: number | null
           source?: string
+          source_event_at?: string
+          source_instrument_id?: string
+          source_native_symbol?: string
+          strategy_version?: string
           symbol?: string
           timeframe?: number
           user_id?: string

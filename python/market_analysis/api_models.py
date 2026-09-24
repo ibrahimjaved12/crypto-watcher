@@ -113,14 +113,21 @@ class TechnicalAnalysisRequest(InputModel):
     schema_version: Literal[1]
     instrument: TechnicalInstrumentRequest
     timeframe_minutes: Literal[15, 60, 240]
-    candles: tuple[TechnicalCandleRequest, ...]
-    warmup_candles: tuple[TechnicalCandleRequest, ...] = ()
-    missing_open_times_ms: tuple[Timestamp, ...] = ()
+    candles: Annotated[
+        tuple[TechnicalCandleRequest, ...], Field(min_length=1, max_length=1000)
+    ]
+    warmup_candles: Annotated[
+        tuple[TechnicalCandleRequest, ...], Field(max_length=1000)
+    ] = ()
+    missing_open_times_ms: Annotated[
+        tuple[Timestamp, ...], Field(max_length=1000)
+    ] = ()
     source: Source
     source_event_time_ms: Timestamp
     evaluation_time_ms: Timestamp
     detection_time_ms: Timestamp
     price_type: Literal["trade", "mark", "index"]
+    target_candle_open_time_ms: Timestamp | None = None
     config: TechnicalConfigurationRequest
 
     @model_validator(mode="after")
@@ -145,5 +152,13 @@ class TechnicalAnalysisRequest(InputModel):
             evaluation_time_ms=self.evaluation_time_ms,
             detection_time_ms=self.detection_time_ms,
             price_type=self.price_type,
+            target_candle_open_time_ms=self.target_candle_open_time_ms,
             config=TechnicalConfig(**self.config.model_dump()),
         )
+
+
+class TechnicalAnalysisBatchRequest(InputModel):
+    schema_version: Literal[1]
+    requests: Annotated[
+        tuple[TechnicalAnalysisRequest, ...], Field(min_length=1, max_length=8)
+    ]

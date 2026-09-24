@@ -1,8 +1,7 @@
 # Python analysis service and Lovable integration
 
-This feature lets an authenticated dashboard user select a watched pair and run
-Python analysis. It is disabled until the app's server configuration is supplied.
-No Python service or hosted app was deployed during implementation.
+The service handles authenticated manual analysis and scheduled completed-candle
+TA calculations. It is disabled until the app's server configuration is supplied.
 
 ## Request and ownership path
 
@@ -20,11 +19,11 @@ No Python service or hosted app was deployed during implementation.
    TanStack validates the response schema, instrument, and source provenance before
    returning it to the browser.
 
-The existing monitor remains the sole writer of alerts and baselines. Python calls
+TanStack remains the sole writer of alerts, baselines, monitor runs, and TA
+snapshots. Python calls
 the existing `cumulative.observe` function but **discards its proposed state**.
 Running analysis repeatedly cannot initialize or reset a baseline or save an alert.
-No new database migrations, scheduler, login mechanism or Google OAuth changes
-are part of this integration.
+The service does not add a scheduler, login mechanism, or browser-accessible token.
 
 ## Configuration
 
@@ -109,6 +108,11 @@ unavailable here, so the image build/start must still be verified before deploym
   request models reject unknown fields, unsupported symbols, invalid decimal
   prices/settings and inconsistent baseline timestamps. Credentials are compared
   using a constant-time comparison. Validation errors do not echo the request body.
+- `POST /v1/technical-analysis`: calculates one versioned TA result from supplied
+  immutable futures candles.
+- `POST /v1/technical-analysis/batch`: calculates one to eight due snapshots. The
+  scheduled monitor uses this endpoint and strictly validates contract, candle,
+  timestamps, versions, score, reasons, and provenance before writing.
 - No database client, persistence, scheduler or browser CORS access is installed in
   Python. Do not expose the service token to frontend callers. `/docs` and OpenAPI
   routes are disabled in this minimal deployed service.
@@ -161,7 +165,7 @@ This is advisory against the loaded state. Settings and baselines may change dur
 the request. An eligible
 preview neither reserves nor guarantees a future alert.
 
-Python tries public Binance USDⓈ-M, Kraken perpetual-futures, then OKX USDT-swap
+Python tries public Binance USDⓈ-M, OKX USDT-swap, then Kraken perpetual-futures
 trade candles. A selected provider supplies the entire workload; histories are never
 combined across providers. Fresh valid minute data can return **partial** rolling or TA
 history while still evaluating the baseline. Missing, stale, inactive, or unsupported
@@ -171,11 +175,12 @@ The dashboard displays source freshness, source-native identity, failure categor
 request duration, and request/response byte counts for the hosted trial. It does not
 persist those measurements or any analysis result.
 
-Database reads have a 5-second abort timer. Exchange HTTP operations have 5-second
-timeouts; Python imposes an 18-second total analysis deadline, and TanStack aborts
-the service request after 25 seconds. Thus a full app request may take up to roughly
-30 seconds including state reads. Timed-out Python work is cancelled. No application
-retry loops or new scheduler are added. Provider failure returns an unavailable
+Manual database reads have a 5-second abort timer. Exchange HTTP operations have
+5-second timeouts; Python imposes an 18-second total manual-analysis deadline, and
+TanStack aborts that request after 25 seconds. Scheduled TA batches have a 6-second
+TanStack timeout and one retry for network, timeout, rate-limit, or 5xx failures.
+Authentication, validation, redirect, and malformed-response failures are not
+retried. Provider failure returns an unavailable
 result with safe reason codes; timeout returns 504, invalid request 422, bad token
 401, and unexpected service failure 502. Raw upstream errors and credentials are
 never forwarded or logged by the integration. Responses are not cached.
@@ -282,10 +287,8 @@ API tests use fixed candles and mocked HTTP transport, not mock login. Bridge te
 exercise user-scoped SELECTs, rejection paths, payload minimization and response
 validation. They do not replace the complete hosted session/CSRF/RLS browser test.
 
-Local verification passed: 45 Python tests, 21 JavaScript/database/bridge tests,
-TypeScript typecheck, targeted ESLint and the Bun production build. The generated
-browser assets were checked for service-token/URL configuration identifiers and
-contain neither. Python API tests required execution outside the sandbox because
-its thread/event-loop restrictions stalled the test client. Docker image verification
-is still blocked by the stopped Docker daemon. Hosted end-to-end verification remains
-pending deployment and secret configuration.
+Current focused verification passes all 54 Python tests, the seven scheduled
+TA/database tests, TypeScript typechecking, and targeted ESLint. The aggregate Node
+suite still stops on the three diagnostics-test failures tracked by issue #57.
+No application server, production build, Docker image, or hosted end-to-end check
+was run for this change; deployment and secret configuration remain external steps.

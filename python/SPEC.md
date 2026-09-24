@@ -5,8 +5,8 @@ rule remains documented in [cumulative monitoring](../docs/cumulative-monitoring
 
 ## Instrument and provider
 
-- Manual API sources, in order: `binance-usdm`, `kraken-futures`, `okx-usdt-swap`.
-  The existing CLI and scheduled TypeScript provider order is unchanged.
+- Manual API sources, in order: `binance-usdm`, `okx-usdt-swap`, `kraken-futures`.
+  The CLI and scheduled monitor use the same provider order.
 - Market: perpetual futures only.
 - Identity: `binance-usdm:<native symbol>`, for example
   `binance-usdm:BTCUSDT`.
@@ -52,8 +52,7 @@ versioned input is `unavailable`. Forming and future candles are not visible to 
 calculation. The offline replay adapter additionally removes them before every
 chronological step.
 
-This port does not change the TypeScript scheduled monitor or its database writes.
-That implementation remains active until the planned scheduling cutover.
+The scheduled monitor supplies immutable candle inputs and remains the sole database writer.
 
 `POST /v1/analysis` runs this calculator for all three timeframes after loading one
 provider's complete workload. Its compact response includes canonical and source-native

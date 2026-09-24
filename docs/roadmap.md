@@ -11,8 +11,8 @@ wallet execution, accounting, historical runs, and live paper trading.
 ## Status and dependency rules
 
 **Current** means implemented in repository code: dashboard/auth/CRUD, Binance USDⓈ-M REST
-monitoring, TypeScript TA history and forward returns, temporary workload controls,
-and optional read-only Python analysis. It does not confirm live scheduler health.
+monitoring, Python TA history and forward returns, temporary workload controls,
+and manual Python analysis. It does not confirm live scheduler health.
 See [activity controls](activity-controls.md) for the current switches. **Proposed**
 means agreed incremental work below, including external operational storage and
 public futures streaming. **Conditional** means an option requiring evidence,
@@ -46,12 +46,12 @@ dependencies already exist.
 | 12    | [#14 — Optimize market collection, calculations, and database persistence](https://github.com/ibrahimjaved12/crypto-watcher/issues/14)                                  | Ready          | #13 and #22 measurement baselines; preserve movement semantics.                              |
 | 13    | [#15 — Separate market collection, analysis, movement alerts, and notification controls](https://github.com/ibrahimjaved12/crypto-watcher/issues/15)                    | Backlog        | #14 is not an implementation blocker; its measurements and regression checks gate closure.   |
 | 14    | [#16 — Add overlap protection, restart recovery, and freshness reporting](https://github.com/ibrahimjaved12/crypto-watcher/issues/16)                                   | Backlog        | #14–#15 contracts; establish ownership/recovery now, complete stream tests with #26.         |
-| 15    | [#23 — Make market-data providers and instrument identities strictly futures-only](https://github.com/ibrahimjaved12/crypto-watcher/issues/23)                          | Backlog        | Futures identity cutover; runtime overlap/recovery hardening continues in #16.                |
+| 15    | [#23 — Make market-data providers and instrument identities strictly futures-only](https://github.com/ibrahimjaved12/crypto-watcher/issues/23)                          | Backlog        | Futures identity cutover; runtime overlap/recovery hardening continues in #16.               |
 | 16    | [#17 — Port TA v2 into a shared deterministic Python calculation package](https://github.com/ibrahimjaved12/crypto-watcher/issues/17)                                   | Backlog        | #23 input contract; prove fixed-fixture TA parity.                                           |
 | 17    | [#18 — Extend Run Python analysis to cover the intended futures-analysis workload](https://github.com/ibrahimjaved12/crypto-watcher/issues/18)                          | Backlog        | #17; exercise representative futures analysis through the read-only bridge.                  |
 | 18    | [#19 — Run a bounded Python analysis trial and evaluate persistent-worker hosting](https://github.com/ibrahimjaved12/crypto-watcher/issues/19)                          | Backlog        | #18; bounded API trial and separate persistent-worker hosting assessment.                    |
 | 19    | [#24 — Persist immutable analysis conclusions, trade setups, and provenance](https://github.com/ibrahimjaved12/crypto-watcher/issues/24)                                | Backlog        | #23 and #17; immutable provenance before scheduled cutover.                                  |
-| 20    | [#20 — Switch scheduled TA to Python and retire the TypeScript TA calculator](https://github.com/ibrahimjaved12/crypto-watcher/issues/20)                               | Backlog        | #17–#19 and #24; parity, reliability, provenance, and rollback gates.                        |
+| 20    | [#20 — Switch scheduled TA to Python and retire the TypeScript TA calculator](https://github.com/ibrahimjaved12/crypto-watcher/issues/20)                               | Implemented    | Shared Python calculation; TanStack remains the sole writer.                                 |
 | 21    | [#25 — Introduce external PostgreSQL for frequent operational updates and selective result synchronization](https://github.com/ibrahimjaved12/crypto-watcher/issues/25) | Backlog        | #13 baseline, #16 ownership/recovery, #24 records, and #20 boundary.                         |
 | 22    | [#26 — Implement a shared futures WebSocket collector with REST bootstrap and gap recovery](https://github.com/ibrahimjaved12/crypto-watcher/issues/26)                 | Backlog        | #19 hosting evidence, #23 futures feeds, #25 allocation; complete #16 gap tests.             |
 | 23    | [#27 — Define retention, historical-data storage, and verified archival policies](https://github.com/ibrahimjaved12/crypto-watcher/issues/27)                           | Backlog        | #24–#26 data inventory; verify archives and restores before cleanup.                         |
@@ -89,12 +89,9 @@ dependencies already exist.
    contracts. Preserve existing alerts and directional cooldown semantics. #13 is
    a measurement and closure gate for #22, not an implementation blocker. #14 is a
    measurement/regression gate for closing #15, whose separation work may proceed.
-4. **Futures and canonical calculations (15–20):** establish futures identity, port TA to
-   the pure Python package, test through the manual bridge, run a finite hosted
-   trial, and preserve immutable provenance before scheduled cutover. Keep one
-   writer and one production calculator; validate rollback and retire TypeScript
-   after the bounded rollback window. The movement monitor remains independently
-   owned until explicitly migrated.
+4. **Futures and canonical calculations (15–20):** futures identity and the shared
+   Python calculation path are present. TanStack remains the one scheduled writer;
+   the movement monitor remains independently owned until explicitly migrated.
 5. **Operational data and collection (21–23):** finalize table ownership, add
    external PostgreSQL with transactional outbox and selective Lovable sync, prove
    authenticated fresh-state reads, then deploy the persistent shared collector.

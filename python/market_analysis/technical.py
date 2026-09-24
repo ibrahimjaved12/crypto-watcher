@@ -53,6 +53,7 @@ class TechnicalInput:
     evaluation_time_ms: int
     detection_time_ms: int
     price_type: str = "trade"
+    target_candle_open_time_ms: int | None = None
     warmup_candles: tuple[TechnicalCandle, ...] = ()
     missing_open_times_ms: tuple[int, ...] = ()
     config: TechnicalConfig = field(default_factory=TechnicalConfig)
@@ -74,6 +75,7 @@ def _base_result(request, status, reason):
         "classification": "unavailable",
         "direction": "unavailable",
         "score": None,
+        "atr_pct": None,
         "factor_breakdown": None,
         "reasons": [],
         "indicators": None,
@@ -134,6 +136,16 @@ def _validate_contract(request):
         or request.detection_time_ms > request.evaluation_time_ms
     ):
         return "future_timestamp"
+    if (
+        request.target_candle_open_time_ms is not None
+        and (
+            type(request.target_candle_open_time_ms) is not int
+            or request.target_candle_open_time_ms < 0
+            or request.target_candle_open_time_ms
+            + request.timeframe_minutes * MINUTE != request.source_event_time_ms
+        )
+    ):
+        return "mismatched_source_event_time"
     return None
 
 
@@ -147,7 +159,7 @@ def _completed_candles(request):
         if candle.complete and candle.open_ms + duration <= request.evaluation_time_ms:
             visible.append(candle)
     candles = sorted(visible, key=lambda candle: candle.open_ms)
-    if len(candles) < request.config.minimum_history:
+    if not candles:
         return None, "insufficient_history"
     seen = set()
     for index, candle in enumerate(candles):
@@ -173,6 +185,15 @@ def _completed_candles(request):
         return None, "missing_candles"
     if request.evaluation_time_ms - (candles[-1].open_ms + duration) > duration + 120_000:
         return None, "stale_candles"
+    target = request.target_candle_open_time_ms
+    if target is not None:
+        if type(target) is not int or target < 0 or target % duration:
+            return None, "invalid_target_candle"
+        if not any(candle.open_ms == target for candle in candles):
+            return None, "target_candle_unavailable"
+        candles = [candle for candle in candles if candle.open_ms <= target]
+    if len(candles) < request.config.minimum_history:
+        return None, "insufficient_history"
     return candles, None
 
 
@@ -514,6 +535,7 @@ def calculate_technical_analysis(request):
         classification=interpretation["classification"],
         direction=interpretation["direction"],
         score=interpretation["score"],
+        atr_pct=interpretation["atr_pct"],
         factor_breakdown=interpretation["factor_breakdown"],
         reasons=interpretation["reasons"],
         indicators=indicators,

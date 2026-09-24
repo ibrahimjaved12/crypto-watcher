@@ -23,7 +23,7 @@ conditional decisions.
 
 The current implementation tries public futures REST data in order: **Binance USDⓈ-M,
 OKX USDT perpetual swaps, then Kraken perpetual futures**.
-Saved TypeScript TA includes forward-return outcomes; conditional trade evaluation,
+Saved Python TA includes forward-return outcomes; conditional trade evaluation,
 backtesting, and paper trading remain planned work.
 Background execution also needs verification: [issue #13](https://github.com/ibrahimjaved12/crypto-watcher/issues/13)
 reports an observed disabled cron; repository code alone does not prove a live schedule.
@@ -31,8 +31,8 @@ reports an observed disabled cron; repository code alone does not prove a live s
 Technical Analysis v2 adds OHLCV indicators, numeric candle patterns, and saved
 forward outcomes. See [TA rules and deployment](docs/technical-analysis.md).
 
-The dashboard now supports optional read-only Python analysis through a separate
-FastAPI service. See [Python API setup and hosted testing](docs/python-api.md)
+The dashboard and scheduled TA use a separate Python calculation service. See
+[Python API setup and hosted testing](docs/python-api.md)
 for the server secrets, local/Docker commands and deployment steps.
 
 The monitoring algorithm now has a [saved-baseline cumulative rule](docs/cumulative-monitoring.md)
@@ -71,7 +71,7 @@ fail-closed and are clearly labeled as unavailable.
 | `VITE_TA_HISTORY_AUTO_REFRESH_ENABLED=true`     | Reads saved TA history when the dashboard opens and every 60 seconds while active.                                                        |
 | `TA_GENERATION_ENABLED=false`                   | Skips new TA calculations during manual and scheduled monitoring runs. Unset defaults to enabled.                                         |
 | `TA_OUTCOME_EVALUATION_ENABLED=false`           | Skips pending TA-outcome evaluation during manual and scheduled monitoring runs. Unset defaults to enabled.                               |
-| `PYTHON_ANALYSIS_ENABLED=true`                  | Enables the explicit **Run Python analysis** action. It does not create a background loop.                                                |
+| `PYTHON_ANALYSIS_ENABLED=true`                  | Enables manual Python analysis and scheduled TA calculations. It does not create a second scheduler.                                      |
 
 The user monitoring master switch gates manual and scheduled monitoring work. It does
 not stop the Lovable Job from calling the endpoint or stop either browser 60-second

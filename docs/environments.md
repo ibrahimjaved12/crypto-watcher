@@ -111,7 +111,7 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `VITE_SUPABASE_PUBLISHABLE_KEY` | Browser | Required; identical public/anon key; secret/service-role keys rejected |
 | `SUPABASE_SERVICE_ROLE_KEY` | TanStack secret | Empty; required for admin monitoring operations; local value from status |
 | `SUPABASE_PROJECT_ID`, `VITE_SUPABASE_PROJECT_ID` | Server / browser metadata | Optional; not used to choose targets |
-| `PYTHON_ANALYSIS_ENABLED` | TanStack | `false`; explicit `true` enables manual analysis |
+| `PYTHON_ANALYSIS_ENABLED` | TanStack | `false`; explicit `true` enables manual analysis and scheduled TA calculations |
 | `PYTHON_ANALYSIS_URL` | TanStack | `http://127.0.0.1:8000`; required when enabled |
 | `PYTHON_ANALYSIS_TOKEN` | TanStack + FastAPI secret | Empty/disabled; matching 32–256 URL-safe characters required when enabled |
 | `MONITOR_CRON_TOKEN` | Scheduler caller + TanStack secret | Empty; required for the public monitor hook |

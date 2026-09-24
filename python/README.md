@@ -11,10 +11,11 @@ The one-shot CLI below still reports rolling-window analysis and does not persis
 baselines; its command behavior is unchanged.
 
 `market_analysis.technical.calculate_technical_analysis` is the pure, canonical
-TA v2 calculation entry point. The authenticated `/v1/technical-analysis` route
-and `market_analysis.replay` both call it with explicit versioned inputs. Neither
-path reads a database, contacts an exchange, uses wall-clock time, or writes a
-result. The replay runner accepts a fixed JSON `TechnicalInput` fixture:
+TA v2 calculation entry point. Manual analysis, the authenticated single and batch
+technical-analysis routes, and `market_analysis.replay` call it with explicit
+versioned inputs. These calculation paths do not read a database, use wall-clock
+time, or write a result. The replay runner accepts a fixed JSON `TechnicalInput`
+fixture:
 
 ```sh
 .venv/bin/python -m market_analysis.replay path/to/fixture.json
@@ -52,8 +53,8 @@ deployment limitations, and [calculation contract](SPEC.md) for intentional
 behavior differences and the remaining product decisions. Fixtures are synthetic,
 fixed test data only; the live command never substitutes fixtures.
 
-CLI limits: no historical storage/backtesting, cooldown lookup, trusted
-result ingestion or deployed Python service. Sequential HTTP requests use an
+CLI limits: no historical storage/backtesting, cooldown lookup, result persistence,
+or deployed Python service. Sequential HTTP requests use an
 8-second timeout per request; there is no scheduler, rate-limit coordinator or
 retry loop. It tries Binance USDⓈ-M, OKX USDT swaps, then Kraken perpetual futures.
 Local clock accuracy and exchange availability affect results.

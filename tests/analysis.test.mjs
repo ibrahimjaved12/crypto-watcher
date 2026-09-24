@@ -22,6 +22,7 @@ const { analysisInput } = await import(contract);
 const { analyzeForUser } = await import(
   await moduleUrl("../src/lib/analysis.server.ts", {
     "./analysis.contract": contract,
+    "./python-service.server": await moduleUrl("../src/lib/python-service.server.ts"),
   })
 );
 const env = {
