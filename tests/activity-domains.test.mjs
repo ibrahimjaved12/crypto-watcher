@@ -15,7 +15,7 @@ async function moduleUrl(path, imports = {}) {
 
 const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 
-const { DEFAULT_SETTINGS, runMonitorForUser } = await import(
+const { DEFAULT_SETTINGS, recordRun, runMonitorForUser } = await import(
   await moduleUrl("../src/lib/monitor/engine.server.ts", {
     "@/lib/market/providers.server": stub(`
       export async function loadCandles(symbol) {
@@ -43,6 +43,11 @@ const { DEFAULT_SETTINGS, runMonitorForUser } = await import(
         globalThis.__domains.ta.push(symbol);
         return [];
       }
+    `),
+    "../operational/repository.server": stub(`
+      const disabled={enabled:false};
+      export const getOperationalStore=()=>disabled;
+      export const operationalNativeSymbol=(_source,symbol)=>symbol;
     `),
   })
 );
@@ -77,9 +82,15 @@ function database() {
   };
 }
 
-async function run(patch) {
-  globalThis.__domains = { reads: 0, market: [], checkpoints: 0, rpc: 0, ta: [] };
-  const result = await runMonitorForUser(database(), "user", settings(patch));
+async function run(patch, operationalStore) {
+  globalThis.__domains = { reads: 0, market: [], checkpoints: 0, operational: 0, rpc: 0, ta: [] };
+  const result = await runMonitorForUser(
+    database(),
+    "user",
+    settings(patch),
+    undefined,
+    operationalStore,
+  );
   return { result, calls: globalThis.__domains };
 }
 
@@ -103,8 +114,73 @@ test("the master and collection controls stop work before provider or database I
   for (const patch of [{ monitoring_enabled: false }, { market_data_collection_enabled: false }]) {
     const { result, calls } = await run(patch);
     assert.equal(result.status, "skipped");
-    assert.deepEqual(calls, { reads: 0, market: [], checkpoints: 0, rpc: 0, ta: [] });
+    assert.deepEqual(calls, {
+      reads: 0,
+      market: [],
+      checkpoints: 0,
+      operational: 0,
+      rpc: 0,
+      ta: [],
+    });
   }
+});
+
+test("the feature flag selects one checkpoint writer without dual writes", async () => {
+  const store = {
+    enabled: true,
+    async recordCandles() {
+      globalThis.__domains.operational++;
+    },
+    async recordCheckpoint() {
+      globalThis.__domains.operational++;
+      return "recorded";
+    },
+  };
+  const { result, calls } = await run({ completed_candle_ta_enabled: false }, store);
+  assert.equal(result.status, "success");
+  assert.equal(calls.checkpoints, 0);
+  assert.equal(calls.operational, 4);
+  assert.equal(calls.rpc, 2);
+});
+
+test("monitor-run ownership switches as one domain without a Lovable dual-write", async () => {
+  let operationalWrites = 0;
+  const store = {
+    enabled: true,
+    async recordMonitorRun() {
+      operationalWrites++;
+    },
+  };
+  const db = {
+    from() {
+      throw new Error("Lovable monitor_runs must not be written");
+    },
+  };
+  await recordRun(
+    db,
+    {
+      userId: "user",
+      status: "success",
+      symbolsChecked: 1,
+      alertsCreated: 0,
+      dataSource: "binance-usdm",
+      error: null,
+      durationMs: 1,
+      metrics: {
+        exchangeRequests: 0,
+        candleRows: 0,
+        marketCacheHits: 0,
+        taCalculations: 0,
+        taSignalsSaved: 0,
+        taOutcomesUpdated: 0,
+        databaseReads: 0,
+        databaseWriteAttempts: 0,
+        databaseNoOps: 0,
+      },
+    },
+    store,
+  );
+  assert.equal(operationalWrites, 1);
 });
 
 test("collection checkpoints continue while every downstream consumer is paused", async () => {

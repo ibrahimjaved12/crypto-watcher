@@ -17,6 +17,8 @@ dist-ssr
 *.local
 supabase/.temp/
 supabase/.branches/
+operational-db/supabase/.temp/
+operational-db/supabase/.branches/
 
 # Wrangler / Cloudflare
 .wrangler/

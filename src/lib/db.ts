@@ -205,15 +205,3 @@ export async function deleteNote(id: string): Promise<void> {
   const { error } = await supabase.from("notes").delete().eq("id", id);
   if (error) throw error;
 }
-
-export async function fetchRuns(): Promise<MonitorRun[]> {
-  const { data, error } = await supabase
-    .from("monitor_runs")
-    .select(
-      "id, ran_at, status, symbols_checked, alerts_created, data_source, error_message, duration_ms, metrics",
-    )
-    .order("ran_at", { ascending: false })
-    .limit(25);
-  if (error) throw error;
-  return (data ?? []) as unknown as MonitorRun[];
-}

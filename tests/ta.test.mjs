@@ -131,6 +131,7 @@ test("TA persistence deduplicates futures snapshots and enforces user read isola
       "20260921090000_activity_domains.sql",
       "20260923090000_binance_usdm_futures.sql",
       "20260924090000_monitor_efficiency.sql",
+      "20260924110000_analysis_conclusions.sql",
       "20260924120000_python_scheduled_ta.sql",
     ]) {
       await db.exec(

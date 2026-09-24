@@ -13,7 +13,7 @@ export type MarketSnapshot = {
  * no auth and can be called from public loaders.
  */
 export const getMarketSnapshot = createServerFn({ method: "POST" })
-  .inputValidator((input: { symbols: string[] }) => {
+  .validator((input: { symbols: string[] }) => {
     const symbols = (input?.symbols ?? [])
       .map((s) => String(s).toUpperCase())
       .filter(isSupportedSymbol)

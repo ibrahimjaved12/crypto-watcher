@@ -30,17 +30,19 @@ python/.venv/bin/python -m pip install -r python/requirements.txt
 npm run dev:local
 ```
 
-`npm run dev:local` starts local Supabase if needed, creates `.env.local` when it is
-missing, starts FastAPI when `PYTHON_ANALYSIS_ENABLED=true`, and then starts the
-application. `supabase start` downloads the local database, auth, and other services
+`npm run dev:local` starts the main local Supabase project and disables the operational store.
+`npm run dev:local:all` additionally starts and enables the separate operational project. Both
+commands create `.env.local` when it is missing, start FastAPI when
+`PYTHON_ANALYSIS_ENABLED=true`, and then start the application with a clean Vite dependency
+optimization pass. `supabase start` downloads the local database, auth, and other services
 in Docker; you do not install Postgres separately. The first run needs internet
 access for container images. This repository already has `supabase/config.toml`, so
 skip `supabase init`. No Supabase account, login, hosted link, or Lovable Cloud is
 required. npm adds the project-installed Supabase CLI to `PATH` for this command.
 
 Ctrl+C stops the application and any FastAPI process started by the launcher.
-Supabase stays running so later starts are fast and local data remains available.
-Run `npm run dev:local:stop` when you want to stop its containers. The launcher
+Started Supabase stacks stay running so later starts are fast and local data remains available.
+Run `npm run dev:local:stop` when you want to stop both projects. The launcher
 reuses an already healthy FastAPI process instead of starting a duplicate.
 
 Open the app URL printed by Vite. Local email/password provisioning and account
@@ -48,20 +50,22 @@ isolation are tracked in [issue #50](https://github.com/ibrahimjaved12/crypto-wa
 Google sign-in requires separate OAuth provisioning.
 
 **Environment values:** Nothing needs manual filling for the basic app:
-`npm run env:local` writes both profiles, both loopback URLs, both anon keys,
-the server service-role key, and disabled automatic activity defaults. It also
+`npm run env:local` writes the main profiles, loopback URLs, anon keys,
+server service-role key, and disabled automatic activity defaults. It also
 generates a Python token but leaves Python analysis disabled. Leave cron secrets
 unset and scheduled monitoring disabled. Do not copy hosted keys into this file.
 The root `.env.example` is a reference, not a file you must copy first.
 
-On later sessions, run only `npm run dev:local`; keep the existing `.env.local`.
+On later sessions, use `npm run dev:local` without operational storage or
+`npm run dev:local:all` with it; keep the existing `.env.local`.
 Use `npm run dev` only when you intentionally want the application without managing
 Supabase or FastAPI.
 
-The generator reads `supabase status -o json`, writes a mode-0600, gitignored
+The generator reads the main local Supabase status, writes a mode-0600, gitignored
 `.env.local`, and refuses to overwrite an existing file. It does not link, push,
-seed, or access a hosted project. For existing local files, update values using
-`supabase status`; never paste its secret output into commits or logs. The committed
+seed, or access a hosted project. For an existing local file, run
+`npm run env:local:operational` once after starting the operational stack; never paste
+status secret output into commits or logs. The committed
 migrations replay cleanly with `npx supabase db reset --local`; deterministic users
 and seed data remain part of [issue #48](https://github.com/ibrahimjaved12/crypto-watcher/issues/48).
 
@@ -99,31 +103,37 @@ All variables are listed in the root [.env.example](../.env.example). Empty requ
 values fail validation. Browser values are public and embedded at build time; server
 values are runtime configuration (loaded into the dev process by Vite locally).
 
-| Variable | Owner / scope | Safe default and requirement |
-| --- | --- | --- |
-| `APP_PROFILE` | TanStack + build validation | Required: `local` for development, `production` for hosted use |
-| `VITE_APP_PROFILE` | Browser + build | Required; must match server |
-| `ALLOW_HOSTED_SUPABASE` | TanStack + build | `false`; exact `true` required for hosted use |
-| `VITE_ALLOW_HOSTED_SUPABASE` | Browser + build | `false`; exact `true` required for hosted use |
-| `SUPABASE_URL` | TanStack | Required; generated loopback API URL |
-| `VITE_SUPABASE_URL` | Browser | Required; identical to server URL |
-| `SUPABASE_PUBLISHABLE_KEY` | TanStack | Required; local anon key from status |
-| `VITE_SUPABASE_PUBLISHABLE_KEY` | Browser | Required; identical public/anon key; secret/service-role keys rejected |
-| `SUPABASE_SERVICE_ROLE_KEY` | TanStack secret | Empty; required for admin monitoring operations; local value from status |
-| `SUPABASE_PROJECT_ID`, `VITE_SUPABASE_PROJECT_ID` | Server / browser metadata | Optional; not used to choose targets |
-| `PYTHON_ANALYSIS_ENABLED` | TanStack | `false`; explicit `true` enables manual analysis and scheduled TA calculations |
-| `PYTHON_ANALYSIS_URL` | TanStack | `http://127.0.0.1:8000`; required when enabled |
-| `PYTHON_ANALYSIS_TOKEN` | TanStack + FastAPI secret | Empty/disabled; matching 32–256 URL-safe characters required when enabled |
-| `MONITOR_CRON_TOKEN` | Scheduler caller + TanStack secret | Empty; required for the public monitor hook |
-| `LOVABLE_CRON_SECRET` | Lovable scheduler + TanStack secret | Empty; used by Lovable cron authentication |
-| `LOVABLE_CRON_SECRET_PREVIOUS` | TanStack secret | Empty; optional rotation overlap |
-| `SCHEDULED_MONITOR_ENABLED` | TanStack | `false` |
-| `VITE_MARKET_AUTO_REFRESH_ENABLED` | Browser | `false` |
-| `VITE_TA_HISTORY_AUTO_REFRESH_ENABLED` | Browser | `false` |
-| `TA_GENERATION_ENABLED` | TanStack | `true`; preserves manual checks |
-| `TA_OUTCOME_EVALUATION_ENABLED` | TanStack | `true`; preserves manual checks |
-| `ACTIVITY_DIAGNOSTICS` | TanStack | `false` |
-| `VITE_ACTIVITY_DIAGNOSTICS` | Browser | `false` |
+| Variable                                          | Owner / scope                       | Safe default and requirement                                                                            |
+| ------------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `APP_PROFILE`                                     | TanStack + build validation         | Required: `local` for development, `production` for hosted use                                          |
+| `VITE_APP_PROFILE`                                | Browser + build                     | Required; must match server                                                                             |
+| `ALLOW_HOSTED_SUPABASE`                           | TanStack + build                    | `false`; exact `true` required for hosted use                                                           |
+| `VITE_ALLOW_HOSTED_SUPABASE`                      | Browser + build                     | `false`; exact `true` required for hosted use                                                           |
+| `SUPABASE_URL`                                    | TanStack                            | Required; generated loopback API URL                                                                    |
+| `VITE_SUPABASE_URL`                               | Browser                             | Required; identical to server URL                                                                       |
+| `SUPABASE_PUBLISHABLE_KEY`                        | TanStack                            | Required; local anon key from status                                                                    |
+| `VITE_SUPABASE_PUBLISHABLE_KEY`                   | Browser                             | Required; identical public/anon key; secret/service-role keys rejected                                  |
+| `SUPABASE_SERVICE_ROLE_KEY`                       | TanStack secret                     | Empty; required for admin monitoring operations; local value from status                                |
+| `SUPABASE_PROJECT_ID`, `VITE_SUPABASE_PROJECT_ID` | Server / browser metadata           | Optional; not used to choose targets                                                                    |
+| `OPERATIONAL_DB_ENABLED`                          | TanStack                            | `false` for rollback; exact `true` transfers checkpoint/run ownership and enables recent-candle storage |
+| `OPERATIONAL_SUPABASE_URL`                        | TanStack                            | Separate local/hosted operational Supabase origin; required when enabled                                |
+| `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`           | TanStack secret                     | Operational project service-role key; required when enabled; never `VITE_*`                             |
+| `OPERATIONAL_CANDLE_RETENTION_DAYS`               | TanStack                            | `7`; allowed range 1–30                                                                                 |
+| `OPERATIONAL_MONITOR_RUN_RETENTION_DAYS`          | TanStack                            | `30`; allowed range 1–90                                                                                |
+| `OPERATIONAL_OUTBOX_MAX_ATTEMPTS`                 | TanStack                            | `10`; allowed range 1–100 before dead-letter                                                            |
+| `PYTHON_ANALYSIS_ENABLED`                         | TanStack                            | `false`; explicit `true` enables manual analysis and scheduled TA calculations                          |
+| `PYTHON_ANALYSIS_URL`                             | TanStack                            | `http://127.0.0.1:8000`; required when enabled                                                          |
+| `PYTHON_ANALYSIS_TOKEN`                           | TanStack + FastAPI secret           | Empty/disabled; matching 32–256 URL-safe characters required when enabled                               |
+| `MONITOR_CRON_TOKEN`                              | Scheduler caller + TanStack secret  | Empty; required for the public monitor hook                                                             |
+| `LOVABLE_CRON_SECRET`                             | Lovable scheduler + TanStack secret | Empty; used by Lovable cron authentication                                                              |
+| `LOVABLE_CRON_SECRET_PREVIOUS`                    | TanStack secret                     | Empty; optional rotation overlap                                                                        |
+| `SCHEDULED_MONITOR_ENABLED`                       | TanStack                            | `false`                                                                                                 |
+| `VITE_MARKET_AUTO_REFRESH_ENABLED`                | Browser                             | `false`                                                                                                 |
+| `VITE_TA_HISTORY_AUTO_REFRESH_ENABLED`            | Browser                             | `false`                                                                                                 |
+| `TA_GENERATION_ENABLED`                           | TanStack                            | `true`; preserves manual checks                                                                         |
+| `TA_OUTCOME_EVALUATION_ENABLED`                   | TanStack                            | `true`; preserves manual checks                                                                         |
+| `ACTIVITY_DIAGNOSTICS`                            | TanStack                            | `false`                                                                                                 |
+| `VITE_ACTIVITY_DIAGNOSTICS`                       | Browser                             | `false`                                                                                                 |
 
 Never prefix tokens, passwords, private keys, or secrets with `VITE_`. Startup rejects
 secret variable names and copied server-secret values in public configuration, as
@@ -131,18 +141,22 @@ well as Supabase secret/service-role keys used as publishable keys.
 
 ## Actions and services
 
-| Action | Services used |
-| --- | --- |
-| Sign in, initial reads, watchlist/settings changes, default row creation | Selected Supabase auth/database: local by default; shared staging or Lovable only with explicit hosted profile |
-| Refresh market prices | Public exchange APIs; independent of Lovable Cloud |
-| Run check now / enabled scheduled checks | Selected Supabase reads/writes and public exchange prices/candles |
-| Refresh TA history | Selected Supabase |
-| Manual Python analysis | Selected Supabase reads → configured FastAPI → public exchange APIs; local FastAPI by default |
-| `npm run dev:local` | Local Docker/Supabase, optional local FastAPI, and the application server |
-| `supabase start`, `npm run env:local` | Local Docker/Supabase; startup may download container images |
-| Production build | Compiles explicit hosted configuration; does not itself run monitoring or seed data |
+| Action                                                                   | Services used                                                                                                      |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Sign in, initial reads, watchlist/settings changes, default row creation | Selected Supabase auth/database: local by default; shared staging or Lovable only with explicit hosted profile     |
+| Refresh market prices                                                    | Public exchange APIs; independent of Lovable Cloud                                                                 |
+| Run check now / enabled scheduled checks                                 | Lovable permanent-state operations, operational working-state operations when enabled, and public exchange candles |
+| Refresh TA history                                                       | Selected Supabase                                                                                                  |
+| Manual Python analysis                                                   | Selected Supabase reads → configured FastAPI → public exchange APIs; local FastAPI by default                      |
+| `npm run dev:local`                                                      | Main local Supabase, optional local FastAPI, and the application; operational ownership forced off                 |
+| `npm run dev:local:all`                                                  | Main and operational local Supabase, optional local FastAPI, and the application                                   |
+| `supabase start`, `npm run env:local`                                    | Main local Supabase; startup may download container images                                                         |
+| Production build                                                         | Compiles explicit hosted configuration; does not itself run monitoring or seed data                                |
 
 [Manual activity controls](activity-controls.md) and [per-user controls](activity-domains.md)
 remain in effect. Automatic market/history refresh and scheduled monitoring remain
 off; authentication and manual database actions remain available. No scheduler is
 created by this change.
+
+Operational ownership, isolated migrations, retention, synchronization, and rollback are
+documented in [Operational PostgreSQL](operational-database.md).

@@ -12,6 +12,7 @@ import {
   TA_MINIMUM_HISTORY,
   TA_VERSION,
 } from "./schedule";
+import type { OperationalStore } from "../operational/types";
 
 type Client = Pick<SupabaseClient<Database>, "from" | "rpc">;
 
@@ -55,6 +56,7 @@ export async function runTA(
   symbol: string,
   context: MonitorRunContext = createMonitorRunContext(),
   calculate: typeof calculateTechnicalBatch = calculateTechnicalBatch,
+  operationalStore?: OperationalStore,
 ) {
   const generation = activityEnabled(process.env["TA_GENERATION_ENABLED"]);
   const outcomes = activityEnabled(process.env["TA_OUTCOME_EVALUATION_ENABLED"]);
@@ -107,6 +109,22 @@ export async function runTA(
         if (generationDue) {
           generationMarket = await context.ta(symbol, timeframe, validate);
           const candles = completedCandles(generationMarket.candles, timeframe, now);
+          if (operationalStore?.enabled) {
+            context.metrics.databaseWriteAttempts += 1;
+            const nativeSymbol = sourceNativeSymbol(generationMarket.source, symbol);
+            await operationalStore.recordCandles({
+              userId,
+              instrumentId: `${generationMarket.source}:${nativeSymbol}`,
+              symbol,
+              nativeSymbol,
+              source: generationMarket.source,
+              endpoint: generationMarket.endpoint,
+              priceType: generationMarket.priceType,
+              timeframeMinutes: timeframe,
+              retrievedAt: generationMarket.retrievedAt,
+              candles,
+            });
+          }
           const last = candles.at(-1)!;
           let candidates =
             latestAt === null

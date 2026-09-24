@@ -40,7 +40,7 @@ try {
   console.log("Created .env.local from local Supabase status. Run npm run dev:local.");
 } catch {
   console.error(
-    "Could not create .env.local. Start local Supabase (supabase start), ensure its CLI is on PATH, and ensure .env.local does not already exist. Existing files are never overwritten.",
+    "Could not create .env.local. Start local Supabase, ensure the CLI is on PATH, and ensure .env.local does not already exist. Existing files are never overwritten.",
   );
   process.exitCode = 1;
 }
