@@ -1,0 +1,77 @@
+# Binance USD-M futures collector
+
+The backend process owns one public Binance USD-M WebSocket connection for the union of all
+watched contracts. It starts with the TanStack server process, runs without an open dashboard,
+and is enabled only when both `BINANCE_COLLECTOR_ENABLED=true` and the operational database are
+enabled. A renewable operational-database lease prevents two application instances from acting
+as authoritative collectors.
+
+## Inputs and candle semantics
+
+Each subscribed contract uses five native streams:
+
+- `aggTrade` for a bounded live trade/movement window;
+- native `kline_1m`, `kline_15m`, `kline_1h`, and `kline_4h` streams.
+
+No mark-price stream is subscribed because there is no live consumer in this ticket; the existing
+futures snapshot REST call remains the on-demand mark-price/funding source. No order-book or raw
+trade history is retained for simulated execution. Add either only with its consuming feature.
+
+Binance-native klines are canonical. Exchange open and close timestamps identify a candle.
+Developing (`x=false`) updates stay only in bounded process memory. Final (`x=true`) candles are
+normalized, inserted idempotently into the operational database, emitted once after a successful
+new insert, and then trigger the existing Python completed-candle TA path. The direct 15m/1h/4h
+streams remain authoritative; they are not assembled from 1m data. Spot or non-USD-M events are
+rejected.
+
+The endpoint and operating limits were checked against Binance documentation on 2026-09-25:
+
+- [USD-M market streams](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/market)
+- [live subscribe/unsubscribe](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/websocket-market-streams/Live-Subscribing-Unsubscribing-to-streams)
+- [USD-M REST klines](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data)
+
+The implementation uses `wss://fstream.binance.com/market/stream`, rotates before Binance's
+24-hour connection lifetime, reconnects with bounded exponential backoff and jitter, and keeps
+the supported 20-contract maximum at 100 streams—well below the documented 1,024-stream limit.
+The WebSocket implementation answers protocol ping frames automatically.
+
+## Bootstrap, recovery, and bounds
+
+For each contract/timeframe, startup loads recent completed `/fapi/v1/klines` history and excludes
+the still-developing REST candle. A skipped final interval changes health to `RECOVERING`, fetches
+only the bounded missing range, verifies exact chronological continuity, deduplicates REST/WS
+overlap in the database, and processes the incoming live final last. An unprovable or over-1,000
+candle gap becomes `UNAVAILABLE`.
+
+Memory contains only the latest trade, one developing candle per contract/timeframe, the latest
+completed checkpoint, connection health, a five-minute/2,000-item aggregate-trade buffer per
+contract, and a 256-item completed-candle work queue. Queue overflow marks the collector stale,
+closes the socket, and relies on REST recovery; it never creates an unbounded queue. Developing
+updates and aggregate trades are not persisted.
+
+Recovered/bootstrap candles carry their origin and do not directly trigger live analysis or a
+new movement alert. A subsequent genuinely live completed candle invokes the existing idempotent
+Python TA orchestration, which may catch up due conclusions. Movement baseline/cooldown/alert
+state remains wholly in its Lovable transaction.
+
+## Ownership and operation
+
+With the collector enabled, `collector_recent_candles`, `collector_health`, and `collector_leases`
+in the operational database are the only completed-candle/checkpoint working-state path. The old
+request-driven per-user operational candle/checkpoint writes and scheduled TA trigger are disabled;
+Lovable remains authoritative for watchlists, settings, movement state/alerts, and permanent TA
+conclusions. No candle is dual-written to Lovable.
+
+Apply `operational-db/supabase/migrations/20260925120000_binance_collector.sql` only to the external
+operational database. Set this server-only flag (never a `VITE_*` variable):
+
+```text
+BINANCE_COLLECTOR_ENABLED=true
+```
+
+`npm run dev:local:all` enables it for that local process. `npm run dev:local` disables it and uses
+the legacy request-driven path. In production, enable it only on a long-lived TanStack server
+runtime; the operational lease elects one collector across instances. Disable the flag on the
+whole fleet to roll back without simultaneous writers. Health (`LIVE`, `RECOVERING`, `STALE`, or
+`UNAVAILABLE`) is returned only through the authenticated operational-state server function and is
+filtered to the caller's watchlist.

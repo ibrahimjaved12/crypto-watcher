@@ -56,7 +56,7 @@ export async function runTA(
   symbol: string,
   context: MonitorRunContext = createMonitorRunContext(),
   calculate: typeof calculateTechnicalBatch = calculateTechnicalBatch,
-  operationalStore?: OperationalStore,
+  operationalStore: OperationalStore | null | undefined = undefined,
 ) {
   const generation = activityEnabled(process.env["TA_GENERATION_ENABLED"]);
   const outcomes = activityEnabled(process.env["TA_OUTCOME_EVALUATION_ENABLED"]);

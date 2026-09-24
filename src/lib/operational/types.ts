@@ -14,6 +14,49 @@ export type OperationalCandleBatch = {
   candles: Candle[];
 };
 
+export type CollectorCandle = {
+  instrumentId: string;
+  symbol: string;
+  nativeSymbol: string;
+  provider: "binance-usdm";
+  endpoint: string;
+  priceType: "trade";
+  timeframeMinutes: 1 | 15 | 60 | 240;
+  openTime: number;
+  closeTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  sourceEventTime: number;
+  receivedAt: number;
+  transport: "rest" | "websocket";
+};
+
+export type CollectorHealthStatus = "LIVE" | "RECOVERING" | "STALE" | "UNAVAILABLE";
+
+export type CollectorHealth = {
+  instrument_id: string;
+  symbol: string;
+  timeframe_minutes: number;
+  status: CollectorHealthStatus;
+  last_event_at: string | null;
+  last_completed_open_time: string | null;
+  lag_ms: number | null;
+  queue_depth: number;
+  reconnect_count: number;
+  error_message: string | null;
+  updated_at: string;
+};
+
+export type CollectorStorageDiagnostics = {
+  candle_rows: number;
+  health_rows: number;
+  oldest_candle_at: string | null;
+  newest_candle_at: string | null;
+};
+
 export type OperationalCheckpoint = {
   userId: string;
   instrumentId: string;
@@ -69,6 +112,24 @@ export interface OperationalStore {
   ): Promise<void>;
   listMonitorRuns(userId: string, limit?: number): Promise<OperationalMonitorRun[]>;
   diagnostics(userId: string): Promise<StorageDiagnostics>;
+  recordCollectorCandles(candles: CollectorCandle[]): Promise<string[]>;
+  recordCollectorHealth(input: {
+    instrumentId: string;
+    symbol: string;
+    timeframeMinutes: 1 | 15 | 60 | 240;
+    status: CollectorHealthStatus;
+    lastEventAt: number | null;
+    lastCompletedOpenTime: number | null;
+    lagMs: number | null;
+    queueDepth: number;
+    reconnectCount: number;
+    errorMessage: string | null;
+  }): Promise<void>;
+  listCollectorHealth(symbols: string[]): Promise<CollectorHealth[]>;
+  collectorDiagnostics(): Promise<CollectorStorageDiagnostics>;
+  claimCollectorLease(instanceId: string, leaseSeconds?: number): Promise<boolean>;
+  renewCollectorLease(instanceId: string, leaseSeconds?: number): Promise<boolean>;
+  releaseCollectorLease(instanceId: string): Promise<void>;
   stageDurableResult(input: {
     resultId: string;
     eventId: string;

@@ -107,6 +107,8 @@ export async function runMonitorForUser(
   const failures: string[] = [];
   let alertsCreated = 0;
   let source: string | null = null;
+  const sharedCollectorOwnsMarketData =
+    operationalStore.enabled && process.env["BINANCE_COLLECTOR_ENABLED"] === "true";
 
   for (const symbol of symbols) {
     try {
@@ -118,7 +120,11 @@ export async function runMonitorForUser(
       source = source ?? outcome.result.source;
 
       let checkpointStatus: string;
-      if (operationalStore.enabled) {
+      if (sharedCollectorOwnsMarketData) {
+        // The shared collector owns completed-candle/checkpoint state. Movement
+        // detection remains in its existing Lovable transaction until migrated whole.
+        checkpointStatus = "recorded";
+      } else if (operationalStore.enabled) {
         context.metrics.databaseWriteAttempts += 2;
         const nativeSymbol = operationalNativeSymbol(outcome.result.source, symbol);
         const instrumentId = `${outcome.result.source}:${nativeSymbol}`;
@@ -192,7 +198,7 @@ export async function runMonitorForUser(
   }
 
   const taErrors: string[] = [];
-  if (settings.completed_candle_ta_enabled) {
+  if (settings.completed_candle_ta_enabled && !sharedCollectorOwnsMarketData) {
     for (const symbol of symbols) {
       taErrors.push(
         ...(await runTA(supabaseAdmin, userId, symbol, context, undefined, operationalStore)),

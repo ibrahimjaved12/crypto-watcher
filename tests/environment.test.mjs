@@ -88,6 +88,7 @@ test("operational database configuration has no browser-visible variants", () =>
     "VITE_OPERATIONAL_DB_ENABLED",
     "VITE_OPERATIONAL_SUPABASE_URL",
     "VITE_OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY",
+    "VITE_BINANCE_COLLECTOR_ENABLED",
   ]) {
     assert.throws(() => validateEnvironment({ ...local, [name]: "configured" }), /server-only/);
   }

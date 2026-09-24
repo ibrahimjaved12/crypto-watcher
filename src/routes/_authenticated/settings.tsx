@@ -245,6 +245,14 @@ function SettingsPage() {
               {operational.data.diagnostics.dead_outbox_rows} dead-letter
             </p>
           ) : null}
+          {operational.data?.collectorHealth.length ? (
+            <p className="num mt-1 text-xs text-muted-foreground">
+              Collector:{" "}
+              {operational.data.collectorHealth.filter((row) => row.status === "LIVE").length}/
+              {operational.data.collectorHealth.length} intervals live ·{" "}
+              {operational.data.collectorDiagnostics?.candle_rows ?? 0} shared candles
+            </p>
+          ) : null}
           <ul className="mt-4 space-y-2">
             {(runs.data ?? []).map((r) => (
               <li key={r.id} className="rounded-md border border-border/70 p-3 text-sm">

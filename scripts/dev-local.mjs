@@ -147,6 +147,7 @@ async function main() {
   // The launcher mode is the ownership cutover. Never leave the second writer
   // enabled merely because credentials remain in the reusable local env file.
   process.env.OPERATIONAL_DB_ENABLED = String(withOperational);
+  process.env.BINANCE_COLLECTOR_ENABLED = String(withOperational);
 
   if (process.env.PYTHON_ANALYSIS_ENABLED === "true") {
     const url = requireLocalUrl(process.env.PYTHON_ANALYSIS_URL ?? "");
