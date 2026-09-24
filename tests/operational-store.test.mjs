@@ -36,11 +36,21 @@ before(async () => {
       "utf8",
     ),
   );
+  await db.exec(
+    await readFile(
+      new URL(
+        "../operational-db/supabase/migrations/20260925120000_binance_collector.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
 });
 beforeEach(async () => {
   await db.exec(`RESET ROLE;
     TRUNCATE sync_outbox, operational_results, monitor_runs,
-      market_data_checkpoints, recent_candles CASCADE;`);
+      market_data_checkpoints, recent_candles, collector_recent_candles,
+      collector_health, collector_leases CASCADE;`);
 });
 after(() => db.close());
 

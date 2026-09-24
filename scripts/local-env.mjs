@@ -27,6 +27,7 @@ try {
     PYTHON_ANALYSIS_URL: "http://127.0.0.1:8000",
     PYTHON_ANALYSIS_TOKEN: randomBytes(32).toString("base64url"),
     SCHEDULED_MONITOR_ENABLED: "false",
+    BINANCE_COLLECTOR_ENABLED: "false",
     VITE_MARKET_AUTO_REFRESH_ENABLED: "false",
     VITE_TA_HISTORY_AUTO_REFRESH_ENABLED: "false",
   };

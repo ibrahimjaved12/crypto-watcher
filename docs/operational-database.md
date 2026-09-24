@@ -8,8 +8,9 @@ TanStack is the only privileged writer to both databases; Python remains calcula
 
 | State domain                                             | Authoritative owner when enabled | Writer                                             |
 | -------------------------------------------------------- | -------------------------------- | -------------------------------------------------- |
-| Recent completed futures candles (1m, 15m, 1h, 4h)       | Operational DB                   | TanStack operational repository                    |
-| Market-data checkpoint/freshness                         | Operational DB                   | TanStack operational repository                    |
+| Shared Binance completed candles (1m, 15m, 1h, 4h)       | Operational DB                   | Leased TanStack WebSocket collector                |
+| Collector checkpoint/freshness/health                    | Operational DB                   | Leased TanStack WebSocket collector                |
+| Legacy per-user candles/checkpoints (collector disabled) | Operational DB                   | Request-driven TanStack monitor                    |
 | Monitor-run diagnostics                                  | Operational DB                   | TanStack operational repository                    |
 | Outbox/retry/dead-letter state                           | Operational DB                   | TanStack operational repository; currently dormant |
 | Auth, users, watchlists, settings, notes                 | Lovable                          | Existing Lovable paths                             |
@@ -31,6 +32,7 @@ OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY=<server secret>
 OPERATIONAL_CANDLE_RETENTION_DAYS=7
 OPERATIONAL_MONITOR_RUN_RETENTION_DAYS=30
 OPERATIONAL_OUTBOX_MAX_ATTEMPTS=10
+BINANCE_COLLECTOR_ENABLED=true
 ```
 
 Never create `VITE_*` forms. Startup validation rejects them. Apply only
@@ -71,12 +73,15 @@ The dashboard's recent-run read is an authenticated TanStack server function. It
 verified Lovable user identity, adds an explicit `user_id` predicate to operational queries,
 and never returns the operational service-role credential.
 
-Completed candles default to seven-day retention (allowed range 1–30 days); monitor runs
-default to 30 days (allowed range 1–90 days), and inactive checkpoints expire after 30 days.
-Writes perform database-wide bounded cleanup.
+Shared and legacy completed candles default to seven-day retention (allowed range 1–30 days);
+monitor runs default to 30 days (allowed range 1–90 days), and inactive checkpoints expire after
+30 days. Writes perform database-wide bounded cleanup.
 The authenticated read reports per-user storage counts; operators can call
 `get_global_storage_diagnostics()` for total row counts, oldest candle time, outbox state counts
-and the oldest undelivered event. Only completed candles are persisted—never raw stream ticks.
+and the oldest undelivered event, and `get_collector_storage_diagnostics()` for shared candle and
+health growth. Only completed candles are persisted—never developing updates or raw `aggTrade`
+events. See [the collector design](./binance-futures-collector.md) for recovery, memory bounds, and
+health.
 
 No current durable result is safe to migrate, so the transactional outbox is intentionally
 unused. Its infrastructure atomically stages a stable result ID and stable event ID, claims
@@ -87,8 +92,10 @@ purged. A future domain must define its Lovable destination before activating de
 
 ## Cutover and rollback
 
-Deploy the operational migration and credentials first, then switch all TanStack instances to
-`OPERATIONAL_DB_ENABLED=true` together. Roll back by switching all instances to `false`
-together; checkpoint and monitor-run ownership then returns to Lovable, while operational data
-is retained. Never run a mixed fleet with different flag values, because that would create two
-writers for those domains. Do not enable fallback-on-error.
+Deploy the operational migration and credentials first, then switch all long-lived TanStack
+instances to `OPERATIONAL_DB_ENABLED=true` and `BINANCE_COLLECTOR_ENABLED=true` together. Roll the
+collector back by switching `BINANCE_COLLECTOR_ENABLED=false` across the whole fleet; the legacy
+request-driven operational candle/checkpoint path resumes. Switching `OPERATIONAL_DB_ENABLED=false`
+as well returns all legacy operational ownership to Lovable. Operational data is retained. Never
+run a mixed fleet with different flag values, because that would create two writers for those
+domains. Do not enable fallback-on-error.

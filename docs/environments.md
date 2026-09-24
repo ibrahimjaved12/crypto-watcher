@@ -121,6 +121,7 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `OPERATIONAL_CANDLE_RETENTION_DAYS`               | TanStack                            | `7`; allowed range 1–30                                                                                 |
 | `OPERATIONAL_MONITOR_RUN_RETENTION_DAYS`          | TanStack                            | `30`; allowed range 1–90                                                                                |
 | `OPERATIONAL_OUTBOX_MAX_ATTEMPTS`                 | TanStack                            | `10`; allowed range 1–100 before dead-letter                                                            |
+| `BINANCE_COLLECTOR_ENABLED`                       | TanStack server                     | Server-only cutover; requires operational DB and a long-lived runtime                                   |
 | `PYTHON_ANALYSIS_ENABLED`                         | TanStack                            | `false`; explicit `true` enables manual analysis and scheduled TA calculations                          |
 | `PYTHON_ANALYSIS_URL`                             | TanStack                            | `http://127.0.0.1:8000`; required when enabled                                                          |
 | `PYTHON_ANALYSIS_TOKEN`                           | TanStack + FastAPI secret           | Empty/disabled; matching 32–256 URL-safe characters required when enabled                               |
@@ -149,7 +150,7 @@ well as Supabase secret/service-role keys used as publishable keys.
 | Refresh TA history                                                       | Selected Supabase                                                                                                  |
 | Manual Python analysis                                                   | Selected Supabase reads → configured FastAPI → public exchange APIs; local FastAPI by default                      |
 | `npm run dev:local`                                                      | Main local Supabase, optional local FastAPI, and the application; operational ownership forced off                 |
-| `npm run dev:local:all`                                                  | Main and operational local Supabase, optional local FastAPI, and the application                                   |
+| `npm run dev:local:all`                                                  | Main and operational local Supabase, shared Binance collector, optional local FastAPI, and the application         |
 | `supabase start`, `npm run env:local`                                    | Main local Supabase; startup may download container images                                                         |
 | Production build                                                         | Compiles explicit hosted configuration; does not itself run monitoring or seed data                                |
 

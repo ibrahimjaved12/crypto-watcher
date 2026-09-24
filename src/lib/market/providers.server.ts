@@ -260,7 +260,7 @@ async function resolveInstrument(
   };
 }
 
-function parseBinance(raw: unknown, minutes: number): Candle[] {
+function parseBinance(raw: unknown, minutes: number, now = Date.now()): Candle[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error("empty kline response");
   const duration = minutes * 60_000;
   return raw.map((row) => {
@@ -277,9 +277,52 @@ function parseBinance(raw: unknown, minutes: number): Candle[] {
       low: finiteNumber(row[3], "low price"),
       close: finiteNumber(row[4], "close price"),
       volume: finiteNonnegative(row[5], "volume"),
-      complete: closeTime < Date.now(),
+      complete: closeTime < now,
     };
   });
+}
+
+export type BinanceKlineRange = {
+  limit?: number;
+  startTime?: number;
+  endTime?: number;
+  now?: number;
+};
+
+/** Exact Binance USD-M trade-price klines for collector bootstrap and bounded recovery. */
+export async function loadBinanceFuturesKlines(
+  symbol: string,
+  minutes: 1 | 15 | 60 | 240,
+  range: BinanceKlineRange = {},
+): Promise<TACandleResult> {
+  const instrument = await resolveInstrument(MARKET_SOURCE, symbol);
+  const limit = range.limit ?? 250;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("invalid kline limit");
+  const interval = minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`;
+  const query = new URLSearchParams({
+    symbol: instrument.nativeSymbol,
+    interval,
+    limit: String(limit),
+  });
+  for (const [name, value] of [
+    ["startTime", range.startTime],
+    ["endTime", range.endTime],
+  ] as const) {
+    if (value !== undefined) {
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error(`invalid ${name}`);
+      query.set(name, String(value));
+    }
+  }
+  const raw = await fetchJson(`${BASE_URLS[MARKET_SOURCE]}${ENDPOINTS[MARKET_SOURCE]}?${query}`);
+  const retrievedAtMs = range.now ?? Date.now();
+  return {
+    source: MARKET_SOURCE,
+    instrument,
+    endpoint: ENDPOINTS[MARKET_SOURCE],
+    priceType: MARKET_PRICE_TYPE,
+    retrievedAt: new Date(retrievedAtMs).toISOString(),
+    candles: parseBinance(raw, minutes, retrievedAtMs),
+  };
 }
 
 function parseOkx(raw: unknown, minutes: number): Candle[] {

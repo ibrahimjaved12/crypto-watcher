@@ -214,6 +214,9 @@ npm run dev:local
 
 The repository pins Node 22 in `.nvmrc` and the Supabase CLI in `package-lock.json`.
 
+Architecture: [operational PostgreSQL](docs/operational-database.md) and the
+[shared Binance futures collector](docs/binance-futures-collector.md).
+
 ## Python analysis milestone
 
 The separate [Python module](python/README.md) provides a one-shot public-candle

@@ -17,7 +17,7 @@ enabled = false
 port = 55329
 
 [studio]
-enabled = false
+enabled = true
 port = 55323
 
 [local_smtp]

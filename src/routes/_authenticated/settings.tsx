@@ -11,6 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { fetchSettings, saveSettings } from "@/lib/db";
 import { getOperationalState } from "@/lib/operational.functions";
+import type { CollectorHealthStatus } from "@/lib/operational/types";
 import { useServerFn } from "@tanstack/react-start";
 
 export const Route = createFileRoute("/_authenticated/settings")({
@@ -34,6 +35,33 @@ export const Route = createFileRoute("/_authenticated/settings")({
   component: SettingsPage,
 });
 
+function formatInterval(minutes: number) {
+  return minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`;
+}
+
+function formatLag(milliseconds: number | null) {
+  if (milliseconds === null) return "—";
+  if (milliseconds < 1_000) return `${milliseconds}ms`;
+  if (milliseconds < 60_000) return `${Math.round(milliseconds / 1_000)}s`;
+  return `${Math.round(milliseconds / 60_000)}m`;
+}
+
+function collectorOverallStatus(
+  health: Array<{ status: CollectorHealthStatus }>,
+): CollectorHealthStatus | null {
+  if (health.length === 0) return null;
+  if (health.some((entry) => entry.status === "UNAVAILABLE")) return "UNAVAILABLE";
+  if (health.some((entry) => entry.status === "STALE")) return "STALE";
+  if (health.some((entry) => entry.status === "RECOVERING")) return "RECOVERING";
+  return "LIVE";
+}
+
+function collectorBadgeVariant(status: CollectorHealthStatus) {
+  if (status === "UNAVAILABLE") return "destructive" as const;
+  if (status === "LIVE") return "secondary" as const;
+  return "outline" as const;
+}
+
 function SettingsPage() {
   const loadOperationalState = useServerFn(getOperationalState);
   const queryClient = useQueryClient();
@@ -43,6 +71,8 @@ function SettingsPage() {
     queryFn: () => loadOperationalState(),
   });
   const runs = { data: operational.data?.runs };
+  const collectorHealth = operational.data?.collectorHealth ?? [];
+  const overallCollectorStatus = collectorOverallStatus(collectorHealth);
 
   const [threshold, setThreshold] = useState("2");
   const [cooldown, setCooldown] = useState("15");
@@ -237,13 +267,65 @@ function SettingsPage() {
           </p>
           {operational.data?.diagnostics ? (
             <p className="num mt-1 text-xs text-muted-foreground">
-              Operational storage: {operational.data.diagnostics.recent_candle_rows} candles ·{" "}
-              {operational.data.diagnostics.checkpoint_rows} checkpoints ·{" "}
+              Request-driven operational storage: {operational.data.diagnostics.recent_candle_rows}{" "}
+              completed candles · {operational.data.diagnostics.checkpoint_rows} checkpoints ·{" "}
               {operational.data.diagnostics.monitor_run_rows} runs ·{" "}
               {operational.data.diagnostics.pending_outbox_rows} pending sync ·{" "}
               {operational.data.diagnostics.failed_outbox_rows} failed ·{" "}
               {operational.data.diagnostics.dead_outbox_rows} dead-letter
             </p>
+          ) : null}
+          {overallCollectorStatus ? (
+            <div className="mt-3 space-y-2 border-t border-border/60 pt-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-medium">Shared Binance collector</p>
+                  <p className="num text-xs text-muted-foreground">
+                    Collector-owned storage:{" "}
+                    {operational.data?.collectorDiagnostics?.candle_rows ?? 0} completed candles
+                  </p>
+                </div>
+                <Badge variant={collectorBadgeVariant(overallCollectorStatus)}>
+                  {overallCollectorStatus}
+                </Badge>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[620px] text-left text-xs">
+                  <thead className="text-muted-foreground">
+                    <tr className="border-b border-border/60">
+                      <th className="py-2 pr-3 font-medium">Symbol</th>
+                      <th className="py-2 pr-3 font-medium">Interval</th>
+                      <th className="py-2 pr-3 font-medium">Status</th>
+                      <th className="py-2 pr-3 font-medium">Latest completed</th>
+                      <th className="py-2 pr-3 font-medium">Lag</th>
+                      <th className="py-2 font-medium">Reconnects</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {collectorHealth.map((row) => (
+                      <tr
+                        key={`${row.instrument_id}:${row.timeframe_minutes}`}
+                        className="border-b border-border/40 last:border-0"
+                      >
+                        <td className="py-2 pr-3 font-medium">{row.symbol}</td>
+                        <td className="py-2 pr-3">{formatInterval(row.timeframe_minutes)}</td>
+                        <td className="py-2 pr-3">
+                          <Badge variant={collectorBadgeVariant(row.status)}>{row.status}</Badge>
+                        </td>
+                        <td className="num py-2 pr-3">
+                          {row.last_completed_open_time
+                            ? new Date(row.last_completed_open_time).toLocaleString()
+                            : "—"}
+                        </td>
+                        <td className="num py-2 pr-3">{formatLag(row.lag_ms)}</td>
+                        <td className="num py-2">{row.reconnect_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           ) : null}
           <ul className="mt-4 space-y-2">
             {(runs.data ?? []).map((r) => (
@@ -284,7 +366,7 @@ function SettingsPage() {
             ))}
             {runs.data?.length === 0 ? (
               <li className="text-sm text-muted-foreground">
-                No runs recorded yet. The scheduler runs every 5 minutes.
+                No manual or scheduled monitoring runs recorded yet.
               </li>
             ) : null}
           </ul>
