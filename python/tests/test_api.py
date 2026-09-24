@@ -29,11 +29,11 @@ def payload():
 def technical_payload():
     duration = 15 * MINUTE
     candles = [
-        {"open_ms": NOW - (200 - index) * duration,
+        {"open_ms": NOW - (220 - index) * duration,
          "open": str(index + 100), "high": str(index + 102),
          "low": str(index + 99), "close": str(index + 101),
          "volume": "100", "complete": True}
-        for index in range(200)
+        for index in range(220)
     ]
     return {
         "schema_version": 1,
@@ -117,6 +117,26 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
         self.assertEqual(response.json()["score"], 60)
+
+    def test_scheduled_batch_targets_due_candles(self):
+        app = create_app(TOKEN, analyzer_for())
+        latest = technical_payload()
+        older = deepcopy(latest)
+        target = older["candles"][-8]["open_ms"]
+        older["target_candle_open_time_ms"] = target
+        older["source_event_time_ms"] = target + 15 * MINUTE
+        response = self.request(
+            app,
+            "POST",
+            "/v1/technical-analysis/batch",
+            json={"schema_version": 1, "requests": [latest, older]},
+            headers=HEADERS,
+        )
+        self.assertEqual(response.status_code, 200)
+        results = response.json()["results"]
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["candle_open_time_ms"], latest["candles"][-1]["open_ms"])
+        self.assertEqual(results[1]["candle_open_time_ms"], target)
 
     def test_missing_configuration_fails_closed(self):
         app = create_app("")

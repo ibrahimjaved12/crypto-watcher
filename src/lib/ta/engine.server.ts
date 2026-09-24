@@ -2,7 +2,16 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { activityEnabled, logActivity } from "../activity-controls";
 import type { Database, Json } from "@/integrations/supabase/types";
 import { createMonitorRunContext, type MonitorRunContext } from "../monitor/run-context";
-import { analyze, closedCandles, outcomeDue, TA_FRAMES, TA_VERSION } from "./core";
+import { calculateTechnicalBatch } from "./python-client.server";
+import { requestCandles, type TechnicalAnalysisRequest } from "./python-contract";
+import {
+  completedCandles,
+  outcomeDue,
+  TA_FRAMES,
+  TA_INTERPRETATION_VERSION,
+  TA_MINIMUM_HISTORY,
+  TA_VERSION,
+} from "./schedule";
 
 type Client = Pick<SupabaseClient<Database>, "from" | "rpc">;
 
@@ -32,12 +41,20 @@ export function latestCompletedCandleAt(timeframe: number, now: number): number 
   return Math.floor(now / duration) * duration - duration;
 }
 
+function sourceNativeSymbol(source: string, symbol: string) {
+  const base = symbol.replace(/USDT$/, "");
+  if (source === "okx-usdt-swap") return `${base}-USDT-SWAP`;
+  if (source === "kraken-futures") return `PF_${base === "BTC" ? "XBT" : base}USD`;
+  return symbol;
+}
+
 /** Each frame fails independently; movement alerts do not depend on TA. */
 export async function runTA(
   db: Client,
   userId: string,
   symbol: string,
   context: MonitorRunContext = createMonitorRunContext(),
+  calculate: typeof calculateTechnicalBatch = calculateTechnicalBatch,
 ) {
   const generation = activityEnabled(process.env["TA_GENERATION_ENABLED"]);
   const outcomes = activityEnabled(process.env["TA_OUTCOME_EVALUATION_ENABLED"]);
@@ -82,14 +99,14 @@ export async function runTA(
           return;
         }
 
-        const validate = (candles: Parameters<typeof closedCandles>[0]) => {
-          closedCandles(candles, timeframe, now);
+        const validate = (candles: Parameters<typeof completedCandles>[0]) => {
+          completedCandles(candles, timeframe, now);
         };
         let generationMarket: Awaited<ReturnType<MonitorRunContext["ta"]>> | undefined;
 
         if (generationDue) {
           generationMarket = await context.ta(symbol, timeframe, validate);
-          const candles = closedCandles(generationMarket.candles, timeframe, now);
+          const candles = completedCandles(generationMarket.candles, timeframe, now);
           const last = candles.at(-1)!;
           let candidates =
             latestAt === null
@@ -105,25 +122,99 @@ export async function runTA(
             throw new Error("Expected completed TA candle is not available");
           }
           candidates = candidates.slice(0, TA_CATCH_UP_LIMIT);
-          const rows = candidates.map((candle) => {
-            const index = candles.findIndex((value) => value.time === candle.time);
-            const history = candles.slice(0, index + 1);
-            if (history.length < 200) throw new Error("Insufficient history for TA catch-up");
-            const indicators = analyze(history);
+          const nativeSymbol = sourceNativeSymbol(generationMarket.source, symbol);
+          const sourceInstrumentId = `${generationMarket.source}:${nativeSymbol}`;
+          const requests: TechnicalAnalysisRequest[] = candidates.map((candle) => ({
+            schema_version: 1,
+            instrument: {
+              instrument_id: sourceInstrumentId,
+              exchange: generationMarket!.source,
+              native_symbol: nativeSymbol,
+              market_type: "futures",
+              contract_type: "perpetual",
+            },
+            timeframe_minutes: timeframe,
+            candles: requestCandles(candles),
+            warmup_candles: [],
+            missing_open_times_ms: [],
+            source: generationMarket!.source,
+            source_event_time_ms: candle.time + duration,
+            evaluation_time_ms: now,
+            detection_time_ms: now,
+            price_type: "trade",
+            target_candle_open_time_ms: candle.time,
+            config: {
+              ta_version: TA_VERSION,
+              interpretation_version: TA_INTERPRETATION_VERSION,
+              minimum_history: TA_MINIMUM_HISTORY,
+            },
+          }));
+          const results = await calculate(requests);
+          const rows = results.map((result, index) => {
+            const candle = candidates[index]!;
+            const expectedCandleCount =
+              candles.findIndex((value) => value.time === candle.time) + 1;
+            if (
+              result.status !== "ok" ||
+              !result.indicators ||
+              !result.factor_breakdown ||
+              result.reason !== null ||
+              result.timeframe_minutes !== timeframe ||
+              result.candle_open_time_ms !== candle.time ||
+              result.candle_close_time_ms !== candle.time + duration ||
+              result.source_event_time_ms !== candle.time + duration ||
+              result.evaluation_time_ms !== now ||
+              result.detection_time_ms !== now ||
+              result.ta_version !== TA_VERSION ||
+              result.strategy_version !== TA_INTERPRETATION_VERSION ||
+              result.provenance.instrument_id !== sourceInstrumentId ||
+              result.provenance.exchange !== generationMarket!.source ||
+              result.provenance.source !== generationMarket!.source ||
+              result.provenance.native_symbol !== nativeSymbol ||
+              result.provenance.market_type !== "futures" ||
+              result.provenance.contract_type !== "perpetual" ||
+              result.provenance.price_type !== generationMarket!.priceType ||
+              result.provenance.candle_count !== expectedCandleCount ||
+              result.provenance.warmup_candle_count !== 0 ||
+              result.provenance.missing_open_times_ms.length !== 0 ||
+              result.indicators.candle_count !== expectedCandleCount ||
+              result.indicators.candle.open_ms !== candle.time ||
+              result.indicators.candle.open !== candle.open ||
+              result.indicators.candle.high !== candle.high ||
+              result.indicators.candle.low !== candle.low ||
+              result.indicators.candle.close !== candle.close ||
+              result.indicators.candle.volume !== candle.volume ||
+              !result.indicators.candle.complete
+            ) {
+              throw new Error(
+                `Python TA result unavailable or mismatched: ${result.reason ?? "invalid response"}`,
+              );
+            }
             context.metrics.taCalculations += 1;
             return {
               user_id: userId,
               symbol,
               instrument_id: generationMarket!.instrument.id,
+              source_instrument_id: result.provenance.instrument_id,
+              source_native_symbol: result.provenance.native_symbol,
               timeframe,
               source: generationMarket!.source,
               endpoint: generationMarket!.endpoint,
               price_type: generationMarket!.priceType,
-              version: TA_VERSION,
-              candle_at: new Date(candle.time).toISOString(),
-              price: candle.close,
-              indicators: indicators as unknown as Json,
-              patterns: indicators.patterns,
+              version: result.ta_version,
+              strategy_version: result.strategy_version,
+              candle_at: new Date(result.candle_open_time_ms).toISOString(),
+              source_event_at: new Date(result.source_event_time_ms).toISOString(),
+              evaluated_at: new Date(result.evaluation_time_ms).toISOString(),
+              detected_at: new Date(result.detection_time_ms).toISOString(),
+              price: result.indicators.candle.close,
+              classification: result.classification,
+              score: result.score,
+              atr_pct: result.atr_pct,
+              factor_breakdown: result.factor_breakdown as unknown as Json,
+              reasons: result.reasons,
+              indicators: result.indicators as unknown as Json,
+              patterns: result.patterns,
             };
           });
           context.metrics.databaseWriteAttempts += 1;
@@ -146,7 +237,7 @@ export async function runTA(
             generationMarket?.source === source
               ? generationMarket
               : await context.ta(symbol, timeframe, validate, source);
-          const history = closedCandles(market.candles, timeframe, now);
+          const history = completedCandles(market.candles, timeframe, now);
           for (const row of relevant) {
             const target = outcomeDue(row.detected_at, timeframe);
             const candle = history.find((value) => value.time + duration === target);

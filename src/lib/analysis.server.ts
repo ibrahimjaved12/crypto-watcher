@@ -1,28 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { analysisInput, analysisResponse, type AnalysisReply } from "./analysis.contract";
+import { pythonServiceConfig } from "./python-service.server";
 
-type Env = Record<string, string | undefined>;
 type Client = Pick<SupabaseClient<Database>, "from">;
-
-function serviceConfig(env: Env) {
-  if (env["PYTHON_ANALYSIS_ENABLED"] !== "true") throw new Error("disabled");
-  const token = env["PYTHON_ANALYSIS_TOKEN"] ?? "";
-  if (!/^[A-Za-z0-9_-]{32,256}$/.test(token)) throw new Error("token");
-  const url = new URL(env["PYTHON_ANALYSIS_URL"] ?? "");
-  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  if (
-    (url.protocol !== "https:" && !(url.protocol === "http:" && local)) ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash ||
-    url.pathname !== "/"
-  ) {
-    throw new Error("url");
-  }
-  return { url: new URL("/v1/analysis", url).toString(), token };
-}
 
 function milliseconds(value: string | null) {
   if (value === null) return null;
@@ -38,7 +19,7 @@ export async function analyzeForUser(
   supabase: Client,
   userId: string,
   symbol: string,
-  env: Env = process.env,
+  env: Record<string, string | undefined> = process.env,
   send: typeof fetch = fetch,
 ): Promise<AnalysisReply> {
   if (!userId) return { ok: false, error: "Sign in to request analysis.", category: "auth" };
@@ -51,7 +32,7 @@ export async function analyzeForUser(
   }
   let config;
   try {
-    config = serviceConfig(env);
+    config = pythonServiceConfig("/v1/analysis", env);
   } catch {
     return {
       ok: false,

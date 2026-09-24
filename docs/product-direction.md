@@ -152,8 +152,8 @@ directional accuracy alone is not evidence of profitable trading.
 | Browser         | React/TanStack dashboard; market quote and TA-history queries default to manual-only, including initial load, focus/reconnect, invalidation, and key-change fetches. Build-time flags can enable 60-second refetch intervals while active. Tabs and query lifecycle events can add requests when automatic fetching is enabled. See [activity controls](activity-controls.md).                                                                                                                                                                                                                                                                      |
 | Auth and CRUD   | Supabase Auth and user-JWT/RLS access through the browser or TanStack. Watchlists, settings, notes, and history live in Lovable PostgreSQL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Monitoring      | TanStack scheduled route and authenticated manual check invoke the server monitor. Authenticated scheduled requests default to a skipped result before database access and require an explicit runtime flag to run; this does not disable manual checks or the external scheduler invocation itself. User controls independently gate REST collection/checkpointing, movement alerts, and completed-candle TA. TanStack holds privileged write access; PostgreSQL RPCs own ordered latest-candle checkpoints and atomic cumulative baselines, directional cooldowns, and alert insertion. See [independent activity controls](activity-domains.md). |
-| TA and outcomes | TypeScript TA v2 evaluates completed 15m, 1h, and 4h candles and saves `ta_signals`. A user control gates both operations; temporary server flags can further gate generation and pending-outcome evaluation separately during manual and scheduled checks. Current outcome evaluation measures forward returns, not ordered futures-trade profitability.                                                                                                                                                                                                                                                                                           |
-| Python preview  | Optional authenticated TanStack bridge calls a separate FastAPI service. Python returns read-only analysis; it does not persist alerts, baselines, runs, or TA signals.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| TA and outcomes | The shared Python package calculates completed 15m, 1h, and 4h TA. TanStack selects due work, validates responses, and is the sole `ta_signals` writer. Failures are visible and have no alternate calculator. Outcome evaluation remains in TanStack and measures forward returns, not ordered futures-trade profitability.                                                                                                                                                                                                                                                                                                                        |
+| Python service  | The authenticated FastAPI service provides pure manual, scheduled, and replay-compatible calculations. It has no application database credentials and performs no persistence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Providers       | Futures trade-price REST polling in order: Binance USDⓈ-M, OKX USDT swaps, then Kraken perpetuals. There is no persistent futures WebSocket collector.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 The scheduler's configured intent is a five-minute monitor invocation. However,
@@ -169,10 +169,12 @@ flowchart TD
     Browser -->|Quote refresh and manual check|TS[TanStack server]
     Job[Configured scheduler - active state requires verification] -.->|Authenticated monitor route|TS
     TS -->|Futures REST polling|Futures[Binance, OKX, then Kraken perpetual futures]
+    TS -->|Due candle batches|API[FastAPI calculation service]
+    API -->|Shared deterministic TA|TS
     TS -->|Privileged orchestration and RPC calls|Lovable
     Browser -->|Manual Python preview|Bridge[TanStack authenticated bridge]
     Bridge -->|User-scoped reads|Supabase
-    Bridge -->|Server-only service token|API[FastAPI read-only analysis]
+    Bridge -->|Server-only service token|API
     API -->|Futures REST|Futures
     API -->|Analysis response|Bridge
     Bridge -->|Validated result|Browser
@@ -189,8 +191,8 @@ Kraken perpetual futures. Stored rows keep the selected Binance contract identit
 and record the actual futures source and endpoint. The cutover deliberately deletes
 the disposable pre-release market data.
 
-Not yet implemented: full canonical Python TA, external
-operational storage/sync, streaming collection, news ingestion, conditional setup
+Not yet implemented: external operational storage/sync, streaming collection,
+news ingestion, conditional setup
 state machines, ordered trade outcomes, historical backtests, virtual wallets,
 continuous paper trading, calibrated ML, or email/WhatsApp delivery.
 
@@ -253,7 +255,7 @@ migration. No two databases accept competing writes to the same logical state.
 | Identity and user CRUD                                                  | Supabase Auth; browser/TanStack user JWT and RLS; Lovable DB                                                        | Retain this boundary and Lovable ownership of watchlists/settings/notes unless explicitly migrated.                                                                                                 |
 | Privileged application orchestration                                    | TanStack server                                                                                                     | TanStack retains authorization, due-work orchestration, response validation, and privileged Lovable writes.                                                                                         |
 | Movement baseline/cooldown/alert transaction                            | Lovable PostgreSQL RPC invoked by TanStack                                                                          | Retain current authority until explicitly transferred; any move transfers the whole atomic state domain with one writer.                                                                            |
-| TA calculations                                                         | TypeScript saved TA; separate read-only Python preview                                                              | Shared Python package after parity/trial/provenance gates; TanStack initially writes scheduled results to Lovable.                                                                                  |
+| TA calculations                                                         | Shared Python package; TanStack validates and writes scheduled results to Lovable                                   | Retain this split unless operational evidence supports a broader orchestration migration.                                                                                                           |
 | Collector checkpoints, rolling prices/candles, gap and due-work cursors | Latest per-user/pair REST checkpoint in Lovable; no streaming collector, rolling shared candle store, or gap cursor | Assigned collector/orchestration persistence adapter is sole writer to external operational tables.                                                                                                 |
 | Developing/active setup state and paper positions                       | Not implemented                                                                                                     | One designated setup engine/simulation controller per state domain; external operational DB is proposed. Wallet, fills, and ledger transitions must commit atomically.                              |
 | Immutable conclusions, outcomes, reports                                | Current TA/alerts in Lovable via TanStack                                                                           | Existing records retain their authority. For selected newly external-owned result domains, source commits result plus outbox; Lovable holds a read projection/history copy, not a second authority. |
@@ -279,9 +281,8 @@ silently using a second calculator or stale inputs.
 ## Decisions and deployment gates
 
 - **Current:** React/TanStack, Supabase auth/CRUD, TanStack privileged Lovable writes,
-  ordered futures REST monitoring, TypeScript saved TA, and optional read-only Python preview.
-- **Proposed:** canonical deterministic Python calculations;
-  external operational PostgreSQL with selective sync; persistent public futures
+  ordered futures REST monitoring, and canonical Python TA calculations.
+- **Proposed:** external operational PostgreSQL with selective sync; persistent public futures
   collector with REST recovery; evidence-backed setups, evaluation, and paper trading.
 - **Conditional:** Django/ORM ownership, Celery/broker, direct Python database access,
   broader Python orchestration, a fully external backend, and paid hosting. Decide

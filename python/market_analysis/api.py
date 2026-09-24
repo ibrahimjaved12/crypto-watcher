@@ -10,7 +10,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import httpx
 
-from .api_models import AnalysisRequest, TechnicalAnalysisRequest
+from .api_models import (
+    AnalysisRequest,
+    TechnicalAnalysisBatchRequest,
+    TechnicalAnalysisRequest,
+)
 from .service import analyze_request
 from .technical import calculate_technical_analysis
 
@@ -67,6 +71,16 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
     @app.post("/v1/technical-analysis", dependencies=[Depends(authorize)])
     async def technical_analysis(body: TechnicalAnalysisRequest):
         return calculate_technical_analysis(body.calculation_input())
+
+    @app.post("/v1/technical-analysis/batch", dependencies=[Depends(authorize)])
+    async def technical_analysis_batch(body: TechnicalAnalysisBatchRequest):
+        return {
+            "schema_version": 1,
+            "results": [
+                calculate_technical_analysis(item.calculation_input())
+                for item in body.requests
+            ],
+        }
 
     return app
 

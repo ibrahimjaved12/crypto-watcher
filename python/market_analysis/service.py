@@ -124,7 +124,7 @@ def baseline_preview(request, price, observed_ms, source, now_ms):
 def compact_technical(result):
     return {key: result[key] for key in (
         "schema_version", "status", "reason", "classification", "direction", "score",
-        "factor_breakdown", "reasons", "patterns", "timeframe_minutes",
+        "atr_pct", "factor_breakdown", "reasons", "patterns", "timeframe_minutes",
         "candle_open_time_ms", "candle_close_time_ms", "source_event_time_ms",
         "evaluation_time_ms", "detection_time_ms", "ta_version", "strategy_version",
         "provenance")}

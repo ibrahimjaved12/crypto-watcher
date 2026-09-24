@@ -56,6 +56,7 @@ def input_from_dict(value):
         evaluation_time_ms=value["evaluation_time_ms"],
         detection_time_ms=value["detection_time_ms"],
         price_type=value.get("price_type", "trade"),
+        target_candle_open_time_ms=value.get("target_candle_open_time_ms"),
         config=config,
     )
 

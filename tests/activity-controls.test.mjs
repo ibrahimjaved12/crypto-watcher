@@ -84,6 +84,38 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
       candles: Array.from({ length: 200 }, (_, time) => ({ time, close: 100 })),
     };
   };
+  globalThis.__activityCalculate = async (requests) =>
+    requests.map((request) => ({
+      status: "ok",
+      reason: null,
+      timeframe_minutes: request.timeframe_minutes,
+      candle_open_time_ms: request.target_candle_open_time_ms,
+      candle_close_time_ms: request.target_candle_open_time_ms + request.timeframe_minutes * 60_000,
+      source_event_time_ms: request.source_event_time_ms,
+      evaluation_time_ms: request.evaluation_time_ms,
+      detection_time_ms: request.detection_time_ms,
+      ta_version: "ta-v2",
+      strategy_version: "interpretation-v1",
+      classification: "neutral",
+      score: 0,
+      atr_pct: 1,
+      factor_breakdown: {},
+      reasons: [],
+      patterns: [],
+      indicators: {
+        candle: { open_ms: request.target_candle_open_time_ms, close: 100, complete: true },
+        candle_count: 200,
+      },
+      provenance: {
+        instrument_id: request.instrument.instrument_id,
+        native_symbol: request.instrument.native_symbol,
+        source: request.source,
+        price_type: request.price_type,
+        candle_count: 200,
+        warmup_candle_count: 0,
+        missing_open_times_ms: [],
+      },
+    }));
   const { runTA } = await import(
     await moduleUrl("../src/lib/ta/engine.server.ts", {
       "../activity-controls": controlsUrl,
@@ -91,8 +123,14 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
         const metrics=()=>({exchangeRequests:0,candleRows:0,marketCacheHits:0,taCalculations:0,taSignalsSaved:0,taOutcomesUpdated:0,databaseReads:0,databaseWriteAttempts:0,databaseNoOps:0});
         export const createMonitorRunContext=()=>({metrics:metrics(),ta:async()=>globalThis.__activityFetch()});
       `),
-      "./core": stub(
-        "export const TA_FRAMES=[15,60,240], TA_VERSION='test'; export const closedCandles=x=>x; export const analyze=()=>({patterns:[]}); export const outcomeDue=()=>0;",
+      "./python-client.server": stub(
+        "export const calculateTechnicalBatch=(...args)=>globalThis.__activityCalculate(...args);",
+      ),
+      "./python-contract": stub(
+        "export const requestCandles=x=>x.map(c=>({...c,open_ms:c.time}));",
+      ),
+      "./schedule": stub(
+        "export const TA_FRAMES=[15,60,240],TA_VERSION='ta-v2',TA_INTERPRETATION_VERSION='interpretation-v1',TA_MINIMUM_HISTORY=200; export const completedCandles=x=>x; export const outcomeDue=()=>0;",
       ),
     })
   );
@@ -150,6 +188,7 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
       saved[i] === undefined ? delete process.env[name] : (process.env[name] = saved[i]),
     );
     delete globalThis.__activityFetch;
+    delete globalThis.__activityCalculate;
   }
 });
 

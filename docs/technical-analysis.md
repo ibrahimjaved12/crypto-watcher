@@ -1,188 +1,73 @@
-# Technical Analysis v2
+# Technical analysis
 
-This document specifies the current descriptive TA implementation. Future strategy
-versions may use these observations as the originating evidence for a conditional
-futures setup. The saved pattern and assessment must remain linked to the setup's
-eligibility, confirmation, continued validity, entry, management, expiry, and
-event-ordered outcome rules defined in the
-[analysis and evaluation specification](analysis-evaluation.md).
+The shared Python package is the canonical implementation for manual analysis,
+scheduled completed-candle TA, and chronological replay. TanStack remains the
+scheduler, authorization boundary, market-data adapter, response validator, and
+only database writer.
 
-## v2 coverage and architecture
+## Scheduled flow
 
-Saved TA runs in the existing TypeScript monitoring pipeline. Python remains the
-separate read-only rolling-price/baseline service; this release does not migrate
-TA to it. The existing pinned indicator library supplies the added calculations.
-No schema migration or extra exchange requests are required: new values use the
-existing `ta_signals.indicators` JSON field. Historical records are not rewritten.
+For each enabled account and watched perpetual-futures contract, the monitor:
 
-| Feature           | v2 behavior                                                                      |
-| ----------------- | -------------------------------------------------------------------------------- |
-| RSI               | Wilder RSI14 and threshold explanations                                          |
-| Moving averages   | EMA20/50 plus EMA200 long-term price context                                     |
-| MACD              | EMA12 minus EMA26, EMA9 signal, histogram and previous histogram                 |
-| Bollinger Bands   | 20-close SMA ± 2 population standard deviations, bandwidth percent, %B           |
-| Volatility        | Wilder ATR14 and percent of close                                                |
-| Volume            | Latest / previous 20-bar mean ratio and percentage change                        |
-| Timeframes        | 15m, 1h, 4h and an All history filter                                            |
-| Direction         | Existing EMA trend and separate EMA200/MACD bullish, bearish or neutral context  |
-| Explanations      | Expand Indicator explanations for values, formulas, thresholds and pattern rules |
-| Completed candles | Existing aligned, consecutive, fresh OHLCV validation                            |
-| Trend strength    | Wilder ADX14 and +DI/−DI: below 20 weak, 20–25 developing, >=25 trending         |
-| Range context     | Previous 20 candles' lowest low and highest high, excluding the latest candle    |
+1. asks PostgreSQL which 15m, 1h, and 4h candles and forward outcomes are due;
+2. fetches 250 trade-price candles only for frames with due work;
+3. sends at most eight target candles per frame to the authenticated FastAPI
+   `POST /v1/technical-analysis/batch` endpoint;
+4. validates the complete versioned response and its contract, source, candle,
+   evaluation, detection, and calculation-version fields; and
+5. idempotently inserts `ta_signals` using the unique key
+   `(user_id, symbol, timeframe, candle_at, version)`.
 
-ADX adds strength context without assigning a direction. Range levels provide
-reference boundaries, not guaranteed support/resistance. Additional oscillators,
-automated divergence, strategy rules and backtesting are deferred. MACD/EMA/RSI
-are correlated, so agreement is not independent confirmation. The added indicators
-do not contribute points to the existing interpretation-v1 score.
+FastAPI calls `market_analysis.technical.calculate_technical_analysis`, the same
+pure function used by manual Python analysis and `market_analysis.replay`. It has
+no database credentials and performs no writes. A request times out after six
+seconds and receives one bounded retry for network, timeout, rate-limit, or 5xx
+failure. Invalid requests, authentication failures, redirects, and invalid
+responses are not retried.
 
-MACD bias uses histogram sign: rising negative histogram still means bearish bias
-with improving momentum. Band location does not guarantee reversal. %B is null
-when bands coincide; zero reference volume produces null ratio/change. Undefined
-or nonfinite v2 outputs are stored as null. EMA200 uses finite available history
-(minimum 200 bars), so may differ from a chart initialized with much more history.
-All periods refer to candles, not days. Range breaks require a strictly outside
-close; equality remains inside. ADX thresholds are descriptive heuristics.
-
-New snapshots use ta-v2 and include candle count. Historical v1 values missing
-new fields display unavailable. The All filter shows paginated history rather
-than a synchronized cross-timeframe score; compare close times and sources.
-
-TA runs inside the existing scheduled and manual monitoring pass for enabled
-watchlists. Its records live in `ta_signals`; movement alerts and their baselines
-remain separate. The user-scoped Completed-candle technical analysis control can
-pause both new snapshots and pending outcome work without pausing movement alerts;
-market-data collection and the monitoring master switch remain prerequisites. A TA
-failure is reported in monitoring run errors as `TA ...`
-and does not prevent movement alert calculations. Temporary activity controls can
-independently pause new TA generation (`TA_GENERATION_ENABLED=false`), pending
-outcome evaluation (`TA_OUTCOME_EVALUATION_ENABLED=false`), or automatic browser
-history loading. Browser history loading defaults to manual-only and requires
-`VITE_TA_HISTORY_AUTO_REFRESH_ENABLED=true` to run automatically. See
-[activity controls](activity-controls.md) for deployment flags and
-[independent activity controls](activity-domains.md) for user settings.
+There is no alternate calculation path. Python configuration, transport,
+validation, or calculation failures make the monitoring run partial or failed
+with a visible `TA <symbol> <timeframe>m` error. Movement observations, cumulative
+baselines, and movement alerts remain independent.
 
 ## Calculation contract
 
-- Timeframes: 15m, 1h, 4h, using perpetual-futures trade-price candles.
-- Fetch 250 bars per timeframe. Require at least 200 completed, consecutive,
-  aligned candles with valid OHLC and nonnegative base-asset volume.
-- Exclude forming candles. Reject missing or duplicate completed bars.
-- Reject a last close older than one interval plus two minutes.
-- Try Binance USDⓈ-M, OKX USDT swaps, then Kraken perpetuals.
-- EMA20/50/200, MACD12/26/9, Bollinger20/2, Wilder ADX14, RSI14 and ATR14
-  use `technicalindicators` 3.1.0.
-- Volume change compares the latest bar with the mean of the previous 20 bars,
-  excluding the current bar. A zero mean produces null, not infinity.
+- Versions: `ta-v2` and `interpretation-v1`, request/response schema version 1.
+- Instruments: supported linear USDT perpetual futures using trade-price candles.
+- Timeframes: 15m, 1h, and 4h.
+- Data: at least 200 completed, aligned, consecutive, valid OHLCV candles from a
+  250-candle provider request; forming candles are excluded.
+- Freshness: the latest provider candle may lag by at most one interval plus two
+  minutes.
+- Indicators: EMA20/50/200, RSI14, Wilder ATR14, MACD12/26/9, Bollinger20/2,
+  Wilder ADX14/+DI/-DI, prior 20-candle range, and 20-candle volume comparison.
+- Patterns: doji, hammer, shooting star, bullish/bearish engulfing, EMA20/50
+  crosses, RSI 30/70 recovery/rejection, and volume spike.
+- Interpretation: a descriptive score from -100 to +100 with persisted trend,
+  momentum, pattern, and volume contributions and reasons. It is not a probability
+  or an executable trade recommendation.
 
-Patterns use explicit v1 definitions; they are observations, not buy/sell orders:
+Delayed runs recover at most eight missing candles per frame, oldest first. Each
+request names its target candle, so catch-up uses only history available through
+that candle while preserving the actual source-event, evaluation, and detection
+times.
 
-| Pattern                   | Rule                                                                                                           |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Doji                      | Body <= 10% of high-low range; zero-range bars excluded                                                        |
-| Hammer                    | Body > 10% of range, lower wick >= 2 bodies, upper wick <= 0.5 body, preceding three-bar close change negative |
-| Shooting star             | Mirrored hammer with positive preceding close change                                                           |
-| Bullish/bearish engulfing | Opposite-colored bodies, current body fully covers previous body and is strictly larger                        |
-| EMA cross                 | EMA20 crosses EMA50 on the latest completed candle                                                             |
-| RSI recovery/rejection    | Cross back above 30 or below 70                                                                                |
-| Volume spike              | Latest volume >= twice the previous 20-bar mean                                                                |
+## Persistence and outcomes
 
-Each check saves the latest completed candle's snapshot, including observations
-with no pattern. Unique key: user, symbol, timeframe, candle open time, version.
-Concurrent and repeated checks preserve the first snapshot and source. The
-version is `ta-v2`; future rule changes must increment it. Downtime is not
-silently skipped: a delayed runner recovers at most eight missing completed
-candles per timeframe per pass, oldest first. Gaps older than the available
-250-candle provider history fail explicitly.
+Each saved snapshot includes canonical and source contract identities, provider
+and endpoint, price type, candle open/close event time, evaluation and detection
+times, calculation and strategy versions, score, factor breakdown, reasons,
+patterns, and indicators. The dashboard renders these persisted conclusions; it
+does not recalculate a score in the browser.
 
-Before downloading candles, the monitor asks the database for the latest saved
-candle/version and outcomes whose evaluation time is due. A repeated run for the
-same completed candle does not download TA history, calculate indicators, or
-attempt a duplicate snapshot write. Compatible outcome transitions are committed
-in one idempotent batch. See the [local efficiency report](monitor-efficiency.md).
+Forward outcomes remain descriptive. The target is four intervals after the next
+timeframe boundary at or after detection. TanStack updates pending rows
+idempotently using the recorded provider source. A missing target outside the
+available provider history becomes `unavailable`; a provider failure stays pending
+for retry.
 
-## Dashboard interpretation
-
-`interpretation-v1` is calculated from each saved snapshot in the browser. It
-requires no migration or new exchange requests, and applies to existing history.
-It is a descriptive heuristic, not a calibrated probability or a trading strategy.
-Scores are not persisted and must not be treated as historically issued advice.
-
-- Trend: bullish when price > EMA20 > EMA50; bearish when price < EMA20 < EMA50;
-  neutral otherwise, including equality. Contribution: +40, -40, or 0.
-- Momentum: RSI <30 oversold (-20); [30,45) weak (-10); [45,55] neutral (0);
-  (55,70] strong (+10); >70 overbought (+20). Extremes describe current momentum,
-  not an automatic reversal prediction.
-- ATR percent: 100 * ATR14 / saved close. It contributes no directional points.
-- Directional patterns: hammer, bullish engulfing, bullish EMA cross, RSI recovery
-  are bullish; shooting star, bearish engulfing, bearish EMA cross, RSI rejection
-  are bearish. One-sided evidence contributes +20/-20 total, regardless of count.
-  Conflicting evidence, doji, volume spike alone, and unknown patterns score 0.
-- Volume adds +20/-20 only when a directional pattern agrees with the EMA trend
-  and volume is at least the prior 20-bar average (volume change >=0).
-- Pattern support labels distinguish conflicting directions, countertrend or
-  neutral trend, missing inputs, below-average volume, and aligned plus volume
-  supported. This assesses same-candle evidence, not later-candle confirmation.
-- Total score ranges from -100 to +100. Expand a score to see all contributions.
-  Missing/invalid trend, RSI, or volume inputs produce an unavailable score.
-  Missing ATR only affects the volatility display. Movement alerts do not enter
-  this calculation. Historical rows use the currently displayed interpretation
-  version, independently of their original TA calculation version.
-
-## Outcomes
-
-The target is four intervals after the next timeframe boundary at or after
-the actual detection time. Return is the target completed close divided by the
-recorded signal close, minus one, expressed as a percentage. For example,
-a 15m observation detected at 12:05 is evaluated at 13:15.
-
-This is a descriptive forward price change, not a simulated executable trade,
-direction-adjusted win rate, or profit after fees, slippage, and funding.
-The starting close may precede detection. Outcomes use the same
-`binance-usdm:<symbol>` contract and trade-price candle source as the saved signal.
-Missing target history becomes `unavailable`; provider failures leave it pending
-and are retried. Outcomes are processed while the pair remains watched and
-monitoring is enabled. Removing or pausing a pair preserves history but pauses
-its outcome updates. At most 500 pending records per pair/frame are handled
-per run. No TP/SL, news score, or combined movement/TA score is implemented.
-
-## Deployment
-
-For an installation without TA v1, apply
-`supabase/migrations/20260917090000_technical_analysis.sql`, followed by the later
-repository migrations including `20260924090000_monitor_efficiency.sql`, before
-deploying the app changes. Authenticated users may read only their own records;
-only the server service role may create or update them.
-
-After publication, let the existing monitor complete a check. Verify new ta-v2
-rows in 15m/1h/4h, and expand Indicator explanations to check EMA200, MACD,
-Bollinger, ADX and range values. Compare source and completed-close timestamps;
-use All to inspect frames together. Old ta-v1 rows should remain readable with
-unavailable new fields. Refresh reloads saved history; it does not run analysis.
-When automatic TA history is disabled, the first load, filter changes, pagination,
-focus/reconnect, and invalidations stay quiet until Refresh is pressed.
-
-The existing cron endpoint also runs TA. Confirm the cron HTTP timeout and hosting
-request budget allow due exchange requests, with more on fallback or when settling
-a different exchange's outcomes. Identical inputs are shared within one invocation,
-but never across invocations.
-The default pg_net timeout can be too short. Configure the existing job's
-`net.http_post` timeout for the measured deployed runtime, without creating a
-second overlapping job. Inspect HTTP results and `monitor_runs` after deployment.
-
-Run `npm test --prefix tests`, `npx tsc --noEmit`, and `npm run build` with Node 22.
-The dashboard displays saved history with timeframe and symbol filters. No paid
-API, LLM key, or Python deployment is required for this module.
-
-References: [technicalindicators](https://github.com/anandanand84/technicalindicators),
-[OKX candles](https://www.okx.com/docs-v5/en/), and
-[Kraken Futures candles](https://docs.kraken.com/api/docs/futures-api/charts/candles).
-
-## Shared Python calculation package
-
-The deterministic Python port is available through
-`market_analysis.technical.calculate_technical_analysis`. FastAPI's authenticated
-`/v1/technical-analysis` adapter and the offline chronological replay runner use the
-same pure function and explicit futures identity, candles, timestamps, price type,
-gap markers, and versions. The existing TypeScript scheduler and writers remain the
-production path until their separate cutover.
+`completed_candle_ta_enabled`, `TA_GENERATION_ENABLED`, and
+`TA_OUTCOME_EVALUATION_ENABLED` control scheduled work. `PYTHON_ANALYSIS_ENABLED`,
+`PYTHON_ANALYSIS_URL`, and `PYTHON_ANALYSIS_TOKEN` must be configured for TA
+generation. See [Python service](python-api.md) and
+[activity controls](activity-controls.md).

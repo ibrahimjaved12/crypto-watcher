@@ -14,16 +14,18 @@ intended conditional-trade evaluation system.
 | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | Movement alerts (`alerts`)                    | Futures instrument ID, observed change, saved-baseline comparison, rule, threshold, trade price, endpoint/source, timestamps, and test status  | Searchable alert history with CSV export. It records threshold movements, not conditional trade setups or strategy outcomes.             |
 | Monitor runs (`monitor_runs`)                 | Run time, status, symbols checked, alerts created, source, and error text                                                                      | Operational evidence that a monitoring pass ran or failed. It is not a market assessment or profitability record.                        |
-| TA snapshots (`ta_signals`)                   | Futures instrument ID, completed trade-price candle, timeframe, indicator JSON, detected patterns, endpoint/source, TA version, and timestamps | Saved descriptive 15m/1h/4h technical evidence. It does not currently contain the intended immutable conditional setup contract.         |
+| TA snapshots (`ta_signals`)                   | Canonical/source futures identities, completed trade-price candle, indicators, persisted score/factors/reasons, versions, and source/evaluation/detection times | Immutable descriptive 15m/1h/4h technical evidence from the shared Python calculator. It is not a conditional trade setup. |
 | TA forward outcomes (`ta_signals`)            | Pending/measured/unavailable status, future close, evaluation time, and return percentage                                                      | A fixed-horizon forward-price observation. It is not event-ordered TP/SL execution or profit after costs.                                |
-| Browser TA interpretation                     | A current `interpretation-v1` score and factor explanation calculated from each saved snapshot                                                 | The score is displayed but not persisted as an immutable historically issued score. There is no current score-band effectiveness report. |
+| Dashboard TA interpretation                   | The saved `interpretation-v1` classification, score, factors, reasons, and indicator explanations                                              | The browser renders the persisted conclusion and does not recalculate its score. There is no current score-band effectiveness report.     |
 | Analysis conclusions (`analysis_conclusions`) | Immutable futures identity, conclusion, score/factors, versions, timestamps, freshness, and input reference                                    | Append-only activity logging for authorized server writers. Manual Python analysis remains read-only.                                    |
 | Monitor baselines (`monitor_baselines`)       | Futures instrument ID, saved trade-price comparison/time, endpoint/source, threshold, last observation, and directional cooldown times         | Mutable operational state for cumulative movement detection, not an audit history or prediction log.                                     |
 
 Application/process diagnostic logs may also be emitted, but they are not durable
 product evidence. There is currently no stored developing-setup lifecycle, general
-outcome/effectiveness log, or simulated-wallet ledger. Legacy `ta_signals` rows are
-not backfilled into conclusions because their missing provenance cannot be inferred.
+outcome/effectiveness log, or simulated-wallet ledger. Scheduled completed-candle
+conclusions remain in `ta_signals` because that table also owns their fixed-horizon
+outcome lifecycle. The broader append-only `analysis_conclusions` contract remains
+available for other analysis activity.
 
 ## Intended record model and histories
 

@@ -76,6 +76,7 @@ const technicalResult = z
     classification: z.enum(["bullish", "bearish", "neutral", "unavailable"]),
     direction: z.enum(["bullish", "bearish", "neutral", "unavailable"]),
     score: z.number().finite().min(-100).max(100).nullable(),
+    atr_pct: z.number().finite().nonnegative().nullable(),
     factor_breakdown: z
       .object({ trend: factor, momentum: factor, patterns: factor, volume: factor })
       .nullable(),
