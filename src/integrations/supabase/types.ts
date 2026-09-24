@@ -88,6 +88,138 @@ export type Database = {
           },
         ]
       }
+      analysis_conclusions: {
+        Row: {
+          classification: string
+          completed_candle_at: string | null
+          configuration_version: string
+          contract_type: string
+          detected_at: string
+          direction: string
+          endpoint: string
+          evaluated_at: string
+          factor_breakdown: Json
+          id: string
+          idempotency_key: string
+          input_hash: string | null
+          input_reference: string | null
+          instrument_id: string
+          market_type: string
+          model_version: string | null
+          persisted_at: string
+          price_type: string
+          provider: string
+          reasons: Json
+          reference_price: number | null
+          schema_version: number
+          score: number | null
+          score_kind: string
+          source_event_at: string | null
+          source_freshness_ms: number | null
+          source_instrument_id: string
+          source_native_symbol: string
+          source_retrieved_at: string | null
+          status: string
+          strategy_version: string
+          supersedes_id: string | null
+          symbol: string
+          ta_version: string
+          timeframe_minutes: number
+          user_id: string
+        }
+        Insert: {
+          classification: string
+          completed_candle_at?: string | null
+          configuration_version: string
+          contract_type?: string
+          detected_at: string
+          direction: string
+          endpoint: string
+          evaluated_at: string
+          factor_breakdown: Json
+          id?: string
+          idempotency_key: string
+          input_hash?: string | null
+          input_reference?: string | null
+          instrument_id: string
+          market_type?: string
+          model_version?: string | null
+          persisted_at?: string
+          price_type: string
+          provider: string
+          reasons: Json
+          reference_price?: number | null
+          schema_version: number
+          score?: number | null
+          score_kind?: string
+          source_event_at?: string | null
+          source_freshness_ms?: number | null
+          source_instrument_id: string
+          source_native_symbol: string
+          source_retrieved_at?: string | null
+          status: string
+          strategy_version: string
+          supersedes_id?: string | null
+          symbol: string
+          ta_version: string
+          timeframe_minutes: number
+          user_id: string
+        }
+        Update: {
+          classification?: string
+          completed_candle_at?: string | null
+          configuration_version?: string
+          contract_type?: string
+          detected_at?: string
+          direction?: string
+          endpoint?: string
+          evaluated_at?: string
+          factor_breakdown?: Json
+          id?: string
+          idempotency_key?: string
+          input_hash?: string | null
+          input_reference?: string | null
+          instrument_id?: string
+          market_type?: string
+          model_version?: string | null
+          persisted_at?: string
+          price_type?: string
+          provider?: string
+          reasons?: Json
+          reference_price?: number | null
+          schema_version?: number
+          score?: number | null
+          score_kind?: string
+          source_event_at?: string | null
+          source_freshness_ms?: number | null
+          source_instrument_id?: string
+          source_native_symbol?: string
+          source_retrieved_at?: string | null
+          status?: string
+          strategy_version?: string
+          supersedes_id?: string | null
+          symbol?: string
+          ta_version?: string
+          timeframe_minutes?: number
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "analysis_conclusions_instrument_identity_fkey"
+            columns: ["instrument_id", "symbol"]
+            isOneToOne: false
+            referencedRelation: "market_instruments"
+            referencedColumns: ["id", "native_symbol"]
+          },
+          {
+            foreignKeyName: "analysis_conclusions_supersedes_fkey"
+            columns: ["user_id", "supersedes_id"]
+            isOneToOne: false
+            referencedRelation: "analysis_conclusions"
+            referencedColumns: ["user_id", "id"]
+          },
+        ]
+      }
       market_data_checkpoints: {
         Row: {
           data_source: string

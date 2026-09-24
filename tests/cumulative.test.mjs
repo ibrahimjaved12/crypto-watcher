@@ -27,6 +27,7 @@ before(async () => {
     "20260923090000_binance_usdm_futures.sql",
     "20260924090000_monitor_efficiency.sql",
     "20260924100000_remove_monitor_run_retention.sql",
+    "20260924110000_analysis_conclusions.sql",
   ]) {
     await db.exec(
       await readFile(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"),
