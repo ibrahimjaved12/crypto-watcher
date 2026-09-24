@@ -9,7 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import { fetchRuns, fetchSettings, saveSettings } from "@/lib/db";
+import { fetchSettings, saveSettings } from "@/lib/db";
+import { getOperationalState } from "@/lib/operational.functions";
+import { useServerFn } from "@tanstack/react-start";
 
 export const Route = createFileRoute("/_authenticated/settings")({
   head: () => ({
@@ -33,9 +35,14 @@ export const Route = createFileRoute("/_authenticated/settings")({
 });
 
 function SettingsPage() {
+  const loadOperationalState = useServerFn(getOperationalState);
   const queryClient = useQueryClient();
   const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
-  const runs = useQuery({ queryKey: ["runs"], queryFn: fetchRuns });
+  const operational = useQuery({
+    queryKey: ["operational-state"],
+    queryFn: () => loadOperationalState(),
+  });
+  const runs = { data: operational.data?.runs };
 
   const [threshold, setThreshold] = useState("2");
   const [cooldown, setCooldown] = useState("15");
@@ -228,6 +235,16 @@ function SettingsPage() {
           <p className="text-xs text-muted-foreground">
             Every scheduled and manual check, including failures.
           </p>
+          {operational.data?.diagnostics ? (
+            <p className="num mt-1 text-xs text-muted-foreground">
+              Operational storage: {operational.data.diagnostics.recent_candle_rows} candles ·{" "}
+              {operational.data.diagnostics.checkpoint_rows} checkpoints ·{" "}
+              {operational.data.diagnostics.monitor_run_rows} runs ·{" "}
+              {operational.data.diagnostics.pending_outbox_rows} pending sync ·{" "}
+              {operational.data.diagnostics.failed_outbox_rows} failed ·{" "}
+              {operational.data.diagnostics.dead_outbox_rows} dead-letter
+            </p>
+          ) : null}
           <ul className="mt-4 space-y-2">
             {(runs.data ?? []).map((r) => (
               <li key={r.id} className="rounded-md border border-border/70 p-3 text-sm">

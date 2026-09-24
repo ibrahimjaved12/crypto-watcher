@@ -9,13 +9,15 @@
   "scripts": {
     "dev": "vite dev",
     "dev:local": "node scripts/dev-local.mjs",
-    "dev:local:stop": "supabase stop",
+    "dev:local:all": "node scripts/dev-local.mjs --with-operational",
+    "dev:local:stop": "node scripts/stop-local.mjs",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write .",
     "env:local": "node scripts/local-env.mjs",
+    "env:local:operational": "node scripts/operational-env.mjs",
     "test:environment": "node tests/environment.test.mjs"
   },
   "overrides": {

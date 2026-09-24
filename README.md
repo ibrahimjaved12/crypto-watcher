@@ -1,5 +1,9 @@
 Local setup and hosted profiles: [Environment setup](docs/environments.md).
 
+Frequent completed-candle working state can use a separate bounded
+[operational PostgreSQL](docs/operational-database.md). Lovable remains the permanent application
+database and the movement baseline/cooldown/alert transaction remains entirely in Lovable.
+
 # Crypto Watcher
 
 Crypto Watch identifies and evaluates **conditional futures-trade opportunities

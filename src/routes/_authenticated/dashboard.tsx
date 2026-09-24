@@ -19,9 +19,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { addSymbol, fetchRuns, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db";
+import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db";
 import { getMarketSnapshot } from "@/lib/market.functions";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
+import { getOperationalState } from "@/lib/operational.functions";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
@@ -51,6 +52,7 @@ function Dashboard() {
   const [pending, setPending] = useState("");
   const runCheck = useServerFn(runMyMonitorCheck);
   const loadMarket = useServerFn(getMarketSnapshot);
+  const loadOperationalState = useServerFn(getOperationalState);
 
   const watchlist = useQuery({ queryKey: ["watchlist"], queryFn: fetchWatchlist });
   const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
@@ -69,8 +71,11 @@ function Dashboard() {
     enabled: automatic.enabled && symbols.length > 0,
   });
 
-  const runs = useQuery({ queryKey: ["runs"], queryFn: fetchRuns });
-  const lastRun = runs.data?.[0];
+  const operational = useQuery({
+    queryKey: ["operational-state"],
+    queryFn: () => loadOperationalState(),
+  });
+  const lastRun = operational.data?.runs[0];
 
   const add = useMutation({
     mutationFn: addSymbol,
@@ -94,7 +99,7 @@ function Dashboard() {
         `Check ${result.status}: ${result.symbolsChecked} pairs, ${result.alertsCreated} alert(s).`,
       );
       if (result.error) toast.warning(result.error);
-      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["operational-state"] });
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
       queryClient.invalidateQueries({ queryKey: ["ta"] });
     },

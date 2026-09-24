@@ -108,7 +108,10 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
       },
       provenance: {
         instrument_id: request.instrument.instrument_id,
+        exchange: request.instrument.exchange,
         native_symbol: request.instrument.native_symbol,
+        market_type: request.instrument.market_type,
+        contract_type: request.instrument.contract_type,
         source: request.source,
         price_type: request.price_type,
         candle_count: 200,

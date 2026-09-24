@@ -19,6 +19,13 @@ function isPrivilegedKey(value: unknown): boolean {
 }
 
 export function validatePublicSecrets(env: Env) {
+  for (const name of [
+    "VITE_OPERATIONAL_DB_ENABLED",
+    "VITE_OPERATIONAL_SUPABASE_URL",
+    "VITE_OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY",
+  ]) {
+    if (env[name] !== undefined) fail(`${name} must remain server-only.`);
+  }
   const secrets = Object.entries(env)
     .filter(
       ([name, value]) =>

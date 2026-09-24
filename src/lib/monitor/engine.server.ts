@@ -15,6 +15,8 @@ import {
 } from "./run-context";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { getOperationalStore, operationalNativeSymbol } from "../operational/repository.server";
+import type { OperationalStore } from "../operational/types";
 
 export type MonitorSettings = {
   user_id: string;
@@ -60,6 +62,7 @@ export async function runMonitorForUser(
   userId: string,
   settings: MonitorSettings,
   context: MonitorRunContext = createMonitorRunContext(),
+  operationalStore: OperationalStore = getOperationalStore(),
 ): Promise<UserRunResult> {
   const startedAt = performance.now();
   const startingMetrics = metricsSnapshot(context.metrics);
@@ -114,20 +117,51 @@ export async function runMonitorForUser(
       const observation = completedObservation(outcome.result.minute);
       source = source ?? outcome.result.source;
 
-      context.metrics.databaseWriteAttempts += 1;
-      const { data: checkpoint, error: checkpointError } = await supabaseAdmin.rpc(
-        "record_market_data_checkpoint",
-        {
-          p_user_id: userId,
-          p_symbol: symbol,
-          p_price: observation.price,
-          p_observed_at: observation.observedAt,
-          p_source: outcome.result.source,
-        },
-      );
-      if (checkpointError) throw new Error(checkpointError.message);
-      const checkpointStatus = (checkpoint as { status?: string } | null)?.status;
-      if (!checkpointStatus) throw new Error("Missing market checkpoint result");
+      let checkpointStatus: string;
+      if (operationalStore.enabled) {
+        context.metrics.databaseWriteAttempts += 2;
+        const nativeSymbol = operationalNativeSymbol(outcome.result.source, symbol);
+        const instrumentId = `${outcome.result.source}:${nativeSymbol}`;
+        await operationalStore.recordCandles({
+          userId,
+          instrumentId,
+          symbol,
+          nativeSymbol,
+          source: outcome.result.source,
+          endpoint: outcome.result.endpoint,
+          priceType: outcome.result.priceType,
+          timeframeMinutes: 1,
+          retrievedAt: outcome.result.retrievedAt,
+          candles: outcome.result.minute,
+        });
+        checkpointStatus = await operationalStore.recordCheckpoint({
+          userId,
+          instrumentId,
+          symbol,
+          nativeSymbol,
+          source: outcome.result.source,
+          endpoint: outcome.result.endpoint,
+          priceType: outcome.result.priceType,
+          timeframeMinutes: 1,
+          observedAt: observation.observedAt,
+          price: observation.price,
+        });
+      } else {
+        context.metrics.databaseWriteAttempts += 1;
+        const { data: checkpoint, error: checkpointError } = await supabaseAdmin.rpc(
+          "record_market_data_checkpoint",
+          {
+            p_user_id: userId,
+            p_symbol: symbol,
+            p_price: observation.price,
+            p_observed_at: observation.observedAt,
+            p_source: outcome.result.source,
+          },
+        );
+        if (checkpointError) throw new Error(checkpointError.message);
+        checkpointStatus = (checkpoint as { status?: string } | null)?.status ?? "";
+        if (!checkpointStatus) throw new Error("Missing market checkpoint result");
+      }
       if (["already_processed", "not_watched", "disabled"].includes(checkpointStatus)) {
         context.metrics.databaseNoOps += 1;
       }
@@ -160,7 +194,9 @@ export async function runMonitorForUser(
   const taErrors: string[] = [];
   if (settings.completed_candle_ta_enabled) {
     for (const symbol of symbols) {
-      taErrors.push(...(await runTA(supabaseAdmin, userId, symbol, context)));
+      taErrors.push(
+        ...(await runTA(supabaseAdmin, userId, symbol, context, undefined, operationalStore)),
+      );
     }
   }
 
@@ -184,9 +220,25 @@ export async function runMonitorForUser(
   });
 }
 
-export async function recordRun(supabaseAdmin: AdminClient, result: UserRunResult): Promise<void> {
+export async function recordRun(
+  supabaseAdmin: AdminClient,
+  result: UserRunResult,
+  operationalStore: OperationalStore = getOperationalStore(),
+): Promise<void> {
   // Include the operational log write itself in the saved measurement.
   result.metrics.databaseWriteAttempts += 1;
+  if (operationalStore.enabled) {
+    await operationalStore.recordMonitorRun(result.userId, {
+      status: result.status,
+      symbols_checked: result.symbolsChecked,
+      alerts_created: result.alertsCreated,
+      data_source: result.dataSource,
+      error_message: result.error,
+      duration_ms: result.durationMs,
+      metrics: result.metrics,
+    });
+    return;
+  }
   const { error } = await supabaseAdmin.from("monitor_runs").insert({
     user_id: result.userId,
     status: result.status,

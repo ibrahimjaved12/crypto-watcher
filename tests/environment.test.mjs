@@ -82,6 +82,16 @@ test("rejects server secrets by public name, copied value, opaque key and JWT ro
   }
   validateEnvironment({ ...local, SUPABASE_SERVICE_ROLE_KEY: "private" });
 });
+
+test("operational database configuration has no browser-visible variants", () => {
+  for (const name of [
+    "VITE_OPERATIONAL_DB_ENABLED",
+    "VITE_OPERATIONAL_SUPABASE_URL",
+    "VITE_OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY",
+  ]) {
+    assert.throws(() => validateEnvironment({ ...local, [name]: "configured" }), /server-only/);
+  }
+});
 test("URLs reject credentials and non-origin targets", () => {
   for (const url of [
     "ftp://localhost",
@@ -103,15 +113,29 @@ test("generator uses local status, protects permissions, and refuses overwrite/h
     mkdirSync(bin);
     const cli = join(bin, "supabase");
     const run = () =>
-      spawnSync(process.execPath, [fileURLToPath(new URL("../scripts/local-env.mjs", import.meta.url))], {
-        cwd: root,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
-        encoding: "utf8",
-      });
-    const mock = (url) =>
+      spawnSync(
+        process.execPath,
+        [fileURLToPath(new URL("../scripts/local-env.mjs", import.meta.url))],
+        {
+          cwd: root,
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+          encoding: "utf8",
+        },
+      );
+    const runOperational = () =>
+      spawnSync(
+        process.execPath,
+        [fileURLToPath(new URL("../scripts/operational-env.mjs", import.meta.url))],
+        {
+          cwd: root,
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+          encoding: "utf8",
+        },
+      );
+    const mock = (url, operationalUrl = "http://127.0.0.1:55321") =>
       writeFileSync(
         cli,
-        `#!/bin/sh\nprintf '%s' '${JSON.stringify({ API_URL: url, ANON_KEY: "anon-test", SERVICE_ROLE_KEY: "secret-test" })}'\n`,
+        `#!/bin/sh\ncase " $* " in *" --workdir operational-db "*) printf '%s' '${JSON.stringify({ API_URL: operationalUrl, ANON_KEY: "operational-anon-test", SERVICE_ROLE_KEY: "operational-secret-test" })}' ;; *) printf '%s' '${JSON.stringify({ API_URL: url, ANON_KEY: "anon-test", SERVICE_ROLE_KEY: "secret-test" })}' ;; esac\n`,
         { mode: 0o700 },
       );
     mock("http://127.0.0.1:54321");
@@ -121,8 +145,17 @@ test("generator uses local status, protects permissions, and refuses overwrite/h
     assert.match(contents, /APP_PROFILE="local"/);
     assert.match(contents, /SUPABASE_SERVICE_ROLE_KEY="secret-test"/);
     assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.equal(runOperational().status, 0);
+    const withOperational = readFileSync(file, "utf8");
+    assert.match(withOperational, /OPERATIONAL_SUPABASE_URL="http:\/\/127\.0\.0\.1:55321"/);
+    assert.match(
+      withOperational,
+      /OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY="operational-secret-test"/,
+    );
+    assert.equal(runOperational().status, 1);
+    assert.equal(readFileSync(file, "utf8"), withOperational);
     assert.equal(run().status, 1);
-    assert.equal(readFileSync(file, "utf8"), contents);
+    assert.equal(readFileSync(file, "utf8"), withOperational);
     rmSync(file);
     mock("https://project.supabase.co");
     assert.equal(run().status, 1);

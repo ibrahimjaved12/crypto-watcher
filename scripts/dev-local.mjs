@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadEnvFile } from "node:process";
 
 const root = resolve(import.meta.dirname, "..");
+const withOperational = process.argv.includes("--with-operational");
 const children = new Map();
 let shuttingDown = false;
 
@@ -115,13 +116,37 @@ async function main() {
     quiet: true,
   });
   console.log("[local-dev] Supabase is ready.");
+  if (withOperational) {
+    console.log("[local-dev] Starting the separate operational Supabase if needed…");
+    run(
+      "supabase",
+      ["start", "--workdir", "operational-db"],
+      "Could not start local operational Supabase. Ensure Docker is running.",
+      { quiet: true },
+    );
+    console.log("[local-dev] Operational Supabase is ready.");
+  }
 
   const envPath = resolve(root, ".env.local");
   if (!existsSync(envPath)) {
     console.log("[local-dev] Creating .env.local from local Supabase…");
     run(process.execPath, ["scripts/local-env.mjs"], "Could not create .env.local.");
   }
+  if (withOperational) {
+    const existing = readFileSync(envPath, "utf8");
+    if (!/^OPERATIONAL_DB_ENABLED=/m.test(existing)) {
+      console.log("[local-dev] Adding local operational database configuration…");
+      run(
+        process.execPath,
+        ["scripts/operational-env.mjs"],
+        "Could not configure the local operational database.",
+      );
+    }
+  }
   loadEnvFile(envPath);
+  // The launcher mode is the ownership cutover. Never leave the second writer
+  // enabled merely because credentials remain in the reusable local env file.
+  process.env.OPERATIONAL_DB_ENABLED = String(withOperational);
 
   if (process.env.PYTHON_ANALYSIS_ENABLED === "true") {
     const url = requireLocalUrl(process.env.PYTHON_ANALYSIS_URL ?? "");
@@ -180,7 +205,7 @@ async function main() {
 
   console.log("[local-dev] Starting the application…");
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  start("application", npm, ["run", "dev"]);
+  start("application", npm, ["run", "dev", "--", "--force"]);
 }
 
 process.once("SIGINT", () => void shutdown(0));
