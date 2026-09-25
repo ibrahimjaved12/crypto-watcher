@@ -1,10 +1,12 @@
 # Binance USD-M futures collector
 
-The backend process owns one public Binance USD-M WebSocket connection for the union of all
-watched contracts. It starts with the TanStack server process, runs without an open dashboard,
+The collector is an independently runnable persistent backend worker. It owns one public Binance
+USD-M WebSocket connection for the union of all watched contracts, runs without an open dashboard,
 and is enabled only when both `BINANCE_COLLECTOR_ENABLED=true` and the operational database are
-enabled. A renewable operational-database lease prevents two application instances from acting
-as authoritative collectors.
+enabled. A renewable operational-database lease prevents two worker instances from acting as
+authoritative collectors. The TanStack application server does not start the collector: importing
+or starting the app never opens a market stream. Production hosting for the worker remains an open
+decision in [#19](https://github.com/ibrahimjaved12/crypto-watcher/issues/19).
 
 ## Inputs and candle semantics
 
@@ -77,18 +79,23 @@ Lovable remains authoritative for watchlists, settings, movement state/alerts, a
 conclusions. No candle is dual-written to Lovable.
 
 Apply `operational-db/supabase/migrations/20260925120000_binance_collector.sql` only to the external
-operational database. Set this server-only flag (never a `VITE_*` variable):
+operational database. Set this server-only flag (never a `VITE_*` variable) on both the collector
+worker and the application server:
 
 ```text
 BINANCE_COLLECTOR_ENABLED=true
 ```
 
-`npm run dev:local:all` enables it for that local process. `npm run dev:local` disables it and uses
-the legacy request-driven path. In production, enable it only on a long-lived TanStack server
-runtime; the operational lease elects one collector across instances. Disable the flag on the
-whole fleet to roll back without simultaneous writers. Health (`LIVE`, `RECOVERING`, `STALE`, or
-`UNAVAILABLE`) is returned only through the authenticated operational-state server function and is
-filtered to the caller's watchlist.
+The worker reads it to start the collector; the application reads it to know that the shared
+collector owns completed-candle/checkpoint state. Locally, `npm run dev:local:all` starts the
+collector worker as a separate process and enables the flag for both processes, while
+`npm run dev:local` disables it and uses the legacy request-driven path. `npm run collector:worker`
+runs the worker on its own. In production, run the collector as a persistent worker process and
+select its host from the evidence in #19; the operational lease elects one collector across
+instances. Disable the flag on the whole fleet and stop the worker to roll back without
+simultaneous writers. Health (`LIVE`, `RECOVERING`, `STALE`, or `UNAVAILABLE`) is returned only
+through the authenticated operational-state server function and is filtered to the caller's
+watchlist.
 
 ## Monitor overlap and freshness
 

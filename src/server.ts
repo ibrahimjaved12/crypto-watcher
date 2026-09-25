@@ -1,6 +1,5 @@
 import { validateServerEnvironment } from "./lib/environment.server";
 import "./lib/error-capture";
-import { startBinanceCollector } from "./lib/market/collector.server";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
@@ -10,9 +9,6 @@ type ServerEntry = {
 };
 
 let serverEntryPromise: Promise<ServerEntry> | undefined;
-
-// Starts once per long-lived backend process and never depends on a dashboard request.
-startBinanceCollector();
 
 async function getServerEntry(): Promise<ServerEntry> {
   if (!serverEntryPromise) {

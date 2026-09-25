@@ -204,8 +204,17 @@ async function main() {
     console.log("[local-dev] FastAPI skipped because PYTHON_ANALYSIS_ENABLED is not true.");
   }
 
-  console.log("[local-dev] Starting the application…");
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+
+  if (withOperational) {
+    // The collector is a separate persistent worker, not part of the app server.
+    console.log("[local-dev] Starting the collector worker as a separate process…");
+    start("collector", npm, ["run", "collector:worker"]);
+  } else {
+    console.log("[local-dev] Collector worker skipped; the app uses the request-driven path.");
+  }
+
+  console.log("[local-dev] Starting the application…");
   start("application", npm, ["run", "dev", "--", "--force"]);
 }
 

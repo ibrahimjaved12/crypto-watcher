@@ -121,7 +121,7 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `OPERATIONAL_CANDLE_RETENTION_DAYS`               | TanStack                            | `7`; allowed range 1–30                                                                                 |
 | `OPERATIONAL_MONITOR_RUN_RETENTION_DAYS`          | TanStack                            | `30`; allowed range 1–90                                                                                |
 | `OPERATIONAL_OUTBOX_MAX_ATTEMPTS`                 | TanStack                            | `10`; allowed range 1–100 before dead-letter                                                            |
-| `BINANCE_COLLECTOR_ENABLED`                       | TanStack server                     | Server-only cutover; requires operational DB and a long-lived runtime                                   |
+| `BINANCE_COLLECTOR_ENABLED`                       | Collector worker + app server       | Server-only cutover; requires operational DB and the separate collector worker process                  |
 | `PYTHON_ANALYSIS_ENABLED`                         | TanStack                            | `false`; explicit `true` enables manual analysis and scheduled TA calculations                          |
 | `PYTHON_ANALYSIS_URL`                             | TanStack                            | `http://127.0.0.1:8000`; required when enabled                                                          |
 | `PYTHON_ANALYSIS_TOKEN`                           | TanStack + FastAPI secret           | Empty/disabled; matching 32–256 URL-safe characters required when enabled                               |

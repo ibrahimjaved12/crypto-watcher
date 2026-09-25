@@ -75,7 +75,7 @@ async function analyzeCompletedCandle(event: CompletedCandleEvent): Promise<void
   }
 }
 
-class CollectorRuntime {
+export class CollectorRuntime {
   private readonly instanceId = crypto.randomUUID();
   private readonly collector: BinanceFuturesCollector;
   private readonly movement: MovementEngineRuntime;
@@ -360,6 +360,12 @@ type CollectorGlobal = typeof globalThis & {
   __cryptoWatcherBinanceCollector?: CollectorRuntime;
 };
 
+/**
+ * Shared collector startup path. Starts the one authoritative collector and returns
+ * its runtime handle, or null when `BINANCE_COLLECTOR_ENABLED` is not true. It does
+ * not wire process signal handling: an independent worker entrypoint owns graceful
+ * shutdown and lease release.
+ */
 export function startBinanceCollector(): CollectorRuntime | null {
   if (!enabled()) return null;
   const global = globalThis as CollectorGlobal;
@@ -369,9 +375,5 @@ export function startBinanceCollector(): CollectorRuntime | null {
   const runtime = new CollectorRuntime(store);
   global.__cryptoWatcherBinanceCollector = runtime;
   runtime.start();
-  if (typeof process !== "undefined" && typeof process.once === "function") {
-    process.once("SIGTERM", () => void runtime.stop());
-    process.once("SIGINT", () => void runtime.stop());
-  }
   return runtime;
 }

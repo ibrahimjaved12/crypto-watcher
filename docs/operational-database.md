@@ -2,14 +2,15 @@
 
 Lovable PostgreSQL remains the permanent application database. A second Supabase/PostgreSQL
 instance owns bounded, frequently updated working state when `OPERATIONAL_DB_ENABLED=true`.
-TanStack is the only privileged writer to both databases; Python remains calculation-only.
+The application server and the collector worker are the only privileged writers to both databases;
+Python remains calculation-only.
 
 ## Ownership
 
 | State domain                                             | Authoritative owner when enabled | Writer                                             |
 | -------------------------------------------------------- | -------------------------------- | -------------------------------------------------- |
-| Shared Binance completed candles (1m, 15m, 1h, 4h)       | Operational DB                   | Leased TanStack WebSocket collector                |
-| Collector checkpoint/freshness/health                    | Operational DB                   | Leased TanStack WebSocket collector                |
+| Shared Binance completed candles (1m, 15m, 1h, 4h)       | Operational DB                   | Leased collector worker                            |
+| Collector checkpoint/freshness/health                    | Operational DB                   | Leased collector worker                            |
 | Legacy per-user candles/checkpoints (collector disabled) | Operational DB                   | Request-driven TanStack monitor                    |
 | Monitor-run diagnostics                                  | Operational DB                   | TanStack operational repository                    |
 | Outbox/retry/dead-letter state                           | Operational DB                   | TanStack operational repository; currently dormant |
@@ -51,19 +52,24 @@ npx supabase db push --workdir operational-db \
 Alternatively, apply the SQL file through that operational project's SQL editor. Neither method
 requires or authorizes a Lovable login or Lovable schema change.
 
-Local development uses two isolated Supabase stacks:
+Local development uses two isolated Supabase stacks and runs the application and the collector
+worker as separate processes:
 
 ```sh
 npx supabase start
 npx supabase start --workdir operational-db
 npm run env:local                 # new .env.local
 npm run env:local:operational     # existing .env.local only
-npm run dev
+npm run dev:local:all             # app + collector worker
+# or run them independently:
+npm run dev                       # app only, no collector
+npm run collector:worker          # collector worker only
 ```
 
-`npm run dev:local` starts only the original main local stack and explicitly disables operational
-ownership. `npm run dev:local:all` starts both stacks and enables the operational store.
-`npm run dev:local:stop` stops both. The main API is at port 54321 and the operational API at 55321.
+`npm run dev:local` starts only the original main local stack, runs the app alone, and explicitly
+disables operational ownership. `npm run dev:local:all` starts both stacks and runs the app plus a
+separate collector worker process. `npm run dev:local:stop` stops both. The main API is at port
+54321 and the operational API at 55321.
 Local operational Supabase Auth runs only to issue its API/service-role credentials; application
 users and authentication remain exclusively in the main local database or Lovable.
 
@@ -92,10 +98,11 @@ purged. A future domain must define its Lovable destination before activating de
 
 ## Cutover and rollback
 
-Deploy the operational migration and credentials first, then switch all long-lived TanStack
-instances to `OPERATIONAL_DB_ENABLED=true` and `BINANCE_COLLECTOR_ENABLED=true` together. Roll the
-collector back by switching `BINANCE_COLLECTOR_ENABLED=false` across the whole fleet; the legacy
-request-driven operational candle/checkpoint path resumes. Switching `OPERATIONAL_DB_ENABLED=false`
-as well returns all legacy operational ownership to Lovable. Operational data is retained. Never
-run a mixed fleet with different flag values, because that would create two writers for those
-domains. Do not enable fallback-on-error.
+Deploy the operational migration and credentials first, then start the collector worker and switch
+the application fleet to `OPERATIONAL_DB_ENABLED=true` and `BINANCE_COLLECTOR_ENABLED=true`
+together. Roll the collector back by stopping the worker and switching
+`BINANCE_COLLECTOR_ENABLED=false` across the whole fleet; the legacy request-driven operational
+candle/checkpoint path resumes. Switching `OPERATIONAL_DB_ENABLED=false` as well returns all legacy
+operational ownership to Lovable. Operational data is retained. Never run a mixed fleet with
+different flag values, because that would create two writers for those domains. Do not enable
+fallback-on-error.
