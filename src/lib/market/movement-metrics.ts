@@ -671,6 +671,9 @@ function validateConfig(config: MarketMovementConfig): void {
   if (config.minimumHistoricalCoverageMs > config.historicalLookbackMs) {
     throw new Error("minimum historical coverage exceeds lookback");
   }
+  if (config.materialZ < config.flatZ) {
+    throw new Error("material Z threshold must be at least the flat Z threshold");
+  }
   if (config.trimFraction >= 0.5) throw new Error("trim fraction must be below 0.5");
   if (config.liquidityWeightCap > 1) throw new Error("liquidity weight cap exceeds 1");
   if (config.minimumEligibleFraction > 1) {

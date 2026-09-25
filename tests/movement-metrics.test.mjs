@@ -121,6 +121,19 @@ function windowResult(result, windowMinutes) {
   return result.windows.find((value) => value.windowMinutes === windowMinutes);
 }
 
+test("rejects a material threshold below the flat threshold", () => {
+  assert.throws(
+    () =>
+      calculateMarketMovement({
+        evaluationBoundaryTime: END,
+        universe: { id: "top-usdm", version: "2026-09-25", symbols: [] },
+        symbols: [],
+        config: { ...DEFAULT_MARKET_MOVEMENT_CONFIG, flatZ: 1, materialZ: 0.5 },
+      }),
+    /material Z threshold must be at least the flat Z threshold/,
+  );
+});
+
 test("uses exact boundaries for current and previous returns, velocity, and acceleration", () => {
   const returns = { 1: [0.12, -0.03], 5: [-0.2, 0.08], 15: [0.4, 0.1] };
   const result = evaluate([symbolInput("BTCUSDT", returns)]);
