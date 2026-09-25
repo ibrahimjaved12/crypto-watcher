@@ -4,6 +4,14 @@ import { test } from "node:test";
 import ts from "../node_modules/typescript/lib/typescript.js";
 
 const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+const movementSource = await readFile(
+  new URL("../src/lib/market/movement-buckets.ts", import.meta.url),
+  "utf8",
+);
+const movementOutput = ts.transpileModule(movementSource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const movementUrl = `data:text/javascript;base64,${Buffer.from(movementOutput).toString("base64")}`;
 const source = await readFile(new URL("../src/lib/market/collector.ts", import.meta.url), "utf8");
 let { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
@@ -13,6 +21,10 @@ outputText = outputText.replaceAll(
   JSON.stringify(
     stub(`export const isSupportedSymbol=(value)=>["BTCUSDT","ETHUSDT"].includes(value);`),
   ),
+);
+outputText = outputText.replaceAll(
+  JSON.stringify("./movement-buckets"),
+  JSON.stringify(movementUrl),
 );
 const { BinanceFuturesCollector, candleIdentity } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`
@@ -73,6 +85,7 @@ function wsKline(openTime, timeframeMinutes = 1, closed = true) {
 function harness(overrides = {}) {
   const persisted = new Set();
   const writes = [];
+  const healthWrites = [];
   const events = [];
   const loadRest = async (request) => {
     if (overrides.loadRest) return overrides.loadRest(request);
@@ -104,14 +117,16 @@ function harness(overrides = {}) {
         }
         return inserted;
       },
-      async recordCollectorHealth() {},
+      async recordCollectorHealth(input) {
+        healthWrites.push(input);
+      },
     },
     loadRest,
     async onCompleted(event) {
       events.push(event);
     },
   });
-  return { collector, events, writes };
+  return { collector, events, writes, healthWrites };
 }
 
 test("developing kline stays in memory and never enters completed persistence", async () => {
@@ -234,4 +249,33 @@ test("aggregate-trade buffers obey both time and hard-count bounds", async () =>
     collector.latestTrades("BTCUSDT").map((item) => item.aggregateId),
     [5],
   );
+});
+
+test("accepted aggregate trades feed movement buckets without persistence writes", async () => {
+  const { collector, writes, healthWrites } = harness();
+  await collector.reconcile(["BTCUSDT"]);
+  writes.length = 0;
+  healthWrites.length = 0;
+  const accepted = collector.accept(
+    {
+      stream: "btcusdt@aggTrade",
+      data: {
+        e: "aggTrade",
+        E: BASE,
+        s: "BTCUSDT",
+        st: 1,
+        a: 1,
+        p: "101",
+        q: "2",
+        T: BASE,
+      },
+    },
+    BASE,
+  );
+  collector.advanceMovementBuckets(BASE);
+
+  assert.equal(accepted, true);
+  assert.equal(writes.length, 0);
+  assert.equal(healthWrites.length, 0);
+  assert.equal(collector.movementSnapshot("BTCUSDT").buckets[0].endpointPrice, 101);
 });
