@@ -305,6 +305,30 @@ test("repository reads and writes always carry the authenticated user scope", as
   assert.equal(seen.rpc[0][1].p_user_id, user);
 });
 
+test("market movement append rejects null and unexpected RPC statuses", async () => {
+  const repositoryUrl = await moduleUrl("../src/lib/operational/repository.server.ts", {
+    "@supabase/supabase-js": stub("export const createClient=()=>({});"),
+    "./config.server": stub("export const operationalDbConfig=()=>({enabled:false});"),
+  });
+  const { createOperationalStore } = await import(repositoryUrl);
+  let status = null;
+  const store = createOperationalStore(
+    {
+      async rpc() {
+        return { data: status, error: null };
+      },
+    },
+    { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
+  );
+
+  const event = { episodeStartBoundaryTime: 0, evaluationBoundaryTime: 0 };
+  await assert.rejects(store.appendMarketMovementEvent(event), /returned null/);
+  status = "unexpected";
+  await assert.rejects(store.appendMarketMovementEvent(event), /returned unexpected/);
+  status = "appended";
+  assert.equal(await store.appendMarketMovementEvent(event), "appended");
+});
+
 test("outbox delivery confirms only after sink success", async () => {
   const outboxUrl = await moduleUrl("../src/lib/operational/outbox.server.ts");
   const { deliverOutboxBatch } = await import(outboxUrl);

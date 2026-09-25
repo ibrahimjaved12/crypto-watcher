@@ -1,4 +1,14 @@
 import type { Candle } from "../market/providers.server";
+import type {
+  ConfirmedMarketDirection,
+  MarketDirectionState,
+  MarketPace,
+  MarketStateEvidence,
+} from "../market/market-state-classifier";
+import type {
+  MarketEpisodeTransitionType,
+  SerializedMarketEpisodeLifecycleState,
+} from "../market/market-episode-lifecycle";
 import type { MonitorMetrics } from "../monitor/run-context";
 
 export type OperationalCandleBatch = {
@@ -102,6 +112,76 @@ export type OutboxEvent = {
   attempts: number;
 };
 
+export type PersistedMarketStateCurrent = {
+  universeId: string;
+  primaryWindowMinutes: 5;
+  universeVersion: string;
+  provider: "binance-usdm";
+  exchange: "binance";
+  priceType: "trade";
+  evaluationBoundaryTime: number;
+  directionState: MarketDirectionState;
+  pace: MarketPace;
+  activeEpisodeId: string | null;
+  activeDirection: ConfirmedMarketDirection | null;
+  interrupted: boolean;
+  episodeAlgorithmVersion: string;
+  lifecycleConfigVersion: string;
+  classifierAlgorithmVersion: string;
+  classifierConfigVersion: string;
+  movementAlgorithmVersion: string;
+  movementConfigVersion: string;
+  lifecycleState: SerializedMarketEpisodeLifecycleState;
+  currentEvidence: MarketStateEvidence;
+  updatedAt?: string;
+};
+
+export type PersistedMarketMovementEvent = {
+  eventId: string;
+  episodeId: string;
+  episodeAlgorithmVersion: string;
+  lifecycleConfigVersion: string;
+  transition: MarketEpisodeTransitionType;
+  transitionReason: string;
+  fromDirection: ConfirmedMarketDirection | null;
+  toDirection: ConfirmedMarketDirection | null;
+  episodeStartBoundaryTime: number;
+  evaluationBoundaryTime: number;
+  universeId: string;
+  universeVersion: string;
+  primaryWindowMinutes: 5;
+  provider: "binance-usdm";
+  exchange: "binance";
+  priceType: "trade";
+  direction: ConfirmedMarketDirection;
+  pace: MarketPace;
+  directionalBreadth: number;
+  materialBreadth: number;
+  medianRawReturn: number | null;
+  medianNormalizedMovement: number | null;
+  medianAcceleration: number | null;
+  accelerationBreadth: number;
+  dispersion: number | null;
+  rvolSummary: unknown;
+  outliers: unknown;
+  supportingContracts: string[];
+  conflictingContracts: string[];
+  configuredUniverse: string[];
+  includedSymbols: string[];
+  excludedSymbols: unknown;
+  windowsContext: unknown;
+  classifierAlgorithmVersion: string;
+  classifierConfigVersion: string;
+  movementAlgorithmVersion: string;
+  movementConfigVersion: string;
+  createdAt?: string;
+};
+
+export type MarketEpisodePersistenceStatus = {
+  eventId: string;
+  status: "appended" | "already_exists";
+};
+
 export interface OperationalStore {
   readonly enabled: boolean;
   recordCandles(batch: OperationalCandleBatch): Promise<void>;
@@ -141,4 +221,17 @@ export interface OperationalStore {
   claimOutbox(workerId: string, limit?: number): Promise<OutboxEvent[]>;
   markOutboxDelivered(eventId: string, workerId: string): Promise<void>;
   markOutboxFailed(eventId: string, workerId: string, error: string): Promise<void>;
+  getMarketStateCurrent(
+    universeId: string,
+    primaryWindowMinutes?: number,
+  ): Promise<PersistedMarketStateCurrent | null>;
+  upsertMarketStateCurrent(state: PersistedMarketStateCurrent): Promise<void>;
+  appendMarketMovementEvent(
+    event: PersistedMarketMovementEvent,
+  ): Promise<"appended" | "already_exists">;
+  persistMarketEpisodeLifecycleStep(
+    state: PersistedMarketStateCurrent,
+    events: readonly PersistedMarketMovementEvent[],
+  ): Promise<MarketEpisodePersistenceStatus[]>;
+  listMarketMovementEvents(episodeId: string): Promise<PersistedMarketMovementEvent[]>;
 }
