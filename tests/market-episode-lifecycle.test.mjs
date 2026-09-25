@@ -30,9 +30,27 @@ const {
   computeEpisodeId,
   computeEventId,
   extractSupportingAndConflictingSymbols,
+  serializeMarketEpisodeLifecycleState,
+  deserializeMarketEpisodeLifecycleState,
+  markMarketEpisodeStatePersisted,
 } = await import(`data:text/javascript;base64,${Buffer.from(lifecycleOutput).toString("base64")}`);
 
 const BASE_TIME = 1_800_000_000_000;
+
+function lifecycleConfig(version) {
+  return {
+    version,
+    currentSnapshotCadenceMs: 30_000,
+    startConfirmationCount: 2,
+    exitConfirmationCount: 3,
+    reversalConfirmationCount: 2,
+    strengthConfirmationCount: 2,
+    continuationRisingBreadth: 0.55,
+    continuationFallingBreadth: 0.55,
+    materialStrengthenBreadth: 0.7,
+    materialWeakenBreadth: 0.5,
+  };
+}
 
 const available = (value) => ({ available: true, value });
 const unavailable = (reason = "MARKET_UNIVERSE_INELIGIBLE") => ({
@@ -228,6 +246,33 @@ function makePair({
   return { movement, classification };
 }
 
+function persistedCurrent(result) {
+  const state = result.nextState;
+  const persistedState = markMarketEpisodeStatePersisted(state);
+  return {
+    universeId: state.universeId,
+    primaryWindowMinutes: state.primaryWindowMinutes,
+    universeVersion: state.universeVersion,
+    provider: state.provider,
+    exchange: state.exchange,
+    priceType: state.priceType,
+    evaluationBoundaryTime: state.evaluationBoundaryTime,
+    directionState: state.currentDirectionState,
+    pace: state.currentPace,
+    activeEpisodeId: state.activeEpisode?.episodeId ?? null,
+    activeDirection: state.activeEpisode?.direction ?? null,
+    interrupted: state.interrupted,
+    episodeAlgorithmVersion: state.episodeAlgorithmVersion,
+    lifecycleConfigVersion: state.lifecycleConfigVersion,
+    classifierAlgorithmVersion: state.classifierAlgorithmVersion,
+    classifierConfigVersion: state.classifierConfigVersion,
+    movementAlgorithmVersion: state.movementAlgorithmVersion,
+    movementConfigVersion: state.movementConfigVersion,
+    lifecycleState: serializeMarketEpisodeLifecycleState(persistedState),
+    currentEvidence: result.currentEvidence,
+  };
+}
+
 // -------------------------------------------------------------
 // Database setup for persistence tests
 // -------------------------------------------------------------
@@ -294,6 +339,32 @@ test("1. one broad evaluation => no STARTED", () => {
   assert.equal(result.nextState.pendingCandidate.startBoundaryTime, BASE_TIME);
 });
 
+test("duplicate and backward boundaries never advance start confirmation", () => {
+  const candidate = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const first = processMarketEpisodeLifecycle({
+    ...candidate,
+    previousState: null,
+  });
+  const duplicate = processMarketEpisodeLifecycle({
+    ...candidate,
+    previousState: first.nextState,
+  });
+
+  assert.equal(duplicate.transitions.length, 0);
+  assert.equal(duplicate.nextState.pendingCandidate?.count, 1);
+  assert.equal(duplicate.nextState.evaluationBoundaryTime, BASE_TIME);
+  assert.equal(duplicate.shouldPersistCurrentImmediately, false);
+
+  const older = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME - 5_000,
+  });
+  assert.throws(
+    () => processMarketEpisodeLifecycle({ ...older, previousState: first.nextState }),
+    /must not move backward/,
+  );
+});
+
 test("2. second consecutive same broad direction => one STARTED with first boundary start time", () => {
   const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
   const step1 = processMarketEpisodeLifecycle({
@@ -320,6 +391,12 @@ test("2. second consecutive same broad direction => one STARTED with first bound
   assert.notEqual(step2.nextState.activeEpisode, null);
   assert.equal(step2.nextState.activeEpisode.direction, "BROAD_RISE");
   assert.equal(step2.nextState.activeEpisode.startBoundaryTime, BASE_TIME);
+  assert.equal(step2.nextState.episodeAlgorithmVersion, "market-episode-v1");
+  assert.equal(step2.nextState.lifecycleConfigVersion, "market-episode-config-v1");
+  assert.equal(step2.nextState.activeEpisode.episodeAlgorithmVersion, "market-episode-v1");
+  assert.equal(step2.nextState.activeEpisode.lifecycleConfigVersion, "market-episode-config-v1");
+  assert.equal(started.episodeAlgorithmVersion, "market-episode-v1");
+  assert.equal(started.lifecycleConfigVersion, "market-episode-config-v1");
   assert.equal(step2.shouldPersistCurrentImmediately, true);
 });
 
@@ -582,6 +659,16 @@ test("7, 8, 9. 2 consecutive full opposite broad states => one REVERSED, new epi
   assert.equal(rev.transitionReason, "reversal_confirmed");
   assert.equal(rev.evaluationBoundaryTime, BASE_TIME + 15_000);
   assert.equal(rev.episodeStartBoundaryTime, BASE_TIME);
+  assert.equal(rev.direction, "BROAD_DROP");
+  assert.equal(rev.pace, "ACCELERATING");
+  assert.equal(rev.directionalBreadth, 0.8);
+  assert.equal(rev.materialBreadth, 0.6);
+  assert.equal(rev.accelerationBreadth, 1);
+  assert.deepEqual(
+    rev.supportingContracts,
+    Array.from({ length: 10 }, (_, i) => `S${i}USDT`),
+  );
+  assert.deepEqual(rev.conflictingContracts, []);
 
   // New active episode checks:
   assert.notEqual(step4.nextState.activeEpisode, null);
@@ -589,6 +676,35 @@ test("7, 8, 9. 2 consecutive full opposite broad states => one REVERSED, new epi
   assert.equal(step4.nextState.activeEpisode.direction, "BROAD_DROP");
   // New episode start boundary = FIRST opposite evaluation (BASE_TIME + 10_000)
   assert.equal(step4.nextState.activeEpisode.startBoundaryTime, BASE_TIME + 10_000);
+});
+
+test("duplicate pending reversal evaluation cannot confirm REVERSED", () => {
+  const firstRise = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({ ...firstRise, previousState: null });
+  const secondRise = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 5_000,
+  });
+  const step2 = processMarketEpisodeLifecycle({
+    ...secondRise,
+    previousState: step1.nextState,
+  });
+  const firstDrop = makePair({
+    primaryWindow: broadDropWindow(),
+    boundaryTime: BASE_TIME + 10_000,
+  });
+  const pending = processMarketEpisodeLifecycle({
+    ...firstDrop,
+    previousState: step2.nextState,
+  });
+  const duplicate = processMarketEpisodeLifecycle({
+    ...firstDrop,
+    previousState: pending.nextState,
+  });
+
+  assert.equal(duplicate.transitions.length, 0);
+  assert.equal(duplicate.nextState.pendingReversal?.count, 1);
+  assert.equal(duplicate.nextState.activeEpisode?.direction, "BROAD_RISE");
 });
 
 test("10. strengthened via pace crossing after 2 confirmations", () => {
@@ -872,6 +988,84 @@ test("15. universe/version change ends old episode", () => {
   assert.equal(step3.nextState.universeVersion, "2026-09-26");
 });
 
+test("lifecycle version changes reset pending context and end active episodes", () => {
+  const first = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const pendingV1 = processMarketEpisodeLifecycle({
+    ...first,
+    previousState: null,
+    config: lifecycleConfig("lifecycle-v1"),
+  });
+  const second = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 5_000,
+  });
+  const resetToV2 = processMarketEpisodeLifecycle({
+    ...second,
+    previousState: pendingV1.nextState,
+    config: lifecycleConfig("lifecycle-v2"),
+  });
+  assert.equal(resetToV2.transitions.length, 0);
+  assert.equal(resetToV2.nextState.pendingCandidate?.count, 1);
+  assert.equal(resetToV2.nextState.pendingCandidate?.startBoundaryTime, BASE_TIME + 5_000);
+
+  const third = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 10_000,
+  });
+  const activeV2 = processMarketEpisodeLifecycle({
+    ...third,
+    previousState: resetToV2.nextState,
+    config: lifecycleConfig("lifecycle-v2"),
+  });
+  assert.equal(activeV2.transitions[0].transition, "STARTED");
+
+  const algorithmChangedState = {
+    ...activeV2.nextState,
+    episodeAlgorithmVersion: "market-episode-old",
+    activeEpisode: {
+      ...activeV2.nextState.activeEpisode,
+      episodeAlgorithmVersion: "market-episode-old",
+    },
+  };
+  const fourth = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 15_000,
+  });
+  const configEnded = processMarketEpisodeLifecycle({
+    ...fourth,
+    previousState: activeV2.nextState,
+    config: lifecycleConfig("lifecycle-v3"),
+  });
+  assert.equal(configEnded.transitions[0].transition, "ENDED");
+  assert.equal(configEnded.transitions[0].transitionReason, "lifecycle_config_version_changed");
+
+  const ended = processMarketEpisodeLifecycle({
+    ...fourth,
+    previousState: algorithmChangedState,
+    config: lifecycleConfig("lifecycle-v2"),
+  });
+  assert.equal(ended.transitions[0].transition, "ENDED");
+  assert.equal(ended.transitions[0].transitionReason, "episode_algorithm_version_changed");
+  assert.equal(ended.nextState.pendingCandidate?.count, 1);
+
+  const idInput = {
+    universeId: "top-usdm",
+    universeVersion: "2026-09-25",
+    primaryWindowMinutes: 5,
+    direction: "BROAD_RISE",
+    startBoundaryTime: BASE_TIME,
+    movementAlgorithmVersion: "market-movement-v1",
+    movementConfigVersion: "market-movement-config-v1",
+    classifierAlgorithmVersion: "market-state-v1",
+    classifierConfigVersion: "market-state-config-v1",
+    episodeAlgorithmVersion: "market-episode-v1",
+  };
+  assert.notEqual(
+    computeEpisodeId({ ...idInput, lifecycleConfigVersion: "lifecycle-v1" }),
+    computeEpisodeId({ ...idInput, lifecycleConfigVersion: "lifecycle-v2" }),
+  );
+});
+
 test("16. retrying the same evaluation does not duplicate transition identity", () => {
   const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
   const step1 = processMarketEpisodeLifecycle({
@@ -919,11 +1113,13 @@ test("17. operational event insertion is idempotent in database", async () => {
     `SELECT public.append_market_movement_event(
       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
       $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
-      $31, $32, $33, $34, $35
+      $31, $32, $33, $34, $35, $36, $37
     ) AS status`,
     [
       event.eventId,
       event.episodeId,
+      event.episodeAlgorithmVersion,
+      event.lifecycleConfigVersion,
       event.transition,
       event.transitionReason,
       event.fromDirection,
@@ -966,11 +1162,13 @@ test("17. operational event insertion is idempotent in database", async () => {
     `SELECT public.append_market_movement_event(
       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
       $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
-      $31, $32, $33, $34, $35
+      $31, $32, $33, $34, $35, $36, $37
     ) AS status`,
     [
       event.eventId,
       event.episodeId,
+      event.episodeAlgorithmVersion,
+      event.lifecycleConfigVersion,
       event.transition,
       event.transitionReason,
       event.fromDirection,
@@ -1113,6 +1311,42 @@ test("19. restart from persisted active state requires fresh confirmation", () =
   assert.equal(step4.nextState.pendingResume, null);
 });
 
+test("persistence acknowledgement and lifecycle serialization are explicit and lossless", () => {
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const pending = processMarketEpisodeLifecycle({ ...eval1, previousState: null });
+  assert.equal(pending.shouldPersistCurrentImmediately, true);
+  assert.equal(pending.nextState.lastPersistedTime, undefined);
+
+  const eval2 = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 5_000,
+  });
+  const active = processMarketEpisodeLifecycle({
+    ...eval2,
+    previousState: pending.nextState,
+  });
+  const completeState = {
+    ...active.nextState,
+    pendingCandidate: { direction: "BROAD_RISE", startBoundaryTime: BASE_TIME, count: 1 },
+    pendingExitFailureCount: 2,
+    pendingReversal: {
+      toDirection: "BROAD_DROP",
+      startBoundaryTime: BASE_TIME + 10_000,
+      count: 1,
+    },
+    pendingStrengthen: { reason: "pace_accelerated", count: 1 },
+    pendingWeaken: { reason: "material_breadth_reduced", count: 1 },
+    pendingResume: { direction: "BROAD_RISE", count: 1 },
+  };
+  const acknowledged = markMarketEpisodeStatePersisted(completeState);
+  assert.equal(acknowledged.lastPersistedTime, completeState.evaluationBoundaryTime);
+  assert.equal(completeState.lastPersistedTime, undefined);
+
+  const serialized = serializeMarketEpisodeLifecycleState(acknowledged);
+  assert.equal(serialized.serializationVersion, "market-episode-state-v1");
+  assert.deepEqual(deserializeMarketEpisodeLifecycleState(serialized), acknowledged);
+});
+
 test("20. supporting/conflicting contract lists are exact", () => {
   const symbols = [
     makeSymbol(0, { direction: "RISING", included: true }),
@@ -1141,7 +1375,8 @@ test("21. market_state_current upsert is bounded to one row and updates on confl
   // First upsert
   await db.query(
     `SELECT public.upsert_market_state_current(
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+      $17, $18, $19, $20
     )`,
     [
       "top-usdm",
@@ -1156,11 +1391,13 @@ test("21. market_state_current upsert is bounded to one row and updates on confl
       "mep_test_1",
       "BROAD_RISE",
       false,
+      "market-episode-v1",
+      "market-episode-config-v1",
       "market-state-v1",
       "market-state-config-v1",
       "market-movement-v1",
       "market-movement-config-v1",
-      JSON.stringify({ pendingCandidate: null }),
+      JSON.stringify({ serializationVersion: "market-episode-state-v1" }),
       JSON.stringify({ risingFraction: 0.8 }),
     ],
   );
@@ -1176,7 +1413,8 @@ test("21. market_state_current upsert is bounded to one row and updates on confl
   // Second upsert for same universe and window updates the single bounded row
   await db.query(
     `SELECT public.upsert_market_state_current(
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+      $17, $18, $19, $20
     )`,
     [
       "top-usdm",
@@ -1191,11 +1429,13 @@ test("21. market_state_current upsert is bounded to one row and updates on confl
       null,
       null,
       false,
+      "market-episode-v1",
+      "market-episode-config-v1",
       "market-state-v1",
       "market-state-config-v1",
       "market-movement-v1",
       "market-movement-config-v1",
-      JSON.stringify({ pendingCandidate: null }),
+      JSON.stringify({ serializationVersion: "market-episode-state-v1" }),
       JSON.stringify({ risingFraction: 0.4 }),
     ],
   );
@@ -1207,6 +1447,74 @@ test("21. market_state_current upsert is bounded to one row and updates on confl
   assert.equal(res.rows.length, 1);
   assert.equal(res.rows[0].direction_state, "NEUTRAL");
   assert.equal(res.rows[0].active_episode_id, null);
+  assert.equal(res.rows[0].episode_algorithm_version, "market-episode-v1");
+  assert.equal(res.rows[0].lifecycle_config_version, "market-episode-config-v1");
+  assert.equal(res.rows[0].lifecycle_state.serializationVersion, "market-episode-state-v1");
+});
+
+test("atomic lifecycle persistence appends events and upserts current state in one transaction", async () => {
+  const eval1 = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 100_000,
+    universeId: "atomic-usdm",
+  });
+  const step1 = processMarketEpisodeLifecycle({ ...eval1, previousState: null });
+  const eval2 = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 105_000,
+    universeId: "atomic-usdm",
+  });
+  const step2 = processMarketEpisodeLifecycle({ ...eval2, previousState: step1.nextState });
+  const current = persistedCurrent(step2);
+  const event = step2.transitions[0];
+
+  const first = await db.query(
+    "SELECT public.persist_market_episode_lifecycle_step($1, $2) AS statuses",
+    [JSON.stringify(current), JSON.stringify([event])],
+  );
+  assert.deepEqual(first.rows[0].statuses, [{ eventId: event.eventId, status: "appended" }]);
+
+  const retry = await db.query(
+    "SELECT public.persist_market_episode_lifecycle_step($1, $2) AS statuses",
+    [JSON.stringify(current), JSON.stringify([event])],
+  );
+  assert.deepEqual(retry.rows[0].statuses, [{ eventId: event.eventId, status: "already_exists" }]);
+  assert.equal(
+    Number(
+      (
+        await db.query("SELECT count(*) FROM market_movement_events WHERE event_id = $1", [
+          event.eventId,
+        ])
+      ).rows[0].count,
+    ),
+    1,
+  );
+
+  const currentRow = (
+    await db.query("SELECT * FROM market_state_current WHERE universe_id = 'atomic-usdm'")
+  ).rows[0];
+  assert.equal(currentRow.active_episode_id, event.episodeId);
+  assert.equal(currentRow.lifecycle_state.activeEpisode.episodeId, event.episodeId);
+  assert.equal(currentRow.lifecycle_state.lastPersistedTime, current.evaluationBoundaryTime);
+
+  const rollbackEvent = { ...event, eventId: "mevt_atomic_rollback" };
+  await assert.rejects(
+    db.query("SELECT public.persist_market_episode_lifecycle_step($1, $2)", [
+      JSON.stringify({ ...current, primaryWindowMinutes: 1 }),
+      JSON.stringify([rollbackEvent]),
+    ]),
+    /primary_window_minutes/,
+  );
+  assert.equal(
+    Number(
+      (
+        await db.query("SELECT count(*) FROM market_movement_events WHERE event_id = $1", [
+          rollbackEvent.eventId,
+        ])
+      ).rows[0].count,
+    ),
+    0,
+  );
 });
 
 test("22. RLS blocks anon and authenticated roles from reading or writing market tables", async () => {

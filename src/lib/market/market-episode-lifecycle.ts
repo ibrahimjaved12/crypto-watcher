@@ -16,6 +16,7 @@ import type {
 
 export const MARKET_EPISODE_ALGORITHM_VERSION = "market-episode-v1";
 export const DEFAULT_MARKET_EPISODE_CONFIG_VERSION = "market-episode-config-v1";
+export const MARKET_EPISODE_STATE_SERIALIZATION_VERSION = "market-episode-state-v1";
 
 export type MarketEpisodeTransitionType =
   "STARTED" | "STRENGTHENED" | "WEAKENED" | "REVERSED" | "ENDED";
@@ -50,6 +51,8 @@ export const DEFAULT_MARKET_EPISODE_LIFECYCLE_CONFIG: Readonly<MarketEpisodeLife
 
 export type ActiveMarketEpisode = {
   episodeId: string;
+  episodeAlgorithmVersion: string;
+  lifecycleConfigVersion: string;
   universeId: string;
   universeVersion: string;
   primaryWindowMinutes: 5;
@@ -66,6 +69,8 @@ export type ActiveMarketEpisode = {
 };
 
 export type MarketEpisodeLifecycleState = {
+  episodeAlgorithmVersion: string;
+  lifecycleConfigVersion: string;
   universeId: string;
   universeVersion: string;
   primaryWindowMinutes: 5;
@@ -107,9 +112,19 @@ export type MarketEpisodeLifecycleState = {
   movementConfigVersion: string;
 };
 
+export type SerializedMarketEpisodeLifecycleState = Omit<
+  MarketEpisodeLifecycleState,
+  "lastPersistedTime"
+> & {
+  serializationVersion: typeof MARKET_EPISODE_STATE_SERIALIZATION_VERSION;
+  lastPersistedTime: number | null;
+};
+
 export type MarketMovementEvent = {
   eventId: string;
   episodeId: string;
+  episodeAlgorithmVersion: string;
+  lifecycleConfigVersion: string;
   transition: MarketEpisodeTransitionType;
   transitionReason: string;
   fromDirection: MarketEpisodeDirection | null;
@@ -169,6 +184,8 @@ export function computeEpisodeId(input: {
   movementConfigVersion: string;
   classifierAlgorithmVersion: string;
   classifierConfigVersion: string;
+  episodeAlgorithmVersion: string;
+  lifecycleConfigVersion: string;
 }): string {
   const payload = [
     "market_episode",
@@ -181,6 +198,8 @@ export function computeEpisodeId(input: {
     input.movementConfigVersion,
     input.classifierAlgorithmVersion,
     input.classifierConfigVersion,
+    input.episodeAlgorithmVersion,
+    input.lifecycleConfigVersion,
   ].join(":");
   const hash = createHash("sha256").update(payload, "utf8").digest("hex").slice(0, 32);
   return `mep_${hash}`;
@@ -201,6 +220,51 @@ export function computeEventId(input: {
   ].join(":");
   const hash = createHash("sha256").update(payload, "utf8").digest("hex").slice(0, 32);
   return `mevt_${hash}`;
+}
+
+function cloneLifecycleState(state: MarketEpisodeLifecycleState): MarketEpisodeLifecycleState {
+  return {
+    ...state,
+    activeEpisode: state.activeEpisode ? { ...state.activeEpisode } : null,
+    pendingCandidate: state.pendingCandidate ? { ...state.pendingCandidate } : null,
+    pendingReversal: state.pendingReversal ? { ...state.pendingReversal } : null,
+    pendingStrengthen: state.pendingStrengthen ? { ...state.pendingStrengthen } : null,
+    pendingWeaken: state.pendingWeaken ? { ...state.pendingWeaken } : null,
+    pendingResume: state.pendingResume ? { ...state.pendingResume } : null,
+  };
+}
+
+export function serializeMarketEpisodeLifecycleState(
+  state: MarketEpisodeLifecycleState,
+): SerializedMarketEpisodeLifecycleState {
+  return {
+    ...cloneLifecycleState(state),
+    serializationVersion: MARKET_EPISODE_STATE_SERIALIZATION_VERSION,
+    lastPersistedTime: state.lastPersistedTime ?? null,
+  };
+}
+
+export function deserializeMarketEpisodeLifecycleState(
+  serialized: SerializedMarketEpisodeLifecycleState,
+): MarketEpisodeLifecycleState {
+  if (serialized.serializationVersion !== MARKET_EPISODE_STATE_SERIALIZATION_VERSION) {
+    throw new Error(`Unsupported market episode state version: ${serialized.serializationVersion}`);
+  }
+  const { serializationVersion: _serializationVersion, lastPersistedTime, ...state } = serialized;
+  return cloneLifecycleState({
+    ...state,
+    lastPersistedTime: lastPersistedTime ?? undefined,
+  });
+}
+
+/** Call only after the operational current-state write has succeeded. */
+export function markMarketEpisodeStatePersisted(
+  state: MarketEpisodeLifecycleState,
+): MarketEpisodeLifecycleState {
+  return {
+    ...cloneLifecycleState(state),
+    lastPersistedTime: state.evaluationBoundaryTime,
+  };
 }
 
 export function extractSupportingAndConflictingSymbols(
@@ -280,6 +344,7 @@ function buildEvent(input: {
   primaryWindow: MarketStateWindowClassification;
   primaryMovementWindow: MarketMovementWindowResult;
   direction: MarketEpisodeDirection;
+  lifecycleConfigVersion: string;
 }): MarketMovementEvent {
   const { classification, primaryWindow, primaryMovementWindow, direction } = input;
   const { supportingContracts, conflictingContracts } = extractSupportingAndConflictingSymbols(
@@ -312,6 +377,8 @@ function buildEvent(input: {
   return {
     eventId,
     episodeId: input.episodeId,
+    episodeAlgorithmVersion: MARKET_EPISODE_ALGORITHM_VERSION,
+    lifecycleConfigVersion: input.lifecycleConfigVersion,
     transition: input.transition,
     transitionReason: input.transitionReason,
     fromDirection: input.fromDirection,
@@ -420,6 +487,18 @@ export function processMarketEpisodeLifecycle(
   const currentPace = primaryWindow.pace;
   const previous = input.previousState;
 
+  if (previous && evaluationBoundary < previous.evaluationBoundaryTime) {
+    throw new Error("Market episode evaluations must not move backward in time");
+  }
+  if (previous && evaluationBoundary === previous.evaluationBoundaryTime) {
+    return {
+      nextState: cloneLifecycleState(previous),
+      transitions: [],
+      currentEvidence: primaryWindow.evidence,
+      shouldPersistCurrentImmediately: false,
+    };
+  }
+
   const transitions: MarketMovementEvent[] = [];
   let shouldPersistImmediately = false;
 
@@ -436,26 +515,31 @@ export function processMarketEpisodeLifecycle(
   let pendingResume = previous?.pendingResume ? { ...previous.pendingResume } : null;
   const lastPersistedTime = previous?.lastPersistedTime;
 
-  // Check 1: Universe or algorithm/config version change on active episode
-  if (activeEpisode !== null) {
+  // Check 1: Any context change ends an active episode or clears pending inactive state.
+  const priorContext = activeEpisode ?? previous;
+  if (priorContext !== null) {
     let changeReason: string | null = null;
-    if (activeEpisode.universeId !== input.classification.universeId) {
+    if (priorContext.universeId !== input.classification.universeId) {
       changeReason = "universe_changed";
-    } else if (activeEpisode.universeVersion !== input.classification.universeVersion) {
+    } else if (priorContext.universeVersion !== input.classification.universeVersion) {
       changeReason = "universe_version_changed";
-    } else if (activeEpisode.classifierAlgorithmVersion !== input.classification.algorithmVersion) {
+    } else if (priorContext.classifierAlgorithmVersion !== input.classification.algorithmVersion) {
       changeReason = "classifier_algorithm_version_changed";
-    } else if (activeEpisode.classifierConfigVersion !== input.classification.configVersion) {
+    } else if (priorContext.classifierConfigVersion !== input.classification.configVersion) {
       changeReason = "classifier_config_version_changed";
     } else if (
-      activeEpisode.movementAlgorithmVersion !== input.classification.movementAlgorithmVersion
+      priorContext.movementAlgorithmVersion !== input.classification.movementAlgorithmVersion
     ) {
       changeReason = "movement_algorithm_version_changed";
-    } else if (activeEpisode.movementConfigVersion !== input.classification.movementConfigVersion) {
+    } else if (priorContext.movementConfigVersion !== input.classification.movementConfigVersion) {
       changeReason = "movement_config_version_changed";
+    } else if (priorContext.episodeAlgorithmVersion !== MARKET_EPISODE_ALGORITHM_VERSION) {
+      changeReason = "episode_algorithm_version_changed";
+    } else if (priorContext.lifecycleConfigVersion !== config.version) {
+      changeReason = "lifecycle_config_version_changed";
     }
 
-    if (changeReason !== null) {
+    if (changeReason !== null && activeEpisode !== null) {
       transitions.push(
         buildEvent({
           episodeId: activeEpisode.episodeId,
@@ -469,6 +553,7 @@ export function processMarketEpisodeLifecycle(
           primaryWindow,
           primaryMovementWindow,
           direction: activeEpisode.direction,
+          lifecycleConfigVersion: config.version,
         }),
       );
       activeEpisode = null;
@@ -480,6 +565,13 @@ export function processMarketEpisodeLifecycle(
       pendingWeaken = null;
       pendingResume = null;
       shouldPersistImmediately = true;
+    } else if (changeReason !== null) {
+      pendingCandidate = null;
+      pendingExitFailureCount = 0;
+      pendingReversal = null;
+      pendingStrengthen = null;
+      pendingWeaken = null;
+      pendingResume = null;
     }
   }
 
@@ -530,6 +622,8 @@ export function processMarketEpisodeLifecycle(
             movementConfigVersion: input.classification.movementConfigVersion,
             classifierAlgorithmVersion: input.classification.algorithmVersion,
             classifierConfigVersion: input.classification.configVersion,
+            episodeAlgorithmVersion: MARKET_EPISODE_ALGORITHM_VERSION,
+            lifecycleConfigVersion: config.version,
           });
 
           const currentMaterial =
@@ -539,6 +633,8 @@ export function processMarketEpisodeLifecycle(
 
           activeEpisode = {
             episodeId,
+            episodeAlgorithmVersion: MARKET_EPISODE_ALGORITHM_VERSION,
+            lifecycleConfigVersion: config.version,
             universeId: input.classification.universeId,
             universeVersion: input.classification.universeVersion,
             primaryWindowMinutes: 5,
@@ -567,6 +663,7 @@ export function processMarketEpisodeLifecycle(
               primaryWindow,
               primaryMovementWindow,
               direction,
+              lifecycleConfigVersion: config.version,
             }),
           );
 
@@ -612,7 +709,8 @@ export function processMarketEpisodeLifecycle(
               classification: input.classification,
               primaryWindow,
               primaryMovementWindow,
-              direction: oldDirection,
+              direction: toDirection,
+              lifecycleConfigVersion: config.version,
             }),
           );
 
@@ -626,6 +724,8 @@ export function processMarketEpisodeLifecycle(
             movementConfigVersion: input.classification.movementConfigVersion,
             classifierAlgorithmVersion: input.classification.algorithmVersion,
             classifierConfigVersion: input.classification.configVersion,
+            episodeAlgorithmVersion: MARKET_EPISODE_ALGORITHM_VERSION,
+            lifecycleConfigVersion: config.version,
           });
 
           const currentMaterial =
@@ -635,6 +735,8 @@ export function processMarketEpisodeLifecycle(
 
           activeEpisode = {
             episodeId: newEpisodeId,
+            episodeAlgorithmVersion: MARKET_EPISODE_ALGORITHM_VERSION,
+            lifecycleConfigVersion: config.version,
             universeId: input.classification.universeId,
             universeVersion: input.classification.universeVersion,
             primaryWindowMinutes: 5,
@@ -696,6 +798,7 @@ export function processMarketEpisodeLifecycle(
               primaryWindow,
               primaryMovementWindow,
               direction: activeEpisode.direction,
+              lifecycleConfigVersion: config.version,
             }),
           );
           activeEpisode = null;
@@ -742,7 +845,8 @@ export function processMarketEpisodeLifecycle(
               classification: input.classification,
               primaryWindow,
               primaryMovementWindow,
-              direction: oldDirection,
+              direction: toDirection,
+              lifecycleConfigVersion: config.version,
             }),
           );
 
@@ -756,6 +860,8 @@ export function processMarketEpisodeLifecycle(
             movementConfigVersion: input.classification.movementConfigVersion,
             classifierAlgorithmVersion: input.classification.algorithmVersion,
             classifierConfigVersion: input.classification.configVersion,
+            episodeAlgorithmVersion: MARKET_EPISODE_ALGORITHM_VERSION,
+            lifecycleConfigVersion: config.version,
           });
 
           const currentMaterial =
@@ -765,6 +871,8 @@ export function processMarketEpisodeLifecycle(
 
           activeEpisode = {
             episodeId: newEpisodeId,
+            episodeAlgorithmVersion: MARKET_EPISODE_ALGORITHM_VERSION,
+            lifecycleConfigVersion: config.version,
             universeId: input.classification.universeId,
             universeVersion: input.classification.universeVersion,
             primaryWindowMinutes: 5,
@@ -818,6 +926,7 @@ export function processMarketEpisodeLifecycle(
               primaryWindow,
               primaryMovementWindow,
               direction: activeEpisode.direction,
+              lifecycleConfigVersion: config.version,
             }),
           );
           activeEpisode = null;
@@ -877,6 +986,7 @@ export function processMarketEpisodeLifecycle(
                   primaryWindow,
                   primaryMovementWindow,
                   direction: activeEpisode.direction,
+                  lifecycleConfigVersion: config.version,
                 }),
               );
               if (strengthenPace) activeEpisode.confirmedPace = "ACCELERATING";
@@ -913,6 +1023,7 @@ export function processMarketEpisodeLifecycle(
                   primaryWindow,
                   primaryMovementWindow,
                   direction: activeEpisode.direction,
+                  lifecycleConfigVersion: config.version,
                 }),
               );
               if (weakenPace) activeEpisode.confirmedPace = "DECELERATING";
@@ -946,13 +1057,15 @@ export function processMarketEpisodeLifecycle(
   // Periodic persistence check (default: every 30 seconds)
   if (
     !shouldPersistImmediately &&
-    (!lastPersistedTime ||
+    (lastPersistedTime === undefined ||
       evaluationBoundary - lastPersistedTime >= config.currentSnapshotCadenceMs)
   ) {
     shouldPersistImmediately = true;
   }
 
   const nextState: MarketEpisodeLifecycleState = {
+    episodeAlgorithmVersion: MARKET_EPISODE_ALGORITHM_VERSION,
+    lifecycleConfigVersion: config.version,
     universeId: input.classification.universeId,
     universeVersion: input.classification.universeVersion,
     primaryWindowMinutes: 5,
@@ -970,7 +1083,7 @@ export function processMarketEpisodeLifecycle(
     pendingStrengthen,
     pendingWeaken,
     pendingResume,
-    lastPersistedTime: shouldPersistImmediately ? evaluationBoundary : lastPersistedTime,
+    lastPersistedTime,
     classifierAlgorithmVersion: input.classification.algorithmVersion,
     classifierConfigVersion: input.classification.configVersion,
     movementAlgorithmVersion: input.classification.movementAlgorithmVersion,

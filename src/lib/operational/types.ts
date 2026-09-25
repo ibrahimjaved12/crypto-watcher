@@ -3,8 +3,12 @@ import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
   MarketPace,
+  MarketStateEvidence,
 } from "../market/market-state-classifier";
-import type { MarketEpisodeTransitionType } from "../market/market-episode-lifecycle";
+import type {
+  MarketEpisodeTransitionType,
+  SerializedMarketEpisodeLifecycleState,
+} from "../market/market-episode-lifecycle";
 import type { MonitorMetrics } from "../monitor/run-context";
 
 export type OperationalCandleBatch = {
@@ -121,18 +125,22 @@ export type PersistedMarketStateCurrent = {
   activeEpisodeId: string | null;
   activeDirection: ConfirmedMarketDirection | null;
   interrupted: boolean;
+  episodeAlgorithmVersion: string;
+  lifecycleConfigVersion: string;
   classifierAlgorithmVersion: string;
   classifierConfigVersion: string;
   movementAlgorithmVersion: string;
   movementConfigVersion: string;
-  pendingState: unknown;
-  currentEvidence: unknown;
+  lifecycleState: SerializedMarketEpisodeLifecycleState;
+  currentEvidence: MarketStateEvidence;
   updatedAt?: string;
 };
 
 export type PersistedMarketMovementEvent = {
   eventId: string;
   episodeId: string;
+  episodeAlgorithmVersion: string;
+  lifecycleConfigVersion: string;
   transition: MarketEpisodeTransitionType;
   transitionReason: string;
   fromDirection: ConfirmedMarketDirection | null;
@@ -167,6 +175,11 @@ export type PersistedMarketMovementEvent = {
   movementAlgorithmVersion: string;
   movementConfigVersion: string;
   createdAt?: string;
+};
+
+export type MarketEpisodePersistenceStatus = {
+  eventId: string;
+  status: "appended" | "already_exists";
 };
 
 export interface OperationalStore {
@@ -216,5 +229,9 @@ export interface OperationalStore {
   appendMarketMovementEvent(
     event: PersistedMarketMovementEvent,
   ): Promise<"appended" | "already_exists">;
+  persistMarketEpisodeLifecycleStep(
+    state: PersistedMarketStateCurrent,
+    events: readonly PersistedMarketMovementEvent[],
+  ): Promise<MarketEpisodePersistenceStatus[]>;
   listMarketMovementEvents(episodeId: string): Promise<PersistedMarketMovementEvent[]>;
 }

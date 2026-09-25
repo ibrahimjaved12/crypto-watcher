@@ -106,6 +106,9 @@ const disabledStore: OperationalStore = {
   async appendMarketMovementEvent() {
     throw new Error("Operational market-movement storage is disabled");
   },
+  async persistMarketEpisodeLifecycleStep() {
+    throw new Error("Operational market-episode storage is disabled");
+  },
   async listMarketMovementEvents() {
     return [];
   },
@@ -378,12 +381,14 @@ export function createOperationalStore(
         activeEpisodeId: (row["active_episode_id"] as string | null) ?? null,
         activeDirection: (row["active_direction"] as ConfirmedMarketDirection | null) ?? null,
         interrupted: Boolean(row["interrupted"]),
+        episodeAlgorithmVersion: String(row["episode_algorithm_version"]),
+        lifecycleConfigVersion: String(row["lifecycle_config_version"]),
         classifierAlgorithmVersion: String(row["classifier_algorithm_version"]),
         classifierConfigVersion: String(row["classifier_config_version"]),
         movementAlgorithmVersion: String(row["movement_algorithm_version"]),
         movementConfigVersion: String(row["movement_config_version"]),
-        pendingState: row["pending_state"],
-        currentEvidence: row["current_evidence"],
+        lifecycleState: row["lifecycle_state"] as PersistedMarketStateCurrent["lifecycleState"],
+        currentEvidence: row["current_evidence"] as PersistedMarketStateCurrent["currentEvidence"],
         updatedAt: String(row["updated_at"]),
       };
     },
@@ -401,11 +406,16 @@ export function createOperationalStore(
         p_active_episode_id: state.activeEpisodeId,
         p_active_direction: state.activeDirection,
         p_interrupted: state.interrupted,
+        p_episode_algorithm_version: state.episodeAlgorithmVersion,
+        p_lifecycle_config_version: state.lifecycleConfigVersion,
         p_classifier_algorithm_version: state.classifierAlgorithmVersion,
         p_classifier_config_version: state.classifierConfigVersion,
         p_movement_algorithm_version: state.movementAlgorithmVersion,
         p_movement_config_version: state.movementConfigVersion,
-        p_pending_state: state.pendingState,
+        p_lifecycle_state: {
+          ...state.lifecycleState,
+          lastPersistedTime: state.evaluationBoundaryTime,
+        },
         p_current_evidence: state.currentEvidence,
       });
       rpcError(error, "market-state-current upsert");
@@ -414,6 +424,8 @@ export function createOperationalStore(
       const { data, error } = await client.rpc("append_market_movement_event", {
         p_event_id: event.eventId,
         p_episode_id: event.episodeId,
+        p_episode_algorithm_version: event.episodeAlgorithmVersion,
+        p_lifecycle_config_version: event.lifecycleConfigVersion,
         p_transition: event.transition,
         p_transition_reason: event.transitionReason,
         p_from_direction: event.fromDirection,
@@ -449,7 +461,45 @@ export function createOperationalStore(
         p_movement_config_version: event.movementConfigVersion,
       });
       rpcError(error, "market-movement-event append");
-      return (data as "appended" | "already_exists") ?? "appended";
+      if (data !== "appended" && data !== "already_exists") {
+        throw new Error(`Operational database market-movement-event append returned ${data}`);
+      }
+      return data;
+    },
+    async persistMarketEpisodeLifecycleStep(state, events) {
+      const lifecycleState = {
+        ...state.lifecycleState,
+        lastPersistedTime: state.evaluationBoundaryTime,
+      };
+      const currentState = { ...state, lifecycleState };
+      const { data, error } = await client.rpc("persist_market_episode_lifecycle_step", {
+        p_current_state: currentState,
+        p_events: events,
+      });
+      rpcError(error, "market-episode lifecycle persistence");
+      if (!Array.isArray(data)) {
+        throw new Error(
+          "Operational database market-episode lifecycle persistence returned invalid status",
+        );
+      }
+      return data.map((entry) => {
+        if (
+          typeof entry !== "object" ||
+          entry === null ||
+          typeof (entry as Record<string, unknown>)["eventId"] !== "string" ||
+          !["appended", "already_exists"].includes(
+            String((entry as Record<string, unknown>)["status"]),
+          )
+        ) {
+          throw new Error(
+            "Operational database market-episode lifecycle persistence returned invalid status",
+          );
+        }
+        return {
+          eventId: String((entry as Record<string, unknown>)["eventId"]),
+          status: (entry as Record<string, unknown>)["status"] as "appended" | "already_exists",
+        };
+      });
     },
     async listMarketMovementEvents(episodeId) {
       const { data, error } = await client
@@ -461,6 +511,8 @@ export function createOperationalStore(
       return ((data ?? []) as Array<Record<string, unknown>>).map((row) => ({
         eventId: String(row["event_id"]),
         episodeId: String(row["episode_id"]),
+        episodeAlgorithmVersion: String(row["episode_algorithm_version"]),
+        lifecycleConfigVersion: String(row["lifecycle_config_version"]),
         transition: row["transition"] as MarketEpisodeTransitionType,
         transitionReason: String(row["transition_reason"]),
         fromDirection: (row["from_direction"] as ConfirmedMarketDirection) ?? null,
