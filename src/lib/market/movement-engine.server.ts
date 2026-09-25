@@ -97,7 +97,7 @@ type PendingMovementPersistence = {
 };
 
 export class MovementEngineRuntime {
-  private readonly engine = new MarketMovementEngine();
+  private engine = new MarketMovementEngine();
   private readonly now: () => number;
   private readonly movementConfig: MarketMovementConfig;
   private readonly classifierConfig: MarketStateClassifierConfig;
@@ -106,6 +106,12 @@ export class MovementEngineRuntime {
   private timer: ReturnType<typeof setInterval> | null = null;
   private active = false;
   private running = false;
+  /**
+   * Monotonic ownership generation. Incremented whenever this runtime loses (or
+   * gives up) authoritative ownership, so in-flight work from a prior lease
+   * tenure can never write over a newer owner's durable state.
+   */
+  private tenure = 0;
   private lifecycleRestored = false;
   private lifecycleRestoreRetryAt = 0;
   private lifecycleRestoreFailures = 0;
@@ -113,6 +119,7 @@ export class MovementEngineRuntime {
   private historicalLoadedAt = 0;
   private historicalRetryAt = 0;
   private historicalFailures = 0;
+  private historicalUniverseVersion: string | null = null;
   private historicalLoading: Promise<void> | null = null;
   private lastTransition: PersistedMovementTransition | null = null;
   private pendingPersistence: PendingMovementPersistence | null = null;
@@ -140,7 +147,30 @@ export class MovementEngineRuntime {
     this.active = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    // Losing the lease means another instance may advance and persist the market
+    // lifecycle while this one is inactive, so all in-memory ownership from this
+    // tenure is discarded; the next `start()` must reload from the database.
+    this.invalidateOwnership();
     await this.historicalLoading?.catch(() => undefined);
+  }
+
+  /**
+   * Drops every piece of in-memory lifecycle ownership so a reacquisition cannot
+   * continue from stale counters or blindly write an old tenure's pending batch.
+   */
+  private invalidateOwnership(): void {
+    this.tenure += 1;
+    this.lifecycleRestored = false;
+    this.lifecycleRestoreRetryAt = 0;
+    this.lifecycleRestoreFailures = 0;
+    this.historical = new Map();
+    this.historicalLoadedAt = 0;
+    this.historicalRetryAt = 0;
+    this.historicalFailures = 0;
+    this.historicalUniverseVersion = null;
+    this.lastTransition = null;
+    this.pendingPersistence = null;
+    this.engine = new MarketMovementEngine();
   }
 
   private async tick(): Promise<void> {
@@ -160,12 +190,15 @@ export class MovementEngineRuntime {
    * the engine deterministically; the periodic timer calls it through `tick`.
    */
   async runOnce(): Promise<void> {
+    const tenure = this.tenure;
     // Fail closed: never evaluate against a lifecycle state that has not been
     // established by a successful operational read.
     if (!this.lifecycleRestored && !(await this.attemptLifecycleRestore(this.now()))) return;
+    if (tenure !== this.tenure) return;
     // Durable persistence is mandatory: an outstanding batch must be persisted
     // before any later boundary is evaluated, so its transitions cannot be lost.
     if (this.pendingPersistence && !(await this.flushPendingPersistence())) return;
+    if (tenure !== this.tenure) return;
     const symbols = this.deps.collector.subscribedSymbols();
     if (symbols.length === 0) return;
     const now = this.now();
@@ -180,6 +213,7 @@ export class MovementEngineRuntime {
     // Finalize quiet/no-trade symbols only through the safe boundary.
     this.deps.collector.advanceMovementBuckets(finalizable);
     await this.refreshHistorical(universe, now);
+    if (tenure !== this.tenure) return;
     const snapshots = new Map<string, MovementBucketSnapshot>();
     const sourceStatus = new Map<string, MovementSourceStatus>();
     for (const symbol of universe.symbols) {
@@ -209,8 +243,11 @@ export class MovementEngineRuntime {
   private async attemptLifecycleRestore(now: number): Promise<boolean> {
     if (this.lifecycleRestored) return true;
     if (now < this.lifecycleRestoreRetryAt) return false;
+    const tenure = this.tenure;
     try {
       const current = await this.deps.store.getMarketStateCurrent(MARKET_UNIVERSE_ID);
+      // Ownership may have been lost while the read was in flight.
+      if (tenure !== this.tenure) return false;
       if (!current) {
         this.lifecycleRestored = true;
         return true;
@@ -221,6 +258,7 @@ export class MovementEngineRuntime {
       this.lifecycleRestored = true;
       return true;
     } catch (error) {
+      if (tenure !== this.tenure) return false;
       this.lifecycleRestoreFailures += 1;
       const delay = backoffDelay(this.lifecycleRestoreFailures);
       this.lifecycleRestoreRetryAt = now + delay;
@@ -234,23 +272,32 @@ export class MovementEngineRuntime {
   private async refreshHistorical(universe: MarketUniverse, now: number): Promise<void> {
     if (this.historicalLoading) return;
     if (now < this.historicalRetryAt) return;
+    // A changed universe (e.g. a newly watched symbol) needs history immediately
+    // rather than waiting out the normal refresh cadence.
+    const universeChanged = this.historicalUniverseVersion !== universe.version;
     if (
+      !universeChanged &&
       this.historicalLoadedAt !== 0 &&
       now - this.historicalLoadedAt < MOVEMENT_HISTORICAL_REFRESH_MS
     ) {
       return;
     }
+    const tenure = this.tenure;
     this.historicalLoading = (async () => {
       try {
         const candles = await this.deps.store.readMovementCandleHistory(
           universe.symbols,
           now - this.movementConfig.historicalLookbackMs,
         );
+        // Ownership may have been lost while the read was in flight.
+        if (tenure !== this.tenure) return;
         this.historical = buildMovementNormalizationHistory(candles, this.movementConfig);
         this.historicalLoadedAt = now;
+        this.historicalUniverseVersion = universe.version;
         this.historicalFailures = 0;
         this.historicalRetryAt = 0;
       } catch (error) {
+        if (tenure !== this.tenure) return;
         this.historicalFailures += 1;
         const delay = backoffDelay(this.historicalFailures);
         this.historicalRetryAt = now + delay;
@@ -336,15 +383,19 @@ export class MovementEngineRuntime {
    * database write succeeds.
    */
   private async flushPersistence(batch: PendingMovementPersistence): Promise<boolean> {
+    const tenure = this.tenure;
     try {
       await this.deps.store.persistMarketEpisodeLifecycleStep(batch.current, batch.events);
     } catch (error) {
+      // A newer owner may have taken over: never re-queue a stale tenure's batch.
+      if (tenure !== this.tenure) return false;
       this.pendingPersistence = batch;
       console.error(
         `[movement-engine] lifecycle persistence failed; retrying the same batch: ${message(error)}`,
       );
       return false;
     }
+    if (tenure !== this.tenure) return false;
     this.pendingPersistence = null;
     this.engine.acknowledgePersisted();
     this.lastTransition = batch.mostRecentTransition;

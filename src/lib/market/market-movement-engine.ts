@@ -146,13 +146,21 @@ export function buildMovementNormalizationHistory(
  * the population is comparable regardless of where the returned candle series
  * happens to start.
  *
+ * A one-minute candle with `openTime = t` does not represent the price at `t`; it
+ * completes at `t + 60s`. The observation boundary is therefore the candle's
+ * *completed* boundary `openTime + 60_000`, and its close is the price immediately
+ * preceding that aligned exchange-time boundary.
+ *
  * - 1m stays canonical one-minute sampling.
  * - 5m endpoints (and their return/notional windows) align to fixed 5-minute
  *   epoch boundaries; 15m endpoints to fixed 15-minute boundaries.
+ * - The prior endpoint is exactly `w` minutes earlier, and the notional window
+ *   covers the same aligned interval (the `w` completed minutes ending at the
+ *   current boundary).
  *
- * A window is only sampled when both endpoints and every minute in the notional
- * interval are present in the trailing contiguous run. Missing minutes are never
- * fabricated; a gap still truncates the trusted history.
+ * A window is only sampled when both endpoint candles and every minute in the
+ * notional interval are present in the trailing contiguous run. Missing minutes
+ * are never fabricated; a gap still truncates the trusted history.
  */
 function buildSymbolNormalization(
   candles: readonly MovementCandle[],
@@ -170,16 +178,18 @@ function buildSymbolNormalization(
     const returns: number[] = [];
     const previousNotionalVolumes: number[] = [];
     for (const current of run) {
-      const endpoint = current.openTime;
+      // The close immediately preceding this candle's completed exchange boundary.
+      const boundary = current.openTime + MINUTE_MS;
       // Fixed exchange-time alignment, independent of the series' first candle.
-      if (endpoint % windowMs !== 0) continue;
-      const start = endpoint - windowMs;
-      if (start < oldestOpenTime) continue;
-      const previous = byOpenTime.get(start);
+      if (boundary % windowMs !== 0) continue;
+      const priorBoundary = boundary - windowMs;
+      const previousOpenTime = priorBoundary - MINUTE_MS;
+      if (previousOpenTime < oldestOpenTime) continue;
+      const previous = byOpenTime.get(previousOpenTime);
       if (!previous) continue;
       let notional = 0;
       let contiguous = true;
-      for (let openTime = start + MINUTE_MS; openTime <= endpoint; openTime += MINUTE_MS) {
+      for (let openTime = priorBoundary; openTime <= boundary - MINUTE_MS; openTime += MINUTE_MS) {
         const candle = byOpenTime.get(openTime);
         if (!candle) {
           contiguous = false;

@@ -126,13 +126,14 @@ function snapshotFor(symbol, boundary) {
 
 function createHarness() {
   const state = { now: BASE, boundary: BASE, advanced: [] };
-  const control = { failRestore: 0, failHistory: 0, failPersist: false };
+  const control = { failRestore: 0, failHistory: 0, failPersist: false, symbols: [...SYMBOLS] };
   const calls = { restore: 0, history: 0, persist: [] };
   const persistedEvents = new Map();
   const candles = new Map(SYMBOLS.map((symbol) => [symbol, historicalCandles()]));
+  let durableCurrent = null;
 
   const collector = {
-    subscribedSymbols: () => [...SYMBOLS],
+    subscribedSymbols: () => [...control.symbols],
     advanceMovementBuckets: (boundary) => state.advanced.push(boundary),
     symbolSourceStatus: () => "LIVE",
     movementLateRejections: () => 0,
@@ -142,15 +143,15 @@ function createHarness() {
     async getMarketStateCurrent() {
       calls.restore += 1;
       if (calls.restore <= control.failRestore) throw new Error("restore read failed");
-      return null;
+      return durableCurrent;
     },
     async readMovementCandleHistory() {
       calls.history += 1;
       if (calls.history <= control.failHistory) throw new Error("history read failed");
       return candles;
     },
-    async persistMarketEpisodeLifecycleStep(_current, events) {
-      calls.persist.push({ events });
+    async persistMarketEpisodeLifecycleStep(current, events) {
+      calls.persist.push({ current, events });
       if (control.failPersist) {
         control.failPersist = false;
         throw new Error("persist write failed");
@@ -162,13 +163,29 @@ function createHarness() {
       });
     },
   };
+  const setDurableCurrent = (current) => {
+    durableCurrent = current;
+  };
   const runtime = new MovementEngineRuntime({
     store,
     collector,
     finalization: { version: "test", graceMs: 0 },
     now: () => state.now,
   });
-  return { runtime, state, control, calls, persistedEvents };
+  return { runtime, state, control, calls, persistedEvents, setDurableCurrent };
+}
+
+/** Builds a durable current-state row advanced to `boundary` from a captured one. */
+function advancedCurrent(current, boundary) {
+  return {
+    ...current,
+    evaluationBoundaryTime: boundary,
+    lifecycleState: {
+      ...current.lifecycleState,
+      evaluationBoundaryTime: boundary,
+      lastPersistedTime: boundary,
+    },
+  };
 }
 
 test("a required persistence batch is retried until it succeeds without losing its transition", async () => {
@@ -250,4 +267,80 @@ test("a failed normalization-history load is retried with backoff, not every tic
   harness.state.boundary = BASE + 5_000;
   await harness.runtime.runOnce();
   assert.equal(harness.calls.history, 2, "history is retried after the bounded backoff");
+});
+
+test("a changed universe forces an immediate normalization-history refresh", async () => {
+  const harness = createHarness();
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.history, 1);
+
+  // Same universe within the refresh cadence: no reload.
+  harness.state.now = BASE + 5_000;
+  harness.state.boundary = BASE + 5_000;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.history, 1);
+
+  // A newly watched symbol changes the universe version and must not wait 15m.
+  harness.control.symbols = [...SYMBOLS, "LINKUSDT"];
+  harness.state.now = BASE + 10_000;
+  harness.state.boundary = BASE + 10_000;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.history, 2, "a universe change forces an immediate refresh");
+});
+
+test("reacquiring the lease reloads durable state and discards the previous tenure's batch", async () => {
+  const harness = createHarness();
+  try {
+    // Tenure A evaluates at T and confirms a STARTED transition at T+5s whose write fails.
+    await harness.runtime.runOnce();
+    const firstCurrent = harness.calls.persist[0].current;
+    harness.state.now = BASE + 5_000;
+    harness.state.boundary = BASE + 5_000;
+    harness.control.failPersist = true;
+    await harness.runtime.runOnce();
+    assert.equal(harness.calls.persist.length, 2);
+    assert.equal(harness.persistedEvents.size, 0);
+    const staleEventId = harness.calls.persist[1].events[0].eventId;
+
+    // Lease lost: A discards its in-memory ownership, including the pending batch.
+    await harness.runtime.stop();
+
+    // Another owner advanced durable state to T+N while A was inactive.
+    const advancedAt = BASE + 30_000;
+    harness.setDurableCurrent(advancedCurrent(firstCurrent, advancedAt));
+
+    // A reacquires the lease and must reload T+N rather than resume from T.
+    await harness.runtime.start();
+    assert.equal(harness.calls.persist.length, 2, "reacquisition itself writes nothing");
+
+    // A boundary before T+N must not be evaluated, and the stale batch must not be written.
+    harness.state.now = BASE + 5_000;
+    harness.state.boundary = BASE + 5_000;
+    await harness.runtime.runOnce();
+    assert.equal(
+      harness.calls.persist.length,
+      2,
+      "must not resume from the previous tenure's last evaluated boundary",
+    );
+    assert.equal(
+      harness.persistedEvents.has(staleEventId),
+      false,
+      "the previous tenure's pending batch is not written after reacquisition",
+    );
+
+    // Evaluation resumes from the reloaded boundary: candidate at T+N+5s, STARTED at T+N+10s.
+    harness.state.now = advancedAt + 5_000;
+    harness.state.boundary = advancedAt + 5_000;
+    await harness.runtime.runOnce();
+    assert.equal(harness.calls.persist.length, 2, "candidate accumulation alone does not persist");
+
+    harness.state.now = advancedAt + 10_000;
+    harness.state.boundary = advancedAt + 10_000;
+    await harness.runtime.runOnce();
+    assert.equal(harness.calls.persist.length, 3);
+    assert.equal(harness.calls.persist[2].current.evaluationBoundaryTime, advancedAt + 10_000);
+    assert.equal(harness.calls.persist[2].events[0].transition, "STARTED");
+  } finally {
+    await harness.runtime.stop();
+  }
 });

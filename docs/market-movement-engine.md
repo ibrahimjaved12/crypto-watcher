@@ -69,6 +69,10 @@ completed one-minute candles in the operational database (`collector_recent_cand
 - Sampling is exchange-time aligned, not index/phase dependent: 1m stays canonical 1m, while 5m and
   15m endpoints (and their return/notional windows) align to fixed 5-minute / 15-minute epoch
   boundaries. Adding or removing irrelevant leading candles cannot shift the sampled population.
+- Observations use a 1m candle's _completed_ boundary (`openTime + 60s`), so the close used for a
+  boundary is the candle that completes immediately before it — e.g. the 12:05 boundary uses the
+  12:04-open candle's close, never the 12:05-open candle. The prior endpoint is exactly `w` minutes
+  earlier and the notional window covers the same aligned interval.
 - `usableCoverageMs` is the trailing contiguous run; a gap discards earlier, non-comparable candles.
 - `previousNotionalVolumes` are the last `rvolComparisonWindows` completed-window notionals
   (base volume × close as the quote-notional proxy), measured over the exact same aligned intervals.
@@ -118,6 +122,16 @@ Startup restore fails closed. Evaluation never begins with a null lifecycle stat
 operational read establishes either that no persisted state exists, or that persisted state has been
 restored via #73's restart-interruption semantics. Transient restore and normalization-history read
 failures use bounded exponential backoff rather than retrying on every one-second tick.
+
+Lease handoff is treated as a change of ownership. `stop()` (which the collector calls whenever it
+loses or gives up the authoritative lease) discards all in-memory lifecycle ownership — engine
+state, last-evaluated boundary, pending persistence and cached history. The next `start()`
+reloads `market_state_current` with #73 restart/interruption semantics before evaluating, so a
+reacquiring instance never resumes from a previous tenure's counters and never writes a stale
+tenure's pending batch over a newer owner's durable state.
+
+The normalization history is refreshed immediately when `universe.version` changes (for example a
+newly watched symbol), and on the normal 15-minute cadence otherwise.
 
 ## Migration
 

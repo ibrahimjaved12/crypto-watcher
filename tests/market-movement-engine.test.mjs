@@ -282,7 +282,7 @@ test("normalization history is derived from contiguous one-minute candles only",
   assert.equal(entry[1].previousNotionalVolumes.length, 20);
   assert.equal(entry[1].usableCoverageMs, minutes * MINUTE_MS);
   assert.equal(entry[5].returns.length, 39);
-  assert.equal(entry[15].returns.length, 13);
+  assert.equal(entry[15].returns.length, 12);
   const expected = Math.log(candles[1].close / candles[0].close);
   assert.ok(Math.abs(entry[1].returns[0] - expected) < 1e-12);
 });
@@ -309,32 +309,59 @@ test("5m/15m history sampling is exchange-time aligned and phase-independent", (
     close: 100 + offsetMinutes * 0.1 + (offsetMinutes % 5) * 0.01,
     volume: 1 + (offsetMinutes % 3),
   });
-  const baseline = Array.from({ length: minutes }, (_, index) => candleAt(index));
-  // Three extra leading minutes: contiguous, but not enough to create a new
-  // aligned 5m/15m endpoint, so the comparable population must be identical.
-  const prefixed = Array.from({ length: minutes + 3 }, (_, index) => candleAt(index - 3));
+  // The first three minutes are irrelevant to the 5m/15m population: dropping
+  // them must not shift the aligned endpoints or their returns/notionals.
+  const withLeading = Array.from({ length: minutes }, (_, index) => candleAt(index));
+  const withoutLeading = Array.from({ length: minutes - 3 }, (_, index) => candleAt(index + 3));
 
-  const baselineHistory = buildMovementNormalizationHistory(new Map([["BTCUSDT", baseline]])).get(
-    "BTCUSDT",
-  );
-  const prefixedHistory = buildMovementNormalizationHistory(new Map([["BTCUSDT", prefixed]])).get(
-    "BTCUSDT",
-  );
+  const withLeadingHistory = buildMovementNormalizationHistory(
+    new Map([["BTCUSDT", withLeading]]),
+  ).get("BTCUSDT");
+  const withoutLeadingHistory = buildMovementNormalizationHistory(
+    new Map([["BTCUSDT", withoutLeading]]),
+  ).get("BTCUSDT");
 
   for (const windowMinutes of [5, 15]) {
     assert.deepEqual(
-      prefixedHistory[windowMinutes].returns,
-      baselineHistory[windowMinutes].returns,
+      withoutLeadingHistory[windowMinutes].returns,
+      withLeadingHistory[windowMinutes].returns,
       `${windowMinutes}m returns must not shift with irrelevant leading candles`,
     );
     assert.deepEqual(
-      prefixedHistory[windowMinutes].previousNotionalVolumes,
-      baselineHistory[windowMinutes].previousNotionalVolumes,
+      withoutLeadingHistory[windowMinutes].previousNotionalVolumes,
+      withLeadingHistory[windowMinutes].previousNotionalVolumes,
       `${windowMinutes}m notional windows must use the same aligned intervals`,
     );
   }
   // 1m remains canonical one-minute sampling.
-  assert.equal(baselineHistory[1].returns.length, minutes - 1);
+  assert.equal(withLeadingHistory[1].returns.length, minutes - 1);
+});
+
+test("5m history uses the 1m close completing at the boundary, not the boundary-open candle", () => {
+  const boundary = BASE; // 5m-aligned; call it 12:05 for the regression narrative
+  // openTimes are boundary-relative minutes: -6 = 11:59, -1 = 12:04, 0 = 12:05.
+  const closes = [
+    [-6, 200], // 11:59-open, the close immediately preceding the 12:00 boundary
+    [-5, 1],
+    [-4, 1],
+    [-3, 1],
+    [-2, 1],
+    [-1, 100], // 12:04-open, the close immediately preceding the 12:05 boundary
+    [0, 999], // 12:05-open, must never represent the 12:05 boundary
+  ];
+  const candles = closes.map(([offset, close]) => ({
+    openTime: boundary + offset * MINUTE_MS,
+    close,
+    volume: 1,
+  }));
+
+  const returns = buildMovementNormalizationHistory(new Map([["BTCUSDT", candles]])).get(
+    "BTCUSDT",
+  )[5].returns;
+  assert.equal(returns.length, 1);
+  // 12:05 boundary uses the 12:04-open close (100) against the 11:59-open close (200).
+  assert.ok(Math.abs(returns[0] - Math.log(100 / 200)) < 1e-12);
+  assert.notEqual(returns[0], Math.log(999 / 1));
 });
 
 test("engine status keeps LIVE, WARMING, STALE and UNAVAILABLE distinct", () => {
