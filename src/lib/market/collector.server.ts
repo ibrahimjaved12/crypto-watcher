@@ -11,6 +11,8 @@ import {
   normalizeRestCandles,
   type CompletedCandleEvent,
 } from "./collector";
+import { MovementEngineRuntime } from "./movement-engine.server";
+import { movementFinalizationConfig } from "./movement-finalization";
 
 const WATCHLIST_REFRESH_MS = 30_000;
 const LEASE_SECONDS = 60;
@@ -76,6 +78,7 @@ async function analyzeCompletedCandle(event: CompletedCandleEvent): Promise<void
 class CollectorRuntime {
   private readonly instanceId = crypto.randomUUID();
   private readonly collector: BinanceFuturesCollector;
+  private readonly movement: MovementEngineRuntime;
   private socket: WebSocket | null = null;
   private stopped = false;
   private active = false;
@@ -110,6 +113,11 @@ class CollectorRuntime {
       },
       onCompleted: analyzeCompletedCandle,
       onOverload: () => this.socket?.close(1013, "bounded processing capacity exceeded"),
+    });
+    this.movement = new MovementEngineRuntime({
+      store,
+      collector: this.collector,
+      finalization: movementFinalizationConfig(process.env),
     });
   }
 
@@ -178,6 +186,7 @@ class CollectorRuntime {
         this.socket.close(1013, "stale market stream");
       }
     }, 10_000);
+    void this.movement.start();
   }
 
   private async renewLease(): Promise<void> {
@@ -343,6 +352,7 @@ class CollectorRuntime {
     this.staleTimer = null;
     this.retryTimer = null;
     this.lifetimeTimer = null;
+    void this.movement.stop();
   }
 }
 

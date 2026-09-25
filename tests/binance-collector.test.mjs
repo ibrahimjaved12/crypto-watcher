@@ -279,3 +279,33 @@ test("accepted aggregate trades feed movement buckets without persistence writes
   assert.equal(healthWrites.length, 0);
   assert.equal(collector.movementSnapshot("BTCUSDT").buckets[0].endpointPrice, 101);
 });
+
+test("late-after-finalization trades are rejected and counted without rewriting history", async () => {
+  const { collector } = harness();
+  await collector.reconcile(["BTCUSDT"]);
+  const trade = (id, time) => ({
+    stream: "btcusdt@aggTrade",
+    data: { e: "aggTrade", E: time, s: "BTCUSDT", st: 1, a: id, p: "101", q: "2", T: time },
+  });
+
+  assert.equal(collector.accept(trade(1, BASE), BASE), true);
+  collector.advanceMovementBuckets(BASE);
+  assert.equal(collector.movementSnapshot("BTCUSDT").buckets.at(-1).boundaryTime, BASE);
+  assert.equal(collector.movementLateRejections(), 0);
+
+  // A later trade whose exchange time belongs to the finalized bucket is rejected.
+  assert.equal(collector.accept(trade(2, BASE), BASE), false);
+  assert.equal(collector.movementLateRejections(), 1);
+  assert.equal(collector.movementSnapshot("BTCUSDT").buckets.at(-1).endpointPrice, 101);
+});
+
+test("per-symbol source status reflects collector health for the movement gate", async () => {
+  const { collector } = harness();
+  await collector.reconcile(["BTCUSDT"]);
+  assert.equal(collector.symbolSourceStatus("BTCUSDT"), "RECOVERING");
+  assert.equal(collector.symbolSourceStatus("ETHUSDT"), "UNAVAILABLE");
+
+  collector.accept(wsKline(BASE - 60_000));
+  await collector.waitForIdle();
+  assert.equal(collector.symbolSourceStatus("BTCUSDT"), "LIVE");
+});

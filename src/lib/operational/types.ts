@@ -3,12 +3,15 @@ import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
   MarketPace,
-  MarketStateEvidence,
 } from "../market/market-state-classifier";
 import type {
   MarketEpisodeTransitionType,
   SerializedMarketEpisodeLifecycleState,
 } from "../market/market-episode-lifecycle";
+import type {
+  MovementCandle,
+  PersistedMarketMovementCurrentEvidence,
+} from "../market/market-movement-state";
 import type { MonitorMetrics } from "../monitor/run-context";
 
 export type OperationalCandleBatch = {
@@ -132,7 +135,7 @@ export type PersistedMarketStateCurrent = {
   movementAlgorithmVersion: string;
   movementConfigVersion: string;
   lifecycleState: SerializedMarketEpisodeLifecycleState;
-  currentEvidence: MarketStateEvidence;
+  currentEvidence: PersistedMarketMovementCurrentEvidence;
   updatedAt?: string;
 };
 
@@ -208,6 +211,11 @@ export interface OperationalStore {
   }): Promise<void>;
   listCollectorHealth(symbols: string[]): Promise<CollectorHealth[]>;
   collectorDiagnostics(): Promise<CollectorStorageDiagnostics>;
+  /** Canonical completed one-minute candles used to derive #71 normalization history. */
+  readMovementCandleHistory(
+    symbols: string[],
+    sinceMs: number,
+  ): Promise<Map<string, MovementCandle[]>>;
   claimCollectorLease(instanceId: string, leaseSeconds?: number): Promise<boolean>;
   renewCollectorLease(instanceId: string, leaseSeconds?: number): Promise<boolean>;
   releaseCollectorLease(instanceId: string): Promise<void>;

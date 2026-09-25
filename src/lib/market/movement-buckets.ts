@@ -5,6 +5,10 @@ export const MAX_LAST_TRADE_AGE_SECONDS = 15;
 export const MAX_LAST_TRADE_AGE_MS = MAX_LAST_TRADE_AGE_SECONDS * 1_000;
 export const MOVEMENT_WINDOWS_MINUTES = [1, 5, 15] as const;
 
+/** A trade whose exchange time belongs to an already-finalized bucket is rejected, never rewritten. */
+export const MOVEMENT_LATE_FINALIZATION_MESSAGE =
+  "movement trade arrived after its bucket was finalized";
+
 export type MovementWindowMinutes = (typeof MOVEMENT_WINDOWS_MINUTES)[number];
 export type MovementReadinessStatus = "READY" | "WARMING" | "STALE";
 
@@ -125,7 +129,7 @@ class SymbolMovementBuckets {
       throw new Error("out-of-order movement trade");
     }
     if (this.lastFinalizedBoundary !== null && trade.tradeTime <= this.lastFinalizedBoundary) {
-      throw new Error("movement trade arrived after its bucket was finalized");
+      throw new Error(MOVEMENT_LATE_FINALIZATION_MESSAGE);
     }
 
     const safeBoundary =
@@ -267,11 +271,17 @@ class SymbolMovementBuckets {
 /** Bounded, persistence-free input shared by live processing and deterministic replay. */
 export class FuturesMovementBuckets {
   private readonly symbols = new Map<string, SymbolMovementBuckets>();
+  private lateAfterFinalization = 0;
 
   constructor(private readonly capacity = MOVEMENT_BUCKET_CAPACITY) {
     if (!Number.isSafeInteger(capacity) || capacity < 1) {
       throw new Error("invalid movement history capacity");
     }
+  }
+
+  /** Count of trades rejected because their bucket had already been finalized. */
+  get lateAfterFinalizationCount(): number {
+    return this.lateAfterFinalization;
   }
 
   reconcile(symbols: Iterable<string>): void {
@@ -289,8 +299,15 @@ export class FuturesMovementBuckets {
   accept(trade: MovementTradeInput): boolean {
     const state = this.symbols.get(trade.symbol.toUpperCase());
     if (!state) return false;
-    state.accept(trade);
-    return true;
+    try {
+      state.accept(trade);
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.message === MOVEMENT_LATE_FINALIZATION_MESSAGE) {
+        this.lateAfterFinalization += 1;
+      }
+      throw error;
+    }
   }
 
   advanceTo(boundaryTime: number): void {

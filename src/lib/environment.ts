@@ -24,6 +24,7 @@ export function validatePublicSecrets(env: Env) {
     "VITE_OPERATIONAL_SUPABASE_URL",
     "VITE_OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY",
     "VITE_BINANCE_COLLECTOR_ENABLED",
+    "VITE_MOVEMENT_FINALIZATION_GRACE_MS",
   ]) {
     if (env[name] !== undefined) fail(`${name} must remain server-only.`);
   }

@@ -13,6 +13,7 @@ import { fetchSettings, saveSettings } from "@/lib/db";
 import { timestampFreshness, type FreshnessState } from "@/lib/freshness";
 import { getOperationalState } from "@/lib/operational.functions";
 import type { CollectorHealthStatus } from "@/lib/operational/types";
+import type { MovementEngineStatus } from "@/lib/market/market-movement-state";
 import { useServerFn } from "@tanstack/react-start";
 
 export const Route = createFileRoute("/_authenticated/settings")({
@@ -63,6 +64,12 @@ function collectorBadgeVariant(status: CollectorHealthStatus) {
   return "outline" as const;
 }
 
+function movementBadgeVariant(status: MovementEngineStatus) {
+  if (status === "UNAVAILABLE") return "destructive" as const;
+  if (status === "LIVE") return "secondary" as const;
+  return "outline" as const;
+}
+
 function freshnessBadgeVariant(status: FreshnessState) {
   if (status === "UNAVAILABLE") return "destructive" as const;
   if (status === "FRESH") return "secondary" as const;
@@ -80,6 +87,7 @@ function SettingsPage() {
   const runs = { data: operational.data?.runs };
   const collectorHealth = operational.data?.collectorHealth ?? [];
   const overallCollectorStatus = collectorOverallStatus(collectorHealth);
+  const movementEngine = operational.data?.movementEngine ?? null;
   const activityFreshness = operational.data?.activityFreshness;
   const freshnessNow = operational.dataUpdatedAt || Date.now();
 
@@ -337,6 +345,53 @@ function SettingsPage() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          ) : null}
+          {movementEngine ? (
+            <div className="mt-3 space-y-2 border-t border-border/60 pt-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-medium">Market movement engine</p>
+                  <p className="num text-muted-foreground">
+                    {movementEngine.configuredSymbolCount} configured ·{" "}
+                    {movementEngine.eligibleSymbolCount} eligible
+                  </p>
+                </div>
+                <Badge variant={movementBadgeVariant(movementEngine.status)}>
+                  {movementEngine.status}
+                </Badge>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-muted-foreground">Primary 5m</span>
+                <span className="num ml-auto">
+                  {movementEngine.primaryDirectionState} · {movementEngine.primaryPace}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-muted-foreground">Last evaluation boundary</span>
+                <span className="num ml-auto">
+                  {new Date(movementEngine.lastEvaluationBoundaryTime).toLocaleString()}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-muted-foreground">Most recent transition</span>
+                <span className="num ml-auto">
+                  {movementEngine.mostRecentTransition
+                    ? `${movementEngine.mostRecentTransition.transition} · ${movementEngine.mostRecentTransition.transitionReason}`
+                    : "—"}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-muted-foreground">Algorithm / config / universe</span>
+                <span className="num ml-auto">
+                  {movementEngine.movementAlgorithmVersion} · {movementEngine.movementConfigVersion}{" "}
+                  · {movementEngine.universeVersion}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-muted-foreground">Late after finalization</span>
+                <span className="num ml-auto">{movementEngine.lateAfterFinalizationCount}</span>
               </div>
             </div>
           ) : null}

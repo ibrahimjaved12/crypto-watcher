@@ -45,6 +45,15 @@ before(async () => {
       "utf8",
     ),
   );
+  await db.exec(
+    await readFile(
+      new URL(
+        "../operational-db/supabase/migrations/20260925200000_movement_normalization_history.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
 });
 beforeEach(async () => {
   await db.exec(`RESET ROLE;
@@ -367,4 +376,136 @@ test("outbox delivery confirms only after sink success", async () => {
   assert.deepEqual(result, { claimed: 2, delivered: 0, failed: 2 });
   assert.deepEqual(marked, []);
   assert.deepEqual(failed, ["one", "two"]);
+});
+
+test("movement normalization history RPC returns compact one-minute candles per symbol", async () => {
+  const observed = Math.floor(Date.now() / 60_000) * 60_000 - 3 * 60_000;
+  const rows = [0, 1, 2].map((index) => {
+    const openTime = observed + index * 60_000;
+    return {
+      instrument_id: "binance-usdm:BTCUSDT",
+      symbol: "BTCUSDT",
+      native_symbol: "BTCUSDT",
+      provider: "binance-usdm",
+      endpoint: "/fapi/v1/klines",
+      price_type: "trade",
+      timeframe_minutes: 1,
+      open_time: new Date(openTime).toISOString(),
+      close_time: new Date(openTime + 60_000 - 1).toISOString(),
+      open: 100,
+      high: 110,
+      low: 90,
+      close: 100 + index,
+      volume: 5,
+      source_event_at: new Date(openTime + 60_000 - 1).toISOString(),
+      received_at: new Date(openTime + 60_000).toISOString(),
+      transport: "rest",
+    };
+  });
+  await db.query("SELECT record_collector_candles($1,$2)", [JSON.stringify(rows), 7]);
+
+  const history = (
+    await db.query("SELECT get_collector_movement_candles($1,$2) AS history", [
+      ["BTCUSDT"],
+      new Date(observed - 60_000).toISOString(),
+    ])
+  ).rows[0].history;
+  assert.equal(history.BTCUSDT.length, 3);
+  assert.equal(history.BTCUSDT[0][0], observed);
+  assert.equal(history.BTCUSDT[0][1], 100);
+  assert.equal(history.BTCUSDT[2][1], 102);
+  assert.equal(history.BTCUSDT[0][2], 5);
+
+  const empty = (
+    await db.query("SELECT get_collector_movement_candles($1,$2) AS history", [
+      [],
+      new Date(observed).toISOString(),
+    ])
+  ).rows[0].history;
+  assert.deepEqual(empty, {});
+});
+
+test("repository movement history read maps compact rows and skips malformed entries", async () => {
+  const repositoryUrl = await moduleUrl("../src/lib/operational/repository.server.ts", {
+    "@supabase/supabase-js": stub("export const createClient=()=>({});"),
+    "./config.server": stub("export const operationalDbConfig=()=>({enabled:false});"),
+  });
+  const { createOperationalStore } = await import(repositoryUrl);
+  const store = createOperationalStore(
+    {
+      async rpc(name) {
+        assert.equal(name, "get_collector_movement_candles");
+        return {
+          data: { BTCUSDT: [[1000, 101.5, 2], [2000, 102, 3], ["bad"]], ETHUSDT: "nope" },
+          error: null,
+        };
+      },
+    },
+    { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
+  );
+  const history = await store.readMovementCandleHistory(["btcusdt", "ethusdt"], 0);
+  assert.deepEqual(history.get("BTCUSDT"), [
+    { openTime: 1000, close: 101.5, volume: 2 },
+    { openTime: 2000, close: 102, volume: 3 },
+  ]);
+  assert.equal(history.has("ETHUSDT"), false);
+});
+
+test("market-state-current read forwards only known fields and never service credentials", async () => {
+  const baseTime = 1_800_000_000_000;
+  const repositoryUrl = await moduleUrl("../src/lib/operational/repository.server.ts", {
+    "@supabase/supabase-js": stub("export const createClient=()=>({});"),
+    "./config.server": stub("export const operationalDbConfig=()=>({enabled:false});"),
+  });
+  const { createOperationalStore } = await import(repositoryUrl);
+  const row = {
+    universe_id: "binance-usdm-public-market",
+    primary_window_minutes: 5,
+    universe_version: "market-universe-v1:test",
+    provider: "binance-usdm",
+    exchange: "binance",
+    price_type: "trade",
+    evaluation_boundary_time: new Date(baseTime).toISOString(),
+    direction_state: "BROAD_RISE",
+    pace: "ACCELERATING",
+    active_episode_id: null,
+    active_direction: null,
+    interrupted: false,
+    episode_algorithm_version: "market-episode-v1",
+    lifecycle_config_version: "market-episode-config-v1",
+    classifier_algorithm_version: "market-state-v1",
+    classifier_config_version: "market-state-config-v1",
+    movement_algorithm_version: "market-movement-v1",
+    movement_config_version: "market-movement-config-v1",
+    lifecycle_state: { serializationVersion: "market-episode-state-v1" },
+    current_evidence: { risingFraction: 0.8 },
+    updated_at: new Date(baseTime).toISOString(),
+    service_role_key: "super-secret",
+  };
+  const query = {
+    select() {
+      return this;
+    },
+    eq() {
+      return this;
+    },
+    async maybeSingle() {
+      return { data: row, error: null };
+    },
+  };
+  const store = createOperationalStore(
+    {
+      from: () => query,
+      async rpc() {
+        return { data: null, error: null };
+      },
+    },
+    { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
+  );
+  const current = await store.getMarketStateCurrent("binance-usdm-public-market");
+  assert.equal(current.directionState, "BROAD_RISE");
+  assert.equal(current.universeVersion, "market-universe-v1:test");
+  assert.equal(current.evaluationBoundaryTime, baseTime);
+  assert.equal("service_role_key" in current, false);
+  assert.equal(JSON.stringify(current).includes("super-secret"), false);
 });
