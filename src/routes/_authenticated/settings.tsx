@@ -390,6 +390,15 @@ function SettingsPage() {
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                <span className="text-muted-foreground">Finalization config / grace</span>
+                <span className="num ml-auto">
+                  {movementEngine.finalizationConfigVersion ?? "—"}
+                  {movementEngine.finalizationGraceMs === null
+                    ? ""
+                    : ` · ${movementEngine.finalizationGraceMs}ms`}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-muted-foreground">Late after finalization</span>
                 <span className="num ml-auto">{movementEngine.lateAfterFinalizationCount}</span>
               </div>

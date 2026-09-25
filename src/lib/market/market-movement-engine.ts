@@ -84,6 +84,9 @@ export type MovementCurrentEvidenceInput = {
   engineUpdatedAt: number;
   lastSourceEventTime: number | null;
   lastTradeTime: number | null;
+  lastReceivedAt: number | null;
+  finalizationConfigVersion: string;
+  finalizationGraceMs: number;
   mostRecentTransition: PersistedMovementTransition | null;
 };
 
@@ -257,8 +260,11 @@ export function buildMovementCurrentEvidence(
       evaluationBoundaryTime: input.classification.evaluationBoundaryTime,
       lastSourceEventTime: input.lastSourceEventTime,
       lastTradeTime: input.lastTradeTime,
+      lastReceivedAt: input.lastReceivedAt,
       engineUpdatedAt: input.engineUpdatedAt,
     },
+    finalizationConfigVersion: input.finalizationConfigVersion,
+    finalizationGraceMs: input.finalizationGraceMs,
     mostRecentTransition: input.mostRecentTransition,
   };
 }
@@ -363,13 +369,15 @@ export class MarketMovementEngine {
   }
 }
 
-/** Latest exchange event time / trade time observed across the shared snapshots. */
+/** Latest exchange event time / trade time / receive time observed across the shared snapshots. */
 export function snapshotEventTimes(snapshots: ReadonlyMap<string, MovementBucketSnapshot>): {
   lastSourceEventTime: number | null;
   lastTradeTime: number | null;
+  lastReceivedAt: number | null;
 } {
   let lastSourceEventTime: number | null = null;
   let lastTradeTime: number | null = null;
+  let lastReceivedAt: number | null = null;
   for (const snapshot of snapshots.values()) {
     const latest = snapshot.buckets.at(-1);
     const eventTime = finiteNonnegative(latest?.lastRealEventTime);
@@ -380,6 +388,10 @@ export function snapshotEventTimes(snapshots: ReadonlyMap<string, MovementBucket
     if (tradeTime !== null && (lastTradeTime === null || tradeTime > lastTradeTime)) {
       lastTradeTime = tradeTime;
     }
+    const receivedAt = finiteNonnegative(snapshot.latestRealReceivedAt);
+    if (receivedAt !== null && (lastReceivedAt === null || receivedAt > lastReceivedAt)) {
+      lastReceivedAt = receivedAt;
+    }
   }
-  return { lastSourceEventTime, lastTradeTime };
+  return { lastSourceEventTime, lastTradeTime, lastReceivedAt };
 }

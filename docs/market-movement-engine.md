@@ -19,6 +19,12 @@ Accepted `aggTrade` observations feed the existing `FuturesMovementBuckets` insi
 `BinanceFuturesCollector`. No additional WebSocket, no raw tick persistence, and no per-five-second
 append-only stream is created. #26 completed-candle bootstrap/recovery is unchanged.
 
+Each finalized bucket retains its provider/instrument/price type and the last real trade's exchange
+event/trade times plus its local receive time (`lastRealReceivedAt`); carry-forward buckets preserve
+those timestamps. The bounded current evidence exposes the latest real `lastReceivedAt` alongside
+`lastSourceEventTime`/`lastTradeTime`, so receive-time provenance survives without raw-tick
+persistence.
+
 The engine runtime (`movement-engine.server.ts`) starts only inside the authoritative collector
 process (the operational lease owner) and evaluates each newly finalized five-second boundary
 exactly once for the shared universe.
@@ -43,9 +49,12 @@ finalizable_boundary = floor((wall_clock_now_ms - grace_ms) / 5000) * 5000
 - A trade whose exchange time belongs to an already-finalized bucket is rejected, never rewritten,
   and counted as a late-after-finalization event in diagnostics.
 
-The grace is explicit, server-side and versioned (`movement-finalization-config-v1`). Set
-`MOVEMENT_FINALIZATION_GRACE_MS` (integer, 0–60000) to tune it; it must never be a `VITE_*`
-variable.
+The grace is explicit, server-side and versioned. The effective config version deterministically
+identifies the grace in force (`movement-finalization-config-v1:grace-<ms>`), so tuning
+`MOVEMENT_FINALIZATION_GRACE_MS` (integer, 0–60000) is a new config version rather than a silent
+change under an unchanged version. It must never be a `VITE_*` variable. The effective
+`finalizationConfigVersion` and `finalizationGraceMs` are persisted in the bounded current evidence
+and exposed through the authenticated current-state and compact diagnostics contracts.
 
 ## Universe semantics
 
@@ -90,11 +99,12 @@ Authenticated server-side reads:
 - `getMarketMovementCurrentState` (`src/lib/market-movement.functions.ts`) returns the structured
   contract for later #30/#31 consumers: primary 5m direction/pace, 1m/15m context, pace/acceleration,
   directional/material breadth, median movement, dispersion, RVOL/participation, isolated outliers,
-  exact configured/included/excluded universe, timestamps, versions, most recent transition, and the
+  exact configured/included/excluded universe, timestamps (including the latest real receive time),
+  versions, the effective finalization config version/grace, most recent transition, and the
   distinct LIVE / WARMING / STALE / UNAVAILABLE status.
 - `getOperationalState` includes a compact `movementEngine` diagnostics block rendered on the
   settings page (status, configured/eligible counts, primary 5m state, last evaluation boundary,
-  versions, most recent transition, late-after-finalization count).
+  versions, finalization config/grace, most recent transition, late-after-finalization count).
 
 The `STALE` threshold is an explicit, version-independent constant (`MOVEMENT_ENGINE_STALE_AFTER_MS`,
 60s) chosen to clear the 30-second persistence cadence plus finalization lag, so a healthy engine

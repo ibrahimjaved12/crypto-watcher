@@ -82,6 +82,7 @@ function warmingSnapshot(symbol) {
     maxLastTradeAgeMs: 15_000,
     buckets: [],
     latestRealTradeTime: null,
+    latestRealReceivedAt: null,
     readiness: Object.fromEntries(
       [1, 5, 15].map((windowMinutes) => [
         windowMinutes,
@@ -198,12 +199,15 @@ test("finalization watermark never finalizes the current wall-clock boundary ear
 });
 
 test("grace is explicit, server-side and versioned", () => {
-  assert.equal(movementFinalizationConfig({}).graceMs, MOVEMENT_FINALIZATION_GRACE_MS_DEFAULT);
-  assert.equal(movementFinalizationConfig({}).version, "movement-finalization-config-v1");
-  assert.equal(
-    movementFinalizationConfig({ MOVEMENT_FINALIZATION_GRACE_MS: "5000" }).graceMs,
-    5_000,
-  );
+  const defaultConfig = movementFinalizationConfig({});
+  assert.equal(defaultConfig.graceMs, MOVEMENT_FINALIZATION_GRACE_MS_DEFAULT);
+  // The effective version must unambiguously identify the grace in force.
+  assert.ok(defaultConfig.version.startsWith("movement-finalization-config-v1"));
+  assert.ok(defaultConfig.version.includes(String(MOVEMENT_FINALIZATION_GRACE_MS_DEFAULT)));
+  const tuned = movementFinalizationConfig({ MOVEMENT_FINALIZATION_GRACE_MS: "5000" });
+  assert.equal(tuned.graceMs, 5_000);
+  assert.ok(tuned.version.includes("5000"));
+  assert.notEqual(tuned.version, defaultConfig.version);
   assert.throws(() => movementFinalizationConfig({ MOVEMENT_FINALIZATION_GRACE_MS: "-1" }));
   assert.throws(() => movementFinalizationConfig({ MOVEMENT_FINALIZATION_GRACE_MS: "nope" }));
 });
@@ -411,6 +415,9 @@ test("1m/5m/15m context, universe and timestamps reach the persisted current evi
     engineUpdatedAt: BASE + 1_000,
     lastSourceEventTime: BASE + 900,
     lastTradeTime: BASE + 950,
+    lastReceivedAt: BASE + 980,
+    finalizationConfigVersion: "movement-finalization-config-v1:grace-2000",
+    finalizationGraceMs: 2_000,
     mostRecentTransition: null,
   });
   assert.equal(evidence.windowsContext.length, 3);
@@ -427,6 +434,9 @@ test("1m/5m/15m context, universe and timestamps reach the persisted current evi
   assert.equal(evidence.engine.lateAfterFinalizationCount, 3);
   assert.equal(evidence.timestamps.lastTradeTime, BASE + 950);
   assert.equal(evidence.timestamps.lastSourceEventTime, BASE + 900);
+  assert.equal(evidence.timestamps.lastReceivedAt, BASE + 980);
+  assert.equal(evidence.finalizationConfigVersion, "movement-finalization-config-v1:grace-2000");
+  assert.equal(evidence.finalizationGraceMs, 2_000);
 });
 
 test("current-state exposure maps persisted evidence without leaking credentials", () => {
@@ -440,6 +450,9 @@ test("current-state exposure maps persisted evidence without leaking credentials
     engineUpdatedAt: BASE + 1_000,
     lastSourceEventTime: BASE + 900,
     lastTradeTime: BASE + 950,
+    lastReceivedAt: BASE + 980,
+    finalizationConfigVersion: "movement-finalization-config-v1:grace-2000",
+    finalizationGraceMs: 2_000,
     mostRecentTransition: {
       transition: "STARTED",
       transitionReason: "confirmed_broad_entry",
@@ -505,6 +518,9 @@ test("diagnostics reflect engine status, counts, timestamps and transition", () 
     engineUpdatedAt: BASE + 1_000,
     lastSourceEventTime: BASE + 900,
     lastTradeTime: BASE + 950,
+    lastReceivedAt: BASE + 980,
+    finalizationConfigVersion: "movement-finalization-config-v1:grace-2000",
+    finalizationGraceMs: 2_000,
     mostRecentTransition: null,
   });
   const diagnostics = toMovementEngineDiagnostics(
@@ -538,7 +554,56 @@ test("diagnostics reflect engine status, counts, timestamps and transition", () 
   assert.equal(toMovementEngineDiagnostics(null, { now: BASE }), null);
 });
 
-test("snapshot event times preserve exchange provenance across symbols", () => {
+test("finalization config/grace and receive time are auditable through the contracts", () => {
+  const classification = fakeClassification();
+  const currentEvidence = buildMovementCurrentEvidence({
+    evidence: classification.windows[1].evidence,
+    classification,
+    universe: buildMarketUniverse(SYMBOLS),
+    status: "LIVE",
+    lateAfterFinalizationCount: 0,
+    engineUpdatedAt: BASE + 1_000,
+    lastSourceEventTime: BASE + 900,
+    lastTradeTime: BASE + 950,
+    lastReceivedAt: BASE + 980,
+    finalizationConfigVersion: "movement-finalization-config-v1:grace-5000",
+    finalizationGraceMs: 5_000,
+    mostRecentTransition: null,
+  });
+  const persisted = {
+    universeId: MARKET_UNIVERSE_ID,
+    universeVersion: "market-universe-v1:test",
+    evaluationBoundaryTime: BASE,
+    directionState: "BROAD_RISE",
+    pace: "ACCELERATING",
+    activeEpisodeId: null,
+    activeDirection: null,
+    interrupted: false,
+    episodeAlgorithmVersion: "market-episode-v1",
+    lifecycleConfigVersion: "market-episode-config-v1",
+    classifierAlgorithmVersion: "market-state-v1",
+    classifierConfigVersion: "market-state-config-v1",
+    movementAlgorithmVersion: "market-movement-v1",
+    movementConfigVersion: "market-movement-config-v1",
+    currentEvidence,
+  };
+  const state = toMarketMovementCurrentState(persisted, { now: BASE + 1_000 });
+  assert.equal(state.timestamps.lastReceivedAt, BASE + 980);
+  assert.equal(state.finalizationConfigVersion, "movement-finalization-config-v1:grace-5000");
+  assert.equal(state.finalizationGraceMs, 5_000);
+
+  const diagnostics = toMovementEngineDiagnostics(persisted, { now: BASE + 1_000 });
+  assert.equal(diagnostics.finalizationConfigVersion, "movement-finalization-config-v1:grace-5000");
+  assert.equal(diagnostics.finalizationGraceMs, 5_000);
+});
+
+test("unavailable current state exposes no finalization config", () => {
+  const state = toMarketMovementCurrentState(null, { now: BASE });
+  assert.equal(state.finalizationConfigVersion, null);
+  assert.equal(state.finalizationGraceMs, null);
+});
+
+test("snapshot event times preserve exchange and receive provenance across symbols", () => {
   const times = snapshotEventTimes(
     new Map([
       [
@@ -546,6 +611,7 @@ test("snapshot event times preserve exchange provenance across symbols", () => {
         {
           ...warmingSnapshot("BTCUSDT"),
           latestRealTradeTime: BASE + 400,
+          latestRealReceivedAt: BASE + 600,
           buckets: [{ lastRealEventTime: BASE + 500, boundaryTime: BASE }],
         },
       ],
@@ -554,6 +620,7 @@ test("snapshot event times preserve exchange provenance across symbols", () => {
         {
           ...warmingSnapshot("ETHUSDT"),
           latestRealTradeTime: BASE + 200,
+          latestRealReceivedAt: BASE + 250,
           buckets: [{ lastRealEventTime: BASE + 300, boundaryTime: BASE }],
         },
       ],
@@ -561,4 +628,12 @@ test("snapshot event times preserve exchange provenance across symbols", () => {
   );
   assert.equal(times.lastTradeTime, BASE + 400);
   assert.equal(times.lastSourceEventTime, BASE + 500);
+  assert.equal(times.lastReceivedAt, BASE + 600);
+});
+
+test("snapshot event times expose no receive time when nothing was received", () => {
+  const times = snapshotEventTimes(new Map([["BTCUSDT", warmingSnapshot("BTCUSDT")]]));
+  assert.equal(times.lastTradeTime, null);
+  assert.equal(times.lastSourceEventTime, null);
+  assert.equal(times.lastReceivedAt, null);
 });

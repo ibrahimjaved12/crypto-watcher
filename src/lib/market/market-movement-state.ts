@@ -70,6 +70,7 @@ export type PersistedMovementTimestamps = {
   evaluationBoundaryTime: number;
   lastSourceEventTime: number | null;
   lastTradeTime: number | null;
+  lastReceivedAt: number | null;
   engineUpdatedAt: number;
 };
 
@@ -86,6 +87,12 @@ export type PersistedMarketMovementCurrentEvidence = MarketStateEvidence & {
     lateAfterFinalizationCount: number;
   };
   timestamps: PersistedMovementTimestamps;
+  /**
+   * Effective finalization config in force when this evidence was written. The
+   * version deterministically identifies the grace so tuning it is auditable.
+   */
+  finalizationConfigVersion: string;
+  finalizationGraceMs: number;
   mostRecentTransition: PersistedMovementTransition | null;
 };
 
@@ -104,6 +111,9 @@ export type MarketMovementCurrentState = {
   /** 1m, 5m and 15m structured classifications, primary included. */
   context: MarketStateWindowClassification[];
   timestamps: PersistedMovementTimestamps | null;
+  /** Effective finalization grace/config the persisted evidence was produced under. */
+  finalizationConfigVersion: string | null;
+  finalizationGraceMs: number | null;
   versions: {
     movementAlgorithmVersion: string;
     movementConfigVersion: string;
@@ -130,6 +140,8 @@ export type MovementEngineDiagnostics = {
   primaryPace: MarketPace;
   lastEvaluationBoundaryTime: number;
   lastSourceEventTime: number | null;
+  finalizationConfigVersion: string | null;
+  finalizationGraceMs: number | null;
   movementAlgorithmVersion: string;
   movementConfigVersion: string;
   universeVersion: string;
@@ -207,6 +219,8 @@ export function toMovementEngineDiagnostics(
     primaryPace: current.pace,
     lastEvaluationBoundaryTime: current.evaluationBoundaryTime,
     lastSourceEventTime: evidence.timestamps?.lastSourceEventTime ?? null,
+    finalizationConfigVersion: evidence.finalizationConfigVersion ?? null,
+    finalizationGraceMs: evidence.finalizationGraceMs ?? null,
     movementAlgorithmVersion: current.movementAlgorithmVersion,
     movementConfigVersion: current.movementConfigVersion,
     universeVersion: current.universeVersion,
@@ -228,6 +242,8 @@ export function toMarketMovementCurrentState(
       primary: null,
       context: [],
       timestamps: null,
+      finalizationConfigVersion: null,
+      finalizationGraceMs: null,
       versions: null,
       mostRecentTransition: null,
       lateAfterFinalizationCount: 0,
@@ -259,6 +275,8 @@ export function toMarketMovementCurrentState(
       : null,
     context: windowsContext,
     timestamps: evidence.timestamps ?? null,
+    finalizationConfigVersion: evidence.finalizationConfigVersion ?? null,
+    finalizationGraceMs: evidence.finalizationGraceMs ?? null,
     versions: {
       movementAlgorithmVersion: current.movementAlgorithmVersion,
       movementConfigVersion: current.movementConfigVersion,

@@ -9,12 +9,22 @@
  */
 import { MOVEMENT_BUCKET_MS } from "./movement-buckets";
 
-export const MOVEMENT_FINALIZATION_CONFIG_VERSION = "movement-finalization-config-v1";
+/** V1 config family. The effective version also carries the grace in force. */
+export const MOVEMENT_FINALIZATION_CONFIG_FAMILY = "movement-finalization-config-v1";
 
 /** V1 operating default. This is a lateness watermark, not a trading threshold. */
 export const MOVEMENT_FINALIZATION_GRACE_MS_DEFAULT = 2_000;
 export const MOVEMENT_FINALIZATION_GRACE_MS_MIN = 0;
 export const MOVEMENT_FINALIZATION_GRACE_MS_MAX = 60_000;
+
+/**
+ * Deterministic V1 version that unambiguously identifies the grace in force, so a
+ * tuned `MOVEMENT_FINALIZATION_GRACE_MS` is a new config version rather than a
+ * silent change under the same version.
+ */
+export function movementFinalizationConfigVersion(graceMs: number): string {
+  return `${MOVEMENT_FINALIZATION_CONFIG_FAMILY}:grace-${graceMs}`;
+}
 
 export type MovementFinalizationConfig = {
   version: string;
@@ -22,7 +32,7 @@ export type MovementFinalizationConfig = {
 };
 
 export const DEFAULT_MOVEMENT_FINALIZATION_CONFIG: Readonly<MovementFinalizationConfig> = {
-  version: MOVEMENT_FINALIZATION_CONFIG_VERSION,
+  version: movementFinalizationConfigVersion(MOVEMENT_FINALIZATION_GRACE_MS_DEFAULT),
   graceMs: MOVEMENT_FINALIZATION_GRACE_MS_DEFAULT,
 };
 
@@ -42,7 +52,7 @@ export function movementFinalizationConfig(
       `MOVEMENT_FINALIZATION_GRACE_MS must be an integer ${MOVEMENT_FINALIZATION_GRACE_MS_MIN}–${MOVEMENT_FINALIZATION_GRACE_MS_MAX}`,
     );
   }
-  return { version: MOVEMENT_FINALIZATION_CONFIG_VERSION, graceMs };
+  return { version: movementFinalizationConfigVersion(graceMs), graceMs };
 }
 
 /**

@@ -110,6 +110,7 @@ function snapshotFor(symbol, boundary) {
       (left, right) => left.boundaryTime - right.boundaryTime,
     ),
     latestRealTradeTime: boundary,
+    latestRealReceivedAt: boundary + 123,
     readiness: Object.fromEntries(
       [1, 5, 15].map((windowMinutes) => [
         windowMinutes,
@@ -169,7 +170,7 @@ function createHarness() {
   const runtime = new MovementEngineRuntime({
     store,
     collector,
-    finalization: { version: "test", graceMs: 0 },
+    finalization: { version: "movement-finalization-config-v1:grace-0", graceMs: 0 },
     now: () => state.now,
   });
   return { runtime, state, control, calls, persistedEvents, setDurableCurrent };
@@ -187,6 +188,16 @@ function advancedCurrent(current, boundary) {
     },
   };
 }
+
+test("runtime persists the effective finalization config and receive-time provenance", async () => {
+  const harness = createHarness();
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.persist.length, 1);
+  const evidence = harness.calls.persist[0].current.currentEvidence;
+  assert.equal(evidence.finalizationConfigVersion, "movement-finalization-config-v1:grace-0");
+  assert.equal(evidence.finalizationGraceMs, 0);
+  assert.equal(evidence.timestamps.lastReceivedAt, BASE + 123);
+});
 
 test("a required persistence batch is retried until it succeeds without losing its transition", async () => {
   const harness = createHarness();

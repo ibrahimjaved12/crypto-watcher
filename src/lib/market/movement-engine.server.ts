@@ -325,7 +325,7 @@ export class MovementEngineRuntime {
     const final = results.at(-1)!;
     const events = results.flatMap((result) => result.lifecycle.transitions);
     const state = final.lifecycle.nextState;
-    const { lastSourceEventTime, lastTradeTime } = snapshotEventTimes(snapshots);
+    const { lastSourceEventTime, lastTradeTime, lastReceivedAt } = snapshotEventTimes(snapshots);
     const status = deriveMovementEngineStatus({
       directionState: state.currentDirectionState,
       configuredCount: universe.symbols.length,
@@ -343,6 +343,9 @@ export class MovementEngineRuntime {
       engineUpdatedAt: now,
       lastSourceEventTime,
       lastTradeTime,
+      lastReceivedAt,
+      finalizationConfigVersion: this.finalization.version,
+      finalizationGraceMs: this.finalization.graceMs,
       mostRecentTransition,
     });
     const current: PersistedMarketStateCurrent = {

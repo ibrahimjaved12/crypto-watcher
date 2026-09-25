@@ -18,6 +18,8 @@ export type MovementTradeInput = {
   quantity: number;
   eventTime: number;
   tradeTime: number;
+  /** Local receive time of the observation; carried for provenance, never used in math. */
+  receivedAt: number;
 };
 
 export type MovementBucket = {
@@ -28,6 +30,7 @@ export type MovementBucket = {
   tradeCount: number;
   lastRealTradeTime: number | null;
   lastRealEventTime: number | null;
+  lastRealReceivedAt: number | null;
   carriedForward: boolean;
   provider: "binance-usdm";
   instrumentId: string;
@@ -54,6 +57,7 @@ export type MovementBucketSnapshot = {
   maxLastTradeAgeMs: typeof MAX_LAST_TRADE_AGE_MS;
   buckets: MovementBucket[];
   latestRealTradeTime: number | null;
+  latestRealReceivedAt: number | null;
   readiness: Record<MovementWindowMinutes, MovementWindowReadiness>;
 };
 
@@ -65,6 +69,7 @@ type PendingBucket = {
   tradeCount: number;
   lastRealTradeTime: number;
   lastRealEventTime: number;
+  lastRealReceivedAt: number;
 };
 
 class BoundedBucketRing {
@@ -125,6 +130,7 @@ class SymbolMovementBuckets {
     finitePositive(trade.quantity, "movement trade quantity");
     safeNonnegativeInteger(trade.tradeTime, "movement trade time");
     safeNonnegativeInteger(trade.eventTime, "movement event time");
+    safeNonnegativeInteger(trade.receivedAt, "movement receive time");
     if (this.lastAcceptedTradeTime !== null && trade.tradeTime < this.lastAcceptedTradeTime) {
       throw new Error("out-of-order movement trade");
     }
@@ -146,6 +152,7 @@ class SymbolMovementBuckets {
         tradeCount: 1,
         lastRealTradeTime: trade.tradeTime,
         lastRealEventTime: trade.eventTime,
+        lastRealReceivedAt: trade.receivedAt,
       };
     } else {
       if (this.pending.boundaryTime !== boundaryTime) {
@@ -157,6 +164,7 @@ class SymbolMovementBuckets {
       this.pending.tradeCount += 1;
       this.pending.lastRealTradeTime = trade.tradeTime;
       this.pending.lastRealEventTime = trade.eventTime;
+      this.pending.lastRealReceivedAt = trade.receivedAt;
     }
     this.lastAcceptedTradeTime = trade.tradeTime;
     this.lastRealTrade = { ...trade, symbol: this.symbol };
@@ -207,6 +215,7 @@ class SymbolMovementBuckets {
       maxLastTradeAgeMs: MAX_LAST_TRADE_AGE_MS,
       buckets,
       latestRealTradeTime: this.lastRealTrade?.tradeTime ?? null,
+      latestRealReceivedAt: this.lastRealTrade?.receivedAt ?? null,
       readiness,
     };
   }
@@ -224,6 +233,7 @@ class SymbolMovementBuckets {
       tradeCount: pending?.tradeCount ?? 0,
       lastRealTradeTime: pending?.lastRealTradeTime ?? this.lastRealTrade?.tradeTime ?? null,
       lastRealEventTime: pending?.lastRealEventTime ?? this.lastRealTrade?.eventTime ?? null,
+      lastRealReceivedAt: pending?.lastRealReceivedAt ?? this.lastRealTrade?.receivedAt ?? null,
       carriedForward: carry,
       provider: "binance-usdm",
       instrumentId: `binance-usdm:${this.symbol}`,
