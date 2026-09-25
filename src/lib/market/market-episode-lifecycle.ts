@@ -17,6 +17,7 @@ import type {
 export const MARKET_EPISODE_ALGORITHM_VERSION = "market-episode-v1";
 export const DEFAULT_MARKET_EPISODE_CONFIG_VERSION = "market-episode-config-v1";
 export const MARKET_EPISODE_STATE_SERIALIZATION_VERSION = "market-episode-state-v1";
+export const MARKET_EPISODE_EVALUATION_CADENCE_MS = 5_000;
 
 export type MarketEpisodeTransitionType =
   "STARTED" | "STRENGTHENED" | "WEAKENED" | "REVERSED" | "ENDED";
@@ -486,6 +487,9 @@ export function processMarketEpisodeLifecycle(
   const currentDirectionState = primaryWindow.directionState;
   const currentPace = primaryWindow.pace;
   const previous = input.previousState;
+  const hasEvaluationGap =
+    previous !== null &&
+    evaluationBoundary > previous.evaluationBoundaryTime + MARKET_EPISODE_EVALUATION_CADENCE_MS;
 
   if (previous && evaluationBoundary < previous.evaluationBoundaryTime) {
     throw new Error("Market episode evaluations must not move backward in time");
@@ -575,8 +579,41 @@ export function processMarketEpisodeLifecycle(
     }
   }
 
-  // Check 2: Degraded state (WARMING or UNAVAILABLE)
-  if (currentDirectionState === "WARMING" || currentDirectionState === "UNAVAILABLE") {
+  // Check 2: A skipped 5-second boundary breaks every consecutive confirmation sequence.
+  if (hasEvaluationGap) {
+    pendingCandidate = null;
+    pendingExitFailureCount = 0;
+    pendingReversal = null;
+    pendingStrengthen = null;
+    pendingWeaken = null;
+    pendingResume = null;
+
+    if (activeEpisode === null) {
+      interrupted = false;
+      if (currentDirectionState === "BROAD_RISE" || currentDirectionState === "BROAD_DROP") {
+        pendingCandidate = {
+          direction: currentDirectionState,
+          startBoundaryTime: evaluationBoundary,
+          count: 1,
+        };
+      }
+    } else {
+      interrupted = true;
+      shouldPersistImmediately = true;
+      const isOpposite =
+        (activeEpisode.direction === "BROAD_RISE" && currentDirectionState === "BROAD_DROP") ||
+        (activeEpisode.direction === "BROAD_DROP" && currentDirectionState === "BROAD_RISE");
+      if (isOpposite) {
+        pendingReversal = {
+          toDirection: currentDirectionState as MarketEpisodeDirection,
+          startBoundaryTime: evaluationBoundary,
+          count: 1,
+        };
+      } else if (currentDirectionState === activeEpisode.direction) {
+        pendingResume = { direction: activeEpisode.direction, count: 1 };
+      }
+    }
+  } else if (currentDirectionState === "WARMING" || currentDirectionState === "UNAVAILABLE") {
     if (activeEpisode !== null) {
       if (!interrupted) {
         interrupted = true;

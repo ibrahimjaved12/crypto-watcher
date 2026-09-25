@@ -365,6 +365,27 @@ test("duplicate and backward boundaries never advance start confirmation", () =>
   );
 });
 
+test("pending start followed by a skipped boundary starts fresh at count one", () => {
+  const first = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const pending = processMarketEpisodeLifecycle({ ...first, previousState: null });
+  const afterGap = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 10_000,
+  });
+  const result = processMarketEpisodeLifecycle({
+    ...afterGap,
+    previousState: pending.nextState,
+  });
+
+  assert.equal(result.transitions.length, 0);
+  assert.equal(result.nextState.activeEpisode, null);
+  assert.deepEqual(result.nextState.pendingCandidate, {
+    direction: "BROAD_RISE",
+    startBoundaryTime: BASE_TIME + 10_000,
+    count: 1,
+  });
+});
+
 test("2. second consecutive same broad direction => one STARTED with first boundary start time", () => {
   const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
   const step1 = processMarketEpisodeLifecycle({
@@ -705,6 +726,76 @@ test("duplicate pending reversal evaluation cannot confirm REVERSED", () => {
   assert.equal(duplicate.transitions.length, 0);
   assert.equal(duplicate.nextState.pendingReversal?.count, 1);
   assert.equal(duplicate.nextState.activeEpisode?.direction, "BROAD_RISE");
+});
+
+test("pending reversal followed by a skipped boundary restarts reversal confirmation", () => {
+  const firstRise = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({ ...firstRise, previousState: null });
+  const secondRise = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 5_000,
+  });
+  const active = processMarketEpisodeLifecycle({ ...secondRise, previousState: step1.nextState });
+  const firstDrop = makePair({
+    primaryWindow: broadDropWindow(),
+    boundaryTime: BASE_TIME + 10_000,
+  });
+  const pending = processMarketEpisodeLifecycle({ ...firstDrop, previousState: active.nextState });
+  const dropAfterGap = makePair({
+    primaryWindow: broadDropWindow(),
+    boundaryTime: BASE_TIME + 20_000,
+  });
+  const result = processMarketEpisodeLifecycle({
+    ...dropAfterGap,
+    previousState: pending.nextState,
+  });
+
+  assert.equal(result.transitions.length, 0);
+  assert.equal(result.nextState.interrupted, true);
+  assert.deepEqual(result.nextState.pendingReversal, {
+    toDirection: "BROAD_DROP",
+    startBoundaryTime: BASE_TIME + 20_000,
+    count: 1,
+  });
+  assert.equal(result.nextState.activeEpisode?.direction, "BROAD_RISE");
+});
+
+test("an active episode becomes interrupted after a gap and requires fresh resume confirmation", () => {
+  const firstRise = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({ ...firstRise, previousState: null });
+  const secondRise = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 5_000,
+  });
+  const active = processMarketEpisodeLifecycle({ ...secondRise, previousState: step1.nextState });
+  const riseAfterGap = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 15_000,
+  });
+  const interrupted = processMarketEpisodeLifecycle({
+    ...riseAfterGap,
+    previousState: active.nextState,
+  });
+
+  assert.equal(interrupted.transitions.length, 0);
+  assert.equal(interrupted.nextState.interrupted, true);
+  assert.deepEqual(interrupted.nextState.pendingResume, {
+    direction: "BROAD_RISE",
+    count: 1,
+  });
+  assert.equal(interrupted.nextState.pendingExitFailureCount, 0);
+
+  const nextRise = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 20_000,
+  });
+  const resumed = processMarketEpisodeLifecycle({
+    ...nextRise,
+    previousState: interrupted.nextState,
+  });
+  assert.equal(resumed.transitions.length, 0);
+  assert.equal(resumed.nextState.interrupted, false);
+  assert.equal(resumed.nextState.pendingResume, null);
 });
 
 test("10. strengthened via pace crossing after 2 confirmations", () => {
