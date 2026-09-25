@@ -5,6 +5,7 @@ import type {
   CollectorHealthStatus,
   OperationalStore,
 } from "../operational/types";
+import { FuturesMovementBuckets, type MovementBucketSnapshot } from "./movement-buckets";
 
 export const BINANCE_USDM_WS_ENDPOINT = "wss://fstream.binance.com/market/stream";
 export const BINANCE_USDM_REST_ENDPOINT = "/fapi/v1/klines";
@@ -244,6 +245,7 @@ export class BinanceFuturesCollector {
   private readonly latestCompleted = new Map<string, CollectorCandle>();
   private readonly latestTrade = new Map<string, AggregateTrade>();
   private readonly trades = new Map<string, TradeBuffer>();
+  private readonly movementBuckets = new FuturesMovementBuckets();
   private readonly health = new Map<string, HealthState>();
   private readonly queue: CollectorCandle[] = [];
   private processing: Promise<void> | null = null;
@@ -282,6 +284,18 @@ export class BinanceFuturesCollector {
     return this.latestTrade.get(symbol.toUpperCase()) ?? null;
   }
 
+  movementSnapshot(symbol: string): MovementBucketSnapshot | null {
+    return this.movementBuckets.snapshot(symbol);
+  }
+
+  movementSnapshots(): MovementBucketSnapshot[] {
+    return this.movementBuckets.snapshots();
+  }
+
+  advanceMovementBuckets(boundaryTime: number): void {
+    this.movementBuckets.advanceTo(boundaryTime);
+  }
+
   developingCandle(symbol: string, timeframeMinutes: CollectorInterval): CollectorCandle | null {
     return this.developing.get(this.key(symbol, timeframeMinutes)) ?? null;
   }
@@ -311,6 +325,7 @@ export class BinanceFuturesCollector {
       if (!isSupportedSymbol(symbol)) throw new Error(`unsupported futures contract: ${symbol}`);
       next.add(symbol);
     }
+    this.movementBuckets.reconcile(next);
     for (const symbol of this.symbols) {
       if (next.has(symbol)) continue;
       this.symbols.delete(symbol);
@@ -345,6 +360,11 @@ export class BinanceFuturesCollector {
         (event.trade.aggregateId <= previous.aggregateId ||
           event.trade.tradeTime < previous.tradeTime)
       ) {
+        return false;
+      }
+      try {
+        if (!this.movementBuckets.accept(event.trade)) return false;
+      } catch {
         return false;
       }
       this.latestTrade.set(event.trade.symbol, event.trade);

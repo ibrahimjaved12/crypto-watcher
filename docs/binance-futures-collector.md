@@ -45,9 +45,23 @@ candle gap becomes `UNAVAILABLE`.
 
 Memory contains only the latest trade, one developing candle per contract/timeframe, the latest
 completed checkpoint, connection health, a five-minute/2,000-item aggregate-trade buffer per
-contract, and a 256-item completed-candle work queue. Queue overflow marks the collector stale,
-closes the socket, and relies on REST recovery; it never creates an unbounded queue. Developing
-updates and aggregate trades are not persisted.
+contract, a 35-minute movement bucket ring, and a 256-item completed-candle work queue. Queue
+overflow marks the collector stale, closes the socket, and relies on REST recovery; it never creates
+an unbounded queue. Developing updates, aggregate trades, and movement buckets are not persisted.
+
+## Movement bucket input
+
+Accepted `aggTrade` events also feed a separate, memory-only movement bucket store. It uses Binance's
+trade timestamp (`T`) on a fixed five-second epoch grid and keeps 420 compact buckets (35 minutes) per
+subscribed contract. Each bucket retains its endpoint price, base and quote volume, trade count, last
+real trade/event timestamps, carry-forward flag, and futures provenance. This store is separate from
+the collector's five-minute/2,000-trade safety buffer.
+
+A price is carried through an empty bucket only while its last real trade is at most 15 seconds old;
+later buckets have no endpoint and report stale. Per-window readiness remains `WARMING` until the
+continuous live history spans two adjacent 1m, 5m, or 15m windows. A new process starts empty and does
+not reconstruct this path from REST candles. The deterministic component can be advanced by an
+aligned boundary for live evaluation or replay, and it performs no database writes.
 
 Recovered/bootstrap candles carry their origin and do not directly trigger live analysis or a
 new movement alert. A subsequent genuinely live completed candle invokes the existing idempotent
