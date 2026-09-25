@@ -610,18 +610,28 @@ test("snapshot event times preserve exchange and receive provenance across symbo
         "BTCUSDT",
         {
           ...warmingSnapshot("BTCUSDT"),
-          latestRealTradeTime: BASE + 400,
-          latestRealReceivedAt: BASE + 600,
-          buckets: [{ lastRealEventTime: BASE + 500, boundaryTime: BASE }],
+          buckets: [
+            {
+              boundaryTime: BASE,
+              lastRealEventTime: BASE + 500,
+              lastRealTradeTime: BASE + 400,
+              lastRealReceivedAt: BASE + 600,
+            },
+          ],
         },
       ],
       [
         "ETHUSDT",
         {
           ...warmingSnapshot("ETHUSDT"),
-          latestRealTradeTime: BASE + 200,
-          latestRealReceivedAt: BASE + 250,
-          buckets: [{ lastRealEventTime: BASE + 300, boundaryTime: BASE }],
+          buckets: [
+            {
+              boundaryTime: BASE,
+              lastRealEventTime: BASE + 300,
+              lastRealTradeTime: BASE + 200,
+              lastRealReceivedAt: BASE + 250,
+            },
+          ],
         },
       ],
     ]),
@@ -629,6 +639,35 @@ test("snapshot event times preserve exchange and receive provenance across symbo
   assert.equal(times.lastTradeTime, BASE + 400);
   assert.equal(times.lastSourceEventTime, BASE + 500);
   assert.equal(times.lastReceivedAt, BASE + 600);
+});
+
+test("evaluation provenance uses the finalized bucket, not a newer pending trade", () => {
+  const finalized = BASE + 500;
+  const pending = BASE + 5_400; // still sitting in an unfinalized bucket
+  const times = snapshotEventTimes(
+    new Map([
+      [
+        "BTCUSDT",
+        {
+          ...warmingSnapshot("BTCUSDT"),
+          // Snapshot-level fields point at the newer, not-yet-finalized trade.
+          latestRealTradeTime: pending,
+          latestRealReceivedAt: pending + 10,
+          buckets: [
+            {
+              boundaryTime: BASE,
+              lastRealEventTime: finalized,
+              lastRealTradeTime: finalized - 1,
+              lastRealReceivedAt: finalized + 2,
+            },
+          ],
+        },
+      ],
+    ]),
+  );
+  assert.equal(times.lastSourceEventTime, finalized);
+  assert.equal(times.lastTradeTime, finalized - 1);
+  assert.equal(times.lastReceivedAt, finalized + 2);
 });
 
 test("snapshot event times expose no receive time when nothing was received", () => {

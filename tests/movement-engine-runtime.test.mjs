@@ -87,6 +87,7 @@ function bucket(symbol, boundaryTime, endpointPrice) {
     tradeCount: 1,
     lastRealTradeTime: boundaryTime,
     lastRealEventTime: boundaryTime,
+    lastRealReceivedAt: boundaryTime + 123,
     carriedForward: false,
     provider: "binance-usdm",
     instrumentId: `binance-usdm:${symbol}`,

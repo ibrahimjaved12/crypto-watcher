@@ -369,7 +369,17 @@ export class MarketMovementEngine {
   }
 }
 
-/** Latest exchange event time / trade time / receive time observed across the shared snapshots. */
+/**
+ * Latest exchange event time / trade time / receive time observed across the
+ * shared snapshots.
+ *
+ * All three come from each symbol's latest *finalized* bucket (the ring holds
+ * only finalized buckets), then the maximum across symbols is taken. A newer
+ * trade still sitting in an unfinalized bucket is deliberately excluded so the
+ * persisted evaluation provenance stays internally consistent; the snapshot-level
+ * `latestReal*` fields may legitimately refer to that pending trade and are not
+ * used here.
+ */
 export function snapshotEventTimes(snapshots: ReadonlyMap<string, MovementBucketSnapshot>): {
   lastSourceEventTime: number | null;
   lastTradeTime: number | null;
@@ -384,11 +394,11 @@ export function snapshotEventTimes(snapshots: ReadonlyMap<string, MovementBucket
     if (eventTime !== null && (lastSourceEventTime === null || eventTime > lastSourceEventTime)) {
       lastSourceEventTime = eventTime;
     }
-    const tradeTime = finiteNonnegative(snapshot.latestRealTradeTime);
+    const tradeTime = finiteNonnegative(latest?.lastRealTradeTime);
     if (tradeTime !== null && (lastTradeTime === null || tradeTime > lastTradeTime)) {
       lastTradeTime = tradeTime;
     }
-    const receivedAt = finiteNonnegative(snapshot.latestRealReceivedAt);
+    const receivedAt = finiteNonnegative(latest?.lastRealReceivedAt);
     if (receivedAt !== null && (lastReceivedAt === null || receivedAt > lastReceivedAt)) {
       lastReceivedAt = receivedAt;
     }
