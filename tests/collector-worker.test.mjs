@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -24,6 +25,25 @@ async function loadWorker(collectorStubSource) {
     JSON.stringify(stub(collectorStubSource)),
   );
   return import(stub(outputText));
+}
+
+function buildWorkerArtifact(root) {
+  const build = spawnSync(
+    process.execPath,
+    ["node_modules/vite/bin/vite.js", "build", "--config", "vite.collector-worker.config.ts"],
+    { cwd: root, encoding: "utf8" },
+  );
+  assert.equal(build.status, 0, build.stderr);
+  return join(root, "dist/collector-worker/collector-worker.mjs");
+}
+
+// A minimal environment proves the artifact reads runtime configuration instead of
+// inheriting values that happen to be set in the test process.
+function runWorker(artifact, env) {
+  return spawnSync(process.execPath, [artifact], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env },
+    encoding: "utf8",
+  });
 }
 
 function captureShutdown() {
@@ -166,13 +186,7 @@ test("package.json and the launcher expose a separate collector worker", async (
 
 test("the production worker artifact builds and runs with plain node", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
-  const build = spawnSync(
-    process.execPath,
-    ["node_modules/vite/bin/vite.js", "build", "--config", "vite.collector-worker.config.ts"],
-    { cwd: root, encoding: "utf8" },
-  );
-  assert.equal(build.status, 0, build.stderr);
-  const artifact = join(root, "dist/collector-worker/collector-worker.mjs");
+  const artifact = buildWorkerArtifact(root);
   const output = readFileSync(artifact, "utf8");
   const externalImports = [...output.matchAll(/^import .* from "([^"]+)"/gm)].map(
     (match) => match[1],
@@ -180,12 +194,93 @@ test("the production worker artifact builds and runs with plain node", async () 
   // Self-contained: no bare package specifiers, so no devDependency (Vite) is
   // needed at runtime.
   assert.deepEqual(externalImports, ["node:crypto"]);
-  const run = spawnSync(process.execPath, [artifact], {
-    env: { ...process.env, BINANCE_COLLECTOR_ENABLED: "false" },
-    encoding: "utf8",
-  });
+  const run = runWorker(artifact, { BINANCE_COLLECTOR_ENABLED: "false" });
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /no collector to run/);
+});
+
+test("the built worker reads its collector configuration at runtime", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const artifact = buildWorkerArtifact(root);
+
+  // The tracked production build bakes BINANCE_COLLECTOR_ENABLED=false. A runtime
+  // override must win; otherwise enablement was bound at build time.
+  const enabled = runWorker(artifact, { BINANCE_COLLECTOR_ENABLED: "true" });
+  assert.equal(enabled.status, 1, enabled.stderr);
+  assert.match(enabled.stderr, /requires OPERATIONAL_DB_ENABLED=true/);
+
+  // Operational database configuration is also read at runtime, not baked.
+  const operational = runWorker(artifact, {
+    BINANCE_COLLECTOR_ENABLED: "true",
+    OPERATIONAL_DB_ENABLED: "true",
+  });
+  assert.equal(operational.status, 1, operational.stderr);
+  assert.match(
+    operational.stderr,
+    /OPERATIONAL_SUPABASE_URL and OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY are required/,
+  );
+
+  const invalid = runWorker(artifact, { BINANCE_COLLECTOR_ENABLED: "yes" });
+  assert.equal(invalid.status, 1, invalid.stderr);
+  assert.match(invalid.stderr, /BINANCE_COLLECTOR_ENABLED must be true or false/);
+
+  const output = readFileSync(artifact, "utf8");
+  // Vite replaces every import.meta.env reference with the build-time public
+  // values; server configuration must still be read from process.env.
+  assert.doesNotMatch(output, /import\.meta/);
+  assert.match(output, /process\.env/);
+  for (const name of [
+    "BINANCE_COLLECTOR_ENABLED",
+    "OPERATIONAL_DB_ENABLED",
+    "OPERATIONAL_SUPABASE_URL",
+    "OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY",
+    "MOVEMENT_FINALIZATION_GRACE_MS",
+  ]) {
+    assert.match(output, new RegExp(`"${name}"`), `${name} must stay runtime-configurable`);
+  }
+});
+
+test("the enabled built worker validates the runtime server environment", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const artifact = buildWorkerArtifact(root);
+
+  // A local fake operational Supabase answers the lease RPC so the enabled path
+  // reaches its first supabaseAdmin use. No real service is contacted, and the
+  // WebSocket connect is never reached because validation fails first.
+  const server = createServer((request, response) => {
+    const isLease = String(request.url).includes("claim_collector_lease");
+    request.resume();
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(isLease ? "true" : "[]");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+
+  const child = spawn(process.execPath, [artifact], {
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      BINANCE_COLLECTOR_ENABLED: "true",
+      OPERATIONAL_DB_ENABLED: "true",
+      OPERATIONAL_SUPABASE_URL: `http://127.0.0.1:${port}`,
+      OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY: "test-service-role",
+      // No APP_PROFILE/SUPABASE_URL: the runtime environment is incomplete.
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    // validateServerEnvironment() cross-checks the runtime process.env against the
+    // build-time public VITE_* values, so an incomplete host environment is surfaced.
+    assert.match(stderr, /\[Environment\] APP_PROFILE must be local or production/);
+    assert.match(stderr, /startup unavailable/);
+  } finally {
+    child.kill("SIGKILL");
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("local development starts the collector as a separate process", async () => {

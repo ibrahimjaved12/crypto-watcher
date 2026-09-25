@@ -172,6 +172,12 @@ flowchart TD
     TS -->|Due candle batches|API[FastAPI calculation service]
     API -->|Shared deterministic TA|TS
     TS -->|Privileged orchestration and RPC calls|Lovable
+    TS -->|Collector health and diagnostics reads|Operational[(External operational PostgreSQL)]
+    Futures -->|Binance USD-M WebSocket live events|Worker[Leased Binance USD-M collector worker - separate process]
+    Futures -->|Binance USD-M REST bootstrap and gap recovery|Worker
+    Worker -->|Completed candles, checkpoints, and health|Operational
+    Worker -->|Completed-candle TA|API
+    Worker -->|Watchlist reads and TA conclusions|Lovable
     Browser -->|Manual Python preview|Bridge[TanStack authenticated bridge]
     Bridge -->|User-scoped reads|Supabase
     Bridge -->|Server-only service token|API
@@ -183,7 +189,8 @@ flowchart TD
 Code evidence: [dashboard](../src/routes/_authenticated/dashboard.tsx),
 [TA history](../src/components/market/technical-analysis.tsx),
 [monitor engine](../src/lib/monitor/engine.server.ts),
-[TA persistence](../src/lib/ta/engine.server.ts), and
+[TA persistence](../src/lib/ta/engine.server.ts),
+[collector worker](../src/lib/market/collector-worker.server.ts), and
 [Python bridge](../src/lib/analysis.server.ts).
 
 Both provider implementations try Binance USDⓈ-M, OKX USDT perpetual swaps, then
@@ -191,9 +198,10 @@ Kraken perpetual futures. Stored rows keep the selected Binance contract identit
 and record the actual futures source and endpoint. The cutover deliberately deletes
 the disposable pre-release market data.
 
-Not yet implemented: external operational storage/sync, news ingestion, conditional
-setup state machines, ordered trade outcomes, historical backtests, virtual wallets,
-continuous paper trading, calibrated ML, or email/WhatsApp delivery.
+Not yet implemented: external operational sync of durable results (the transactional
+outbox is dormant), news ingestion, conditional setup state machines, ordered trade
+outcomes, historical backtests, virtual wallets, continuous paper trading, calibrated
+ML, or email/WhatsApp delivery.
 
 ## Proposed incremental architecture and data flow
 
