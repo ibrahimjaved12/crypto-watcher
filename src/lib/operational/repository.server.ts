@@ -9,8 +9,16 @@ import type {
   OperationalMonitorRun,
   OperationalStore,
   OutboxEvent,
+  PersistedMarketMovementEvent,
+  PersistedMarketStateCurrent,
   StorageDiagnostics,
 } from "./types";
+import type {
+  ConfirmedMarketDirection,
+  MarketDirectionState,
+  MarketPace,
+} from "../market/market-state-classifier";
+import type { MarketEpisodeTransitionType } from "../market/market-episode-lifecycle";
 
 type RpcClient = Pick<SupabaseClient, "from" | "rpc">;
 
@@ -88,6 +96,18 @@ const disabledStore: OperationalStore = {
   },
   async markOutboxFailed() {
     throw new Error("Operational outbox is disabled");
+  },
+  async getMarketStateCurrent() {
+    return null;
+  },
+  async upsertMarketStateCurrent() {
+    throw new Error("Operational market-state storage is disabled");
+  },
+  async appendMarketMovementEvent() {
+    throw new Error("Operational market-movement storage is disabled");
+  },
+  async listMarketMovementEvents() {
+    return [];
   },
 };
 
@@ -334,6 +354,153 @@ export function createOperationalStore(
         p_max_attempts: options.outboxMaxAttempts,
       });
       rpcError(error, "outbox failure update");
+    },
+    async getMarketStateCurrent(universeId, primaryWindowMinutes = 5) {
+      const { data, error } = await client
+        .from("market_state_current")
+        .select("*")
+        .eq("universe_id", universeId)
+        .eq("primary_window_minutes", primaryWindowMinutes)
+        .maybeSingle();
+      rpcError(error, "market-state-current read");
+      if (!data) return null;
+      const row = data as Record<string, unknown>;
+      return {
+        universeId: String(row["universe_id"]),
+        primaryWindowMinutes: 5,
+        universeVersion: String(row["universe_version"]),
+        provider: row["provider"] as "binance-usdm",
+        exchange: row["exchange"] as "binance",
+        priceType: row["price_type"] as "trade",
+        evaluationBoundaryTime: new Date(String(row["evaluation_boundary_time"])).getTime(),
+        directionState: row["direction_state"] as MarketDirectionState,
+        pace: row["pace"] as MarketPace,
+        activeEpisodeId: (row["active_episode_id"] as string | null) ?? null,
+        activeDirection: (row["active_direction"] as ConfirmedMarketDirection | null) ?? null,
+        interrupted: Boolean(row["interrupted"]),
+        classifierAlgorithmVersion: String(row["classifier_algorithm_version"]),
+        classifierConfigVersion: String(row["classifier_config_version"]),
+        movementAlgorithmVersion: String(row["movement_algorithm_version"]),
+        movementConfigVersion: String(row["movement_config_version"]),
+        pendingState: row["pending_state"],
+        currentEvidence: row["current_evidence"],
+        updatedAt: String(row["updated_at"]),
+      };
+    },
+    async upsertMarketStateCurrent(state) {
+      const { error } = await client.rpc("upsert_market_state_current", {
+        p_universe_id: state.universeId,
+        p_primary_window_minutes: state.primaryWindowMinutes,
+        p_universe_version: state.universeVersion,
+        p_provider: state.provider,
+        p_exchange: state.exchange,
+        p_price_type: state.priceType,
+        p_evaluation_boundary_time: new Date(state.evaluationBoundaryTime).toISOString(),
+        p_direction_state: state.directionState,
+        p_pace: state.pace,
+        p_active_episode_id: state.activeEpisodeId,
+        p_active_direction: state.activeDirection,
+        p_interrupted: state.interrupted,
+        p_classifier_algorithm_version: state.classifierAlgorithmVersion,
+        p_classifier_config_version: state.classifierConfigVersion,
+        p_movement_algorithm_version: state.movementAlgorithmVersion,
+        p_movement_config_version: state.movementConfigVersion,
+        p_pending_state: state.pendingState,
+        p_current_evidence: state.currentEvidence,
+      });
+      rpcError(error, "market-state-current upsert");
+    },
+    async appendMarketMovementEvent(event) {
+      const { data, error } = await client.rpc("append_market_movement_event", {
+        p_event_id: event.eventId,
+        p_episode_id: event.episodeId,
+        p_transition: event.transition,
+        p_transition_reason: event.transitionReason,
+        p_from_direction: event.fromDirection,
+        p_to_direction: event.toDirection,
+        p_episode_start_boundary_time: new Date(event.episodeStartBoundaryTime).toISOString(),
+        p_evaluation_boundary_time: new Date(event.evaluationBoundaryTime).toISOString(),
+        p_universe_id: event.universeId,
+        p_universe_version: event.universeVersion,
+        p_primary_window_minutes: event.primaryWindowMinutes,
+        p_provider: event.provider,
+        p_exchange: event.exchange,
+        p_price_type: event.priceType,
+        p_direction: event.direction,
+        p_pace: event.pace,
+        p_directional_breadth: event.directionalBreadth,
+        p_material_breadth: event.materialBreadth,
+        p_median_raw_return: event.medianRawReturn,
+        p_median_normalized_movement: event.medianNormalizedMovement,
+        p_median_acceleration: event.medianAcceleration,
+        p_acceleration_breadth: event.accelerationBreadth,
+        p_dispersion: event.dispersion,
+        p_rvol_summary: event.rvolSummary,
+        p_outliers: event.outliers,
+        p_supporting_contracts: event.supportingContracts,
+        p_conflicting_contracts: event.conflictingContracts,
+        p_configured_universe: event.configuredUniverse,
+        p_included_symbols: event.includedSymbols,
+        p_excluded_symbols: event.excludedSymbols,
+        p_windows_context: event.windowsContext,
+        p_classifier_algorithm_version: event.classifierAlgorithmVersion,
+        p_classifier_config_version: event.classifierConfigVersion,
+        p_movement_algorithm_version: event.movementAlgorithmVersion,
+        p_movement_config_version: event.movementConfigVersion,
+      });
+      rpcError(error, "market-movement-event append");
+      return (data as "appended" | "already_exists") ?? "appended";
+    },
+    async listMarketMovementEvents(episodeId) {
+      const { data, error } = await client
+        .from("market_movement_events")
+        .select("*")
+        .eq("episode_id", episodeId)
+        .order("evaluation_boundary_time", { ascending: true });
+      rpcError(error, "market-movement-events list");
+      return ((data ?? []) as Array<Record<string, unknown>>).map((row) => ({
+        eventId: String(row["event_id"]),
+        episodeId: String(row["episode_id"]),
+        transition: row["transition"] as MarketEpisodeTransitionType,
+        transitionReason: String(row["transition_reason"]),
+        fromDirection: (row["from_direction"] as ConfirmedMarketDirection) ?? null,
+        toDirection: (row["to_direction"] as ConfirmedMarketDirection) ?? null,
+        episodeStartBoundaryTime: new Date(String(row["episode_start_boundary_time"])).getTime(),
+        evaluationBoundaryTime: new Date(String(row["evaluation_boundary_time"])).getTime(),
+        universeId: String(row["universe_id"]),
+        universeVersion: String(row["universe_version"]),
+        primaryWindowMinutes: 5,
+        provider: row["provider"] as "binance-usdm",
+        exchange: row["exchange"] as "binance",
+        priceType: row["price_type"] as "trade",
+        direction: row["direction"] as ConfirmedMarketDirection,
+        pace: row["pace"] as MarketPace,
+        directionalBreadth: Number(row["directional_breadth"]),
+        materialBreadth: Number(row["material_breadth"]),
+        medianRawReturn:
+          row["median_raw_return"] === null ? null : Number(row["median_raw_return"]),
+        medianNormalizedMovement:
+          row["median_normalized_movement"] === null
+            ? null
+            : Number(row["median_normalized_movement"]),
+        medianAcceleration:
+          row["median_acceleration"] === null ? null : Number(row["median_acceleration"]),
+        accelerationBreadth: Number(row["acceleration_breadth"]),
+        dispersion: row["dispersion"] === null ? null : Number(row["dispersion"]),
+        rvolSummary: row["rvol_summary"],
+        outliers: row["outliers"],
+        supportingContracts: (row["supporting_contracts"] ?? []) as string[],
+        conflictingContracts: (row["conflicting_contracts"] ?? []) as string[],
+        configuredUniverse: (row["configured_universe"] ?? []) as string[],
+        includedSymbols: (row["included_symbols"] ?? []) as string[],
+        excludedSymbols: row["excluded_symbols"],
+        windowsContext: row["windows_context"],
+        classifierAlgorithmVersion: String(row["classifier_algorithm_version"]),
+        classifierConfigVersion: String(row["classifier_config_version"]),
+        movementAlgorithmVersion: String(row["movement_algorithm_version"]),
+        movementConfigVersion: String(row["movement_config_version"]),
+        createdAt: String(row["created_at"]),
+      }));
     },
   };
 }

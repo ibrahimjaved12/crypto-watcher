@@ -1,0 +1,1228 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { after, before, test } from "node:test";
+import ts from "../node_modules/typescript/lib/typescript.js";
+import { PGlite } from "./node_modules/@electric-sql/pglite/dist/index.js";
+
+// Transpile and load market-state-classifier
+const classifierSource = await readFile(
+  new URL("../src/lib/market/market-state-classifier.ts", import.meta.url),
+  "utf8",
+);
+const classifierOutput = ts.transpileModule(classifierSource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const { classifyMarketState } = await import(
+  `data:text/javascript;base64,${Buffer.from(classifierOutput).toString("base64")}`
+);
+
+// Transpile and load market-episode-lifecycle
+const lifecycleSource = await readFile(
+  new URL("../src/lib/market/market-episode-lifecycle.ts", import.meta.url),
+  "utf8",
+);
+const lifecycleOutput = ts.transpileModule(lifecycleSource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const {
+  processMarketEpisodeLifecycle,
+  restoreLifecycleStateOnRestart,
+  computeEpisodeId,
+  computeEventId,
+  extractSupportingAndConflictingSymbols,
+} = await import(`data:text/javascript;base64,${Buffer.from(lifecycleOutput).toString("base64")}`);
+
+const BASE_TIME = 1_800_000_000_000;
+
+const available = (value) => ({ available: true, value });
+const unavailable = (reason = "MARKET_UNIVERSE_INELIGIBLE") => ({
+  available: false,
+  value: null,
+  reason,
+});
+
+function makeSymbol(index, overrides = {}) {
+  const isRising = overrides.direction === "RISING";
+  const isFalling = overrides.direction === "FALLING";
+  const defaultReturn = isRising ? 0.1 : isFalling ? -0.1 : 0;
+  const defaultZ = isRising ? 1.0 : isFalling ? -1.0 : 0;
+
+  return {
+    symbol: `S${index}USDT`,
+    instrumentId: `binance-usdm:S${index}USDT`,
+    provider: "binance-usdm",
+    exchange: "binance",
+    priceType: "trade",
+    windowMinutes: 5,
+    evaluationBoundaryTime: BASE_TIME,
+    included: true,
+    exclusionReasons: [],
+    currentReturn: available(defaultReturn),
+    previousReturn: available(0),
+    velocity: available(defaultReturn),
+    previousVelocity: available(0),
+    acceleration: available(isRising ? 1 : isFalling ? -1 : 0),
+    historicalMedian: available(0),
+    historicalMad: available(0.05),
+    normalizedZ: available(defaultZ),
+    direction: "FLAT",
+    materialRising: isRising,
+    materialFalling: isFalling,
+    currentNotionalVolume: available(1000),
+    rvol: available(1),
+    crossSectionalZ: available(0),
+    outlierCandidate: false,
+    ...overrides,
+  };
+}
+
+function windowFixture({
+  windowMinutes = 5,
+  marketWideEligible = true,
+  configuredCount = 10,
+  eligibleCount = configuredCount,
+  excludedSymbols = [],
+  accelerations = Array(eligibleCount).fill(1),
+  breadth = {},
+  medianRawReturn = 0,
+  medianNormalizedMovement = 0,
+  symbols,
+  boundaryTime = BASE_TIME,
+  universeId = "top-usdm",
+  universeVersion = "2026-09-25",
+} = {}) {
+  const configuredUniverse = Array.from({ length: configuredCount }, (_, index) => `S${index}USDT`);
+  const included =
+    symbols ??
+    accelerations.map((acceleration, index) =>
+      makeSymbol(index, {
+        acceleration:
+          acceleration === null ? unavailable("SYMBOL_EXCLUDED") : available(acceleration),
+        direction: acceleration > 0 ? "RISING" : acceleration < 0 ? "FALLING" : "FLAT",
+      }),
+    );
+
+  return {
+    algorithmVersion: "market-movement-v1",
+    configVersion: "market-movement-config-v1",
+    universeId,
+    universeVersion,
+    configuredUniverse,
+    includedSymbols: included.filter((s) => s.included).map((s) => s.symbol),
+    excludedSymbols,
+    windowMinutes,
+    provider: "binance-usdm",
+    exchange: "binance",
+    priceType: "trade",
+    evaluationBoundaryTime: boundaryTime,
+    marketWideEligible,
+    eligibleCount,
+    eligibleFraction: configuredCount === 0 ? 0 : eligibleCount / configuredCount,
+    symbols: included,
+    breadth: {
+      available: marketWideEligible,
+      unavailableReason: marketWideEligible ? null : "MARKET_UNIVERSE_INELIGIBLE",
+      denominator: eligibleCount,
+      flatCount: 1,
+      risingCount: 8,
+      fallingCount: 1,
+      materialRisingCount: 6,
+      materialFallingCount: 1,
+      flatFraction: 0.1,
+      risingFraction: 0.8,
+      fallingFraction: 0.1,
+      materialRisingFraction: 0.6,
+      materialFallingFraction: 0.1,
+      ...breadth,
+    },
+    aggregates: {
+      medianRawReturn: marketWideEligible ? available(medianRawReturn) : unavailable(),
+      medianNormalizedMovement: marketWideEligible
+        ? available(medianNormalizedMovement)
+        : unavailable(),
+      trimmedMeanNormalizedMovement: available(0),
+      liquidityWeightedNormalizedMovement: available(0),
+      liquidityWeights: [],
+      dispersionMadNormalizedMovement: marketWideEligible ? available(0.2) : unavailable(),
+    },
+  };
+}
+
+function broadRiseWindow(options = {}) {
+  return windowFixture({
+    breadth: {
+      flatFraction: 0.1,
+      risingFraction: 0.8,
+      fallingFraction: 0.1,
+      materialRisingFraction: 0.6,
+      materialFallingFraction: 0.1,
+    },
+    medianRawReturn: 0.1,
+    medianNormalizedMovement: 0.8,
+    accelerations: Array(10).fill(1),
+    ...options,
+  });
+}
+
+function broadDropWindow(options = {}) {
+  return windowFixture({
+    breadth: {
+      flatFraction: 0.1,
+      risingFraction: 0.1,
+      fallingFraction: 0.8,
+      materialRisingFraction: 0.1,
+      materialFallingFraction: 0.6,
+    },
+    medianRawReturn: -0.1,
+    medianNormalizedMovement: -0.8,
+    accelerations: Array(10).fill(-1),
+    ...options,
+  });
+}
+
+function neutralWindow(options = {}) {
+  return windowFixture({
+    breadth: {
+      flatFraction: 0.4,
+      risingFraction: 0.3,
+      fallingFraction: 0.3,
+      materialRisingFraction: 0.2,
+      materialFallingFraction: 0.2,
+    },
+    medianRawReturn: 0.01,
+    medianNormalizedMovement: 0.1,
+    accelerations: [-1, -1, -1, -1, -1, 1, 1, 1, 1, 1],
+    ...options,
+  });
+}
+
+function makePair({
+  primaryWindow,
+  boundaryTime = BASE_TIME,
+  universeId = "top-usdm",
+  universeVersion = "2026-09-25",
+}) {
+  const pw = {
+    ...primaryWindow,
+    windowMinutes: 5,
+    evaluationBoundaryTime: boundaryTime,
+    universeId,
+    universeVersion,
+  };
+  const movement = {
+    algorithmVersion: "market-movement-v1",
+    configVersion: "market-movement-config-v1",
+    universeId,
+    universeVersion,
+    provider: "binance-usdm",
+    exchange: "binance",
+    priceType: "trade",
+    evaluationBoundaryTime: boundaryTime,
+    windows: [
+      windowFixture({ windowMinutes: 1, boundaryTime, universeId, universeVersion }),
+      pw,
+      windowFixture({ windowMinutes: 15, boundaryTime, universeId, universeVersion }),
+    ],
+  };
+  const classification = classifyMarketState({ movement });
+  return { movement, classification };
+}
+
+// -------------------------------------------------------------
+// Database setup for persistence tests
+// -------------------------------------------------------------
+const db = new PGlite();
+
+before(async () => {
+  await db.exec(`
+    CREATE ROLE anon;
+    CREATE ROLE authenticated;
+    CREATE ROLE service_role BYPASSRLS;
+    GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+  `);
+  await db.exec(
+    await readFile(
+      new URL(
+        "../operational-db/supabase/migrations/20260925090000_operational_store.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  await db.exec(
+    await readFile(
+      new URL(
+        "../operational-db/supabase/migrations/20260925120000_binance_collector.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  await db.exec(
+    await readFile(
+      new URL(
+        "../operational-db/supabase/migrations/20260925180000_market_movement_episodes.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+});
+
+after(() => db.close());
+
+// =============================================================
+// Section O Test Requirements
+// =============================================================
+
+test("1. one broad evaluation => no STARTED", () => {
+  const { movement, classification } = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME,
+  });
+  const result = processMarketEpisodeLifecycle({
+    classification,
+    movement,
+    previousState: null,
+  });
+
+  assert.equal(result.transitions.length, 0);
+  assert.equal(result.nextState.activeEpisode, null);
+  assert.notEqual(result.nextState.pendingCandidate, null);
+  assert.equal(result.nextState.pendingCandidate.direction, "BROAD_RISE");
+  assert.equal(result.nextState.pendingCandidate.count, 1);
+  assert.equal(result.nextState.pendingCandidate.startBoundaryTime, BASE_TIME);
+});
+
+test("2. second consecutive same broad direction => one STARTED with first boundary start time", () => {
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+
+  assert.equal(step2.transitions.length, 1);
+  const started = step2.transitions[0];
+  assert.equal(started.transition, "STARTED");
+  assert.equal(started.direction, "BROAD_RISE");
+  assert.equal(started.transitionReason, "confirmed_broad_entry");
+  // Episode start boundary should be FIRST qualifying evaluation (BASE_TIME), not second (BASE_TIME + 5000)
+  assert.equal(started.episodeStartBoundaryTime, BASE_TIME);
+  assert.equal(started.evaluationBoundaryTime, BASE_TIME + 5_000);
+  assert.notEqual(step2.nextState.activeEpisode, null);
+  assert.equal(step2.nextState.activeEpisode.direction, "BROAD_RISE");
+  assert.equal(step2.nextState.activeEpisode.startBoundaryTime, BASE_TIME);
+  assert.equal(step2.shouldPersistCurrentImmediately, true);
+});
+
+test("3. repeated broad evaluations => STARTED is not repeated", () => {
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+  assert.equal(step2.transitions.length, 1);
+
+  const eval3 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 10_000 });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: eval3.classification,
+    movement: eval3.movement,
+    previousState: step2.nextState,
+  });
+  assert.equal(step3.transitions.length, 0);
+  assert.equal(step3.nextState.activeEpisode?.episodeId, step2.nextState.activeEpisode?.episodeId);
+
+  const eval4 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 15_000 });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: eval4.classification,
+    movement: eval4.movement,
+    previousState: step3.nextState,
+  });
+  assert.equal(step4.transitions.length, 0);
+  assert.equal(step4.nextState.activeEpisode?.direction, "BROAD_RISE");
+});
+
+test("4. 70% entry can fall below 70% but stay >=55% without ending", () => {
+  // Start active episode
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+  assert.equal(step2.transitions[0].transition, "STARTED");
+
+  // Breadth drops to 60% (below 70% entry threshold, but >= 55% continuation threshold)
+  const eval3 = makePair({
+    primaryWindow: windowFixture({
+      breadth: { risingFraction: 0.6, materialRisingFraction: 0.45 },
+      medianRawReturn: 0.05,
+      medianNormalizedMovement: 0.4,
+    }),
+    boundaryTime: BASE_TIME + 10_000,
+  });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: eval3.classification,
+    movement: eval3.movement,
+    previousState: step2.nextState,
+  });
+
+  assert.equal(step3.transitions.length, 0);
+  assert.notEqual(step3.nextState.activeEpisode, null);
+  assert.equal(step3.nextState.pendingExitFailureCount, 0);
+});
+
+test("5. 3 consecutive failed continuation evaluations => ENDED", () => {
+  // Start active episode
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+
+  // Failure 1 (risingFraction = 0.40 < 0.55)
+  const fail1 = makePair({
+    primaryWindow: windowFixture({
+      breadth: { risingFraction: 0.4, materialRisingFraction: 0.2 },
+      medianRawReturn: 0.01,
+      medianNormalizedMovement: 0.2,
+    }),
+    boundaryTime: BASE_TIME + 10_000,
+  });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: fail1.classification,
+    movement: fail1.movement,
+    previousState: step2.nextState,
+  });
+  assert.equal(step3.transitions.length, 0);
+  assert.equal(step3.nextState.pendingExitFailureCount, 1);
+  assert.notEqual(step3.nextState.activeEpisode, null);
+
+  // Failure 2
+  const fail2 = makePair({
+    primaryWindow: windowFixture({
+      breadth: { risingFraction: 0.4, materialRisingFraction: 0.2 },
+      medianRawReturn: 0.01,
+      medianNormalizedMovement: 0.2,
+    }),
+    boundaryTime: BASE_TIME + 15_000,
+  });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: fail2.classification,
+    movement: fail2.movement,
+    previousState: step3.nextState,
+  });
+  assert.equal(step4.transitions.length, 0);
+  assert.equal(step4.nextState.pendingExitFailureCount, 2);
+  assert.notEqual(step4.nextState.activeEpisode, null);
+
+  // Failure 3 => ENDED
+  const fail3 = makePair({
+    primaryWindow: windowFixture({
+      breadth: { risingFraction: 0.4, materialRisingFraction: 0.2 },
+      medianRawReturn: 0.01,
+      medianNormalizedMovement: 0.2,
+    }),
+    boundaryTime: BASE_TIME + 20_000,
+  });
+  const step5 = processMarketEpisodeLifecycle({
+    classification: fail3.classification,
+    movement: fail3.movement,
+    previousState: step4.nextState,
+  });
+  assert.equal(step5.transitions.length, 1);
+  assert.equal(step5.transitions[0].transition, "ENDED");
+  assert.equal(step5.transitions[0].transitionReason, "continuation_failed");
+  assert.equal(step5.nextState.activeEpisode, null);
+  assert.equal(step5.nextState.pendingExitFailureCount, 0);
+});
+
+test("6. exit counter resets when continuation recovers", () => {
+  // Start active episode
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+
+  // Failure 1
+  const fail1 = makePair({
+    primaryWindow: neutralWindow(),
+    boundaryTime: BASE_TIME + 10_000,
+  });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: fail1.classification,
+    movement: fail1.movement,
+    previousState: step2.nextState,
+  });
+  assert.equal(step3.nextState.pendingExitFailureCount, 1);
+
+  // Failure 2
+  const fail2 = makePair({
+    primaryWindow: neutralWindow(),
+    boundaryTime: BASE_TIME + 15_000,
+  });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: fail2.classification,
+    movement: fail2.movement,
+    previousState: step3.nextState,
+  });
+  assert.equal(step4.nextState.pendingExitFailureCount, 2);
+
+  // Continuation recovers (risingFraction = 0.60, medianRawReturn = 0.05 > 0)
+  const recovery = makePair({
+    primaryWindow: windowFixture({
+      breadth: { risingFraction: 0.6, materialRisingFraction: 0.4 },
+      medianRawReturn: 0.05,
+      medianNormalizedMovement: 0.4,
+    }),
+    boundaryTime: BASE_TIME + 20_000,
+  });
+  const step5 = processMarketEpisodeLifecycle({
+    classification: recovery.classification,
+    movement: recovery.movement,
+    previousState: step4.nextState,
+  });
+  assert.equal(step5.nextState.pendingExitFailureCount, 0);
+  assert.notEqual(step5.nextState.activeEpisode, null);
+
+  // Subsequent single failure only increments to 1, does NOT trigger ENDED
+  const failAgain = makePair({
+    primaryWindow: neutralWindow(),
+    boundaryTime: BASE_TIME + 25_000,
+  });
+  const step6 = processMarketEpisodeLifecycle({
+    classification: failAgain.classification,
+    movement: failAgain.movement,
+    previousState: step5.nextState,
+  });
+  assert.equal(step6.transitions.length, 0);
+  assert.equal(step6.nextState.pendingExitFailureCount, 1);
+});
+
+test("7, 8, 9. 2 consecutive full opposite broad states => one REVERSED, new episode start boundary, no extra STARTED, no cooldown", () => {
+  // Start active BROAD_RISE episode at t=1000, confirmed at t=1005
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+  const oldEpisodeId = step2.nextState.activeEpisode.episodeId;
+
+  // Immediately (t=1010), opposite broad drop evaluation arrives (tick 1)
+  const opp1 = makePair({ primaryWindow: broadDropWindow(), boundaryTime: BASE_TIME + 10_000 });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: opp1.classification,
+    movement: opp1.movement,
+    previousState: step2.nextState,
+  });
+  assert.equal(step3.transitions.length, 0);
+  assert.equal(step3.nextState.pendingReversal?.count, 1);
+  assert.equal(step3.nextState.pendingReversal?.toDirection, "BROAD_DROP");
+  assert.equal(step3.nextState.pendingReversal?.startBoundaryTime, BASE_TIME + 10_000);
+
+  // Tick 2 (t=1015): opposite broad drop arrives again => REVERSAL CONFIRMED
+  const opp2 = makePair({ primaryWindow: broadDropWindow(), boundaryTime: BASE_TIME + 15_000 });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: opp2.classification,
+    movement: opp2.movement,
+    previousState: step3.nextState,
+  });
+
+  // Reversal checks:
+  assert.equal(step4.transitions.length, 1); // EXACTLY ONE event (no extra STARTED)
+  const rev = step4.transitions[0];
+  assert.equal(rev.transition, "REVERSED");
+  assert.equal(rev.episodeId, oldEpisodeId);
+  assert.equal(rev.fromDirection, "BROAD_RISE");
+  assert.equal(rev.toDirection, "BROAD_DROP");
+  assert.equal(rev.transitionReason, "reversal_confirmed");
+  assert.equal(rev.evaluationBoundaryTime, BASE_TIME + 15_000);
+  assert.equal(rev.episodeStartBoundaryTime, BASE_TIME);
+
+  // New active episode checks:
+  assert.notEqual(step4.nextState.activeEpisode, null);
+  assert.notEqual(step4.nextState.activeEpisode.episodeId, oldEpisodeId);
+  assert.equal(step4.nextState.activeEpisode.direction, "BROAD_DROP");
+  // New episode start boundary = FIRST opposite evaluation (BASE_TIME + 10_000)
+  assert.equal(step4.nextState.activeEpisode.startBoundaryTime, BASE_TIME + 10_000);
+});
+
+test("10. strengthened via pace crossing after 2 confirmations", () => {
+  // Start BROAD_RISE with MIXED pace (5 symbols positive, 5 negative)
+  const mixedRise = broadRiseWindow({
+    accelerations: [-1, -1, -1, -1, -1, 1, 1, 1, 1, 1],
+  });
+  const eval1 = makePair({ primaryWindow: mixedRise, boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: mixedRise, boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+  assert.equal(step2.nextState.activeEpisode?.confirmedPace, "MIXED");
+
+  // Tick 1 of ACCELERATING pace (10 positive accelerations)
+  const accelRise = broadRiseWindow({ accelerations: Array(10).fill(1) });
+  const eval3 = makePair({ primaryWindow: accelRise, boundaryTime: BASE_TIME + 10_000 });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: eval3.classification,
+    movement: eval3.movement,
+    previousState: step2.nextState,
+  });
+  assert.equal(step3.transitions.length, 0);
+  assert.equal(step3.nextState.pendingStrengthen?.count, 1);
+  assert.equal(step3.nextState.pendingStrengthen?.reason, "pace_accelerated");
+
+  // Tick 2 of ACCELERATING pace => STRENGTHENED
+  const eval4 = makePair({ primaryWindow: accelRise, boundaryTime: BASE_TIME + 15_000 });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: eval4.classification,
+    movement: eval4.movement,
+    previousState: step3.nextState,
+  });
+  assert.equal(step4.transitions.length, 1);
+  assert.equal(step4.transitions[0].transition, "STRENGTHENED");
+  assert.equal(step4.transitions[0].transitionReason, "pace_accelerated");
+  assert.equal(step4.nextState.activeEpisode?.confirmedPace, "ACCELERATING");
+});
+
+test("11. strengthened via material breadth crossing after 2 confirmations", () => {
+  // Start BROAD_RISE with material breadth = 0.60 (< 0.70)
+  const normalRise = broadRiseWindow({
+    breadth: { materialRisingFraction: 0.6 },
+  });
+  const eval1 = makePair({ primaryWindow: normalRise, boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: normalRise, boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+  assert.equal(step2.nextState.activeEpisode?.highMaterialBreadth, false);
+
+  // Tick 1 with material breadth = 0.75 (>= 0.70)
+  const highRise = broadRiseWindow({
+    breadth: { materialRisingFraction: 0.75 },
+  });
+  const eval3 = makePair({ primaryWindow: highRise, boundaryTime: BASE_TIME + 10_000 });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: eval3.classification,
+    movement: eval3.movement,
+    previousState: step2.nextState,
+  });
+  assert.equal(step3.transitions.length, 0);
+  assert.equal(step3.nextState.pendingStrengthen?.count, 1);
+  assert.equal(step3.nextState.pendingStrengthen?.reason, "material_breadth_expanded");
+
+  // Tick 2 with material breadth = 0.75 => STRENGTHENED
+  const eval4 = makePair({ primaryWindow: highRise, boundaryTime: BASE_TIME + 15_000 });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: eval4.classification,
+    movement: eval4.movement,
+    previousState: step3.nextState,
+  });
+  assert.equal(step4.transitions.length, 1);
+  assert.equal(step4.transitions[0].transition, "STRENGTHENED");
+  assert.equal(step4.transitions[0].transitionReason, "material_breadth_expanded");
+  assert.equal(step4.nextState.activeEpisode?.highMaterialBreadth, true);
+});
+
+test("12. weakened via pace crossing after 2 confirmations", () => {
+  // Start BROAD_RISE with ACCELERATING pace
+  const accelRise = broadRiseWindow({ accelerations: Array(10).fill(1) });
+  const eval1 = makePair({ primaryWindow: accelRise, boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: accelRise, boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+  assert.equal(step2.nextState.activeEpisode?.confirmedPace, "ACCELERATING");
+
+  // Tick 1 with DECELERATING pace
+  const decelRise = broadRiseWindow({ accelerations: Array(10).fill(-1) });
+  const eval3 = makePair({ primaryWindow: decelRise, boundaryTime: BASE_TIME + 10_000 });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: eval3.classification,
+    movement: eval3.movement,
+    previousState: step2.nextState,
+  });
+  assert.equal(step3.transitions.length, 0);
+  assert.equal(step3.nextState.pendingWeaken?.count, 1);
+  assert.equal(step3.nextState.pendingWeaken?.reason, "pace_decelerated");
+
+  // Tick 2 with DECELERATING pace => WEAKENED
+  const eval4 = makePair({ primaryWindow: decelRise, boundaryTime: BASE_TIME + 15_000 });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: eval4.classification,
+    movement: eval4.movement,
+    previousState: step3.nextState,
+  });
+  assert.equal(step4.transitions.length, 1);
+  assert.equal(step4.transitions[0].transition, "WEAKENED");
+  assert.equal(step4.transitions[0].transitionReason, "pace_decelerated");
+  assert.equal(step4.nextState.activeEpisode?.confirmedPace, "DECELERATING");
+});
+
+test("13. weakened via material breadth crossing after 2 confirmations while continuation still holds", () => {
+  // Start BROAD_RISE with material breadth = 0.60 (> 0.50)
+  const normalRise = broadRiseWindow({
+    breadth: { materialRisingFraction: 0.6 },
+  });
+  const eval1 = makePair({ primaryWindow: normalRise, boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: normalRise, boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+  assert.equal(step2.nextState.activeEpisode?.lowMaterialBreadth, false);
+
+  // Tick 1: material breadth crosses downward to 0.45 (<= 0.50), continuation holds (risingFraction = 0.60, return > 0)
+  const weakRise = windowFixture({
+    breadth: { risingFraction: 0.6, materialRisingFraction: 0.45 },
+    medianRawReturn: 0.05,
+    medianNormalizedMovement: 0.5,
+    accelerations: Array(10).fill(1),
+  });
+  const eval3 = makePair({ primaryWindow: weakRise, boundaryTime: BASE_TIME + 10_000 });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: eval3.classification,
+    movement: eval3.movement,
+    previousState: step2.nextState,
+  });
+  assert.equal(step3.transitions.length, 0);
+  assert.equal(step3.nextState.pendingWeaken?.count, 1);
+  assert.equal(step3.nextState.pendingWeaken?.reason, "material_breadth_reduced");
+
+  // Tick 2: material breadth still 0.45 => WEAKENED
+  const eval4 = makePair({ primaryWindow: weakRise, boundaryTime: BASE_TIME + 15_000 });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: eval4.classification,
+    movement: eval4.movement,
+    previousState: step3.nextState,
+  });
+  assert.equal(step4.transitions.length, 1);
+  assert.equal(step4.transitions[0].transition, "WEAKENED");
+  assert.equal(step4.transitions[0].transitionReason, "material_breadth_reduced");
+  assert.equal(step4.nextState.activeEpisode?.lowMaterialBreadth, true);
+});
+
+test("14. strength events do not repeat while condition remains true", () => {
+  // Start with material breadth = 0.60
+  const normalRise = broadRiseWindow({ breadth: { materialRisingFraction: 0.6 } });
+  const eval1 = makePair({ primaryWindow: normalRise, boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: normalRise, boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+
+  // Cross upward through 0.70
+  const highRise = broadRiseWindow({ breadth: { materialRisingFraction: 0.75 } });
+  const eval3 = makePair({ primaryWindow: highRise, boundaryTime: BASE_TIME + 10_000 });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: eval3.classification,
+    movement: eval3.movement,
+    previousState: step2.nextState,
+  });
+  const eval4 = makePair({ primaryWindow: highRise, boundaryTime: BASE_TIME + 15_000 });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: eval4.classification,
+    movement: eval4.movement,
+    previousState: step3.nextState,
+  });
+  assert.equal(step4.transitions.length, 1);
+  assert.equal(step4.transitions[0].transition, "STRENGTHENED");
+
+  // Subsequent evaluations staying at 0.75 / 0.80 do NOT emit STRENGTHENED
+  const eval5 = makePair({ primaryWindow: highRise, boundaryTime: BASE_TIME + 20_000 });
+  const step5 = processMarketEpisodeLifecycle({
+    classification: eval5.classification,
+    movement: eval5.movement,
+    previousState: step4.nextState,
+  });
+  assert.equal(step5.transitions.length, 0);
+
+  const eval6 = makePair({
+    primaryWindow: broadRiseWindow({ breadth: { materialRisingFraction: 0.8 } }),
+    boundaryTime: BASE_TIME + 25_000,
+  });
+  const step6 = processMarketEpisodeLifecycle({
+    classification: eval6.classification,
+    movement: eval6.movement,
+    previousState: step5.nextState,
+  });
+  assert.equal(step6.transitions.length, 0);
+});
+
+test("15. universe/version change ends old episode", () => {
+  // Start active episode in universe "top-usdm" version "2026-09-25"
+  const eval1 = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME,
+    universeVersion: "2026-09-25",
+  });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 5_000,
+    universeVersion: "2026-09-25",
+  });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+  assert.notEqual(step2.nextState.activeEpisode, null);
+
+  // Next evaluation has new universe version "2026-09-26"
+  const eval3 = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 10_000,
+    universeVersion: "2026-09-26",
+  });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: eval3.classification,
+    movement: eval3.movement,
+    previousState: step2.nextState,
+  });
+
+  assert.equal(step3.transitions.length, 1);
+  assert.equal(step3.transitions[0].transition, "ENDED");
+  assert.equal(step3.transitions[0].transitionReason, "universe_version_changed");
+  assert.equal(step3.nextState.activeEpisode, null);
+  // Fresh candidate started on new universe
+  assert.notEqual(step3.nextState.pendingCandidate, null);
+  assert.equal(step3.nextState.pendingCandidate.count, 1);
+  assert.equal(step3.nextState.universeVersion, "2026-09-26");
+});
+
+test("16. retrying the same evaluation does not duplicate transition identity", () => {
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const runA = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+
+  const runB = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+
+  assert.equal(runA.transitions.length, 1);
+  assert.equal(runB.transitions.length, 1);
+  assert.equal(runA.transitions[0].eventId, runB.transitions[0].eventId);
+  assert.equal(runA.transitions[0].episodeId, runB.transitions[0].episodeId);
+});
+
+test("17. operational event insertion is idempotent in database", async () => {
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+  const event = step2.transitions[0];
+
+  // Insert event via RPC
+  const insert1 = await db.query(
+    `SELECT public.append_market_movement_event(
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+      $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+      $31, $32, $33, $34, $35
+    ) AS status`,
+    [
+      event.eventId,
+      event.episodeId,
+      event.transition,
+      event.transitionReason,
+      event.fromDirection,
+      event.toDirection,
+      new Date(event.episodeStartBoundaryTime).toISOString(),
+      new Date(event.evaluationBoundaryTime).toISOString(),
+      event.universeId,
+      event.universeVersion,
+      event.primaryWindowMinutes,
+      event.provider,
+      event.exchange,
+      event.priceType,
+      event.direction,
+      event.pace,
+      event.directionalBreadth,
+      event.materialBreadth,
+      event.medianRawReturn,
+      event.medianNormalizedMovement,
+      event.medianAcceleration,
+      event.accelerationBreadth,
+      event.dispersion,
+      JSON.stringify(event.rvolSummary),
+      JSON.stringify(event.outliers),
+      JSON.stringify(event.supportingContracts),
+      JSON.stringify(event.conflictingContracts),
+      JSON.stringify(event.configuredUniverse),
+      JSON.stringify(event.includedSymbols),
+      JSON.stringify(event.excludedSymbols),
+      JSON.stringify(event.windowsContext),
+      event.classifierAlgorithmVersion,
+      event.classifierConfigVersion,
+      event.movementAlgorithmVersion,
+      event.movementConfigVersion,
+    ],
+  );
+  assert.equal(insert1.rows[0].status, "appended");
+
+  // Re-insert exact same event
+  const insert2 = await db.query(
+    `SELECT public.append_market_movement_event(
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+      $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+      $31, $32, $33, $34, $35
+    ) AS status`,
+    [
+      event.eventId,
+      event.episodeId,
+      event.transition,
+      event.transitionReason,
+      event.fromDirection,
+      event.toDirection,
+      new Date(event.episodeStartBoundaryTime).toISOString(),
+      new Date(event.evaluationBoundaryTime).toISOString(),
+      event.universeId,
+      event.universeVersion,
+      event.primaryWindowMinutes,
+      event.provider,
+      event.exchange,
+      event.priceType,
+      event.direction,
+      event.pace,
+      event.directionalBreadth,
+      event.materialBreadth,
+      event.medianRawReturn,
+      event.medianNormalizedMovement,
+      event.medianAcceleration,
+      event.accelerationBreadth,
+      event.dispersion,
+      JSON.stringify(event.rvolSummary),
+      JSON.stringify(event.outliers),
+      JSON.stringify(event.supportingContracts),
+      JSON.stringify(event.conflictingContracts),
+      JSON.stringify(event.configuredUniverse),
+      JSON.stringify(event.includedSymbols),
+      JSON.stringify(event.excludedSymbols),
+      JSON.stringify(event.windowsContext),
+      event.classifierAlgorithmVersion,
+      event.classifierConfigVersion,
+      event.movementAlgorithmVersion,
+      event.movementConfigVersion,
+    ],
+  );
+  assert.equal(insert2.rows[0].status, "already_exists");
+
+  // Verify only 1 row exists in database
+  const countRes = await db.query(
+    "SELECT count(*) FROM public.market_movement_events WHERE event_id = $1",
+    [event.eventId],
+  );
+  assert.equal(Number(countRes.rows[0].count), 1);
+});
+
+test("18. WARMING/UNAVAILABLE interrupts rather than pretending continuity", () => {
+  // Start active episode
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+  assert.equal(step2.nextState.interrupted, false);
+
+  // WARMING evaluation arrives
+  const warmingWindow = windowFixture({
+    marketWideEligible: false,
+    excludedSymbols: Array.from({ length: 10 }, (_, i) => ({
+      symbol: `S${i}USDT`,
+      reasons: ["WARMING_INSUFFICIENT_LIVE_HISTORY"],
+    })),
+  });
+  const eval3 = makePair({ primaryWindow: warmingWindow, boundaryTime: BASE_TIME + 10_000 });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: eval3.classification,
+    movement: eval3.movement,
+    previousState: step2.nextState,
+  });
+
+  assert.equal(step3.transitions.length, 0); // NOT ended!
+  assert.equal(step3.nextState.interrupted, true);
+  assert.notEqual(step3.nextState.activeEpisode, null);
+  assert.equal(step3.shouldPersistCurrentImmediately, true);
+
+  // UNAVAILABLE arrives next
+  const unavailWindow = windowFixture({
+    marketWideEligible: false,
+    excludedSymbols: [{ symbol: "S0USDT", reasons: ["SOURCE_UNAVAILABLE"] }],
+  });
+  const eval4 = makePair({ primaryWindow: unavailWindow, boundaryTime: BASE_TIME + 15_000 });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: eval4.classification,
+    movement: eval4.movement,
+    previousState: step3.nextState,
+  });
+  assert.equal(step4.transitions.length, 0);
+  assert.equal(step4.nextState.interrupted, true);
+  assert.notEqual(step4.nextState.activeEpisode, null);
+});
+
+test("19. restart from persisted active state requires fresh confirmation", () => {
+  // Create an active episode state as if loaded from DB
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    classification: eval1.classification,
+    movement: eval1.movement,
+    previousState: null,
+  });
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    classification: eval2.classification,
+    movement: eval2.movement,
+    previousState: step1.nextState,
+  });
+
+  // Simulate restart
+  const restartedState = restoreLifecycleStateOnRestart(step2.nextState);
+  assert.equal(restartedState.interrupted, true);
+  assert.equal(restartedState.pendingCandidate, null);
+
+  // Evaluation 1 after restart: BROAD_RISE
+  const eval3 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 20_000 });
+  const step3 = processMarketEpisodeLifecycle({
+    classification: eval3.classification,
+    movement: eval3.movement,
+    previousState: restartedState,
+  });
+  assert.equal(step3.transitions.length, 0);
+  // Still interrupted after 1 tick
+  assert.equal(step3.nextState.interrupted, true);
+  assert.equal(step3.nextState.pendingResume?.count, 1);
+
+  // Evaluation 2 after restart: BROAD_RISE again => confirmed resumption!
+  const eval4 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 25_000 });
+  const step4 = processMarketEpisodeLifecycle({
+    classification: eval4.classification,
+    movement: eval4.movement,
+    previousState: step3.nextState,
+  });
+  assert.equal(step4.transitions.length, 0);
+  // Fresh confirmation complete, interrupted cleared!
+  assert.equal(step4.nextState.interrupted, false);
+  assert.equal(step4.nextState.pendingResume, null);
+});
+
+test("20. supporting/conflicting contract lists are exact", () => {
+  const symbols = [
+    makeSymbol(0, { direction: "RISING", included: true }),
+    makeSymbol(1, { direction: "FALLING", included: true }),
+    makeSymbol(2, { direction: "FLAT", included: true }),
+    makeSymbol(3, { direction: "RISING", included: false }), // excluded
+    makeSymbol(4, { direction: "RISING", included: true }),
+  ];
+  const win = windowFixture({ symbols, configuredCount: 5 });
+
+  // For BROAD_RISE: RISING is supporting, FALLING is conflicting
+  const riseContracts = extractSupportingAndConflictingSymbols(win, "BROAD_RISE");
+  assert.deepEqual(riseContracts.supportingContracts, ["S0USDT", "S4USDT"]);
+  assert.deepEqual(riseContracts.conflictingContracts, ["S1USDT"]);
+
+  // For BROAD_DROP: FALLING is supporting, RISING is conflicting
+  const dropContracts = extractSupportingAndConflictingSymbols(win, "BROAD_DROP");
+  assert.deepEqual(dropContracts.supportingContracts, ["S1USDT"]);
+  assert.deepEqual(dropContracts.conflictingContracts, ["S0USDT", "S4USDT"]);
+});
+
+test("21. market_state_current upsert is bounded to one row and updates on conflict", async () => {
+  const boundaryTime1 = new Date(BASE_TIME).toISOString();
+  const boundaryTime2 = new Date(BASE_TIME + 30_000).toISOString();
+
+  // First upsert
+  await db.query(
+    `SELECT public.upsert_market_state_current(
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+    )`,
+    [
+      "top-usdm",
+      5,
+      "2026-09-25",
+      "binance-usdm",
+      "binance",
+      "trade",
+      boundaryTime1,
+      "BROAD_RISE",
+      "ACCELERATING",
+      "mep_test_1",
+      "BROAD_RISE",
+      false,
+      "market-state-v1",
+      "market-state-config-v1",
+      "market-movement-v1",
+      "market-movement-config-v1",
+      JSON.stringify({ pendingCandidate: null }),
+      JSON.stringify({ risingFraction: 0.8 }),
+    ],
+  );
+
+  let res = await db.query(
+    "SELECT * FROM public.market_state_current WHERE universe_id = $1 AND primary_window_minutes = $2",
+    ["top-usdm", 5],
+  );
+  assert.equal(res.rows.length, 1);
+  assert.equal(res.rows[0].direction_state, "BROAD_RISE");
+  assert.equal(res.rows[0].active_episode_id, "mep_test_1");
+
+  // Second upsert for same universe and window updates the single bounded row
+  await db.query(
+    `SELECT public.upsert_market_state_current(
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+    )`,
+    [
+      "top-usdm",
+      5,
+      "2026-09-25",
+      "binance-usdm",
+      "binance",
+      "trade",
+      boundaryTime2,
+      "NEUTRAL",
+      "NOT_APPLICABLE",
+      null,
+      null,
+      false,
+      "market-state-v1",
+      "market-state-config-v1",
+      "market-movement-v1",
+      "market-movement-config-v1",
+      JSON.stringify({ pendingCandidate: null }),
+      JSON.stringify({ risingFraction: 0.4 }),
+    ],
+  );
+
+  res = await db.query(
+    "SELECT * FROM public.market_state_current WHERE universe_id = $1 AND primary_window_minutes = $2",
+    ["top-usdm", 5],
+  );
+  assert.equal(res.rows.length, 1);
+  assert.equal(res.rows[0].direction_state, "NEUTRAL");
+  assert.equal(res.rows[0].active_episode_id, null);
+});
+
+test("22. RLS blocks anon and authenticated roles from reading or writing market tables", async () => {
+  await db.exec("SET ROLE anon;");
+  await assert.rejects(db.query("SELECT * FROM public.market_state_current"), /permission denied/);
+  await assert.rejects(
+    db.query("SELECT * FROM public.market_movement_events"),
+    /permission denied/,
+  );
+
+  await db.exec("SET ROLE authenticated;");
+  await assert.rejects(db.query("SELECT * FROM public.market_state_current"), /permission denied/);
+  await assert.rejects(
+    db.query("SELECT * FROM public.market_movement_events"),
+    /permission denied/,
+  );
+
+  await db.exec("RESET ROLE;");
+});
