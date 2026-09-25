@@ -35,6 +35,7 @@ const replacements = {
   `,
   "./movement-engine.server": movementStub,
   "./movement-finalization": `export function movementFinalizationConfig() { return {}; }`,
+  "./collector-worker-env.server": `export function validateCollectorWorkerEnvironment() {}`,
 };
 
 // The collector runtime is transpiled with every dependency stubbed so the

@@ -99,6 +99,14 @@ roll back without simultaneous writers. Health (`LIVE`, `RECOVERING`, `STALE`, o
 returned only through the authenticated operational-state server function and is filtered to the
 caller's watchlist.
 
+The worker has its own server-only runtime configuration boundary. When enabled it validates
+`APP_PROFILE`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, the operational database variables,
+and `MOVEMENT_FINALIZATION_GRACE_MS` from the host's runtime `process.env`, and fails visibly
+before starting if any are missing or invalid. It never reads browser `VITE_*` values or
+build-time public configuration, so the artifact built once is host-independent. Only the
+TanStack application additionally checks that its runtime matches the browser bundle it serves.
+See [environment setup](./environments.md).
+
 ## Monitor overlap and freshness
 
 Manual and scheduled monitor batches use the same renewable, per-user lease in Lovable. The lease

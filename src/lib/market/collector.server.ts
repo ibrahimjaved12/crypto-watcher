@@ -13,6 +13,7 @@ import {
 } from "./collector";
 import { MovementEngineRuntime } from "./movement-engine.server";
 import { movementFinalizationConfig } from "./movement-finalization";
+import { validateCollectorWorkerEnvironment } from "./collector-worker-env.server";
 
 const WATCHLIST_REFRESH_MS = 30_000;
 const LEASE_SECONDS = 60;
@@ -369,9 +370,13 @@ type CollectorGlobal = typeof globalThis & {
  * its runtime handle, or null when `BINANCE_COLLECTOR_ENABLED` is not true. It does
  * not wire process signal handling: an independent worker entrypoint owns graceful
  * shutdown and lease release.
+ *
+ * When enabled, it first validates the collector worker's server-only runtime
+ * configuration, so a misconfigured host fails visibly instead of half-starting.
  */
 export function startBinanceCollector(): CollectorRuntime | null {
   if (!enabled()) return null;
+  validateCollectorWorkerEnvironment();
   const global = globalThis as CollectorGlobal;
   if (global.__cryptoWatcherBinanceCollector) return global.__cryptoWatcherBinanceCollector;
   const store = getOperationalStore();

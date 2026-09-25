@@ -199,87 +199,145 @@ test("the production worker artifact builds and runs with plain node", async () 
   assert.match(run.stdout, /no collector to run/);
 });
 
+// A complete server-only worker configuration. No browser VITE_* value appears.
+function workerEnv(overrides = {}) {
+  return {
+    APP_PROFILE: "local",
+    SUPABASE_URL: "http://127.0.0.1:54321",
+    SUPABASE_SERVICE_ROLE_KEY: "test-service-role",
+    OPERATIONAL_DB_ENABLED: "true",
+    OPERATIONAL_SUPABASE_URL: "http://127.0.0.1:55321",
+    OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY: "test-operational-service-role",
+    BINANCE_COLLECTOR_ENABLED: "true",
+    ...overrides,
+  };
+}
+
+function omitWorkerEnv(key) {
+  const env = workerEnv();
+  delete env[key];
+  return env;
+}
+
 test("the built worker reads its collector configuration at runtime", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const artifact = buildWorkerArtifact(root);
 
   // The tracked production build bakes BINANCE_COLLECTOR_ENABLED=false. A runtime
-  // override must win; otherwise enablement was bound at build time.
+  // override must win; otherwise enablement was bound at build time. Validation is
+  // server-only, so the first missing requirement is APP_PROFILE, not a VITE_* value.
   const enabled = runWorker(artifact, { BINANCE_COLLECTOR_ENABLED: "true" });
   assert.equal(enabled.status, 1, enabled.stderr);
-  assert.match(enabled.stderr, /requires OPERATIONAL_DB_ENABLED=true/);
-
-  // Operational database configuration is also read at runtime, not baked.
-  const operational = runWorker(artifact, {
-    BINANCE_COLLECTOR_ENABLED: "true",
-    OPERATIONAL_DB_ENABLED: "true",
-  });
-  assert.equal(operational.status, 1, operational.stderr);
-  assert.match(
-    operational.stderr,
-    /OPERATIONAL_SUPABASE_URL and OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY are required/,
-  );
+  assert.match(enabled.stderr, /APP_PROFILE must be local or production/);
 
   const invalid = runWorker(artifact, { BINANCE_COLLECTOR_ENABLED: "yes" });
   assert.equal(invalid.status, 1, invalid.stderr);
   assert.match(invalid.stderr, /BINANCE_COLLECTOR_ENABLED must be true or false/);
 
   const output = readFileSync(artifact, "utf8");
-  // Vite replaces every import.meta.env reference with the build-time public
-  // values; server configuration must still be read from process.env.
-  assert.doesNotMatch(output, /import\.meta/);
+  // Server configuration must be read from process.env, and the artifact must not
+  // carry a build-time browser environment object to compare against.
   assert.match(output, /process\.env/);
+  assert.doesNotMatch(output, /"VITE_SUPABASE_URL":/);
+  assert.doesNotMatch(output, /"VITE_APP_PROFILE":/);
   for (const name of [
     "BINANCE_COLLECTOR_ENABLED",
     "OPERATIONAL_DB_ENABLED",
     "OPERATIONAL_SUPABASE_URL",
     "OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY",
     "MOVEMENT_FINALIZATION_GRACE_MS",
+    "SUPABASE_SERVICE_ROLE_KEY",
   ]) {
     assert.match(output, new RegExp(`"${name}"`), `${name} must stay runtime-configurable`);
   }
 });
 
-test("the enabled built worker validates the runtime server environment", async () => {
+test("invalid or missing worker configuration fails visibly", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const artifact = buildWorkerArtifact(root);
 
-  // A local fake operational Supabase answers the lease RPC so the enabled path
-  // reaches its first supabaseAdmin use. No real service is contacted, and the
-  // WebSocket connect is never reached because validation fails first.
+  const cases = [
+    [{ BINANCE_COLLECTOR_ENABLED: "true" }, /APP_PROFILE must be local or production/],
+    [omitWorkerEnv("SUPABASE_SERVICE_ROLE_KEY"), /SUPABASE_SERVICE_ROLE_KEY is required/],
+    [omitWorkerEnv("OPERATIONAL_DB_ENABLED"), /requires OPERATIONAL_DB_ENABLED=true/],
+    [
+      omitWorkerEnv("OPERATIONAL_SUPABASE_URL"),
+      /OPERATIONAL_SUPABASE_URL and OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY are required/,
+    ],
+    [
+      workerEnv({ MOVEMENT_FINALIZATION_GRACE_MS: "999999" }),
+      /MOVEMENT_FINALIZATION_GRACE_MS must be an integer/,
+    ],
+  ];
+  for (const [env, expected] of cases) {
+    const run = runWorker(artifact, env);
+    assert.equal(run.status, 1, `expected failure for ${JSON.stringify(env)}`);
+    assert.match(run.stderr, expected);
+  }
+});
+
+async function startFakeServer(handler) {
   const server = createServer((request, response) => {
-    const isLease = String(request.url).includes("claim_collector_lease");
     request.resume();
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(isLease ? "true" : "[]");
+    handler(response);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
+  return { server, port: server.address().port };
+}
+
+function stopFakeServer(server) {
+  server.closeAllConnections();
+  return new Promise((resolve) => server.close(resolve));
+}
+
+test("the built collector artifact is configurable without VITE_* values", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const artifact = buildWorkerArtifact(root);
+
+  // The fake operational Supabase grants the lease, so the worker proceeds to its
+  // first supabaseAdmin use and would run the app's browser cross-check if it still
+  // depended on it. The fake main Supabase answers 401, so the watchlist read fails
+  // fast with an HTTP error — no real service is contacted.
+  const operational = await startFakeServer((response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("true");
+  });
+  const main = await startFakeServer((response) => {
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end(JSON.stringify({ message: "invalid api key", code: "401" }));
+  });
 
   const child = spawn(process.execPath, [artifact], {
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
-      BINANCE_COLLECTOR_ENABLED: "true",
-      OPERATIONAL_DB_ENABLED: "true",
-      OPERATIONAL_SUPABASE_URL: `http://127.0.0.1:${port}`,
-      OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY: "test-service-role",
-      // No APP_PROFILE/SUPABASE_URL: the runtime environment is incomplete.
+      ...workerEnv({
+        SUPABASE_URL: `http://127.0.0.1:${main.port}`,
+        OPERATIONAL_SUPABASE_URL: `http://127.0.0.1:${operational.port}`,
+      }),
+      // Deliberately mismatched browser values must be ignored by the worker.
+      VITE_APP_PROFILE: "production",
+      VITE_SUPABASE_URL: "https://elsewhere.example",
+      VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_other",
     },
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  let stdout = "";
   let stderr = "";
+  child.stdout.on("data", (chunk) => (stdout += chunk));
   child.stderr.on("data", (chunk) => (stderr += chunk));
   try {
     await new Promise((resolve) => setTimeout(resolve, 1_500));
-    // validateServerEnvironment() cross-checks the runtime process.env against the
-    // build-time public VITE_* values, so an incomplete host environment is surfaced.
-    assert.match(stderr, /\[Environment\] APP_PROFILE must be local or production/);
-    assert.match(stderr, /startup unavailable/);
+    assert.match(stdout, /collector started/);
+    // Reaching the watchlist read proves the server-only configuration passed and
+    // supabaseAdmin was created. The mismatched VITE_* build must not surface as the
+    // application's browser/server consistency error.
+    assert.match(stderr, /Collector watchlist read failed/);
+    assert.doesNotMatch(stderr, /\[Environment\]/);
+    assert.equal(child.exitCode, null, "the worker must keep running");
   } finally {
     child.kill("SIGKILL");
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
+    await Promise.all([stopFakeServer(operational.server), stopFakeServer(main.server)]);
   }
 });
 

@@ -140,6 +140,15 @@ Never prefix tokens, passwords, private keys, or secrets with `VITE_`. Startup r
 secret variable names and copied server-secret values in public configuration, as
 well as Supabase secret/service-role keys used as publishable keys.
 
+The collector worker is a headless backend process with its own server-only runtime
+configuration boundary. It validates `APP_PROFILE`, `SUPABASE_URL`,
+`SUPABASE_SERVICE_ROLE_KEY`, the operational database variables, and
+`MOVEMENT_FINALIZATION_GRACE_MS` from the host's runtime `process.env`; it never reads
+browser `VITE_*` values or build-time public configuration, so one built artifact stays
+host-independent. Only the TanStack application additionally proves its runtime matches
+the browser bundle it serves. See
+[the collector design](./binance-futures-collector.md).
+
 ## Actions and services
 
 | Action                                                                   | Services used                                                                                                      |

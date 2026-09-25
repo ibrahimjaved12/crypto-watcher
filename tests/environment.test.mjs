@@ -7,7 +7,7 @@ const source = readFileSync(new URL("../src/lib/environment.ts", import.meta.url
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
-const { validateEnvironment, validateTarget } = await import(
+const { validateEnvironment, validateTarget, validateServerSupabase } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`
 );
 const local = {
@@ -93,6 +93,85 @@ test("operational database configuration has no browser-visible variants", () =>
     assert.throws(() => validateEnvironment({ ...local, [name]: "configured" }), /server-only/);
   }
 });
+test("server-only Supabase validation ignores browser VITE_* values", () => {
+  const serverOnly = {
+    APP_PROFILE: "local",
+    SUPABASE_URL: "http://127.0.0.1:54321",
+    SUPABASE_PUBLISHABLE_KEY: "sb_publishable_server",
+    SUPABASE_SERVICE_ROLE_KEY: "secret-test",
+  };
+  validateServerSupabase(serverOnly);
+  // Deliberately mismatched browser values must have no effect: the worker has no
+  // browser bundle, so it must not compare against build-time VITE_* values.
+  validateServerSupabase({
+    ...serverOnly,
+    VITE_APP_PROFILE: "production",
+    VITE_SUPABASE_URL: "https://elsewhere.example",
+    VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_other",
+  });
+  // The application check still rejects the same mismatch the worker ignores.
+  assert.throws(
+    () =>
+      validateEnvironment(serverOnly, {
+        VITE_APP_PROFILE: "local",
+        VITE_ALLOW_HOSTED_SUPABASE: "false",
+        VITE_SUPABASE_URL: "http://127.0.0.1:54321",
+        VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_other",
+      }),
+    /differ/,
+  );
+});
+
+test("server-only Supabase validation requires the service-role credential", () => {
+  const base = { APP_PROFILE: "local", SUPABASE_URL: "http://127.0.0.1:54321" };
+  assert.throws(() => validateServerSupabase(base), /SUPABASE_SERVICE_ROLE_KEY is required/);
+  assert.throws(
+    () => validateServerSupabase({ ...base, SUPABASE_SERVICE_ROLE_KEY: "sb_publishable_x" }),
+    /publishable key/,
+  );
+  assert.throws(
+    () =>
+      validateServerSupabase({
+        ...base,
+        SUPABASE_SERVICE_ROLE_KEY: `e30.${Buffer.from(JSON.stringify({ role: "anon" })).toString("base64url")}.sig`,
+      }),
+    /service_role/,
+  );
+  assert.throws(
+    () =>
+      validateServerSupabase({
+        APP_PROFILE: "production",
+        SUPABASE_URL: "https://project.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "secret-test",
+      }),
+    /ALLOW_HOSTED/,
+  );
+});
+
+test("the app keeps its browser/server check while the worker validates server-only", () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  // The TanStack app still proves its runtime matches the browser build it serves.
+  assert.match(read("../src/server.ts"), /validateServerEnvironment\(\)/);
+  assert.match(
+    read("../src/integrations/supabase/auth-middleware.ts"),
+    /validateServerEnvironment\(\)/,
+  );
+  assert.match(read("../src/lib/environment.server.ts"), /import\.meta\.env/);
+  // The shared admin client no longer performs the browser cross-check, so the
+  // headless collector worker can create it from runtime server configuration.
+  const adminClient = read("../src/integrations/supabase/client.server.ts");
+  assert.match(adminClient, /validateServerSupabaseEnvironment\(\)/);
+  assert.doesNotMatch(adminClient, /validateServerEnvironment\(\)/);
+  // The worker's own boundary is server-only and free of build-time browser values.
+  const workerEnv = read("../src/lib/market/collector-worker-env.server.ts");
+  assert.doesNotMatch(workerEnv, /import\.meta/);
+  assert.doesNotMatch(workerEnv, /["']VITE_/);
+  assert.match(
+    read("../src/lib/market/collector.server.ts"),
+    /validateCollectorWorkerEnvironment\(\)/,
+  );
+});
+
 test("URLs reject credentials and non-origin targets", () => {
   for (const url of [
     "ftp://localhost",
