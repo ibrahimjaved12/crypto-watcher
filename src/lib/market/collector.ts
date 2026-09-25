@@ -292,6 +292,32 @@ export class BinanceFuturesCollector {
     return this.movementBuckets.snapshots();
   }
 
+  /** Trades rejected because their exchange-time bucket had already been finalized. */
+  movementLateRejections(): number {
+    return this.movementBuckets.lateAfterFinalizationCount;
+  }
+
+  /**
+   * Coarse per-symbol source health for the movement engine's source gate.
+   * Uses the best timeframe status so a healthy contract is not excluded by an
+   * unrelated long-timeframe recovery.
+   */
+  symbolSourceStatus(symbol: string): CollectorHealthStatus {
+    const normalized = symbol.toUpperCase();
+    const rank: Record<CollectorHealthStatus, number> = {
+      UNAVAILABLE: 0,
+      STALE: 1,
+      RECOVERING: 2,
+      LIVE: 3,
+    };
+    let best: CollectorHealthStatus = "UNAVAILABLE";
+    for (const timeframe of COLLECTOR_INTERVALS) {
+      const status = this.health.get(this.key(normalized, timeframe))?.status;
+      if (status && rank[status] > rank[best]) best = status;
+    }
+    return best;
+  }
+
   advanceMovementBuckets(boundaryTime: number): void {
     this.movementBuckets.advanceTo(boundaryTime);
   }

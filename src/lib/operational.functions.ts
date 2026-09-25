@@ -6,6 +6,11 @@ import type {
   CollectorStorageDiagnostics,
   StorageDiagnostics,
 } from "./operational/types";
+import {
+  MARKET_UNIVERSE_ID,
+  toMovementEngineDiagnostics,
+  type MovementEngineDiagnostics,
+} from "./market/market-movement-state";
 
 export type OperationalState = {
   owner: "operational" | "lovable";
@@ -13,6 +18,7 @@ export type OperationalState = {
   diagnostics: StorageDiagnostics | null;
   collectorHealth: CollectorHealth[];
   collectorDiagnostics: CollectorStorageDiagnostics | null;
+  movementEngine: MovementEngineDiagnostics | null;
   activityFreshness: {
     marketCheckpoint: {
       available: boolean;
@@ -90,6 +96,7 @@ export const getOperationalState = createServerFn({ method: "GET" })
         watched,
         activityFreshness,
         operationalCheckpoint,
+        movementState,
       ] = await Promise.all([
         store.listMonitorRuns(context.userId, 25),
         store.diagnostics(context.userId),
@@ -100,6 +107,7 @@ export const getOperationalState = createServerFn({ method: "GET" })
           .latestCheckpoint(context.userId)
           .then((observedAt) => ({ available: true, observedAt }))
           .catch(() => ({ available: false, observedAt: null })),
+        store.getMarketStateCurrent(MARKET_UNIVERSE_ID).catch(() => null),
       ]);
       if (watched.error) throw new Error(watched.error.message);
       const symbols = [...new Set((watched.data ?? []).map((row) => row.symbol))];
@@ -110,6 +118,7 @@ export const getOperationalState = createServerFn({ method: "GET" })
         diagnostics,
         collectorHealth,
         collectorDiagnostics,
+        movementEngine: toMovementEngineDiagnostics(movementState, { now: Date.now() }),
         activityFreshness: {
           ...activityFreshness,
           marketCheckpoint: operationalCheckpoint,
@@ -135,6 +144,7 @@ export const getOperationalState = createServerFn({ method: "GET" })
       diagnostics: null,
       collectorHealth: [],
       collectorDiagnostics: null,
+      movementEngine: null,
       activityFreshness,
     };
   });

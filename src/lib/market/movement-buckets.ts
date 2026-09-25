@@ -5,6 +5,10 @@ export const MAX_LAST_TRADE_AGE_SECONDS = 15;
 export const MAX_LAST_TRADE_AGE_MS = MAX_LAST_TRADE_AGE_SECONDS * 1_000;
 export const MOVEMENT_WINDOWS_MINUTES = [1, 5, 15] as const;
 
+/** A trade whose exchange time belongs to an already-finalized bucket is rejected, never rewritten. */
+export const MOVEMENT_LATE_FINALIZATION_MESSAGE =
+  "movement trade arrived after its bucket was finalized";
+
 export type MovementWindowMinutes = (typeof MOVEMENT_WINDOWS_MINUTES)[number];
 export type MovementReadinessStatus = "READY" | "WARMING" | "STALE";
 
@@ -14,6 +18,8 @@ export type MovementTradeInput = {
   quantity: number;
   eventTime: number;
   tradeTime: number;
+  /** Local receive time of the observation; carried for provenance, never used in math. */
+  receivedAt: number;
 };
 
 export type MovementBucket = {
@@ -24,6 +30,7 @@ export type MovementBucket = {
   tradeCount: number;
   lastRealTradeTime: number | null;
   lastRealEventTime: number | null;
+  lastRealReceivedAt: number | null;
   carriedForward: boolean;
   provider: "binance-usdm";
   instrumentId: string;
@@ -50,6 +57,7 @@ export type MovementBucketSnapshot = {
   maxLastTradeAgeMs: typeof MAX_LAST_TRADE_AGE_MS;
   buckets: MovementBucket[];
   latestRealTradeTime: number | null;
+  latestRealReceivedAt: number | null;
   readiness: Record<MovementWindowMinutes, MovementWindowReadiness>;
 };
 
@@ -61,6 +69,7 @@ type PendingBucket = {
   tradeCount: number;
   lastRealTradeTime: number;
   lastRealEventTime: number;
+  lastRealReceivedAt: number;
 };
 
 class BoundedBucketRing {
@@ -121,11 +130,12 @@ class SymbolMovementBuckets {
     finitePositive(trade.quantity, "movement trade quantity");
     safeNonnegativeInteger(trade.tradeTime, "movement trade time");
     safeNonnegativeInteger(trade.eventTime, "movement event time");
+    safeNonnegativeInteger(trade.receivedAt, "movement receive time");
     if (this.lastAcceptedTradeTime !== null && trade.tradeTime < this.lastAcceptedTradeTime) {
       throw new Error("out-of-order movement trade");
     }
     if (this.lastFinalizedBoundary !== null && trade.tradeTime <= this.lastFinalizedBoundary) {
-      throw new Error("movement trade arrived after its bucket was finalized");
+      throw new Error(MOVEMENT_LATE_FINALIZATION_MESSAGE);
     }
 
     const safeBoundary =
@@ -142,6 +152,7 @@ class SymbolMovementBuckets {
         tradeCount: 1,
         lastRealTradeTime: trade.tradeTime,
         lastRealEventTime: trade.eventTime,
+        lastRealReceivedAt: trade.receivedAt,
       };
     } else {
       if (this.pending.boundaryTime !== boundaryTime) {
@@ -153,6 +164,7 @@ class SymbolMovementBuckets {
       this.pending.tradeCount += 1;
       this.pending.lastRealTradeTime = trade.tradeTime;
       this.pending.lastRealEventTime = trade.eventTime;
+      this.pending.lastRealReceivedAt = trade.receivedAt;
     }
     this.lastAcceptedTradeTime = trade.tradeTime;
     this.lastRealTrade = { ...trade, symbol: this.symbol };
@@ -203,6 +215,7 @@ class SymbolMovementBuckets {
       maxLastTradeAgeMs: MAX_LAST_TRADE_AGE_MS,
       buckets,
       latestRealTradeTime: this.lastRealTrade?.tradeTime ?? null,
+      latestRealReceivedAt: this.lastRealTrade?.receivedAt ?? null,
       readiness,
     };
   }
@@ -220,6 +233,7 @@ class SymbolMovementBuckets {
       tradeCount: pending?.tradeCount ?? 0,
       lastRealTradeTime: pending?.lastRealTradeTime ?? this.lastRealTrade?.tradeTime ?? null,
       lastRealEventTime: pending?.lastRealEventTime ?? this.lastRealTrade?.eventTime ?? null,
+      lastRealReceivedAt: pending?.lastRealReceivedAt ?? this.lastRealTrade?.receivedAt ?? null,
       carriedForward: carry,
       provider: "binance-usdm",
       instrumentId: `binance-usdm:${this.symbol}`,
@@ -267,11 +281,17 @@ class SymbolMovementBuckets {
 /** Bounded, persistence-free input shared by live processing and deterministic replay. */
 export class FuturesMovementBuckets {
   private readonly symbols = new Map<string, SymbolMovementBuckets>();
+  private lateAfterFinalization = 0;
 
   constructor(private readonly capacity = MOVEMENT_BUCKET_CAPACITY) {
     if (!Number.isSafeInteger(capacity) || capacity < 1) {
       throw new Error("invalid movement history capacity");
     }
+  }
+
+  /** Count of trades rejected because their bucket had already been finalized. */
+  get lateAfterFinalizationCount(): number {
+    return this.lateAfterFinalization;
   }
 
   reconcile(symbols: Iterable<string>): void {
@@ -289,8 +309,15 @@ export class FuturesMovementBuckets {
   accept(trade: MovementTradeInput): boolean {
     const state = this.symbols.get(trade.symbol.toUpperCase());
     if (!state) return false;
-    state.accept(trade);
-    return true;
+    try {
+      state.accept(trade);
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.message === MOVEMENT_LATE_FINALIZATION_MESSAGE) {
+        this.lateAfterFinalization += 1;
+      }
+      throw error;
+    }
   }
 
   advanceTo(boundaryTime: number): void {

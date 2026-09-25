@@ -13,6 +13,7 @@ import type {
   PersistedMarketStateCurrent,
   StorageDiagnostics,
 } from "./types";
+import type { MovementCandle } from "../market/market-movement-state";
 import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
@@ -77,6 +78,9 @@ const disabledStore: OperationalStore = {
   },
   async collectorDiagnostics() {
     return { candle_rows: 0, health_rows: 0, oldest_candle_at: null, newest_candle_at: null };
+  },
+  async readMovementCandleHistory() {
+    return new Map<string, MovementCandle[]>();
   },
   async claimCollectorLease() {
     return false;
@@ -294,6 +298,36 @@ export function createOperationalStore(
       const row = Array.isArray(data) ? data[0] : data;
       if (!row) throw new Error("Operational database returned no collector diagnostics");
       return row as CollectorStorageDiagnostics;
+    },
+    async readMovementCandleHistory(symbols, sinceMs) {
+      if (symbols.length === 0) return new Map<string, MovementCandle[]>();
+      const { data, error } = await client.rpc("get_collector_movement_candles", {
+        p_symbols: symbols.map((symbol) => symbol.toUpperCase()),
+        p_since: new Date(sinceMs).toISOString(),
+      });
+      rpcError(error, "movement candle history read");
+      const result = new Map<string, MovementCandle[]>();
+      if (!data || typeof data !== "object") return result;
+      for (const [symbol, rows] of Object.entries(data as Record<string, unknown>)) {
+        if (!Array.isArray(rows)) continue;
+        const candles: MovementCandle[] = [];
+        for (const row of rows) {
+          if (!Array.isArray(row) || row.length < 3) continue;
+          const openTime = Number(row[0]);
+          const close = Number(row[1]);
+          const volume = Number(row[2]);
+          if (
+            !Number.isSafeInteger(openTime) ||
+            !Number.isFinite(close) ||
+            !Number.isFinite(volume)
+          ) {
+            continue;
+          }
+          candles.push({ openTime, close, volume });
+        }
+        result.set(symbol.toUpperCase(), candles);
+      }
+      return result;
     },
     async claimCollectorLease(instanceId, leaseSeconds = 60) {
       const { data, error } = await client.rpc("claim_collector_lease", {

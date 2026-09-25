@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node environment.test.mjs && node operational-store.test.mjs && node binance-collector.test.mjs && node activity-controls.test.mjs && node activity-domains.test.mjs && node cumulative.test.mjs && node observation.test.mjs && node analysis.test.mjs && node analysis-conclusions.test.mjs && node ta.test.mjs"
+    "test": "node environment.test.mjs && node operational-store.test.mjs && node binance-collector.test.mjs && node market-movement-engine.test.mjs && node movement-engine-runtime.test.mjs && node activity-controls.test.mjs && node activity-domains.test.mjs && node cumulative.test.mjs && node observation.test.mjs && node analysis.test.mjs && node analysis-conclusions.test.mjs && node ta.test.mjs"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.3.14"

@@ -19,13 +19,14 @@ const {
 
 const BASE = Date.parse("2026-09-25T12:00:00.000Z");
 
-function trade(tradeTime, price = 100, quantity = 1) {
+function trade(tradeTime, price = 100, quantity = 1, receivedAt = tradeTime + 2) {
   return {
     symbol: "BTCUSDT",
     price,
     quantity,
     tradeTime,
     eventTime: tradeTime + 1,
+    receivedAt,
   };
 }
 
@@ -49,10 +50,36 @@ test("five-second exchange-time buckets aggregate trades and retain the latest e
   assert.equal(bucket.quoteVolume, 605);
   assert.equal(bucket.tradeCount, 3);
   assert.equal(bucket.lastRealTradeTime, BASE + 5_000);
+  assert.equal(bucket.lastRealReceivedAt, BASE + 5_002);
   assert.equal(bucket.carriedForward, false);
   assert.equal(bucket.provider, "binance-usdm");
   assert.equal(bucket.instrumentId, "binance-usdm:BTCUSDT");
   assert.equal(bucket.priceType, "trade");
+  assert.equal(buckets.snapshot("BTCUSDT").latestRealReceivedAt, BASE + 5_002);
+});
+
+test("receive time is preserved through finalized and carry-forward buckets", () => {
+  const buckets = movement();
+  buckets.accept(trade(BASE + 1_000, 100, 2, BASE + 1_250));
+  buckets.accept(trade(BASE + 4_999, 101, 3, BASE + 5_100));
+  buckets.advanceTo(BASE + MOVEMENT_BUCKET_MS);
+
+  let snapshot = buckets.snapshot("BTCUSDT");
+  assert.equal(snapshot.buckets[0].lastRealReceivedAt, BASE + 5_100);
+  assert.equal(snapshot.latestRealReceivedAt, BASE + 5_100);
+
+  // A carry-forward bucket preserves the last real trade's receive timestamp,
+  // exactly as it preserves its event/trade timestamps.
+  buckets.advanceTo(BASE + 2 * MOVEMENT_BUCKET_MS);
+  snapshot = buckets.snapshot("BTCUSDT");
+  const carried = snapshot.buckets.at(-1);
+  assert.equal(carried.boundaryTime, BASE + 10_000);
+  assert.equal(carried.carriedForward, true);
+  assert.equal(carried.endpointPrice, 101);
+  assert.equal(carried.lastRealTradeTime, BASE + 4_999);
+  assert.equal(carried.lastRealEventTime, BASE + 5_000);
+  assert.equal(carried.lastRealReceivedAt, BASE + 5_100);
+  assert.equal(snapshot.latestRealReceivedAt, BASE + 5_100);
 });
 
 test("empty buckets carry a fresh endpoint but expose staleness after fifteen seconds", () => {
@@ -94,6 +121,7 @@ test("a new instance starts warming without fabricated intraminute history", () 
   const snapshot = buckets.snapshot("BTCUSDT");
   assert.deepEqual(snapshot.buckets, []);
   assert.equal(snapshot.latestRealTradeTime, null);
+  assert.equal(snapshot.latestRealReceivedAt, null);
   assert.deepEqual(
     Object.values(snapshot.readiness).map((entry) => entry.status),
     ["WARMING", "WARMING", "WARMING"],
