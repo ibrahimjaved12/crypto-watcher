@@ -66,9 +66,12 @@ completed one-minute candles in the operational database (`collector_recent_cand
 `get_collector_movement_candles` and refreshed periodically:
 
 - Window returns use the same horizon as the live window (`log(close[t]/close[t-window])`).
+- Sampling is exchange-time aligned, not index/phase dependent: 1m stays canonical 1m, while 5m and
+  15m endpoints (and their return/notional windows) align to fixed 5-minute / 15-minute epoch
+  boundaries. Adding or removing irrelevant leading candles cannot shift the sampled population.
 - `usableCoverageMs` is the trailing contiguous run; a gap discards earlier, non-comparable candles.
 - `previousNotionalVolumes` are the last `rvolComparisonWindows` completed-window notionals
-  (base volume × close as the quote-notional proxy).
+  (base volume × close as the quote-notional proxy), measured over the exact same aligned intervals.
 - Five-second history is never fabricated from candles. A restart warms the live bucket path per
   #70/#73; it does not backfill buckets.
 
@@ -89,6 +92,10 @@ Authenticated server-side reads:
   settings page (status, configured/eligible counts, primary 5m state, last evaluation boundary,
   versions, most recent transition, late-after-finalization count).
 
+The `STALE` threshold is an explicit, version-independent constant (`MOVEMENT_ENGINE_STALE_AFTER_MS`,
+60s) chosen to clear the 30-second persistence cadence plus finalization lag, so a healthy engine
+does not flicker to `STALE` from normal persistence/timer jitter. The write frequency is unchanged.
+
 Reads go through the operational store's explicit field mapping; the service-role credential never
 reaches the browser. This integration does not build #30's dashboard, #31 setups/scoring, or any
 prediction.
@@ -99,6 +106,18 @@ Reuses #73's atomic `persist_market_episode_lifecycle_step` (append events + ups
 one transaction). Current state is bounded to one row per `(universe_id, primary_window_minutes)`,
 written on transitions or the default 30-second cadence, and protected by the existing monotonic
 `evaluation_boundary_time` guard. No five-second append-only stream is created.
+
+Durable persistence is mandatory. A persistence-required batch (current snapshot plus zero or more
+transitions) is held pending until the atomic write succeeds; later boundaries are not evaluated
+while a batch is pending, and the exact deterministic events/snapshot are retried (event IDs are
+unchanged and the DB append stays idempotent). Lifecycle persistence cadence is acknowledged only
+after the write succeeds, so a transient database failure cannot lose a STARTED / STRENGTHENED /
+WEAKENED / REVERSED / ENDED transition.
+
+Startup restore fails closed. Evaluation never begins with a null lifecycle state: it waits until an
+operational read establishes either that no persisted state exists, or that persisted state has been
+restored via #73's restart-interruption semantics. Transient restore and normalization-history read
+failures use bounded exponential backoff rather than retrying on every one-second tick.
 
 ## Migration
 

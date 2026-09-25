@@ -21,8 +21,18 @@ export const MARKET_UNIVERSE_ID = "binance-usdm-public-market";
 /** Market-wide state is unavailable below this many configured/eligible contracts. */
 export const MINIMUM_MARKET_UNIVERSE_SIZE = 5;
 
-/** A movement engine that has not produced a fresh boundary within this window is STALE. */
-export const MOVEMENT_ENGINE_STALE_AFTER_MS = 30_000;
+/**
+ * A movement engine whose persisted evaluation boundary is older than this is STALE.
+ *
+ * The bounded current state is written on transitions and on the default 30-second
+ * cadence, so a healthy engine's persisted boundary legitimately lags wall-clock now
+ * by the persistence cadence (30s) plus the live finalization grace/bucket lag
+ * (~7s). This explicit, version-independent threshold leaves margin above that so
+ * normal persistence/timer jitter never flickers a healthy engine to STALE, while
+ * still surfacing a genuinely stalled engine. It does not require increasing the
+ * write frequency.
+ */
+export const MOVEMENT_ENGINE_STALE_AFTER_MS = 60_000;
 
 export type MovementEngineStatus = "LIVE" | "WARMING" | "STALE" | "UNAVAILABLE";
 

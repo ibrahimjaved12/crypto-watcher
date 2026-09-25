@@ -48,6 +48,7 @@ const {
   toMovementEngineDiagnostics,
   toMarketMovementCurrentState,
   MARKET_UNIVERSE_ID,
+  MOVEMENT_ENGINE_STALE_AFTER_MS,
 } = await import(stateUrl);
 const { buildMarketUniverse } = await import(universeUrl);
 const {
@@ -301,6 +302,41 @@ test("a history gap drops non-comparable earlier candles", () => {
   assert.equal(entry[1].usableCoverageMs, 99 * MINUTE_MS);
 });
 
+test("5m/15m history sampling is exchange-time aligned and phase-independent", () => {
+  const minutes = 130;
+  const candleAt = (offsetMinutes) => ({
+    openTime: BASE + offsetMinutes * MINUTE_MS,
+    close: 100 + offsetMinutes * 0.1 + (offsetMinutes % 5) * 0.01,
+    volume: 1 + (offsetMinutes % 3),
+  });
+  const baseline = Array.from({ length: minutes }, (_, index) => candleAt(index));
+  // Three extra leading minutes: contiguous, but not enough to create a new
+  // aligned 5m/15m endpoint, so the comparable population must be identical.
+  const prefixed = Array.from({ length: minutes + 3 }, (_, index) => candleAt(index - 3));
+
+  const baselineHistory = buildMovementNormalizationHistory(new Map([["BTCUSDT", baseline]])).get(
+    "BTCUSDT",
+  );
+  const prefixedHistory = buildMovementNormalizationHistory(new Map([["BTCUSDT", prefixed]])).get(
+    "BTCUSDT",
+  );
+
+  for (const windowMinutes of [5, 15]) {
+    assert.deepEqual(
+      prefixedHistory[windowMinutes].returns,
+      baselineHistory[windowMinutes].returns,
+      `${windowMinutes}m returns must not shift with irrelevant leading candles`,
+    );
+    assert.deepEqual(
+      prefixedHistory[windowMinutes].previousNotionalVolumes,
+      baselineHistory[windowMinutes].previousNotionalVolumes,
+      `${windowMinutes}m notional windows must use the same aligned intervals`,
+    );
+  }
+  // 1m remains canonical one-minute sampling.
+  assert.equal(baselineHistory[1].returns.length, minutes - 1);
+});
+
 test("engine status keeps LIVE, WARMING, STALE and UNAVAILABLE distinct", () => {
   const base = { configuredCount: 10, evaluationBoundaryTime: BASE, now: BASE + 1_000 };
   assert.equal(deriveMovementEngineStatus({ ...base, directionState: "NEUTRAL" }), "LIVE");
@@ -319,8 +355,19 @@ test("engine status keeps LIVE, WARMING, STALE and UNAVAILABLE distinct", () => 
     }),
     "UNAVAILABLE",
   );
+  // The staleness threshold must clear the 30s current-state persistence cadence
+  // plus finalization lag, so a healthy but recently-written row never flickers.
+  assert.ok(MOVEMENT_ENGINE_STALE_AFTER_MS > 30_000);
+  assert.equal(
+    deriveMovementEngineStatus({ ...base, now: BASE + 30_000, directionState: "NEUTRAL" }),
+    "LIVE",
+  );
   assert.equal(
     deriveMovementEngineStatus({ ...base, now: BASE + 60_000, directionState: "NEUTRAL" }),
+    "LIVE",
+  );
+  assert.equal(
+    deriveMovementEngineStatus({ ...base, now: BASE + 60_001, directionState: "NEUTRAL" }),
     "STALE",
   );
 });

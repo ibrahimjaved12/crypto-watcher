@@ -27,6 +27,7 @@ import {
   restoreLifecycleStateOnRestart,
   serializeMarketEpisodeLifecycleState,
   type MarketEpisodeLifecycleConfig,
+  type MarketMovementEvent,
 } from "./market-episode-lifecycle";
 import {
   DEFAULT_MOVEMENT_FINALIZATION_CONFIG,
@@ -47,6 +48,18 @@ import {
 
 export const MOVEMENT_ENGINE_TICK_MS = 1_000;
 export const MOVEMENT_HISTORICAL_REFRESH_MS = 15 * 60_000;
+
+/**
+ * Bounded exponential backoff for operational reads/writes that must not be
+ * retried on every one-second engine tick (state restore, normalization history).
+ */
+export const MOVEMENT_RETRY_BASE_MS = 5_000;
+export const MOVEMENT_RETRY_MAX_MS = 60_000;
+
+function backoffDelay(failures: number): number {
+  const exponent = Math.min(Math.max(failures - 1, 0), 20);
+  return Math.min(MOVEMENT_RETRY_MAX_MS, MOVEMENT_RETRY_BASE_MS * 2 ** exponent);
+}
 
 /** Narrow view of the shared collector the engine depends on. */
 export type MovementCollectorPort = Pick<
@@ -72,6 +85,17 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * A persistence-required batch (current snapshot plus zero or more transitions)
+ * held until #73's atomic write succeeds. Event IDs are deterministic and the DB
+ * append is idempotent, so replaying the exact batch can never duplicate an event.
+ */
+type PendingMovementPersistence = {
+  current: PersistedMarketStateCurrent;
+  events: MarketMovementEvent[];
+  mostRecentTransition: PersistedMovementTransition | null;
+};
+
 export class MovementEngineRuntime {
   private readonly engine = new MarketMovementEngine();
   private readonly now: () => number;
@@ -83,10 +107,15 @@ export class MovementEngineRuntime {
   private active = false;
   private running = false;
   private lifecycleRestored = false;
+  private lifecycleRestoreRetryAt = 0;
+  private lifecycleRestoreFailures = 0;
   private historical: MovementNormalizationHistory = new Map();
   private historicalLoadedAt = 0;
+  private historicalRetryAt = 0;
+  private historicalFailures = 0;
   private historicalLoading: Promise<void> | null = null;
   private lastTransition: PersistedMovementTransition | null = null;
+  private pendingPersistence: PendingMovementPersistence | null = null;
 
   constructor(private readonly deps: MovementEngineRuntimeDependencies) {
     this.now = deps.now ?? Date.now;
@@ -100,7 +129,7 @@ export class MovementEngineRuntime {
   async start(): Promise<void> {
     if (this.active) return;
     this.active = true;
-    if (!this.lifecycleRestored) await this.loadPersistedState();
+    if (!this.lifecycleRestored) await this.attemptLifecycleRestore(this.now());
     if (!this.timer) {
       this.timer = setInterval(() => void this.tick(), MOVEMENT_ENGINE_TICK_MS);
       this.timer.unref?.();
@@ -114,59 +143,11 @@ export class MovementEngineRuntime {
     await this.historicalLoading?.catch(() => undefined);
   }
 
-  private async loadPersistedState(): Promise<void> {
-    try {
-      const current = await this.deps.store.getMarketStateCurrent(MARKET_UNIVERSE_ID);
-      if (!current) {
-        this.lifecycleRestored = true;
-        return;
-      }
-      const restored = deserializeMarketEpisodeLifecycleState(current.lifecycleState);
-      this.engine.restoreLifecycleState(restoreLifecycleStateOnRestart(restored));
-      this.lastTransition = current.currentEvidence?.mostRecentTransition ?? null;
-      this.lifecycleRestored = true;
-    } catch (error) {
-      console.error(`[movement-engine] persisted state load failed: ${message(error)}`);
-    }
-  }
-
   private async tick(): Promise<void> {
     if (!this.active || this.running) return;
     this.running = true;
     try {
-      const symbols = this.deps.collector.subscribedSymbols();
-      if (symbols.length === 0) return;
-      const now = this.now();
-      let finalizable: number;
-      try {
-        finalizable = finalizableMovementBoundary(now, this.finalization);
-      } catch {
-        // Wall clock is still inside the grace of the epoch; nothing is safe yet.
-        return;
-      }
-      const universe = buildMarketUniverse(symbols);
-      // Finalize quiet/no-trade symbols only through the safe boundary.
-      this.deps.collector.advanceMovementBuckets(finalizable);
-      await this.refreshHistorical(universe, now);
-      const snapshots = new Map<string, MovementBucketSnapshot>();
-      const sourceStatus = new Map<string, MovementSourceStatus>();
-      for (const symbol of universe.symbols) {
-        const snapshot = this.deps.collector.movementSnapshot(symbol);
-        if (snapshot) snapshots.set(symbol, snapshot);
-        sourceStatus.set(symbol, this.deps.collector.symbolSourceStatus(symbol));
-      }
-      const results = this.engine.advance({
-        finalizableBoundary: finalizable,
-        snapshots,
-        sourceStatus,
-        historical: this.historical,
-        universe,
-        movementConfig: this.movementConfig,
-        classifierConfig: this.classifierConfig,
-        lifecycleConfig: this.lifecycleConfig,
-      });
-      if (results.length === 0) return;
-      await this.persist(results, universe, snapshots, now);
+      await this.runOnce();
     } catch (error) {
       console.error(`[movement-engine] evaluation failed: ${message(error)}`);
     } finally {
@@ -174,8 +155,85 @@ export class MovementEngineRuntime {
     }
   }
 
+  /**
+   * Runs exactly one evaluation cycle. Exposed so focused runtime tests can drive
+   * the engine deterministically; the periodic timer calls it through `tick`.
+   */
+  async runOnce(): Promise<void> {
+    // Fail closed: never evaluate against a lifecycle state that has not been
+    // established by a successful operational read.
+    if (!this.lifecycleRestored && !(await this.attemptLifecycleRestore(this.now()))) return;
+    // Durable persistence is mandatory: an outstanding batch must be persisted
+    // before any later boundary is evaluated, so its transitions cannot be lost.
+    if (this.pendingPersistence && !(await this.flushPendingPersistence())) return;
+    const symbols = this.deps.collector.subscribedSymbols();
+    if (symbols.length === 0) return;
+    const now = this.now();
+    let finalizable: number;
+    try {
+      finalizable = finalizableMovementBoundary(now, this.finalization);
+    } catch {
+      // Wall clock is still inside the grace of the epoch; nothing is safe yet.
+      return;
+    }
+    const universe = buildMarketUniverse(symbols);
+    // Finalize quiet/no-trade symbols only through the safe boundary.
+    this.deps.collector.advanceMovementBuckets(finalizable);
+    await this.refreshHistorical(universe, now);
+    const snapshots = new Map<string, MovementBucketSnapshot>();
+    const sourceStatus = new Map<string, MovementSourceStatus>();
+    for (const symbol of universe.symbols) {
+      const snapshot = this.deps.collector.movementSnapshot(symbol);
+      if (snapshot) snapshots.set(symbol, snapshot);
+      sourceStatus.set(symbol, this.deps.collector.symbolSourceStatus(symbol));
+    }
+    const results = this.engine.advance({
+      finalizableBoundary: finalizable,
+      snapshots,
+      sourceStatus,
+      historical: this.historical,
+      universe,
+      movementConfig: this.movementConfig,
+      classifierConfig: this.classifierConfig,
+      lifecycleConfig: this.lifecycleConfig,
+    });
+    if (results.length === 0) return;
+    await this.persist(results, universe, snapshots, now);
+  }
+
+  /**
+   * Establishes the #73 lifecycle state from the operational store exactly once.
+   * A transient read/deserialize/restore failure is retried with bounded backoff;
+   * evaluation does not start until this succeeds.
+   */
+  private async attemptLifecycleRestore(now: number): Promise<boolean> {
+    if (this.lifecycleRestored) return true;
+    if (now < this.lifecycleRestoreRetryAt) return false;
+    try {
+      const current = await this.deps.store.getMarketStateCurrent(MARKET_UNIVERSE_ID);
+      if (!current) {
+        this.lifecycleRestored = true;
+        return true;
+      }
+      const restored = deserializeMarketEpisodeLifecycleState(current.lifecycleState);
+      this.engine.restoreLifecycleState(restoreLifecycleStateOnRestart(restored));
+      this.lastTransition = current.currentEvidence?.mostRecentTransition ?? null;
+      this.lifecycleRestored = true;
+      return true;
+    } catch (error) {
+      this.lifecycleRestoreFailures += 1;
+      const delay = backoffDelay(this.lifecycleRestoreFailures);
+      this.lifecycleRestoreRetryAt = now + delay;
+      console.error(
+        `[movement-engine] persisted state restore failed; retrying in ${delay}ms: ${message(error)}`,
+      );
+      return false;
+    }
+  }
+
   private async refreshHistorical(universe: MarketUniverse, now: number): Promise<void> {
     if (this.historicalLoading) return;
+    if (now < this.historicalRetryAt) return;
     if (
       this.historicalLoadedAt !== 0 &&
       now - this.historicalLoadedAt < MOVEMENT_HISTORICAL_REFRESH_MS
@@ -183,18 +241,27 @@ export class MovementEngineRuntime {
       return;
     }
     this.historicalLoading = (async () => {
-      const candles = await this.deps.store.readMovementCandleHistory(
-        universe.symbols,
-        now - this.movementConfig.historicalLookbackMs,
-      );
-      this.historical = buildMovementNormalizationHistory(candles, this.movementConfig);
-      this.historicalLoadedAt = now;
+      try {
+        const candles = await this.deps.store.readMovementCandleHistory(
+          universe.symbols,
+          now - this.movementConfig.historicalLookbackMs,
+        );
+        this.historical = buildMovementNormalizationHistory(candles, this.movementConfig);
+        this.historicalLoadedAt = now;
+        this.historicalFailures = 0;
+        this.historicalRetryAt = 0;
+      } catch (error) {
+        this.historicalFailures += 1;
+        const delay = backoffDelay(this.historicalFailures);
+        this.historicalRetryAt = now + delay;
+        console.error(
+          `[movement-engine] normalization history load failed; retrying in ${delay}ms: ${message(error)}`,
+        );
+      }
     })().finally(() => {
       this.historicalLoading = null;
     });
-    await this.historicalLoading.catch((error) => {
-      console.error(`[movement-engine] normalization history load failed: ${message(error)}`);
-    });
+    await this.historicalLoading;
   }
 
   private async persist(
@@ -253,8 +320,34 @@ export class MovementEngineRuntime {
       lifecycleState: serializeMarketEpisodeLifecycleState(state),
       currentEvidence,
     };
-    await this.deps.store.persistMarketEpisodeLifecycleStep(current, events);
+    await this.flushPersistence({ current, events, mostRecentTransition });
+  }
+
+  private async flushPendingPersistence(): Promise<boolean> {
+    const batch = this.pendingPersistence;
+    if (!batch) return true;
+    return this.flushPersistence(batch);
+  }
+
+  /**
+   * Atomically persists one batch. On failure the exact same batch (deterministic
+   * event IDs and current snapshot) is retained as pending and retried before any
+   * later boundary is evaluated; lifecycle cadence is acknowledged only after the
+   * database write succeeds.
+   */
+  private async flushPersistence(batch: PendingMovementPersistence): Promise<boolean> {
+    try {
+      await this.deps.store.persistMarketEpisodeLifecycleStep(batch.current, batch.events);
+    } catch (error) {
+      this.pendingPersistence = batch;
+      console.error(
+        `[movement-engine] lifecycle persistence failed; retrying the same batch: ${message(error)}`,
+      );
+      return false;
+    }
+    this.pendingPersistence = null;
     this.engine.acknowledgePersisted();
-    this.lastTransition = mostRecentTransition;
+    this.lastTransition = batch.mostRecentTransition;
+    return true;
   }
 }

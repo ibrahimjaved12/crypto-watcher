@@ -126,7 +126,9 @@ function trailingContiguousRun(candles: readonly MovementCandle[]): MovementCand
 /**
  * Derives #71's caller-supplied normalization inputs from canonical completed
  * one-minute candles. Window returns use the same horizon as the live window
- * (`log(close[t]/close[t-window])`); five-second history is never fabricated.
+ * (`log(close[t]/close[t-window])`) and are sampled on fixed exchange-time
+ * boundaries (see `buildSymbolNormalization`); five-second history is never
+ * fabricated.
  */
 export function buildMovementNormalizationHistory(
   candlesBySymbol: ReadonlyMap<string, readonly MovementCandle[]>,
@@ -139,6 +141,19 @@ export function buildMovementNormalizationHistory(
   return result;
 }
 
+/**
+ * Samples historical window returns on deterministic exchange-time alignment so
+ * the population is comparable regardless of where the returned candle series
+ * happens to start.
+ *
+ * - 1m stays canonical one-minute sampling.
+ * - 5m endpoints (and their return/notional windows) align to fixed 5-minute
+ *   epoch boundaries; 15m endpoints to fixed 15-minute boundaries.
+ *
+ * A window is only sampled when both endpoints and every minute in the notional
+ * interval are present in the trailing contiguous run. Missing minutes are never
+ * fabricated; a gap still truncates the trusted history.
+ */
 function buildSymbolNormalization(
   candles: readonly MovementCandle[],
   config: MarketMovementConfig,
@@ -147,21 +162,33 @@ function buildSymbolNormalization(
   const run = trailingContiguousRun(candles);
   if (run.length < 2) return windows;
   const usableCoverageMs = run.at(-1)!.openTime + MINUTE_MS - run[0]!.openTime;
+  const oldestOpenTime = run[0]!.openTime;
+  const byOpenTime = new Map(run.map((candle) => [candle.openTime, candle]));
 
   for (const windowMinutes of MOVEMENT_WINDOWS_MINUTES) {
-    const offset = windowMinutes;
-    if (run.length <= offset) continue;
+    const windowMs = windowMinutes * MINUTE_MS;
     const returns: number[] = [];
     const previousNotionalVolumes: number[] = [];
-    for (let index = offset; index < run.length; index += windowMinutes) {
-      const current = run[index]!;
-      const previous = run[index - offset]!;
-      returns.push(Math.log(current.close / previous.close));
+    for (const current of run) {
+      const endpoint = current.openTime;
+      // Fixed exchange-time alignment, independent of the series' first candle.
+      if (endpoint % windowMs !== 0) continue;
+      const start = endpoint - windowMs;
+      if (start < oldestOpenTime) continue;
+      const previous = byOpenTime.get(start);
+      if (!previous) continue;
       let notional = 0;
-      for (let step = index - offset + 1; step <= index; step += 1) {
-        const candle = run[step]!;
+      let contiguous = true;
+      for (let openTime = start + MINUTE_MS; openTime <= endpoint; openTime += MINUTE_MS) {
+        const candle = byOpenTime.get(openTime);
+        if (!candle) {
+          contiguous = false;
+          break;
+        }
         notional += candle.close * candle.volume;
       }
+      if (!contiguous) continue;
+      returns.push(Math.log(current.close / previous.close));
       previousNotionalVolumes.push(notional);
     }
     if (returns.length === 0) continue;
