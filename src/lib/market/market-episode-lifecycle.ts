@@ -69,6 +69,24 @@ export type ActiveMarketEpisode = {
   lowMaterialBreadth: boolean;
 };
 
+/**
+ * Episode-scoping versions that identify which episode/config/universe an event
+ * belongs to. Context-change ENDED events must describe the episode being ended,
+ * not the evaluation that triggered the termination.
+ */
+type MarketEpisodeScope = Pick<
+  ActiveMarketEpisode,
+  | "episodeAlgorithmVersion"
+  | "lifecycleConfigVersion"
+  | "universeId"
+  | "universeVersion"
+  | "primaryWindowMinutes"
+  | "classifierAlgorithmVersion"
+  | "classifierConfigVersion"
+  | "movementAlgorithmVersion"
+  | "movementConfigVersion"
+>;
+
 export type MarketEpisodeLifecycleState = {
   episodeAlgorithmVersion: string;
   lifecycleConfigVersion: string;
@@ -346,8 +364,13 @@ function buildEvent(input: {
   primaryMovementWindow: MarketMovementWindowResult;
   direction: MarketEpisodeDirection;
   lifecycleConfigVersion: string;
+  /**
+   * When set, episode-scoping fields describe this episode scope instead of the
+   * current classification/config (used when terminating an episode on context change).
+   */
+  episodeScope?: MarketEpisodeScope;
 }): MarketMovementEvent {
-  const { classification, primaryWindow, primaryMovementWindow, direction } = input;
+  const { classification, primaryWindow, primaryMovementWindow, direction, episodeScope } = input;
   const { supportingContracts, conflictingContracts } = extractSupportingAndConflictingSymbols(
     primaryMovementWindow,
     direction,
@@ -378,17 +401,18 @@ function buildEvent(input: {
   return {
     eventId,
     episodeId: input.episodeId,
-    episodeAlgorithmVersion: MARKET_EPISODE_ALGORITHM_VERSION,
-    lifecycleConfigVersion: input.lifecycleConfigVersion,
+    episodeAlgorithmVersion:
+      episodeScope?.episodeAlgorithmVersion ?? MARKET_EPISODE_ALGORITHM_VERSION,
+    lifecycleConfigVersion: episodeScope?.lifecycleConfigVersion ?? input.lifecycleConfigVersion,
     transition: input.transition,
     transitionReason: input.transitionReason,
     fromDirection: input.fromDirection,
     toDirection: input.toDirection,
     episodeStartBoundaryTime: input.episodeStartBoundaryTime,
     evaluationBoundaryTime: input.evaluationBoundaryTime,
-    universeId: classification.universeId,
-    universeVersion: classification.universeVersion,
-    primaryWindowMinutes: 5,
+    universeId: episodeScope?.universeId ?? classification.universeId,
+    universeVersion: episodeScope?.universeVersion ?? classification.universeVersion,
+    primaryWindowMinutes: episodeScope?.primaryWindowMinutes ?? 5,
     provider: classification.provider,
     exchange: classification.exchange,
     priceType: classification.priceType,
@@ -420,10 +444,13 @@ function buildEvent(input: {
       reasons: [...reasons],
     })),
     windowsContext: classification.windows,
-    classifierAlgorithmVersion: classification.algorithmVersion,
-    classifierConfigVersion: classification.configVersion,
-    movementAlgorithmVersion: classification.movementAlgorithmVersion,
-    movementConfigVersion: classification.movementConfigVersion,
+    classifierAlgorithmVersion:
+      episodeScope?.classifierAlgorithmVersion ?? classification.algorithmVersion,
+    classifierConfigVersion: episodeScope?.classifierConfigVersion ?? classification.configVersion,
+    movementAlgorithmVersion:
+      episodeScope?.movementAlgorithmVersion ?? classification.movementAlgorithmVersion,
+    movementConfigVersion:
+      episodeScope?.movementConfigVersion ?? classification.movementConfigVersion,
   };
 }
 
@@ -558,6 +585,9 @@ export function processMarketEpisodeLifecycle(
           primaryMovementWindow,
           direction: activeEpisode.direction,
           lifecycleConfigVersion: config.version,
+          // The ENDED event describes the episode being terminated, so its
+          // universe/config/algorithm scope must come from the old episode.
+          episodeScope: activeEpisode,
         }),
       );
       activeEpisode = null;

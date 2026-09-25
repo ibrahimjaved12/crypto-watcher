@@ -1079,6 +1079,168 @@ test("15. universe/version change ends old episode", () => {
   assert.equal(step3.nextState.universeVersion, "2026-09-26");
 });
 
+function assertEndedMatchesEpisodeScope(ended, oldEpisode) {
+  assert.equal(ended.episodeId, oldEpisode.episodeId);
+  assert.equal(ended.universeId, oldEpisode.universeId);
+  assert.equal(ended.universeVersion, oldEpisode.universeVersion);
+  assert.equal(ended.primaryWindowMinutes, oldEpisode.primaryWindowMinutes);
+  assert.equal(ended.episodeAlgorithmVersion, oldEpisode.episodeAlgorithmVersion);
+  assert.equal(ended.lifecycleConfigVersion, oldEpisode.lifecycleConfigVersion);
+  assert.equal(ended.classifierAlgorithmVersion, oldEpisode.classifierAlgorithmVersion);
+  assert.equal(ended.classifierConfigVersion, oldEpisode.classifierConfigVersion);
+  assert.equal(ended.movementAlgorithmVersion, oldEpisode.movementAlgorithmVersion);
+  assert.equal(ended.movementConfigVersion, oldEpisode.movementConfigVersion);
+}
+
+test("context-change ENDED event scopes to the old episode on universe version change", () => {
+  const eval1 = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME,
+    universeVersion: "2026-09-25",
+  });
+  const step1 = processMarketEpisodeLifecycle({ ...eval1, previousState: null });
+  const eval2 = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 5_000,
+    universeVersion: "2026-09-25",
+  });
+  const step2 = processMarketEpisodeLifecycle({ ...eval2, previousState: step1.nextState });
+  const oldEpisode = step2.nextState.activeEpisode;
+  assert.notEqual(oldEpisode, null);
+  assert.equal(oldEpisode.universeVersion, "2026-09-25");
+
+  // Next evaluation arrives under a NEW universe version.
+  const eval3 = makePair({
+    primaryWindow: broadRiseWindow(),
+    boundaryTime: BASE_TIME + 10_000,
+    universeVersion: "2026-09-26",
+  });
+  const step3 = processMarketEpisodeLifecycle({ ...eval3, previousState: step2.nextState });
+
+  assert.equal(step3.transitions.length, 1);
+  const ended = step3.transitions[0];
+  assert.equal(ended.transition, "ENDED");
+  assert.equal(ended.transitionReason, "universe_version_changed");
+  // The ENDED event must describe the OLD episode, not the new universe/context.
+  assertEndedMatchesEpisodeScope(ended, oldEpisode);
+  assert.equal(ended.universeVersion, "2026-09-25");
+  // The reducer still adopts the new context for subsequent evaluations.
+  assert.equal(step3.nextState.universeVersion, "2026-09-26");
+});
+
+test("context-change ENDED event keeps the old lifecycle config version", () => {
+  const configV1 = lifecycleConfig("market-episode-config-v1");
+  const configV2 = lifecycleConfig("market-episode-config-v2");
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({
+    ...eval1,
+    previousState: null,
+    config: configV1,
+  });
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({
+    ...eval2,
+    previousState: step1.nextState,
+    config: configV1,
+  });
+  const oldEpisode = step2.nextState.activeEpisode;
+  assert.notEqual(oldEpisode, null);
+  assert.equal(oldEpisode.lifecycleConfigVersion, "market-episode-config-v1");
+
+  const eval3 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 10_000 });
+  const step3 = processMarketEpisodeLifecycle({
+    ...eval3,
+    previousState: step2.nextState,
+    config: configV2,
+  });
+
+  assert.equal(step3.transitions.length, 1);
+  const ended = step3.transitions[0];
+  assert.equal(ended.transition, "ENDED");
+  assert.equal(ended.transitionReason, "lifecycle_config_version_changed");
+  assertEndedMatchesEpisodeScope(ended, oldEpisode);
+  assert.equal(ended.lifecycleConfigVersion, "market-episode-config-v1");
+  assert.equal(step3.nextState.lifecycleConfigVersion, "market-episode-config-v2");
+
+  // Episode identity must remain internally consistent with the old scope.
+  assert.equal(
+    ended.episodeId,
+    computeEpisodeId({
+      universeId: oldEpisode.universeId,
+      universeVersion: oldEpisode.universeVersion,
+      primaryWindowMinutes: oldEpisode.primaryWindowMinutes,
+      direction: oldEpisode.direction,
+      startBoundaryTime: oldEpisode.startBoundaryTime,
+      movementAlgorithmVersion: oldEpisode.movementAlgorithmVersion,
+      movementConfigVersion: oldEpisode.movementConfigVersion,
+      classifierAlgorithmVersion: oldEpisode.classifierAlgorithmVersion,
+      classifierConfigVersion: oldEpisode.classifierConfigVersion,
+      episodeAlgorithmVersion: oldEpisode.episodeAlgorithmVersion,
+      lifecycleConfigVersion: oldEpisode.lifecycleConfigVersion,
+    }),
+  );
+});
+
+test("context-change ENDED event scopes classifier/movement/episode algorithm changes", () => {
+  const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
+  const step1 = processMarketEpisodeLifecycle({ ...eval1, previousState: null });
+  const eval2 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME + 5_000 });
+  const step2 = processMarketEpisodeLifecycle({ ...eval2, previousState: step1.nextState });
+  const oldEpisode = step2.nextState.activeEpisode;
+  assert.notEqual(oldEpisode, null);
+
+  const cases = [
+    {
+      reason: "classifier_algorithm_version_changed",
+      mutate: (pair) => {
+        pair.classification.algorithmVersion = "market-state-v2";
+      },
+    },
+    {
+      reason: "classifier_config_version_changed",
+      mutate: (pair) => {
+        pair.classification.configVersion = "market-state-config-v2";
+      },
+    },
+    {
+      reason: "movement_algorithm_version_changed",
+      mutate: (pair) => {
+        pair.classification.movementAlgorithmVersion = "market-movement-v2";
+        pair.movement.algorithmVersion = "market-movement-v2";
+      },
+    },
+    {
+      reason: "movement_config_version_changed",
+      mutate: (pair) => {
+        pair.classification.movementConfigVersion = "market-movement-config-v2";
+        pair.movement.configVersion = "market-movement-config-v2";
+      },
+    },
+  ];
+
+  let boundary = BASE_TIME + 5_000;
+  for (const { reason, mutate } of cases) {
+    boundary += 5_000;
+    const pair = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: boundary });
+    mutate(pair);
+    const step = processMarketEpisodeLifecycle({ ...pair, previousState: step2.nextState });
+    assert.equal(step.transitions[0]?.transitionReason, reason);
+    assertEndedMatchesEpisodeScope(step.transitions[0], oldEpisode);
+  }
+
+  // Episode algorithm change is detected from the persisted episode scope.
+  const algorithmChangedState = {
+    ...step2.nextState,
+    episodeAlgorithmVersion: "market-episode-old",
+    activeEpisode: { ...oldEpisode, episodeAlgorithmVersion: "market-episode-old" },
+  };
+  const pair = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: boundary + 5_000 });
+  const ended = processMarketEpisodeLifecycle({ ...pair, previousState: algorithmChangedState });
+  assert.equal(ended.transitions[0].transitionReason, "episode_algorithm_version_changed");
+  assertEndedMatchesEpisodeScope(ended.transitions[0], algorithmChangedState.activeEpisode);
+  assert.equal(ended.transitions[0].episodeAlgorithmVersion, "market-episode-old");
+});
+
 test("lifecycle version changes reset pending context and end active episodes", () => {
   const first = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
   const pendingV1 = processMarketEpisodeLifecycle({
@@ -1541,6 +1703,110 @@ test("21. market_state_current upsert is bounded to one row and updates on confl
   assert.equal(res.rows[0].episode_algorithm_version, "market-episode-v1");
   assert.equal(res.rows[0].lifecycle_config_version, "market-episode-config-v1");
   assert.equal(res.rows[0].lifecycle_state.serializationVersion, "market-episode-state-v1");
+});
+
+function upsertCurrentRow({
+  universeId = "monotonic-usdm",
+  boundaryTime,
+  directionState = "BROAD_RISE",
+  pace = "ACCELERATING",
+  activeEpisodeId = "mep_monotonic",
+  activeDirection = "BROAD_RISE",
+  evidence = { risingFraction: 0.8 },
+}) {
+  return db.query(
+    `SELECT public.upsert_market_state_current(
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+      $17, $18, $19, $20
+    )`,
+    [
+      universeId,
+      5,
+      "2026-09-25",
+      "binance-usdm",
+      "binance",
+      "trade",
+      new Date(boundaryTime).toISOString(),
+      directionState,
+      pace,
+      activeEpisodeId,
+      activeDirection,
+      false,
+      "market-episode-v1",
+      "market-episode-config-v1",
+      "market-state-v1",
+      "market-state-config-v1",
+      "market-movement-v1",
+      "market-movement-config-v1",
+      JSON.stringify({ serializationVersion: "market-episode-state-v1" }),
+      JSON.stringify(evidence),
+    ],
+  );
+}
+
+test("market_state_current upsert is monotonic and rejects stale boundaries", async () => {
+  const newerBoundary = BASE_TIME + 30_000;
+  const olderBoundary = BASE_TIME;
+  const readRow = () =>
+    db.query(
+      "SELECT * FROM public.market_state_current WHERE universe_id = $1 AND primary_window_minutes = $2",
+      ["monotonic-usdm", 5],
+    );
+
+  // Newer snapshot is persisted first.
+  await upsertCurrentRow({
+    boundaryTime: newerBoundary,
+    directionState: "BROAD_RISE",
+    activeEpisodeId: "mep_newer",
+    activeDirection: "BROAD_RISE",
+    evidence: { risingFraction: 0.9 },
+  });
+
+  // A delayed/retried write for an OLDER boundary must not regress current state.
+  await upsertCurrentRow({
+    boundaryTime: olderBoundary,
+    directionState: "NEUTRAL",
+    pace: "NOT_APPLICABLE",
+    activeEpisodeId: null,
+    activeDirection: null,
+    evidence: { risingFraction: 0.1 },
+  });
+
+  let res = await readRow();
+  assert.equal(res.rows.length, 1);
+  assert.equal(new Date(res.rows[0].evaluation_boundary_time).getTime(), newerBoundary);
+  assert.equal(res.rows[0].direction_state, "BROAD_RISE");
+  assert.equal(res.rows[0].active_episode_id, "mep_newer");
+  assert.equal(res.rows[0].current_evidence.risingFraction, 0.9);
+
+  // Equal-boundary retry is still allowed to write (idempotent retry path).
+  await upsertCurrentRow({
+    boundaryTime: newerBoundary,
+    directionState: "BROAD_RISE",
+    pace: "MIXED",
+    activeEpisodeId: "mep_newer",
+    activeDirection: "BROAD_RISE",
+    evidence: { risingFraction: 0.9 },
+  });
+  res = await readRow();
+  assert.equal(res.rows.length, 1);
+  assert.equal(new Date(res.rows[0].evaluation_boundary_time).getTime(), newerBoundary);
+  assert.equal(res.rows[0].pace, "MIXED");
+
+  // A strictly newer boundary updates normally.
+  await upsertCurrentRow({
+    boundaryTime: newerBoundary + 5_000,
+    directionState: "BROAD_DROP",
+    activeEpisodeId: "mep_newest",
+    activeDirection: "BROAD_DROP",
+    evidence: { fallingFraction: 0.9 },
+  });
+  res = await readRow();
+  assert.equal(res.rows.length, 1);
+  assert.equal(new Date(res.rows[0].evaluation_boundary_time).getTime(), newerBoundary + 5_000);
+  assert.equal(res.rows[0].direction_state, "BROAD_DROP");
+  assert.equal(res.rows[0].active_episode_id, "mep_newest");
+  assert.equal(res.rows[0].current_evidence.fallingFraction, 0.9);
 });
 
 test("atomic lifecycle persistence appends events and upserts current state in one transaction", async () => {

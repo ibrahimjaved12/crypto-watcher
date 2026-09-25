@@ -143,7 +143,8 @@ BEGIN
     movement_config_version = EXCLUDED.movement_config_version,
     lifecycle_state = EXCLUDED.lifecycle_state,
     current_evidence = EXCLUDED.current_evidence,
-    updated_at = clock_timestamp();
+    updated_at = clock_timestamp()
+  WHERE public.market_state_current.evaluation_boundary_time <= EXCLUDED.evaluation_boundary_time;
 END;
 $$;
 
