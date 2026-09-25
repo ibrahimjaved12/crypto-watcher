@@ -90,12 +90,14 @@ The worker reads it to start the collector; the application reads it to know tha
 collector owns completed-candle/checkpoint state. Locally, `npm run dev:local:all` starts the
 collector worker as a separate process and enables the flag for both processes, while
 `npm run dev:local` disables it and uses the legacy request-driven path. `npm run collector:worker`
-runs the worker on its own. In production, run the collector as a persistent worker process and
-select its host from the evidence in #19; the operational lease elects one collector across
-instances. Disable the flag on the whole fleet and stop the worker to roll back without
-simultaneous writers. Health (`LIVE`, `RECOVERING`, `STALE`, or `UNAVAILABLE`) is returned only
-through the authenticated operational-state server function and is filtered to the caller's
-watchlist.
+runs the worker on its own. `npm run collector:worker:build` produces the self-contained
+`dist/collector-worker/collector-worker.mjs` artifact, which `npm run collector:worker:start` runs
+with plain `node`; that production path needs no devDependencies. In production, run the collector
+as a persistent worker process and select its host from the evidence in #19; the operational lease
+elects one collector across instances. Disable the flag on the whole fleet and stop the worker to
+roll back without simultaneous writers. Health (`LIVE`, `RECOVERING`, `STALE`, or `UNAVAILABLE`) is
+returned only through the authenticated operational-state server function and is filtered to the
+caller's watchlist.
 
 ## Monitor overlap and freshness
 

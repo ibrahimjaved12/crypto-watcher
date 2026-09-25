@@ -131,6 +131,9 @@ export class CollectorRuntime {
     this.rejectPendingRequests("collector stopping");
     this.socket?.close(1000, "collector stopping");
     this.socket = null;
+    // An explicit shutdown must be a complete barrier for collector-owned runtime
+    // work: await the movement engine's teardown before releasing ownership.
+    await this.movement.stop();
     if (this.active) await this.store.releaseCollectorLease(this.instanceId);
     this.active = false;
   }
@@ -151,6 +154,7 @@ export class CollectorRuntime {
       const heldLease = this.active;
       this.active = false;
       this.clearTimers();
+      void this.movement.stop();
       this.rejectPendingRequests("collector startup failed");
       this.socket?.close();
       this.socket = null;
@@ -199,6 +203,7 @@ export class CollectorRuntime {
     }
     this.active = false;
     this.clearTimers();
+    void this.movement.stop();
     this.rejectPendingRequests("authoritative collector lease lost");
     this.backgroundHealth("UNAVAILABLE", "authoritative collector lease lost");
     this.socket?.close(1012, "collector lease lost");
@@ -352,7 +357,6 @@ export class CollectorRuntime {
     this.staleTimer = null;
     this.retryTimer = null;
     this.lifetimeTimer = null;
-    void this.movement.stop();
   }
 }
 

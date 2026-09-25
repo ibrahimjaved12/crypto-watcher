@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import ts from "../node_modules/typescript/lib/typescript.js";
 
 const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
@@ -62,6 +66,12 @@ test("the worker entrypoint reuses the shared collector startup path", async () 
   );
   assert.match(worker, /from "\.\/collector\.server"/);
   assert.match(worker, /startBinanceCollector/);
+  const entry = await readFile(
+    new URL("../src/worker/collector-worker.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(entry, /from "\.\.\/lib\/market\/collector-worker\.server"/);
+  assert.match(entry, /startCollectorWorker\(\)/);
 });
 
 test("the worker starts through startBinanceCollector and releases on shutdown", async () => {
@@ -139,12 +149,43 @@ test("the worker wires SIGTERM and SIGINT by default", async () => {
 test("package.json and the launcher expose a separate collector worker", async () => {
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.scripts["collector:worker"], "node scripts/collector-worker.mjs");
+  assert.equal(
+    pkg.scripts["collector:worker:build"],
+    "vite build --config vite.collector-worker.config.ts",
+  );
+  assert.equal(
+    pkg.scripts["collector:worker:start"],
+    "node dist/collector-worker/collector-worker.mjs",
+  );
   const launcher = await readFile(
     new URL("../scripts/collector-worker.mjs", import.meta.url),
     "utf8",
   );
-  assert.match(launcher, /collector-worker\.server\.ts/);
-  assert.match(launcher, /startCollectorWorker/);
+  assert.match(launcher, /src\/worker\/collector-worker\.ts/);
+});
+
+test("the production worker artifact builds and runs with plain node", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const build = spawnSync(
+    process.execPath,
+    ["node_modules/vite/bin/vite.js", "build", "--config", "vite.collector-worker.config.ts"],
+    { cwd: root, encoding: "utf8" },
+  );
+  assert.equal(build.status, 0, build.stderr);
+  const artifact = join(root, "dist/collector-worker/collector-worker.mjs");
+  const output = readFileSync(artifact, "utf8");
+  const externalImports = [...output.matchAll(/^import .* from "([^"]+)"/gm)].map(
+    (match) => match[1],
+  );
+  // Self-contained: no bare package specifiers, so no devDependency (Vite) is
+  // needed at runtime.
+  assert.deepEqual(externalImports, ["node:crypto"]);
+  const run = spawnSync(process.execPath, [artifact], {
+    env: { ...process.env, BINANCE_COLLECTOR_ENABLED: "false" },
+    encoding: "utf8",
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /no collector to run/);
 });
 
 test("local development starts the collector as a separate process", async () => {

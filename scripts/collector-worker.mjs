@@ -1,9 +1,10 @@
 import { resolve } from "node:path";
 import { loadEnv, runnerImport } from "vite";
 
-// The Binance collector runs as its own persistent process, independently of the
-// TanStack application server. This launcher loads the local environment, then
-// imports the TypeScript worker entrypoint through Vite's SSR module runner.
+// Local-development launcher for the persistent collector worker. It loads the
+// TypeScript entrypoint through Vite's SSR module runner, so Vite (a
+// devDependency) is only needed here. Production runs the prebuilt
+// `dist/collector-worker/collector-worker.mjs` artifact with plain `node`.
 const root = resolve(import.meta.dirname, "..");
 
 function modeFromArgs() {
@@ -26,19 +27,12 @@ async function main() {
     if (value !== undefined && process.env[name] === undefined) process.env[name] = value;
   }
 
-  const { module } = await runnerImport("/src/lib/market/collector-worker.server.ts", {
+  await runnerImport("/src/worker/collector-worker.ts", {
     root,
     mode,
     configFile: false,
     envDir: false,
   });
-
-  const runtime = module.startCollectorWorker();
-  if (!runtime) {
-    console.log("[collector-worker] BINANCE_COLLECTOR_ENABLED is not true; no collector to run.");
-    return;
-  }
-  console.log("[collector-worker] collector started; awaiting termination signal.");
 }
 
 try {
