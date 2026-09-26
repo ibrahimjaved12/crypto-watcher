@@ -187,6 +187,7 @@ class ApiTests(unittest.TestCase):
         readiness = result["snapshots"][0]["readiness"]["1"]
         self.assertEqual(readiness["state"], "warming")
         self.assertEqual(readiness["reason"], "insufficient_exact_live_history")
+        self.assertEqual(readiness["status"], "WARMING")
 
     def test_batch_provenance_and_completion_boundary(self):
         app = create_app(TOKEN, analyzer_for())

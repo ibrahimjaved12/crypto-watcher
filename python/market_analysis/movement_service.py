@@ -125,7 +125,10 @@ class MovementBoundaryService:
                 "windowMinutes": window_minutes,
                 "state": result.state,
                 "reason": result.reason,
-                "status": result.state.upper(),
+                "status": {
+                    "ready": "READY",
+                    "warming": "WARMING",
+                }.get(result.state, "STALE"),
             }
         latest = buckets[-1] if buckets else None
         return {

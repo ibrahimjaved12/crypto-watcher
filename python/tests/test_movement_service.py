@@ -48,6 +48,13 @@ class MovementBoundaryServiceTests(unittest.TestCase):
             ("unavailable", "source_unavailable_in_required_history"),
         )
 
+        expected_status = {
+            "ready": "READY",
+            "warming": "WARMING",
+            "stale": "STALE",
+            "missing_history": "STALE",
+            "unavailable": "STALE",
+        }
         for state, reason in states:
             with self.subTest(state=state):
                 class ReadinessEngine:
@@ -63,7 +70,7 @@ class MovementBoundaryServiceTests(unittest.TestCase):
                     transported = snapshot["readiness"][window]
                     self.assertEqual(transported["state"], state)
                     self.assertEqual(transported["reason"], reason)
-                    self.assertEqual(transported["status"], state.upper())
+                    self.assertEqual(transported["status"], expected_status[state])
 
     def test_failed_later_symbol_does_not_commit_earlier_symbol_boundary(self):
         service = MovementBoundaryService()
