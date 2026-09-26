@@ -583,7 +583,7 @@ test("repository collector TA read transports recorded provenance without fabric
   const { createOperationalStore } = await import(repositoryUrl);
   const base = 1_800_000_000_000;
   const step = 900_000;
-  const row = (index, transport, endpoint) => ({
+  const row = (index, transport, endpoint, sourceEventTime = undefined) => ({
     provider: "binance-usdm",
     instrument_id: "binance-usdm:BTCUSDT",
     native_symbol: "BTCUSDT",
@@ -594,7 +594,8 @@ test("repository collector TA read transports recorded provenance without fabric
     close_time_ms: base + index * step + step - 1,
     // REST rows have no exchange event; WebSocket rows carry the actual event time,
     // deliberately offset from the completion boundary to prove it is not rewritten.
-    source_event_at_ms: transport === "rest" ? null : base + index * step + step + 7,
+    source_event_at_ms:
+      sourceEventTime ?? (transport === "rest" ? null : base + index * step + step + 7),
     received_at_ms: base + index * step + step + 120,
     open: 100,
     high: 110,
@@ -604,7 +605,7 @@ test("repository collector TA read transports recorded provenance without fabric
   });
   const rows = [
     row(0, "rest", "/fapi/v1/klines"),
-    row(1, "websocket", "wss://fstream.binance.com/market/stream"),
+    row(1, "websocket", "wss://fstream.binance.com/market/stream", base + 2 * step - 7),
   ];
   const store = createOperationalStore(
     {
@@ -651,8 +652,8 @@ test("repository collector TA read transports recorded provenance without fabric
       volume: 3,
       complete: true,
       closeTime: base + 2 * step - 1,
-      // WebSocket provenance: the recorded exchange event time survives unchanged.
-      sourceEventTime: base + 2 * step + 7,
+      // WebSocket provenance: even an event before completion survives unchanged.
+      sourceEventTime: base + 2 * step - 7,
       receivedAt: base + 2 * step + 120,
       endpoint: "wss://fstream.binance.com/market/stream",
       transport: "websocket",
@@ -675,12 +676,8 @@ test("repository collector TA read transports recorded provenance without fabric
     /invalid collector TA candle row/,
   );
 
-  // A row whose source event precedes the candle close, or an unknown transport, is
-  // rejected instead of being silently normalised.
-  for (const corrupt of [
-    { ...row(0, "rest", "/fapi/v1/klines"), source_event_at_ms: base - 1 },
-    { ...row(0, "rest", "/fapi/v1/klines"), transport: "carrier-pigeon" },
-  ]) {
+  // Structural corruption remains rejected instead of being silently normalised.
+  for (const corrupt of [{ ...row(0, "rest", "/fapi/v1/klines"), transport: "carrier-pigeon" }]) {
     const invalid = createOperationalStore(
       {
         async rpc() {

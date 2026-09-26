@@ -384,8 +384,7 @@ export function createOperationalStore(
           volume! < 0 ||
           high! < Math.max(open!, close!) ||
           low! > Math.min(open!, close!) ||
-          closeTime <= openTime ||
-          (sourceEventTime !== null && sourceEventTime < closeTime)
+          closeTime <= openTime
         ) {
           throw new Error("Operational database returned an invalid collector TA candle row");
         }
