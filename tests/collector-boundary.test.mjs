@@ -65,6 +65,8 @@ const collectorReplacements = {
     export async function advancePythonMovementBoundary() {
       return { snapshots: [], lateAfterFinalizationCount: 0 };
     }
+    export async function registerPythonMovementHistory() {}
+    export async function calculatePythonMarketMovement() {}
   `),
   "./movement-finalization": stub(`export function movementFinalizationConfig() { return {}; }`),
   "./collector-worker-env.server": stub(`export function validateCollectorWorkerEnvironment() {}`),

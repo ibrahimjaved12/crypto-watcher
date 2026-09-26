@@ -6,24 +6,18 @@
  *
  *   #70 buckets -> #71 metrics -> #72 classification -> #73 lifecycle
  *
- * It performs no I/O and owns no WebSocket. The server runtime feeds it the shared
- * collector snapshots, per-symbol source status, and caller-supplied normalization
- * history, then persists whatever #73 decides is due.
+ * The runtime supplies the canonical Python #71 result for each boundary.
+ * This engine owns only sequencing and the temporary #72/#73 state.
  */
 import {
   MOVEMENT_BUCKET_MS,
   MOVEMENT_WINDOWS_MINUTES,
   type MovementBucketSnapshot,
-  type MovementWindowMinutes,
 } from "./movement-contract";
 import {
-  calculateMarketMovement,
-  DEFAULT_MARKET_MOVEMENT_CONFIG,
-  type HistoricalMovementWindowInput,
-  type MarketMovementConfig,
+  MARKET_MOVEMENT_ALGORITHM_VERSION,
   type MarketMovementEvaluation,
-  type MarketMovementSymbolInput,
-} from "./movement-metrics";
+} from "./movement-metrics-contract";
 import {
   classifyMarketState,
   DEFAULT_MARKET_STATE_CLASSIFIER_CONFIG,
@@ -41,21 +35,12 @@ import {
 } from "./market-episode-lifecycle";
 import type { MarketUniverse } from "./market-universe";
 import type {
-  MovementCandle,
-  MovementSourceStatus,
   PersistedMarketMovementCurrentEvidence,
   PersistedMovementTransition,
 } from "./market-movement-state";
 
-const MINUTE_MS = 60_000;
-
 /** Bound on boundaries caught up in a single advance before jumping to the latest safe one. */
 export const MOVEMENT_ENGINE_MAX_CATCHUP_BOUNDARIES = 60;
-
-export type MovementNormalizationHistory = Map<
-  string,
-  Partial<Record<MovementWindowMinutes, HistoricalMovementWindowInput>>
->;
 
 export type MovementBoundaryEvaluation = {
   boundaryTime: number;
@@ -66,11 +51,8 @@ export type MovementBoundaryEvaluation = {
 
 export type MovementEngineAdvanceInput = {
   finalizableBoundary: number;
-  snapshots: ReadonlyMap<string, MovementBucketSnapshot>;
-  sourceStatus: ReadonlyMap<string, MovementSourceStatus>;
-  historical: MovementNormalizationHistory;
   universe: MarketUniverse;
-  movementConfig?: MarketMovementConfig;
+  movementForBoundary: (boundaryTime: number) => Promise<MarketMovementEvaluation>;
   classifierConfig?: MarketStateClassifierConfig;
   lifecycleConfig?: MarketEpisodeLifecycleConfig;
 };
@@ -94,124 +76,6 @@ function finiteNonnegative(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
-
-/**
- * Keeps only the trailing contiguous run of one-minute candles, oldest to newest.
- * A gap means the earlier candles cannot be trusted as comparable history.
- */
-function trailingContiguousRun(candles: readonly MovementCandle[]): MovementCandle[] {
-  const usable = candles
-    .filter(
-      (candle) =>
-        Number.isSafeInteger(candle.openTime) &&
-        candle.openTime >= 0 &&
-        Number.isFinite(candle.close) &&
-        candle.close > 0 &&
-        Number.isFinite(candle.volume) &&
-        candle.volume >= 0,
-    )
-    .sort((left, right) => left.openTime - right.openTime);
-  const deduped: MovementCandle[] = [];
-  for (const candle of usable) {
-    const previous = deduped.at(-1);
-    if (previous && previous.openTime === candle.openTime) deduped[deduped.length - 1] = candle;
-    else deduped.push(candle);
-  }
-  if (deduped.length === 0) return [];
-  let start = deduped.length - 1;
-  while (start > 0 && deduped[start]!.openTime - deduped[start - 1]!.openTime === MINUTE_MS) {
-    start -= 1;
-  }
-  return deduped.slice(start);
-}
-
-/**
- * Derives #71's caller-supplied normalization inputs from canonical completed
- * one-minute candles. Window returns use the same horizon as the live window
- * (`log(close[t]/close[t-window])`) and are sampled on fixed exchange-time
- * boundaries (see `buildSymbolNormalization`); five-second history is never
- * fabricated.
- */
-export function buildMovementNormalizationHistory(
-  candlesBySymbol: ReadonlyMap<string, readonly MovementCandle[]>,
-  config: MarketMovementConfig = DEFAULT_MARKET_MOVEMENT_CONFIG,
-): MovementNormalizationHistory {
-  const result: MovementNormalizationHistory = new Map();
-  for (const [symbol, candles] of candlesBySymbol) {
-    result.set(symbol.toUpperCase(), buildSymbolNormalization(candles, config));
-  }
-  return result;
-}
-
-/**
- * Samples historical window returns on deterministic exchange-time alignment so
- * the population is comparable regardless of where the returned candle series
- * happens to start.
- *
- * A one-minute candle with `openTime = t` does not represent the price at `t`; it
- * completes at `t + 60s`. The observation boundary is therefore the candle's
- * *completed* boundary `openTime + 60_000`, and its close is the price immediately
- * preceding that aligned exchange-time boundary.
- *
- * - 1m stays canonical one-minute sampling.
- * - 5m endpoints (and their return/notional windows) align to fixed 5-minute
- *   epoch boundaries; 15m endpoints to fixed 15-minute boundaries.
- * - The prior endpoint is exactly `w` minutes earlier, and the notional window
- *   covers the same aligned interval (the `w` completed minutes ending at the
- *   current boundary).
- *
- * A window is only sampled when both endpoint candles and every minute in the
- * notional interval are present in the trailing contiguous run. Missing minutes
- * are never fabricated; a gap still truncates the trusted history.
- */
-function buildSymbolNormalization(
-  candles: readonly MovementCandle[],
-  config: MarketMovementConfig,
-): Partial<Record<MovementWindowMinutes, HistoricalMovementWindowInput>> {
-  const windows: Partial<Record<MovementWindowMinutes, HistoricalMovementWindowInput>> = {};
-  const run = trailingContiguousRun(candles);
-  if (run.length < 2) return windows;
-  const usableCoverageMs = run.at(-1)!.openTime + MINUTE_MS - run[0]!.openTime;
-  const oldestOpenTime = run[0]!.openTime;
-  const byOpenTime = new Map(run.map((candle) => [candle.openTime, candle]));
-
-  for (const windowMinutes of MOVEMENT_WINDOWS_MINUTES) {
-    const windowMs = windowMinutes * MINUTE_MS;
-    const returns: number[] = [];
-    const previousNotionalVolumes: number[] = [];
-    for (const current of run) {
-      // The close immediately preceding this candle's completed exchange boundary.
-      const boundary = current.openTime + MINUTE_MS;
-      // Fixed exchange-time alignment, independent of the series' first candle.
-      if (boundary % windowMs !== 0) continue;
-      const priorBoundary = boundary - windowMs;
-      const previousOpenTime = priorBoundary - MINUTE_MS;
-      if (previousOpenTime < oldestOpenTime) continue;
-      const previous = byOpenTime.get(previousOpenTime);
-      if (!previous) continue;
-      let notional = 0;
-      let contiguous = true;
-      for (let openTime = priorBoundary; openTime <= boundary - MINUTE_MS; openTime += MINUTE_MS) {
-        const candle = byOpenTime.get(openTime);
-        if (!candle) {
-          contiguous = false;
-          break;
-        }
-        notional += candle.close * candle.volume;
-      }
-      if (!contiguous) continue;
-      returns.push(Math.log(current.close / previous.close));
-      previousNotionalVolumes.push(notional);
-    }
-    if (returns.length === 0) continue;
-    windows[windowMinutes] = {
-      returns,
-      usableCoverageMs,
-      previousNotionalVolumes: previousNotionalVolumes.slice(-config.rvolComparisonWindows),
-    };
-  }
-  return windows;
 }
 
 /** Converts a #73 movement event into the compact transition consumers inspect. */
@@ -295,7 +159,7 @@ export class MarketMovementEngine {
    * Evaluates every finalized boundary up to `finalizableBoundary`. Idempotent:
    * re-advancing to an already-evaluated boundary performs no new evaluation.
    */
-  advance(input: MovementEngineAdvanceInput): MovementBoundaryEvaluation[] {
+  async advance(input: MovementEngineAdvanceInput): Promise<MovementBoundaryEvaluation[]> {
     if (
       !Number.isSafeInteger(input.finalizableBoundary) ||
       input.finalizableBoundary < 0 ||
@@ -327,32 +191,42 @@ export class MarketMovementEngine {
       boundary <= input.finalizableBoundary;
       boundary += MOVEMENT_BUCKET_MS
     ) {
-      results.push(this.evaluateBoundary(boundary, input));
+      results.push(await this.evaluateBoundary(boundary, input));
     }
     return results;
   }
 
-  private evaluateBoundary(
+  private async evaluateBoundary(
     boundaryTime: number,
     input: MovementEngineAdvanceInput,
-  ): MovementBoundaryEvaluation {
-    const symbols: MarketMovementSymbolInput[] = input.universe.symbols.map((symbol) => ({
-      symbol,
-      sourceStatus: input.sourceStatus.get(symbol) ?? "UNAVAILABLE",
-      instrumentCompatible: true,
-      snapshot: input.snapshots.get(symbol) ?? null,
-      historical: input.historical.get(symbol) ?? {},
-    }));
-    const movement = calculateMarketMovement({
-      evaluationBoundaryTime: boundaryTime,
-      universe: {
-        id: input.universe.id,
-        version: input.universe.version,
-        symbols: input.universe.symbols,
-      },
-      symbols,
-      ...(input.movementConfig ? { config: input.movementConfig } : {}),
-    });
+  ): Promise<MovementBoundaryEvaluation> {
+    const movement = await input.movementForBoundary(boundaryTime);
+    if (
+      movement.evaluationBoundaryTime !== boundaryTime ||
+      movement.algorithmVersion !== MARKET_MOVEMENT_ALGORITHM_VERSION ||
+      movement.universeId !== input.universe.id ||
+      movement.universeVersion !== input.universe.version ||
+      movement.configuredUniverse.length !== input.universe.symbols.length ||
+      movement.configuredUniverse.some((symbol, index) => symbol !== input.universe.symbols[index]) ||
+      movement.provider !== "binance-usdm" ||
+      movement.exchange !== "binance" || movement.priceType !== "trade" ||
+      movement.windows.length !== MOVEMENT_WINDOWS_MINUTES.length ||
+      MOVEMENT_WINDOWS_MINUTES.some((window) =>
+        movement.windows.filter((item) =>
+          item.windowMinutes === window &&
+          item.algorithmVersion === movement.algorithmVersion &&
+          item.configVersion === movement.configVersion &&
+          item.evaluationBoundaryTime === boundaryTime &&
+          item.universeId === input.universe.id &&
+          item.universeVersion === input.universe.version &&
+          item.provider === "binance-usdm" && item.exchange === "binance" &&
+          item.priceType === "trade" &&
+          item.configuredUniverse.length === input.universe.symbols.length &&
+          item.configuredUniverse.every((symbol, index) => symbol === input.universe.symbols[index]),
+        ).length !== 1)
+    ) {
+      throw new Error("canonical movement response has mismatched boundary or provenance");
+    }
     const classification = classifyMarketState({
       movement,
       config: input.classifierConfig ?? DEFAULT_MARKET_STATE_CLASSIFIER_CONFIG,

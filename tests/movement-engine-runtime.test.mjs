@@ -18,8 +18,12 @@ async function transpile(path, rewrites = {}) {
 
 const movementBucketsUrl = await transpile("../src/lib/market/movement-contract.ts");
 const stateUrl = await transpile("../src/lib/market/market-movement-state.ts");
-const metricsUrl = await transpile("../src/lib/market/movement-metrics.ts", {
+const metricsUrl = await transpile("../src/lib/market/movement-metrics-contract.ts", {
   "./movement-contract": movementBucketsUrl,
+});
+const normalizationUrl = await transpile("../src/lib/market/movement-normalization-input.ts", {
+  "./movement-contract": movementBucketsUrl,
+  "./movement-metrics-contract": metricsUrl,
 });
 const classifierUrl = await transpile("../src/lib/market/market-state-classifier.ts");
 const lifecycleUrl = await transpile("../src/lib/market/market-episode-lifecycle.ts");
@@ -31,7 +35,7 @@ const finalizationUrl = await transpile("../src/lib/market/movement-finalization
 });
 const engineUrl = await transpile("../src/lib/market/market-movement-engine.ts", {
   "./movement-contract": movementBucketsUrl,
-  "./movement-metrics": metricsUrl,
+  "./movement-metrics-contract": metricsUrl,
   "./market-state-classifier": classifierUrl,
   "./market-episode-lifecycle": lifecycleUrl,
   "./market-universe": universeUrl,
@@ -41,7 +45,8 @@ const runtimeUrl = await transpile("../src/lib/market/movement-engine.server.ts"
   "./market-universe": universeUrl,
   "./market-episode-lifecycle": lifecycleUrl,
   "./movement-finalization": finalizationUrl,
-  "./movement-metrics": metricsUrl,
+  "./movement-metrics-contract": metricsUrl,
+  "./movement-normalization-input": normalizationUrl,
   "./market-state-classifier": classifierUrl,
   "./market-movement-state": stateUrl,
 });
@@ -127,10 +132,41 @@ function snapshotFor(symbol, boundary) {
   };
 }
 
+function canonicalMovement(universe, boundary) {
+  const value = (number) => ({ available: true, value: number });
+  return {
+    algorithmVersion: "market-movement-v1", configVersion: "market-movement-config-v1",
+    universeId: universe.id, universeVersion: universe.version,
+    configuredUniverse: [...universe.symbols],
+    provider: "binance-usdm", exchange: "binance", priceType: "trade",
+    evaluationBoundaryTime: boundary,
+    windows: [1, 5, 15].map((windowMinutes) => ({
+      algorithmVersion: "market-movement-v1", configVersion: "market-movement-config-v1",
+      universeId: universe.id, universeVersion: universe.version,
+      configuredUniverse: [...universe.symbols], includedSymbols: [...universe.symbols],
+      excludedSymbols: [], windowMinutes,
+      provider: "binance-usdm", exchange: "binance", priceType: "trade",
+      evaluationBoundaryTime: boundary, marketWideEligible: true,
+      eligibleCount: universe.symbols.length, eligibleFraction: 1,
+      breadth: { available: true, flatFraction: 0, risingFraction: 1,
+        fallingFraction: 0, materialRisingFraction: 1, materialFallingFraction: 0 },
+      aggregates: { medianRawReturn: value(0.01), medianNormalizedMovement: value(1),
+        dispersionMadNormalizedMovement: value(0.1) },
+      symbols: universe.symbols.map((symbol) => ({
+        symbol, included: true, direction: "RISING", currentReturn: value(0.01),
+        normalizedZ: value(1), acceleration: value(0.0001), rvol: value(1.2),
+        outlierCandidate: false,
+      })),
+    })),
+  };
+}
+
 function createHarness() {
-  const state = { now: BASE, boundary: BASE, advanced: [] };
-  const control = { failRestore: 0, failHistory: 0, failPersist: false, symbols: [...SYMBOLS] };
-  const calls = { restore: 0, history: 0, persist: [] };
+  const state = { now: BASE, boundary: BASE, advanced: [], sessionId: crypto.randomUUID() };
+  const control = { failRestore: 0, failHistory: 0, failPersist: false,
+    failMetrics: false, rotateDuringMetrics: false, changeUniverseDuringMetrics: false,
+    symbols: [...SYMBOLS] };
+  const calls = { restore: 0, history: 0, register: [], metrics: [], persist: [] };
   const persistedEvents = new Map();
   const candles = new Map(SYMBOLS.map((symbol) => [symbol, historicalCandles()]));
   let durableCurrent = null;
@@ -141,6 +177,7 @@ function createHarness() {
     movementSourceStatus: () => "LIVE",
     movementLateRejections: () => 0,
     movementSnapshot: (symbol) => snapshotFor(symbol, state.boundary),
+    currentMovementSessionId: () => state.sessionId,
   };
   const store = {
     async getMarketStateCurrent() {
@@ -172,6 +209,16 @@ function createHarness() {
   const runtime = new MovementEngineRuntime({
     store,
     collector,
+    async registerHistory(sessionId, historyVersion, universe, config, historical) {
+      calls.register.push({sessionId, historyVersion, universe, config, historical});
+    },
+    async calculateMovement(sessionId, boundary, historyVersion, universe) {
+      calls.metrics.push({sessionId, boundary, historyVersion, universe});
+      if (control.failMetrics) throw new Error("Python #71 unavailable");
+      if (control.rotateDuringMetrics) state.sessionId = crypto.randomUUID();
+      if (control.changeUniverseDuringMetrics) control.symbols = [...SYMBOLS, "XRPUSDT"];
+      return canonicalMovement(universe, boundary);
+    },
     finalization: { version: "movement-finalization-config-v1:grace-0", graceMs: 0 },
     now: () => state.now,
   });
@@ -199,6 +246,61 @@ test("runtime persists the effective finalization config and receive-time proven
   assert.equal(evidence.finalizationConfigVersion, "movement-finalization-config-v1:grace-0");
   assert.equal(evidence.finalizationGraceMs, 0);
   assert.equal(evidence.timestamps.lastReceivedAt, BASE + 123);
+});
+
+test("history registers once per refresh and metrics use the same canonical session", async () => {
+  const harness = createHarness();
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.register.length, 1);
+  assert.equal(harness.calls.metrics.length, 1);
+  assert.equal(harness.calls.metrics[0].sessionId, harness.calls.register[0].sessionId);
+  assert.equal(harness.calls.metrics[0].historyVersion, harness.calls.register[0].historyVersion);
+  harness.state.now = BASE + 5_000;
+  harness.state.boundary = BASE + 5_000;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.register.length, 1);
+  assert.equal(harness.calls.metrics.length, 2);
+  harness.state.sessionId = crypto.randomUUID();
+  harness.state.now = BASE + 10_000;
+  harness.state.boundary = BASE + 10_000;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.register.length, 2);
+  assert.equal(harness.calls.register[1].sessionId, harness.state.sessionId);
+  harness.state.now = BASE + 15 * MINUTE;
+  harness.state.boundary = harness.state.now;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.register.length, 3);
+  harness.control.symbols = [...SYMBOLS, "XRPUSDT"];
+  harness.state.now += 5_000;
+  harness.state.boundary = harness.state.now;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.register.length, 4);
+});
+
+test("Python #71 failure does not stop later #70 finalization or advance lifecycle", async () => {
+  const harness = createHarness();
+  harness.control.failMetrics = true;
+  await harness.runtime.runOnce();
+  assert.equal(harness.runtime.engine.lastEvaluatedBoundary, null);
+  harness.state.now = BASE + 5_000;
+  harness.state.boundary = BASE + 5_000;
+  await harness.runtime.runOnce();
+  assert.equal(harness.state.advanced.at(-1), BASE + 5_000);
+  assert.equal(harness.runtime.engine.lastEvaluatedBoundary, null);
+  assert.equal(harness.calls.persist.length, 0);
+  harness.control.failMetrics = false;
+  await harness.runtime.runOnce();
+  assert.equal(harness.runtime.engine.lastEvaluatedBoundary, BASE + 5_000);
+});
+
+test("old session and changed universe responses are discarded before #72/#73", async () => {
+  for (const change of ["rotateDuringMetrics", "changeUniverseDuringMetrics"]) {
+    const harness = createHarness();
+    harness.control[change] = true;
+    await harness.runtime.runOnce();
+    assert.equal(harness.runtime.engine.lastEvaluatedBoundary, null);
+    assert.equal(harness.calls.persist.length, 0);
+  }
 });
 
 test("pending lifecycle persistence does not block newer bucket finalization", async () => {

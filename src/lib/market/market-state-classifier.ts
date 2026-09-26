@@ -5,7 +5,7 @@ import type {
   Metric,
   MetricUnavailableReason,
   SymbolExclusionReason,
-} from "./movement-metrics";
+} from "./movement-metrics-contract";
 
 export const MARKET_STATE_CLASSIFIER_VERSION = "market-state-v1";
 
@@ -64,11 +64,11 @@ export type MarketStateEvidence = {
   eligibleFraction: number;
   includedSymbols: string[];
   excludedSymbols: Array<{ symbol: string; reasons: SymbolExclusionReason[] }>;
-  flatFraction: number;
-  risingFraction: number;
-  fallingFraction: number;
-  materialRisingFraction: number;
-  materialFallingFraction: number;
+  flatFraction: number | null;
+  risingFraction: number | null;
+  fallingFraction: number | null;
+  materialRisingFraction: number | null;
+  materialFallingFraction: number | null;
   medianRawReturn: Metric;
   medianNormalizedMovement: Metric;
   medianAcceleration: ClassificationMetric;
@@ -195,8 +195,8 @@ function directionState(
   const medianRawReturn = window.aggregates.medianRawReturn;
   const medianNormalizedMovement = window.aggregates.medianNormalizedMovement;
   const broadRise =
-    window.breadth.risingFraction >= config.broadDirectionalBreadth &&
-    window.breadth.materialRisingFraction >= config.broadMaterialBreadth &&
+    window.breadth.risingFraction! >= config.broadDirectionalBreadth &&
+    window.breadth.materialRisingFraction! >= config.broadMaterialBreadth &&
     medianRawReturn.available &&
     medianRawReturn.value > 0 &&
     medianNormalizedMovement.available &&
@@ -204,8 +204,8 @@ function directionState(
   if (broadRise) return "BROAD_RISE";
 
   const broadDrop =
-    window.breadth.fallingFraction >= config.broadDirectionalBreadth &&
-    window.breadth.materialFallingFraction >= config.broadMaterialBreadth &&
+    window.breadth.fallingFraction! >= config.broadDirectionalBreadth &&
+    window.breadth.materialFallingFraction! >= config.broadMaterialBreadth &&
     medianRawReturn.available &&
     medianRawReturn.value < 0 &&
     medianNormalizedMovement.available &&
@@ -296,7 +296,7 @@ function isolatedOutliers(
       symbol.currentReturn.value > 0 ? "RISING" : symbol.currentReturn.value < 0 ? "FALLING" : null;
     if (direction === null) continue;
     const sameDirectionBreadth =
-      direction === "RISING" ? window.breadth.risingFraction : window.breadth.fallingFraction;
+      direction === "RISING" ? window.breadth.risingFraction! : window.breadth.fallingFraction!;
     if (sameDirectionBreadth >= config.isolatedOutlierDisagreement) continue;
     result.push({
       symbol: symbol.symbol,

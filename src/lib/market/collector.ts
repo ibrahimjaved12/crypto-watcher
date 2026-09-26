@@ -395,6 +395,11 @@ export class BinanceFuturesCollector {
     );
   }
 
+  /** Opaque identity of the canonical Python #70 session currently owned here. */
+  currentMovementSessionId(): string {
+    return this.movementSessionId;
+  }
+
   /** Trades rejected because their exchange-time bucket had already been finalized. */
   movementLateRejections(): number {
     return this.movementLateRejections;

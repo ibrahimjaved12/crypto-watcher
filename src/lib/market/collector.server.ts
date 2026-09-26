@@ -7,7 +7,8 @@ import {
   normalizeRestCandles,
 } from "./collector";
 import { MovementEngineRuntime } from "./movement-engine.server";
-import { advancePythonMovementBoundary } from "./movement-python-client.server";
+import { advancePythonMovementBoundary, calculatePythonMarketMovement,
+  registerPythonMovementHistory } from "./movement-python-client.server";
 import { movementFinalizationConfig } from "./movement-finalization";
 import { validateCollectorWorkerEnvironment } from "./collector-worker-env.server";
 
@@ -78,6 +79,8 @@ export class CollectorRuntime {
       store,
       collector: this.collector,
       finalization: movementFinalizationConfig(process.env),
+      registerHistory: registerPythonMovementHistory,
+      calculateMovement: calculatePythonMarketMovement,
     });
   }
 

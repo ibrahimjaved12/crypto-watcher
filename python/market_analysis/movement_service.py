@@ -1,9 +1,14 @@
 """In-memory transport adapter around the pure movement bucket engine."""
 from collections import OrderedDict
+from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import fields, is_dataclass
+from decimal import Decimal
 from hashlib import sha256
+import json
 
-from .api_models import MovementBoundaryRequest
+from .api_models import (MovementBoundaryRequest, MovementHistoryRegistrationRequest,
+                         MovementMetricsRequest)
 from .movement import (
     BINANCE_USDM,
     BUCKET_INTERVAL_MS,
@@ -14,6 +19,9 @@ from .movement import (
     MarketObservation,
     MovementBucketEngine,
 )
+from .movement_metrics import (HistoricalWindowInput, MarketMovementConfig,
+                               MarketMovementInput, MarketMovementSymbolInput,
+                               MarketUniverseInput, calculate_market_movement)
 
 DEFAULT_RESPONSE_CACHE_CAPACITY = 4
 DEFAULT_SESSION_CAPACITY = 4
@@ -43,6 +51,7 @@ class MovementBoundaryService:
             "late_after_finalization_count": 0,
             "responses": OrderedDict(),
             "response_hashes": {},
+            "history": None,
         }
 
     def _commit_session(self, session_id, session, is_new):
@@ -137,6 +146,100 @@ class MovementBoundaryService:
             session["response_hashes"].pop(expired, None)
         self._commit_session(session_id, session, is_new_session)
         return response
+
+    def register_history(self, request: MovementHistoryRegistrationRequest):
+        session_id = str(request.session_id)
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise ValueError("movement session is unavailable")
+        config = MarketMovementConfig(**request.config.model_dump())
+        universe = MarketUniverseInput(request.universe_id, request.universe_version,
+                                       request.symbols)
+        fingerprint = sha256(json.dumps(request.model_dump(mode="json"),
+                                        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        previous = session["history"]
+        if previous is not None and previous["version"] == request.history_version:
+            if previous["fingerprint"] != fingerprint:
+                raise ValueError("history version was already registered with different input")
+        else:
+            historical = {
+                item.symbol: {
+                    int(window): HistoricalWindowInput(
+                        values.returns, values.usable_coverage_ms,
+                        values.previous_notional_volumes,
+                    )
+                    for window, values in item.windows.items()
+                }
+                for item in request.historical
+            }
+            # One slot per bounded movement session; replacement releases old history.
+            session["history"] = {
+                "version": request.history_version,
+                "fingerprint": fingerprint,
+                "universe": universe,
+                "config": config,
+                "historical": historical,
+            }
+        self.sessions.move_to_end(session_id)
+        return {"schema_version": 1, "session_id": session_id,
+                "history_version": request.history_version,
+                "universe_id": universe.id, "universe_version": universe.version}
+
+    def calculate_metrics(self, request: MovementMetricsRequest):
+        session_id = str(request.session_id)
+        session = self.sessions.get(session_id)
+        if session is None or session["history"] is None:
+            raise ValueError("movement session or history is unavailable")
+        registration = session["history"]
+        universe = registration["universe"]
+        if (request.history_version != registration["version"]
+                or request.universe_id != universe.id
+                or request.universe_version != universe.version):
+            raise ValueError("movement history identity does not match")
+        boundary = request.evaluation_boundary_time_ms
+        engines = session["engines"]
+        symbol_inputs = {}
+        found_boundary = False
+        for symbol in universe.symbols:
+            engine = engines.get(symbol)
+            if engine is None:
+                continue
+            endpoint = next((bucket for bucket in engine.history
+                             if bucket.boundary_time_ms == boundary), None)
+            if endpoint is None:
+                raise ValueError("requested boundary is unavailable in canonical history")
+            found_boundary = True
+            readiness = {window: engine.readiness(boundary, window, endpoint.source_state)
+                         for window in (1, 5, 15)}
+            symbol_inputs[symbol] = MarketMovementSymbolInput(
+                symbol=symbol, instrument_id=engine.instrument_id,
+                instrument_compatible=engine.instrument_id == f"{BINANCE_USDM}:{symbol}",
+                readiness=readiness,
+                historical=registration["historical"].get(symbol, {}),
+            )
+        if not found_boundary:
+            raise ValueError("requested boundary is not finalized in this session")
+        result = calculate_market_movement(MarketMovementInput(
+            boundary, universe, symbol_inputs, registration["config"]
+        ))
+        self.sessions.move_to_end(session_id)
+        return {"schema_version": 1, "session_id": session_id,
+                "history_version": registration["version"],
+                "evaluation": self._transport(result)}
+
+    @staticmethod
+    def _transport(value):
+        if is_dataclass(value):
+            return {field.name: MovementBoundaryService._transport(getattr(value, field.name))
+                    for field in fields(value)}
+        if isinstance(value, Mapping):
+            return {str(key): MovementBoundaryService._transport(item)
+                    for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [MovementBoundaryService._transport(item) for item in value]
+        if isinstance(value, Decimal):
+            return float(value)
+        return value
 
     @staticmethod
     def _snapshot(symbol, engine, boundary_time_ms, source_state):
