@@ -1,5 +1,6 @@
 """In-memory transport adapter around the pure movement bucket engine."""
 from collections import OrderedDict
+from copy import deepcopy
 from hashlib import sha256
 
 from .api_models import MovementBoundaryRequest
@@ -36,20 +37,17 @@ class MovementBoundaryService:
             return cached
 
         session_id = str(request.session_id)
-        if session_id != self.session_id:
-            self.session_id = session_id
-            self.engines = {}
-            self.responses.clear()
-            self.response_hashes.clear()
+        new_session = session_id != self.session_id
+        source_engines = {} if new_session else self.engines
 
         active_symbols = {item.symbol for item in request.symbols}
-        self.engines = {
-            symbol: engine for symbol, engine in self.engines.items()
+        staged_engines = {
+            symbol: deepcopy(engine) for symbol, engine in source_engines.items()
             if symbol in active_symbols
         }
         snapshots = []
         for item in request.symbols:
-            engine = self.engines.get(item.symbol)
+            engine = staged_engines.get(item.symbol)
             if engine is None:
                 engine = MovementBucketEngine(
                     item.instrument_id,
@@ -57,7 +55,7 @@ class MovementBoundaryService:
                     price_type=TRADE_PRICE,
                     capacity=DEFAULT_HISTORY_BUCKETS,
                 )
-                self.engines[item.symbol] = engine
+                staged_engines[item.symbol] = engine
             observations = tuple(
                 MarketObservation(
                     provider=BINANCE_USDM,
@@ -81,10 +79,15 @@ class MovementBoundaryService:
             "sessionId": session_id,
             "boundaryTime": request.boundary_time_ms,
             "lateAfterFinalizationCount": sum(
-                engine.rejected_late_observations for engine in self.engines.values()
+                engine.rejected_late_observations for engine in staged_engines.values()
             ),
             "snapshots": snapshots,
         }
+        self.session_id = session_id
+        self.engines = staged_engines
+        if new_session:
+            self.responses.clear()
+            self.response_hashes.clear()
         self.responses[cache_key] = response
         self.response_hashes[cache_key] = fingerprint
         while len(self.responses) > self.cache_capacity:
@@ -118,13 +121,11 @@ class MovementBoundaryService:
         readiness = {}
         for window_minutes in WINDOW_BUCKETS:
             result = engine.readiness(boundary_time_ms, window_minutes, source_state)
-            status = {
-                "ready": "READY",
-                "warming": "WARMING",
-            }.get(result.state, "STALE")
             readiness[window_minutes] = {
                 "windowMinutes": window_minutes,
-                "status": status,
+                "state": result.state,
+                "reason": result.reason,
+                "status": result.state.upper(),
             }
         latest = buckets[-1] if buckets else None
         return {

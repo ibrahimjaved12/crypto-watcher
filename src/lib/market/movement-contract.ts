@@ -5,7 +5,18 @@ export const MAX_LAST_TRADE_AGE_MS = MAX_LAST_TRADE_AGE_SECONDS * 1_000;
 export const MOVEMENT_WINDOWS_MINUTES = [1, 5, 15] as const;
 
 export type MovementWindowMinutes = (typeof MOVEMENT_WINDOWS_MINUTES)[number];
-export type MovementReadinessStatus = "READY" | "WARMING" | "STALE";
+export type MovementReadinessStatus =
+  | "READY"
+  | "WARMING"
+  | "STALE"
+  | "MISSING_HISTORY"
+  | "UNAVAILABLE";
+export type CanonicalMovementReadinessState =
+  | "ready"
+  | "warming"
+  | "stale"
+  | "missing_history"
+  | "unavailable";
 export type MovementSourceState = "LIVE" | "RECOVERING" | "STALE" | "UNAVAILABLE";
 
 export type MovementTradeInput = {
@@ -41,6 +52,8 @@ export type MovementBucket = {
 export type MovementWindowReadiness = {
   windowMinutes: MovementWindowMinutes;
   status: MovementReadinessStatus;
+  state: CanonicalMovementReadinessState;
+  reason: string | null;
 };
 
 export type MovementBucketSnapshot = {

@@ -274,9 +274,9 @@ test("accepted aggregate trades are forwarded for Python movement calculation", 
     latestRealTradeTime: BASE,
     latestRealReceivedAt: BASE,
     readiness: {
-      1: { windowMinutes: 1, status: "WARMING" },
-      5: { windowMinutes: 5, status: "WARMING" },
-      15: { windowMinutes: 15, status: "WARMING" },
+      1: { windowMinutes: 1, status: "WARMING", state: "warming", reason: "insufficient_exact_live_history" },
+      5: { windowMinutes: 5, status: "WARMING", state: "warming", reason: "insufficient_exact_live_history" },
+      15: { windowMinutes: 15, status: "WARMING", state: "warming", reason: "insufficient_exact_live_history" },
     },
   };
   const { collector, writes, healthWrites, movementCalls } = harness({

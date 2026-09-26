@@ -36,7 +36,9 @@ const bucket = z
 const readiness = z
   .object({
     windowMinutes: z.union([z.literal(1), z.literal(5), z.literal(15)]),
-    status: z.enum(["READY", "WARMING", "STALE"]),
+    status: z.enum(["READY", "WARMING", "STALE", "MISSING_HISTORY", "UNAVAILABLE"]),
+    state: z.enum(["ready", "warming", "stale", "missing_history", "unavailable"]),
+    reason: z.string().max(80).nullable(),
   })
   .strict();
 const snapshot = z
