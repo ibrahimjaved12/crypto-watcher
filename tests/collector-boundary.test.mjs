@@ -36,6 +36,7 @@ const collectorReplacements = {
     export const BINANCE_USDM_WS_ENDPOINT = "wss://example.invalid/stream";
     export function normalizeRestCandles() { return []; }
     export class BinanceFuturesCollector {
+      resetMovementTransportState() { globalThis.__collectorBoundary.movementResets += 1; }
       async reconcile(symbols) { globalThis.__collectorBoundary.reconciled.push([...symbols]); }
       streamNames() { return []; }
       subscribedSymbols() { return []; }
@@ -99,6 +100,7 @@ test("the collector worker reads one shared subscription universe from the opera
     leaseClaims: 0,
     leaseReleases: 0,
     universeReads: 0,
+    movementResets: 0,
   };
   const previousWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = FakeWebSocket;
@@ -115,6 +117,40 @@ test("the collector worker reads one shared subscription universe from the opera
     assert.equal(globalThis.__collectorBoundary.universeReads, 1);
     await runtime.stop();
     assert.equal(globalThis.__collectorBoundary.leaseReleases, 1);
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("movement transport resets on collector lease acquisition and loss", async () => {
+  globalThis.__collectorBoundary = {
+    reconciled: [],
+    leaseClaims: 0,
+    leaseReleases: 0,
+    universeReads: 0,
+    movementResets: 0,
+  };
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  try {
+    const module = await import(
+      transpile(await read("../src/lib/market/collector.server.ts"), collectorReplacements)
+    );
+    const store = boundaryStore(["BTCUSDT"]);
+    store.renewCollectorLease = async () => false;
+    const runtime = new module.CollectorRuntime(store);
+    runtime.startTimers = () => {};
+    runtime.connect = () => {};
+    await runtime.tryBecomeActive();
+    assert.equal(globalThis.__collectorBoundary.movementResets, 1);
+
+    runtime.stopped = true;
+    await runtime.renewLease();
+    assert.equal(globalThis.__collectorBoundary.movementResets, 2);
+
+    runtime.stopped = false;
+    await runtime.tryBecomeActive();
+    assert.equal(globalThis.__collectorBoundary.movementResets, 3);
   } finally {
     globalThis.WebSocket = previousWebSocket;
   }

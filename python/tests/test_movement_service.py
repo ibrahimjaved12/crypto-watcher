@@ -1,4 +1,5 @@
 import unittest
+from decimal import Decimal
 from types import SimpleNamespace
 
 from market_analysis.api_models import MovementBoundaryRequest
@@ -9,10 +10,10 @@ BASE = 1_800_000_000_000
 SESSION = "2af3e7c8-b777-4e58-9ad2-18e36daac160"
 
 
-def request(boundary, symbols):
+def request(boundary, symbols, session_id=SESSION):
     return MovementBoundaryRequest.model_validate({
         "schema_version": 1,
-        "session_id": SESSION,
+        "session_id": session_id,
         "boundary_time_ms": boundary,
         "symbols": symbols,
     })
@@ -117,6 +118,57 @@ class MovementBoundaryServiceTests(unittest.TestCase):
         first = service.advance(body)
         retried = service.advance(body)
         self.assertIs(retried, first)
+
+    def test_high_precision_decimal_text_reaches_canonical_observation_unchanged(self):
+        service = MovementBoundaryService()
+        body = request(
+            BASE,
+            [symbol_input("BTCUSDT", [observation(
+                BASE,
+                1,
+                "101.000000000000000001",
+                "2.000000000000000009",
+            )])],
+        )
+        service.advance(body)
+        engine = service.sessions[SESSION]["engines"]["BTCUSDT"]
+        observed = engine._last_real_observation
+
+        self.assertEqual(observed.price, Decimal("101.000000000000000001"))
+        self.assertEqual(observed.quantity, Decimal("2.000000000000000009"))
+
+    def test_interleaved_old_session_request_does_not_replace_new_session_state(self):
+        service = MovementBoundaryService(session_capacity=3)
+        old_session = "2af3e7c8-b777-4e58-9ad2-18e36daac160"
+        new_session = "3bf4e8d9-c888-4f69-8be3-29f47ebbd271"
+        old_first = request(
+            BASE,
+            [symbol_input("BTCUSDT", [observation(BASE, 1)])],
+            old_session,
+        )
+        new_first = request(
+            BASE,
+            [symbol_input("BTCUSDT", [observation(BASE, 1, "200")])],
+            new_session,
+        )
+        service.advance(old_first)
+        new_result = service.advance(new_first)
+
+        old_retry = service.advance(old_first)
+        self.assertEqual(old_retry["snapshots"][0]["buckets"][-1]["endpointPrice"], 100.0)
+        self.assertEqual(service.active_session_id, new_session)
+
+        new_next = request(
+            BASE + 5_000,
+            [symbol_input("BTCUSDT", [observation(BASE + 5_000, 2, "201")])],
+            new_session,
+        )
+        new_result = service.advance(new_next)
+        self.assertEqual(new_result["sessionId"], new_session)
+        self.assertEqual(len(new_result["snapshots"][0]["buckets"]), 2)
+        self.assertEqual(
+            new_result["snapshots"][0]["buckets"][0]["endpointPrice"], 200.0
+        )
 
 
 if __name__ == "__main__":

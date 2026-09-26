@@ -81,6 +81,7 @@ function historicalCandles() {
 function bucket(symbol, boundaryTime, endpointPrice) {
   return {
     boundaryTime,
+    sourceState: "LIVE",
     endpointPrice,
     baseQuantity: 1,
     quoteVolume: endpointPrice,
@@ -118,8 +119,8 @@ function snapshotFor(symbol, boundary) {
         {
           windowMinutes,
           status: "READY",
-          requiredHistoryMs: windowMinutes * 2 * MINUTE,
-          availableHistoryMs: windowMinutes * 2 * MINUTE,
+          state: "ready",
+          reason: null,
         },
       ]),
     ),

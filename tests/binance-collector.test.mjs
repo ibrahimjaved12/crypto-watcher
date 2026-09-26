@@ -91,6 +91,7 @@ function harness(overrides = {}) {
   const healthWrites = [];
   const events = [];
   const movementCalls = [];
+  let clock = BASE;
   const loadRest = async (request) => {
     if (overrides.loadRest) return overrides.loadRest(request);
     const duration = request.timeframeMinutes * 60_000;
@@ -104,7 +105,7 @@ function harness(overrides = {}) {
     return [canonical(request.symbol, request.timeframeMinutes, BASE - 2 * duration)];
   };
   const collector = new BinanceFuturesCollector({
-    now: () => BASE,
+    now: () => overrides.now?.() ?? clock,
     queueCapacity: overrides.queueCapacity ?? 16,
     tradeWindowMs: overrides.tradeWindowMs ?? 10_000,
     tradeMaxCount: overrides.tradeMaxCount ?? 10,
@@ -129,15 +130,22 @@ function harness(overrides = {}) {
     async onCompleted(event) {
       events.push(event);
     },
-    async advanceMovementBoundary(boundaryTime, symbols) {
-      movementCalls.push({ boundaryTime, symbols });
+    async advanceMovementBoundary(sessionId, boundaryTime, symbols) {
+      movementCalls.push({ sessionId, boundaryTime, symbols });
       if (overrides.advanceMovementBoundary) {
-        return overrides.advanceMovementBoundary(boundaryTime, symbols);
+        return overrides.advanceMovementBoundary(sessionId, boundaryTime, symbols);
       }
       return { snapshots: [], lateAfterFinalizationCount: 0 };
     },
   });
-  return { collector, events, writes, healthWrites, movementCalls };
+  return {
+    collector,
+    events,
+    writes,
+    healthWrites,
+    movementCalls,
+    setClock(value) { clock = value; },
+  };
 }
 
 test("developing kline stays in memory and never enters completed persistence", async () => {
@@ -262,7 +270,7 @@ test("aggregate-trade buffers obey both time and hard-count bounds", async () =>
   );
 });
 
-test("accepted aggregate trades are forwarded for Python movement calculation", async () => {
+test("accepted aggregate trades preserve exact decimals for Python movement calculation", async () => {
   const pythonSnapshot = {
     symbol: "BTCUSDT",
     provider: "binance-usdm",
@@ -297,8 +305,8 @@ test("accepted aggregate trades are forwarded for Python movement calculation", 
         s: "BTCUSDT",
         st: 1,
         a: 1,
-        p: "101",
-        q: "2",
+        p: "101.000000000000000001",
+        q: "2.000000000000000009",
         T: BASE,
       },
     },
@@ -315,14 +323,85 @@ test("accepted aggregate trades are forwarded for Python movement calculation", 
     {
       symbol: "BTCUSDT",
       aggregateId: 1,
-      price: 101,
-      quantity: 2,
+      price: "101.000000000000000001",
+      quantity: "2.000000000000000009",
       eventTime: BASE,
       tradeTime: BASE,
       receivedAt: BASE,
     },
   ]);
   assert.equal(collector.movementSnapshot("BTCUSDT"), pythonSnapshot);
+});
+
+test("movement reset fences late replies from the prior collector tenure", async () => {
+  let finishOldRequest;
+  const oldReply = new Promise((resolve) => { finishOldRequest = resolve; });
+  let call = 0;
+  const freshSnapshot = { symbol: "BTCUSDT", marker: "fresh-tenure" };
+  const { collector, movementCalls } = harness({
+    advanceMovementBoundary: async () => {
+      call += 1;
+      return call === 1
+        ? oldReply
+        : { snapshots: [freshSnapshot], lateAfterFinalizationCount: 0 };
+    },
+  });
+  await collector.reconcile(["BTCUSDT"]);
+
+  const priorAdvance = collector.advanceMovementBuckets(BASE);
+  const priorSession = movementCalls[0].sessionId;
+  collector.resetMovementTransportState();
+  await collector.advanceMovementBuckets(BASE);
+  assert.notEqual(movementCalls[1].sessionId, priorSession);
+
+  finishOldRequest({
+    snapshots: [{ symbol: "BTCUSDT", marker: "stale-tenure" }],
+    lateAfterFinalizationCount: 0,
+  });
+  await priorAdvance;
+  assert.equal(collector.movementSnapshot("BTCUSDT"), freshSnapshot);
+});
+
+test("source outage within a bucket remains attached after source returns LIVE", async () => {
+  const { collector, movementCalls, setClock } = harness();
+  await collector.reconcile(["BTCUSDT"]);
+  setClock(BASE);
+  await collector.markConnectionStatus("LIVE", null);
+  setClock(BASE + 1_000);
+  await collector.markConnectionStatus("STALE", "short fixture outage");
+  setClock(BASE + 2_000);
+  await collector.markConnectionStatus("LIVE", null);
+
+  await collector.advanceMovementBuckets(BASE + 5_000);
+  assert.equal(movementCalls.at(-1).symbols[0].sourceState, "STALE");
+  await collector.advanceMovementBuckets(BASE + 10_000);
+  assert.equal(movementCalls.at(-1).symbols[0].sourceState, "LIVE");
+});
+
+test("movement reset fences old in-flight replies and starts a new Python session", async () => {
+  let completeOld;
+  const oldReply = new Promise((resolve) => { completeOld = resolve; });
+  let callCount = 0;
+  const freshSnapshot = { symbol: "BTCUSDT", marker: "new-tenure" };
+  const { collector, movementCalls } = harness({
+    advanceMovementBoundary: async () => {
+      callCount += 1;
+      return callCount === 1
+        ? oldReply
+        : { snapshots: [freshSnapshot], lateAfterFinalizationCount: 0 };
+    },
+  });
+  await collector.reconcile(["BTCUSDT"]);
+  const oldAdvance = collector.advanceMovementBuckets(BASE);
+  const oldSession = movementCalls[0].sessionId;
+
+  collector.resetMovementTransportState();
+  await collector.advanceMovementBuckets(BASE);
+  const newSession = movementCalls[1].sessionId;
+  assert.notEqual(newSession, oldSession);
+  completeOld({ snapshots: [{ symbol: "BTCUSDT", marker: "old-tenure" }], lateAfterFinalizationCount: 0 });
+  await oldAdvance;
+  assert.equal(collector.movementSnapshot("BTCUSDT"), freshSnapshot);
 });
 
 test("per-symbol source status reflects collector health for the movement gate", async () => {

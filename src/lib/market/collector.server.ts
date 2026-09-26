@@ -28,12 +28,12 @@ function enabled(env: Record<string, string | undefined> = process.env): boolean
 
 export class CollectorRuntime {
   private readonly instanceId = crypto.randomUUID();
-  private readonly movementSessionId = crypto.randomUUID();
   private readonly collector: BinanceFuturesCollector;
   private readonly movement: MovementEngineRuntime;
   private socket: WebSocket | null = null;
   private stopped = false;
   private active = false;
+  private streamReady = false;
   private reconnectAttempts = 0;
   private requestId = 1;
   private lastMessageAt = 0;
@@ -64,8 +64,8 @@ export class CollectorRuntime {
         });
       },
       onOverload: () => this.socket?.close(1013, "bounded processing capacity exceeded"),
-      advanceMovementBoundary: (boundaryTime, symbols) =>
-        advancePythonMovementBoundary(this.movementSessionId, boundaryTime, symbols),
+      advanceMovementBoundary: (sessionId, boundaryTime, symbols) =>
+        advancePythonMovementBoundary(sessionId, boundaryTime, symbols),
     });
     this.movement = new MovementEngineRuntime({
       store,
@@ -80,7 +80,9 @@ export class CollectorRuntime {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.streamReady = false;
     this.clearTimers();
+    this.collector.resetMovementTransportState();
     this.rejectPendingRequests("collector stopping");
     this.socket?.close(1000, "collector stopping");
     this.socket = null;
@@ -89,6 +91,7 @@ export class CollectorRuntime {
     await this.movement.stop();
     if (this.active) await this.store.releaseCollectorLease(this.instanceId);
     this.active = false;
+    this.streamReady = false;
   }
 
   private async tryBecomeActive(): Promise<void> {
@@ -96,6 +99,7 @@ export class CollectorRuntime {
     try {
       this.active = await this.store.claimCollectorLease(this.instanceId, LEASE_SECONDS);
       if (!this.active) return this.retryStandby();
+      this.collector.resetMovementTransportState();
       await this.collector.reconcile(await this.store.readCollectorSubscriptions());
       this.startTimers();
       this.connect();
@@ -107,6 +111,7 @@ export class CollectorRuntime {
       const heldLease = this.active;
       this.active = false;
       this.clearTimers();
+      this.collector.resetMovementTransportState();
       void this.movement.stop();
       this.rejectPendingRequests("collector startup failed");
       this.socket?.close();
@@ -158,7 +163,9 @@ export class CollectorRuntime {
       );
     }
     this.active = false;
+    this.streamReady = false;
     this.clearTimers();
+    this.collector.resetMovementTransportState();
     void this.movement.stop();
     this.rejectPendingRequests("authoritative collector lease lost");
     this.backgroundHealth("UNAVAILABLE", "authoritative collector lease lost");
@@ -188,7 +195,7 @@ export class CollectorRuntime {
           [...after].filter((stream) => !before.has(stream)),
         ),
       ]);
-      if (this.socket?.readyState === WebSocket.OPEN) {
+      if (this.streamReady && this.socket?.readyState === WebSocket.OPEN) {
         await this.collector.markConnectionStatus("LIVE", null);
       }
     } catch (error) {
@@ -201,6 +208,7 @@ export class CollectorRuntime {
 
   private connect(): void {
     if (this.stopped || !this.active || this.socket) return;
+    this.streamReady = false;
     const socket = new WebSocket(BINANCE_USDM_WS_ENDPOINT);
     this.socket = socket;
     socket.addEventListener("open", () => {
@@ -211,9 +219,11 @@ export class CollectorRuntime {
       ])
         .then(() => {
           this.reconnectAttempts = 0;
+          this.streamReady = true;
           return this.collector.markConnectionStatus("LIVE", null);
         })
         .catch((error) => {
+          this.streamReady = false;
           this.backgroundHealth(
             "UNAVAILABLE",
             error instanceof Error ? error.message : String(error),
@@ -249,6 +259,7 @@ export class CollectorRuntime {
     socket.addEventListener("close", () => {
       if (this.socket !== socket) return;
       this.socket = null;
+      this.streamReady = false;
       this.rejectPendingRequests("Binance connection closed before subscription acknowledgement");
       if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
       this.lifetimeTimer = null;

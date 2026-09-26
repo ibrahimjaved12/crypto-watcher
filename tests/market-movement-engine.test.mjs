@@ -89,8 +89,8 @@ function warmingSnapshot(symbol) {
         {
           windowMinutes,
           status: "WARMING",
-          requiredHistoryMs: windowMinutes * 2 * MINUTE_MS,
-          availableHistoryMs: 0,
+          state: "warming",
+          reason: "insufficient_exact_live_history",
         },
       ]),
     ),

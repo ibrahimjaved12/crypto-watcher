@@ -31,6 +31,8 @@ export type AggregateTrade = {
   aggregateId: number;
   price: number;
   quantity: number;
+  priceText: string;
+  quantityText: string;
   eventTime: number;
   tradeTime: number;
   receivedAt: number;
@@ -59,6 +61,7 @@ type CollectorDependencies = {
   tradeWindowMs?: number;
   tradeMaxCount?: number;
   advanceMovementBoundary(
+    sessionId: string,
     boundaryTime: number,
     symbols: MovementBoundarySymbolInput[],
   ): Promise<MovementBoundaryResult>;
@@ -71,10 +74,23 @@ type HealthState = {
   errorMessage: string | null;
 };
 
+type MovementSourceTransition = {
+  at: number;
+  state: MovementSourceState;
+};
+
 function finitePositive(value: unknown, label: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`invalid ${label}`);
   return parsed;
+}
+
+function positiveDecimalText(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value)) {
+    throw new Error(`invalid ${label}`);
+  }
+  if (!Number.isFinite(Number(value)) || Number(value) <= 0) throw new Error(`invalid ${label}`);
+  return value;
 }
 
 function finiteNonnegative(value: unknown, label: string): number {
@@ -179,13 +195,17 @@ export function parseBinanceMarketMessage(
   if (value["e"] === "aggTrade") {
     const symbol = String(value["s"] ?? "").toUpperCase();
     canonicalBase(symbol, 1);
+    const priceText = positiveDecimalText(value["p"], "movement trade price");
+    const quantityText = positiveDecimalText(value["q"], "movement trade quantity");
     return {
       kind: "trade",
       trade: {
         symbol,
         aggregateId: safeTimestamp(value["a"], "aggregate trade id"),
-        price: finitePositive(value["p"], "trade price"),
-        quantity: finitePositive(value["q"], "trade quantity"),
+        price: finitePositive(priceText, "trade price"),
+        quantity: finitePositive(quantityText, "trade quantity"),
+        priceText,
+        quantityText,
         eventTime: safeTimestamp(value["E"], "event time"),
         tradeTime: safeTimestamp(value["T"], "trade time"),
         receivedAt,
@@ -271,6 +291,7 @@ export class BinanceFuturesCollector {
   private readonly trades = new Map<string, TradeBuffer>();
   private readonly movementObservations = new Map<string, AggregateTrade[]>();
   private readonly movementResults = new Map<string, MovementBucketSnapshot>();
+  private readonly movementSourceTransitions = new Map<string, MovementSourceTransition[]>();
   private readonly health = new Map<string, HealthState>();
   private readonly queue: CollectorCandle[] = [];
   private processing: Promise<void> | null = null;
@@ -278,9 +299,12 @@ export class BinanceFuturesCollector {
   private reconnectCount = 0;
   private movementBoundary: number | null = null;
   private movementRetry: {
+    sessionId: string;
     boundaryTime: number;
     symbols: MovementBoundarySymbolInput[];
   } | null = null;
+  private movementGeneration = 0;
+  private movementSessionId = crypto.randomUUID();
   private movementLateRejections = 0;
 
   constructor(private readonly dependencies: CollectorDependencies) {
@@ -331,6 +355,21 @@ export class BinanceFuturesCollector {
     return this.movementLateRejections;
   }
 
+  resetMovementTransportState(): void {
+    this.movementGeneration += 1;
+    this.movementSessionId = crypto.randomUUID();
+    this.movementBoundary = null;
+    this.movementRetry = null;
+    this.movementLateRejections = 0;
+    this.movementResults.clear();
+    for (const [symbol, observations] of this.movementObservations) {
+      observations.length = 0;
+      this.movementSourceTransitions.set(symbol, [
+        { at: this.now(), state: "UNAVAILABLE" },
+      ]);
+    }
+  }
+
   /**
    * Coarse per-symbol source health for the movement engine's source gate.
    * Uses the best timeframe status so a healthy contract is not excluded by an
@@ -353,6 +392,7 @@ export class BinanceFuturesCollector {
   }
 
   async advanceMovementBuckets(boundaryTime: number): Promise<void> {
+    const generation = this.movementGeneration;
     safeTimestamp(boundaryTime, "movement boundary");
     if (boundaryTime % 5_000 !== 0) throw new Error("movement boundary is not aligned to five seconds");
     if (this.movementBoundary !== null && boundaryTime <= this.movementBoundary) return;
@@ -368,7 +408,7 @@ export class BinanceFuturesCollector {
     );
 
     while (nextBoundary <= boundaryTime) {
-      const input = this.movementRetry?.boundaryTime === nextBoundary
+      const retry = this.movementRetry?.boundaryTime === nextBoundary
         ? this.movementRetry.symbols
         : this.subscribedSymbols().map((symbol) => {
             const observations = (this.movementObservations.get(symbol) ?? []).filter(
@@ -376,20 +416,25 @@ export class BinanceFuturesCollector {
             );
             return {
               symbol,
-              sourceState: this.symbolSourceStatus(symbol) as MovementSourceState,
+              sourceState: this.movementSourceStateForBoundary(symbol, nextBoundary),
               observations: observations.map((trade) => ({
                 symbol,
                 aggregateId: trade.aggregateId,
-                price: trade.price,
-                quantity: trade.quantity,
+                price: trade.priceText,
+                quantity: trade.quantityText,
                 eventTime: trade.eventTime,
                 tradeTime: trade.tradeTime,
                 receivedAt: trade.receivedAt,
               })),
             };
           });
-      this.movementRetry = { boundaryTime: nextBoundary, symbols: input };
-      const result = await this.dependencies.advanceMovementBoundary(nextBoundary, input);
+      const sessionId = this.movementRetry?.boundaryTime === nextBoundary
+        ? this.movementRetry.sessionId
+        : this.movementSessionId;
+      const input = retry;
+      this.movementRetry = { sessionId, boundaryTime: nextBoundary, symbols: input };
+      const result = await this.dependencies.advanceMovementBoundary(sessionId, nextBoundary, input);
+      if (generation !== this.movementGeneration) return;
       for (const snapshot of result.snapshots) {
         this.movementResults.set(snapshot.symbol, snapshot);
       }
@@ -421,6 +466,7 @@ export class BinanceFuturesCollector {
     errorMessage: string | null,
   ): Promise<void> {
     for (const symbol of this.subscribedSymbols()) {
+      if (status !== "LIVE") this.recordMovementSourceTransition(symbol, status);
       for (const timeframe of COLLECTOR_INTERVALS) {
         const candle =
           this.latestCompleted.get(this.key(symbol, timeframe)) ??
@@ -444,6 +490,7 @@ export class BinanceFuturesCollector {
       this.latestTrade.delete(symbol);
       this.movementObservations.delete(symbol);
       this.movementResults.delete(symbol);
+      this.movementSourceTransitions.delete(symbol);
       for (const interval of COLLECTOR_INTERVALS)
         this.developing.delete(this.key(symbol, interval));
     }
@@ -452,6 +499,9 @@ export class BinanceFuturesCollector {
       this.symbols.add(symbol);
       this.trades.set(symbol, new TradeBuffer(this.tradeWindowMs, this.tradeMaxCount));
       this.movementObservations.set(symbol, []);
+      this.movementSourceTransitions.set(symbol, [
+        { at: this.now(), state: "RECOVERING" },
+      ]);
       for (const interval of COLLECTOR_INTERVALS) await this.bootstrap(symbol, interval);
     }
   }
@@ -742,11 +792,20 @@ export class BinanceFuturesCollector {
     status: CollectorHealthStatus,
     errorMessage: string | null,
   ): Promise<void> {
+    if (status !== "LIVE") this.recordMovementSourceTransition(candle.symbol, status);
     const key = this.key(candle.symbol, candle.timeframeMinutes);
     const state = this.state(key);
     state.status = status;
     state.errorMessage = errorMessage;
     if (candle.openTime > 0) state.lastCompletedOpenTime = candle.openTime;
+    if (
+      status === "LIVE" &&
+      COLLECTOR_INTERVALS.every(
+        (timeframe) => this.health.get(this.key(candle.symbol, timeframe))?.status === "LIVE",
+      )
+    ) {
+      this.recordMovementSourceTransition(candle.symbol, "LIVE");
+    }
     await this.dependencies.store.recordCollectorHealth({
       instrumentId: candle.instrumentId,
       symbol: candle.symbol,
@@ -759,5 +818,54 @@ export class BinanceFuturesCollector {
       reconnectCount: this.reconnectCount,
       errorMessage,
     });
+  }
+
+  private recordMovementSourceTransition(
+    symbol: string,
+    state: MovementSourceState,
+  ): void {
+    const normalized = symbol.toUpperCase();
+    const transitions = this.movementSourceTransitions.get(normalized) ?? [];
+    if (transitions.at(-1)?.state === state) return;
+    transitions.push({ at: this.now(), state });
+    if (transitions.length > 1_024) {
+      this.movementSourceTransitions.set(normalized, transitions.slice(-1_023));
+    } else {
+      this.movementSourceTransitions.set(normalized, transitions);
+    }
+  }
+
+  private movementSourceStateForBoundary(
+    symbol: string,
+    boundaryTime: number,
+  ): MovementSourceState {
+    const transitions = this.movementSourceTransitions.get(symbol) ?? [];
+    const intervalStart = boundaryTime - 5_000;
+    let stateAtStart: MovementSourceState = "UNAVAILABLE";
+    let stateAtEnd: MovementSourceState = "UNAVAILABLE";
+    const intervalStates: MovementSourceState[] = [];
+    for (const transition of transitions) {
+      if (transition.at <= intervalStart) stateAtStart = transition.state;
+      if (transition.at > intervalStart && transition.at <= boundaryTime) {
+        intervalStates.push(transition.state);
+      }
+      if (transition.at <= boundaryTime) stateAtEnd = transition.state;
+    }
+    const nonLive = [stateAtStart, ...intervalStates].filter((state) => state !== "LIVE");
+    let intervalState: MovementSourceState;
+    if (nonLive.includes("UNAVAILABLE")) intervalState = "UNAVAILABLE";
+    else if (nonLive.includes("STALE")) intervalState = "STALE";
+    else if (nonLive.includes("RECOVERING")) intervalState = "RECOVERING";
+    else intervalState = stateAtEnd;
+
+    const retainFrom = boundaryTime - 5_000;
+    let anchorIndex = -1;
+    for (let index = 0; index < transitions.length; index += 1) {
+      if (transitions[index]!.at <= retainFrom) anchorIndex = index;
+    }
+    if (anchorIndex > 0) {
+      this.movementSourceTransitions.set(symbol, transitions.slice(anchorIndex));
+    }
+    return intervalState;
   }
 }

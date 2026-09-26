@@ -17,8 +17,8 @@ export type MovementSourceState = "LIVE" | "RECOVERING" | "STALE" | "UNAVAILABLE
 export type MovementTradeInput = {
   symbol: string;
   aggregateId: number;
-  price: number;
-  quantity: number;
+  price: string;
+  quantity: string;
   eventTime: number;
   tradeTime: number;
   receivedAt: number;

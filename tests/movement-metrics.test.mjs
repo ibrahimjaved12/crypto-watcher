@@ -49,6 +49,7 @@ function snapshot(symbol, returnsByWindow = {}, notionalPerBucket = 10) {
   for (let boundaryTime = END - 30 * 60_000; boundaryTime <= END; boundaryTime += BUCKET_MS) {
     buckets.push({
       boundaryTime,
+      sourceState: "LIVE",
       endpointPrice: endpointByBoundary.get(boundaryTime) ?? 90,
       baseQuantity: 1,
       quoteVolume: notionalPerBucket,
@@ -80,8 +81,8 @@ function snapshot(symbol, returnsByWindow = {}, notionalPerBucket = 10) {
         {
           windowMinutes,
           status: "READY",
-          requiredHistoryMs: windowMinutes * 2 * 60_000,
-          availableHistoryMs: 30 * 60_000,
+          state: "ready",
+          reason: null,
         },
       ]),
     ),
@@ -225,13 +226,23 @@ test("zero historical or cross-sectional MAD is explicit and never uses epsilon"
 
 test("stale, warming, recovering, unsupported, and insufficient history stay distinct", () => {
   const stale = symbolInput("STALEUSDT");
-  stale.snapshot.readiness[15].status = "STALE";
+  stale.snapshot.readiness[15] = {
+    windowMinutes: 15,
+    status: "STALE",
+    state: "stale",
+    reason: "last_real_trade_expired",
+  };
   const latest = stale.snapshot.buckets.at(-1);
   latest.endpointPrice = null;
   latest.lastRealTradeTime = END - 20_000;
 
   const warming = symbolInput("WARMUSDT");
-  warming.snapshot.readiness[15].status = "WARMING";
+  warming.snapshot.readiness[15] = {
+    windowMinutes: 15,
+    status: "WARMING",
+    state: "warming",
+    reason: "insufficient_exact_live_history",
+  };
   warming.snapshot.buckets = warming.snapshot.buckets.filter(
     (bucket) => bucket.boundaryTime !== END - 30 * 60_000,
   );
@@ -255,6 +266,40 @@ test("stale, warming, recovering, unsupported, and insufficient history stay dis
   assert.ok(reasons.RECOVERUSDT.includes("SOURCE_RECOVERING"));
   assert.ok(reasons.SPOTUSDT.includes("UNSUPPORTED_INSTRUMENT"));
   assert.ok(reasons.NEWUSDT.includes("INSUFFICIENT_NORMALIZATION_HISTORY"));
+});
+
+test("canonical missing and unavailable readiness use non-stale exclusion categories", () => {
+  const missing = symbolInput("MISSUSDT");
+  missing.snapshot.readiness[15] = {
+    windowMinutes: 15,
+    status: "STALE",
+    state: "missing_history",
+    reason: "noncontiguous_live_history",
+  };
+  const unavailable = symbolInput("DOWNUSDT");
+  unavailable.snapshot.readiness[15] = {
+    windowMinutes: 15,
+    status: "STALE",
+    state: "unavailable",
+    reason: "source_unavailable_in_required_history",
+  };
+  const sourceStale = symbolInput("LINKUSDT");
+  sourceStale.snapshot.readiness[15] = {
+    windowMinutes: 15,
+    status: "STALE",
+    state: "stale",
+    reason: "collector_stale",
+  };
+
+  const result = windowResult(evaluate([missing, unavailable, sourceStale]), 15);
+  const reasons = Object.fromEntries(
+    result.excludedSymbols.map((value) => [value.symbol, value.reasons]),
+  );
+  assert.ok(reasons.MISSUSDT.includes("MISSING_EXACT_BOUNDARY"));
+  assert.ok(reasons.DOWNUSDT.includes("SOURCE_UNAVAILABLE"));
+  assert.ok(!reasons.DOWNUSDT.includes("STALE_LAST_TRADE"));
+  assert.ok(reasons.LINKUSDT.includes("SOURCE_STALE"));
+  assert.ok(!reasons.LINKUSDT.includes("STALE_LAST_TRADE"));
 });
 
 test("fewer than five eligible symbols makes market-wide metrics unavailable", () => {

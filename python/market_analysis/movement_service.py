@@ -19,30 +19,58 @@ from .movement import (
 class MovementBoundaryService:
     """Owns ephemeral per-session engines and idempotent boundary responses."""
 
-    def __init__(self, cache_capacity=DEFAULT_HISTORY_BUCKETS):
+    def __init__(self, cache_capacity=DEFAULT_HISTORY_BUCKETS, session_capacity=4):
         self.cache_capacity = cache_capacity
-        self.session_id = None
-        self.engines = {}
-        self.responses = OrderedDict()
-        self.response_hashes = {}
+        self.session_capacity = session_capacity
+        self.sessions = OrderedDict()
+        self.active_session_id = None
+        self.retired_sessions = OrderedDict()
+
+    @staticmethod
+    def _new_session():
+        return {
+            "engines": {},
+            "responses": OrderedDict(),
+            "response_hashes": {},
+        }
+
+    def _commit_session(self, session_id, session, is_new):
+        if is_new:
+            self.active_session_id = session_id
+            self.sessions[session_id] = session
+            while len(self.sessions) > self.session_capacity:
+                expired_id = next(
+                    key for key in self.sessions if key != self.active_session_id
+                )
+                self.sessions.pop(expired_id)
+                self.retired_sessions[expired_id] = None
+                while len(self.retired_sessions) > self.session_capacity * 4:
+                    self.retired_sessions.popitem(last=False)
+        else:
+            self.sessions.move_to_end(session_id)
 
     def advance(self, request: MovementBoundaryRequest):
         fingerprint = sha256(request.model_dump_json().encode()).hexdigest()
         cache_key = (str(request.session_id), request.boundary_time_ms)
-        cached = self.responses.get(cache_key)
-        if cached is not None:
-            if self.response_hashes[cache_key] != fingerprint:
-                raise ValueError("movement boundary was already applied with different input")
-            self.responses.move_to_end(cache_key)
-            return cached
-
         session_id = str(request.session_id)
-        new_session = session_id != self.session_id
-        source_engines = {} if new_session else self.engines
+        session = self.sessions.get(session_id)
+        is_new_session = session is None
+        if is_new_session:
+            if session_id in self.retired_sessions:
+                raise ValueError("movement session has expired")
+            session = self._new_session()
+        cached = session["responses"].get(cache_key)
+        if cached is not None:
+            if session["response_hashes"][cache_key] != fingerprint:
+                raise ValueError("movement boundary was already applied with different input")
+            if not is_new_session:
+                self.sessions.move_to_end(session_id)
+            session["responses"].move_to_end(cache_key)
+            return cached
 
         active_symbols = {item.symbol for item in request.symbols}
         staged_engines = {
-            symbol: deepcopy(engine) for symbol, engine in source_engines.items()
+            symbol: deepcopy(engine) for symbol, engine in session["engines"].items()
             if symbol in active_symbols
         }
         snapshots = []
@@ -83,16 +111,13 @@ class MovementBoundaryService:
             ),
             "snapshots": snapshots,
         }
-        self.session_id = session_id
-        self.engines = staged_engines
-        if new_session:
-            self.responses.clear()
-            self.response_hashes.clear()
-        self.responses[cache_key] = response
-        self.response_hashes[cache_key] = fingerprint
-        while len(self.responses) > self.cache_capacity:
-            expired, _ = self.responses.popitem(last=False)
-            self.response_hashes.pop(expired, None)
+        session["engines"] = staged_engines
+        session["responses"][cache_key] = response
+        session["response_hashes"][cache_key] = fingerprint
+        while len(session["responses"]) > self.cache_capacity:
+            expired, _ = session["responses"].popitem(last=False)
+            session["response_hashes"].pop(expired, None)
+        self._commit_session(session_id, session, is_new_session)
         return response
 
     @staticmethod

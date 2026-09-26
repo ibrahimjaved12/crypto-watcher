@@ -337,10 +337,31 @@ function calculateSymbol(
   }
 
   const readiness = snapshot.readiness[windowMinutes];
-  if (readiness.status === "WARMING") {
-    addReason(result.exclusionReasons, "WARMING_INSUFFICIENT_LIVE_HISTORY");
-  } else if (readiness.status === "STALE") {
-    addReason(result.exclusionReasons, "STALE_LAST_TRADE");
+  switch (readiness.state) {
+    case "warming":
+      addReason(result.exclusionReasons, "WARMING_INSUFFICIENT_LIVE_HISTORY");
+      break;
+    case "stale":
+      addReason(
+        result.exclusionReasons,
+        readiness.reason === "collector_stale" ? "SOURCE_STALE" : "STALE_LAST_TRADE",
+      );
+      break;
+    case "missing_history":
+      addReason(result.exclusionReasons, "MISSING_EXACT_BOUNDARY");
+      break;
+    case "unavailable":
+      if (readiness.reason === "collector_recovering") {
+        addReason(result.exclusionReasons, "SOURCE_RECOVERING");
+      } else if (readiness.reason === "collector_unavailable" ||
+                 readiness.reason === "source_unavailable_in_required_history" ||
+                 readiness.reason === "no_real_trade_history" ||
+                 readiness.reason === "no_real_trade_endpoint") {
+        addReason(result.exclusionReasons, "SOURCE_UNAVAILABLE");
+      } else {
+        addReason(result.exclusionReasons, "MOVEMENT_HISTORY_UNAVAILABLE");
+      }
+      break;
   }
 
   const windowMs = windowMinutes * 60_000;
