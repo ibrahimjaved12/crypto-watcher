@@ -57,6 +57,7 @@ def movement_payload(session_id="2af3e7c8-b777-4e58-9ad2-18e36daac160"):
         "symbols": [{
             "symbol": "BTCUSDT",
             "instrument_id": "binance-usdm:BTCUSDT",
+            "membership_epoch": 1,
             "source_state": "LIVE",
             "observations": [{
                 "price": "101",

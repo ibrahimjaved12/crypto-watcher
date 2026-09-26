@@ -66,6 +66,8 @@ export type MovementBucketSnapshot = {
 
 export type MovementBoundarySymbolInput = {
   symbol: string;
+  /** Collector membership tenure metadata; not a canonical movement calculation input. */
+  membershipEpoch: number;
   sourceState: MovementSourceState;
   observations: MovementTradeInput[];
 };

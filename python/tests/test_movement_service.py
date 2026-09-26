@@ -19,10 +19,11 @@ def request(boundary, symbols, session_id=SESSION):
     })
 
 
-def symbol_input(symbol, observations=(), source_state="LIVE"):
+def symbol_input(symbol, observations=(), source_state="LIVE", membership_epoch=1):
     return {
         "symbol": symbol,
         "instrument_id": f"binance-usdm:{symbol}",
+        "membership_epoch": membership_epoch,
         "source_state": source_state,
         "observations": list(observations),
     }
@@ -136,6 +137,80 @@ class MovementBoundaryServiceTests(unittest.TestCase):
 
         self.assertEqual(observed.price, Decimal("101.000000000000000001"))
         self.assertEqual(observed.quantity, Decimal("2.000000000000000009"))
+
+    def test_new_symbol_membership_epoch_replaces_only_that_canonical_engine(self):
+        service = MovementBoundaryService()
+        result = None
+        for index in range(25):
+            boundary = BASE + index * 5_000
+            result = service.advance(request(
+                boundary,
+                [
+                    symbol_input(
+                        "BTCUSDT",
+                        [observation(boundary, index + 1, str(100 + index))],
+                        membership_epoch=7,
+                    ),
+                    symbol_input(
+                        "ETHUSDT",
+                        [observation(boundary, index + 101, str(200 + index))],
+                        membership_epoch=1,
+                    ),
+                ],
+            ))
+
+        eth_before = next(
+            item for item in result["snapshots"] if item["symbol"] == "ETHUSDT"
+        )
+        self.assertEqual(eth_before["readiness"][1]["state"], "ready")
+        eth_epoch_1_engine = service.sessions[SESSION]["engines"]["ETHUSDT"]
+        self.assertEqual(len(eth_epoch_1_engine.history), 25)
+        btc_first_price = service.sessions[SESSION]["engines"]["BTCUSDT"].history[0].price
+
+        # No omission request reaches Python between membership tenures. The lower
+        # aggregate ID makes the fresh epoch-2 ordering state explicit below.
+        boundary = BASE + 25 * 5_000
+        replaced = service.advance(request(
+            boundary,
+            [
+                symbol_input(
+                    "BTCUSDT",
+                    [observation(boundary, 26, "125")],
+                    membership_epoch=7,
+                ),
+                symbol_input(
+                    "ETHUSDT",
+                    [observation(boundary, 1, "999")],
+                    membership_epoch=2,
+                ),
+            ],
+        ))
+
+        eth_after = next(
+            item for item in replaced["snapshots"] if item["symbol"] == "ETHUSDT"
+        )
+        btc_after = next(
+            item for item in replaced["snapshots"] if item["symbol"] == "BTCUSDT"
+        )
+        self.assertEqual(len(eth_after["buckets"]), 1)
+        self.assertEqual(eth_after["buckets"][0]["endpointPrice"], 999.0)
+        self.assertEqual(eth_after["readiness"][1]["state"], "warming")
+        self.assertEqual(service.sessions[SESSION]["membership_epochs"]["ETHUSDT"], 2)
+        self.assertIsNot(
+            service.sessions[SESSION]["engines"]["ETHUSDT"],
+            eth_epoch_1_engine,
+        )
+        self.assertEqual(
+            service.sessions[SESSION]["engines"]["ETHUSDT"]._last_accepted_order_key,
+            (boundary, 1),
+        )
+        self.assertEqual(len(service.sessions[SESSION]["engines"]["BTCUSDT"].history), 26)
+        self.assertEqual(btc_after["readiness"][1]["state"], "ready")
+        self.assertEqual(
+            service.sessions[SESSION]["engines"]["BTCUSDT"].history[0].price,
+            btc_first_price,
+        )
+        self.assertEqual(service.sessions[SESSION]["membership_epochs"]["BTCUSDT"], 7)
 
     def test_evicted_session_restarts_empty_after_two_delayed_old_sessions(self):
         service = MovementBoundaryService(session_capacity=2)

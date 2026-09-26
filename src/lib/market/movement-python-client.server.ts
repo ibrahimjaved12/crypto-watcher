@@ -79,6 +79,7 @@ export async function advancePythonMovementBoundary(
     symbols: symbols.map((item) => ({
       symbol: item.symbol,
       instrument_id: `binance-usdm:${item.symbol}`,
+      membership_epoch: item.membershipEpoch,
       source_state: item.sourceState,
       observations: item.observations.map((trade) => ({
         price: trade.price,

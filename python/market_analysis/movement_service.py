@@ -39,6 +39,7 @@ class MovementBoundaryService:
     def _new_session():
         return {
             "engines": {},
+            "membership_epochs": {},
             "late_after_finalization_count": 0,
             "responses": OrderedDict(),
             "response_hashes": {},
@@ -69,19 +70,25 @@ class MovementBoundaryService:
             session["responses"].move_to_end(cache_key)
             return cached
 
-        active_symbols = {item.symbol for item in request.symbols}
         previous_late_total = sum(
             session["engines"][item.symbol].rejected_late_observations
             for item in request.symbols
-            if item.symbol in session["engines"]
+            if (
+                item.symbol in session["engines"]
+                and session["membership_epochs"].get(item.symbol) == item.membership_epoch
+            )
         )
-        staged_engines = {
-            symbol: deepcopy(engine) for symbol, engine in session["engines"].items()
-            if symbol in active_symbols
-        }
+        staged_engines = {}
+        staged_membership_epochs = {}
         snapshots = []
         for item in request.symbols:
-            engine = staged_engines.get(item.symbol)
+            engine = None
+            # Membership tenure is transport ownership metadata. It selects the
+            # canonical engine instance but never enters bucket mathematics.
+            if session["membership_epochs"].get(item.symbol) == item.membership_epoch:
+                existing = session["engines"].get(item.symbol)
+                if existing is not None:
+                    engine = deepcopy(existing)
             if engine is None:
                 engine = MovementBucketEngine(
                     item.instrument_id,
@@ -89,7 +96,8 @@ class MovementBoundaryService:
                     price_type=TRADE_PRICE,
                     capacity=DEFAULT_HISTORY_BUCKETS,
                 )
-                staged_engines[item.symbol] = engine
+            staged_engines[item.symbol] = engine
+            staged_membership_epochs[item.symbol] = item.membership_epoch
             observations = tuple(
                 MarketObservation(
                     provider=BINANCE_USDM,
@@ -120,6 +128,7 @@ class MovementBoundaryService:
             "snapshots": snapshots,
         }
         session["engines"] = staged_engines
+        session["membership_epochs"] = staged_membership_epochs
         session["late_after_finalization_count"] = response["lateAfterFinalizationCount"]
         session["responses"][cache_key] = response
         session["response_hashes"][cache_key] = fingerprint

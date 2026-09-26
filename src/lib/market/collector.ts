@@ -74,6 +74,13 @@ type HealthState = {
   errorMessage: string | null;
 };
 
+type CollectorHealthInput = Parameters<OperationalStore["recordCollectorHealth"]>[0];
+
+type DesiredHealthWrite = {
+  input: CollectorHealthInput;
+  recoveryGeneration: number | undefined;
+};
+
 type MovementSourceTransition = {
   at: number;
   state: MovementSourceState;
@@ -310,6 +317,8 @@ export class BinanceFuturesCollector {
   private readonly movementResults = new Map<string, MovementBucketSnapshot>();
   private readonly movementSourceTransitions = new Map<string, MovementSourceTransition[]>();
   private readonly health = new Map<string, HealthState>();
+  private readonly desiredHealthWrites = new Map<string, DesiredHealthWrite>();
+  private readonly authoritativeHealthInputs = new Map<string, CollectorHealthInput>();
   private readonly queue: CollectorCandle[] = [];
   private processing: Promise<void> | null = null;
   private recovery: { generation: number; promise: Promise<void> } | null = null;
@@ -320,7 +329,6 @@ export class BinanceFuturesCollector {
     sessionId: string;
     boundaryTime: number;
     symbols: MovementBoundarySymbolInput[];
-    membershipEpochs: Map<string, number>;
   } | null = null;
   private movementGeneration = 0;
   private movementMembershipEpoch = 0;
@@ -487,6 +495,7 @@ export class BinanceFuturesCollector {
             );
             return {
               symbol,
+              membershipEpoch: this.movementMembershipEpochs.get(symbol)!,
               sourceState: this.movementSourceStateForBoundary(symbol, nextBoundary),
               observations: observations.map((trade) => ({
                 symbol,
@@ -503,24 +512,17 @@ export class BinanceFuturesCollector {
         ? this.movementRetry.sessionId
         : this.movementSessionId;
       const input = retry;
-      const inputMembershipEpochs = this.movementRetry?.boundaryTime === nextBoundary
-        ? this.movementRetry.membershipEpochs
-        : new Map<string, number>();
-      if (this.movementRetry?.boundaryTime !== nextBoundary) {
-        for (const item of input) {
-          const epoch = this.movementMembershipEpochs.get(item.symbol);
-          if (epoch !== undefined) inputMembershipEpochs.set(item.symbol, epoch);
-        }
-      }
+      const requestMembershipEpochs = new Map(
+        input.map((item) => [item.symbol, item.membershipEpoch]),
+      );
       const isCurrentMembership = (symbol: string): boolean => {
-        const inputEpoch = inputMembershipEpochs.get(symbol);
+        const inputEpoch = requestMembershipEpochs.get(symbol);
         return inputEpoch !== undefined && inputEpoch === this.movementMembershipEpochs.get(symbol);
       };
       this.movementRetry = {
         sessionId,
         boundaryTime: nextBoundary,
         symbols: input,
-        membershipEpochs: inputMembershipEpochs,
       };
       const result = await this.dependencies.advanceMovementBoundary(sessionId, nextBoundary, input);
       if (generation !== this.movementGeneration) return;
@@ -569,17 +571,23 @@ export class BinanceFuturesCollector {
     status: CollectorHealthStatus,
     errorMessage: string | null,
   ): Promise<void> {
+    const recoveryGeneration = this.candleRecoveryGeneration;
     const symbols = this.subscribedSymbols();
     for (const symbol of symbols) {
       this.recordMovementSourceTransition(symbol, status);
     }
-    await this.persistConnectionHealth(symbols, status, errorMessage);
+    await this.persistConnectionHealth(
+      symbols,
+      status,
+      errorMessage,
+      recoveryGeneration,
+    );
   }
 
   async markCandleConnectionStatus(
     status: CollectorHealthStatus,
     errorMessage: string | null,
-    recoveryGeneration?: number,
+    recoveryGeneration = this.candleRecoveryGeneration,
   ): Promise<void> {
     await this.persistConnectionHealth(
       this.subscribedSymbols(),
@@ -601,7 +609,7 @@ export class BinanceFuturesCollector {
         const candle =
           this.latestCompleted.get(this.key(symbol, timeframe)) ??
           this.placeholder(symbol, timeframe);
-        await this.setHealth(candle, status, errorMessage);
+        await this.setHealth(candle, status, errorMessage, recoveryGeneration);
       }
     }
   }
@@ -638,7 +646,10 @@ export class BinanceFuturesCollector {
       this.movementSourceTransitions.set(symbol, [
         { at: this.now(), state: "RECOVERING" },
       ]);
-      for (const interval of COLLECTOR_INTERVALS) await this.bootstrap(symbol, interval);
+      const recoveryGeneration = this.candleRecoveryGeneration;
+      for (const interval of COLLECTOR_INTERVALS) {
+        await this.bootstrap(symbol, interval, recoveryGeneration);
+      }
     }
   }
 
@@ -740,10 +751,12 @@ export class BinanceFuturesCollector {
     }
     this.developing.delete(key);
     if (this.queue.length >= this.queueCapacity) {
+      const recoveryGeneration = this.candleRecoveryGeneration;
       void this.setHealth(
         event.candle,
         "STALE",
         "completed-candle processing capacity exceeded",
+        recoveryGeneration,
       ).catch(() => undefined);
       this.dependencies.onOverload?.();
       return false;
@@ -813,7 +826,7 @@ export class BinanceFuturesCollector {
   ): Promise<void> {
     if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     const placeholder = this.placeholder(symbol, timeframeMinutes);
-    await this.setHealth(placeholder, "RECOVERING", null);
+    await this.setHealth(placeholder, "RECOVERING", null, recoveryGeneration);
     if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     const candles = (
       await this.dependencies.loadRest({
@@ -826,14 +839,17 @@ export class BinanceFuturesCollector {
       .sort((left, right) => left.openTime - right.openTime);
     if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     if (candles.length === 0 || !this.contiguous(candles, timeframeMinutes)) {
-      await this.setHealth(placeholder, "UNAVAILABLE", "REST bootstrap continuity unavailable");
+      await this.setHealth(
+        placeholder,
+        "UNAVAILABLE",
+        "REST bootstrap continuity unavailable",
+        recoveryGeneration,
+      );
       return;
     }
-    await this.persist(candles, "bootstrap");
-    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
+    if (!(await this.persist(candles, "bootstrap", recoveryGeneration))) return;
     const latest = candles.at(-1)!;
-    this.latestCompleted.set(this.key(symbol, timeframeMinutes), latest);
-    await this.setHealth(latest, "RECOVERING", null);
+    await this.setHealth(latest, "RECOVERING", null, recoveryGeneration);
   }
 
   private startDrain(): void {
@@ -841,13 +857,15 @@ export class BinanceFuturesCollector {
     this.processing = (async () => {
       while (this.queue.length > 0 && !this.recovery) {
         const candle = this.queue.shift()!;
+        const recoveryGeneration = this.candleRecoveryGeneration;
         try {
-          await this.processFinal(candle);
+          await this.processFinal(candle, recoveryGeneration);
         } catch (error) {
           await this.setHealth(
             candle,
             "UNAVAILABLE",
             error instanceof Error ? error.message : String(error),
+            recoveryGeneration,
           );
         }
       }
@@ -861,30 +879,41 @@ export class BinanceFuturesCollector {
       });
   }
 
-  private async processFinal(candle: CollectorCandle): Promise<void> {
+  private async processFinal(
+    candle: CollectorCandle,
+    recoveryGeneration: number,
+  ): Promise<void> {
     const key = this.key(candle.symbol, candle.timeframeMinutes);
     let latest = this.latestCompleted.get(key);
     if (!latest) {
-      await this.bootstrap(candle.symbol, candle.timeframeMinutes);
+      await this.bootstrap(candle.symbol, candle.timeframeMinutes, recoveryGeneration);
+      if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
       latest = this.latestCompleted.get(key);
     }
     if (latest && candle.openTime <= latest.openTime) return;
     const duration = candle.timeframeMinutes * 60_000;
     if (latest && candle.openTime !== latest.openTime + duration) {
-      await this.setHealth(candle, "RECOVERING", "completed-candle gap detected");
+      await this.setHealth(
+        candle,
+        "RECOVERING",
+        "completed-candle gap detected",
+        recoveryGeneration,
+      );
+      if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
       const recovered = await this.recoverRange(
         candle.symbol,
         candle.timeframeMinutes,
         latest.openTime + duration,
         candle.openTime - duration,
+        recoveryGeneration,
       );
       if (!recovered) {
+        if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
         throw new Error("REST recovery could not prove candle continuity");
       }
     }
-    await this.persist([candle], "live");
-    this.latestCompleted.set(key, candle);
-    await this.setHealth(candle, "LIVE", null);
+    if (!(await this.persist([candle], "live", recoveryGeneration))) return;
+    await this.setHealth(candle, "LIVE", null, recoveryGeneration);
   }
 
   private async recoverThrough(
@@ -896,7 +925,12 @@ export class BinanceFuturesCollector {
     if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     const latest = this.latestCompleted.get(this.key(symbol, timeframeMinutes));
     if (!latest || targetOpen <= latest.openTime) return;
-    await this.setHealth(latest, "RECOVERING", "reconnect recovery");
+    await this.setHealth(
+      latest,
+      "RECOVERING",
+      "reconnect recovery",
+      recoveryGeneration,
+    );
     if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     if (
       !(await this.recoverRange(
@@ -908,7 +942,12 @@ export class BinanceFuturesCollector {
       ))
     ) {
       if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
-      await this.setHealth(latest, "UNAVAILABLE", "reconnect continuity unavailable");
+      await this.setHealth(
+        latest,
+        "UNAVAILABLE",
+        "reconnect continuity unavailable",
+        recoveryGeneration,
+      );
       throw new Error(`REST reconnect continuity unavailable for ${symbol} ${timeframeMinutes}m`);
     }
   }
@@ -945,21 +984,25 @@ export class BinanceFuturesCollector {
     ) {
       return false;
     }
-    await this.persist(candles, "recovery");
-    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
-    const latest = candles.at(-1)!;
-    this.latestCompleted.set(this.key(symbol, timeframeMinutes), latest);
-    return true;
+    return this.persist(candles, "recovery", recoveryGeneration);
   }
 
-  private async persist(candles: CollectorCandle[], origin: CompletedCandleOrigin): Promise<void> {
+  private async persist(
+    candles: CollectorCandle[],
+    origin: CompletedCandleOrigin,
+    recoveryGeneration?: number,
+  ): Promise<boolean> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     const inserted = new Set(await this.dependencies.store.recordCollectorCandles(candles));
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     for (const candle of candles) {
+      if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
       this.latestCompleted.set(this.key(candle.symbol, candle.timeframeMinutes), candle);
       if (inserted.has(candleIdentity(candle))) {
         await this.dependencies.onCompleted?.({ candle, origin });
       }
     }
+    return true;
   }
 
   private contiguous(candles: CollectorCandle[], timeframeMinutes: CollectorInterval): boolean {
@@ -1020,24 +1063,96 @@ export class BinanceFuturesCollector {
     candle: CollectorCandle,
     status: CollectorHealthStatus,
     errorMessage: string | null,
-  ): Promise<void> {
+    recoveryGeneration?: number,
+  ): Promise<boolean> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     const key = this.key(candle.symbol, candle.timeframeMinutes);
-    const state = this.state(key);
-    state.status = status;
-    state.errorMessage = errorMessage;
-    if (candle.openTime > 0) state.lastCompletedOpenTime = candle.openTime;
-    await this.dependencies.store.recordCollectorHealth({
+    const current = this.health.get(key) ?? {
+      status: "RECOVERING",
+      lastEventAt: null,
+      lastCompletedOpenTime: null,
+      errorMessage: null,
+    };
+    const nextState: HealthState = {
+      ...current,
+      status,
+      errorMessage,
+      lastCompletedOpenTime:
+        candle.openTime > 0 ? candle.openTime : current.lastCompletedOpenTime,
+    };
+    const input: CollectorHealthInput = {
       instrumentId: candle.instrumentId,
       symbol: candle.symbol,
       timeframeMinutes: candle.timeframeMinutes,
       status,
-      lastEventAt: state.lastEventAt,
-      lastCompletedOpenTime: state.lastCompletedOpenTime,
-      lagMs: state.lastEventAt === null ? null : Math.max(0, this.now() - state.lastEventAt),
+      lastEventAt: nextState.lastEventAt,
+      lastCompletedOpenTime: nextState.lastCompletedOpenTime,
+      lagMs:
+        nextState.lastEventAt === null
+          ? null
+          : Math.max(0, this.now() - nextState.lastEventAt),
       queueDepth: this.queue.length,
       reconnectCount: this.reconnectCount,
       errorMessage,
-    });
+    };
+    const desired: DesiredHealthWrite = {
+      input,
+      recoveryGeneration,
+    };
+    this.desiredHealthWrites.set(key, desired);
+    try {
+      await this.dependencies.store.recordCollectorHealth(input);
+    } catch (error) {
+      if (
+        !this.isCandleRecoveryCurrent(recoveryGeneration) ||
+        this.desiredHealthWrites.get(key) !== desired
+      ) {
+        return false;
+      }
+      this.desiredHealthWrites.delete(key);
+      throw error;
+    }
+    if (
+      !this.isCandleRecoveryCurrent(recoveryGeneration) ||
+      this.desiredHealthWrites.get(key) !== desired
+    ) {
+      await this.persistAuthoritativeHealth(key, desired);
+      return false;
+    }
+    this.health.set(key, nextState);
+    this.authoritativeHealthInputs.set(key, input);
+    return true;
+  }
+
+  private async persistAuthoritativeHealth(
+    key: string,
+    obsolete: DesiredHealthWrite,
+  ): Promise<void> {
+    // The operational upsert has no compare-and-swap token. If an older RPC
+    // returns after a newer one, write the still-current desired (or last
+    // committed) value again so the obsolete completion cannot remain final.
+    while (true) {
+      const desired = this.desiredHealthWrites.get(key);
+      let restoreDesired = false;
+      let input = this.authoritativeHealthInputs.get(key);
+      if (
+        desired !== undefined &&
+        desired !== obsolete &&
+        this.isCandleRecoveryCurrent(desired.recoveryGeneration)
+      ) {
+        restoreDesired = true;
+        input = desired.input;
+      }
+      if (!input) return;
+      await this.dependencies.store.recordCollectorHealth(input);
+      if (
+        this.desiredHealthWrites.get(key) === desired &&
+        (!restoreDesired ||
+          this.isCandleRecoveryCurrent(desired?.recoveryGeneration))
+      ) {
+        return;
+      }
+    }
   }
 
   private recordMovementSourceTransition(

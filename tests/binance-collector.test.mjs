@@ -111,6 +111,7 @@ function harness(overrides = {}) {
     tradeMaxCount: overrides.tradeMaxCount ?? 10,
     store: {
       async recordCollectorCandles(candles) {
+        await overrides.recordCollectorCandles?.(candles);
         const inserted = [];
         for (const candle of candles) {
           const id = candleIdentity(candle);
@@ -295,6 +296,115 @@ test("a new candle recovery generation does not reuse an old failing single-flig
 
 test("stale candle recovery success cannot write health into a newer generation", async () => {
   await exerciseCollectorRecoveryTenure("success");
+});
+
+test("stale candle persistence cannot commit latest state or completion side effects", async () => {
+  let holdOldWrite = false;
+  let releaseOldWrite;
+  const oldWrite = new Promise((resolve) => { releaseOldWrite = resolve; });
+  const t1 = canonical("BTCUSDT", 1, BASE - 60_000);
+  const t2 = canonical("BTCUSDT", 1, BASE);
+  const { collector, events } = harness({
+    recordCollectorCandles: async (candles) => {
+      if (holdOldWrite && candles[0]?.openTime === t1.openTime) await oldWrite;
+    },
+  });
+  await collector.reconcile(["BTCUSDT"]);
+  events.length = 0;
+
+  const generationA = collector.beginCandleRecoveryTenure();
+  holdOldWrite = true;
+  const stalePersist = collector.persist([t1], "recovery", generationA);
+  collector.invalidateCandleRecoveryTenure(generationA);
+  const generationB = collector.beginCandleRecoveryTenure();
+  assert.equal(await collector.persist([t2], "recovery", generationB), true);
+  assert.equal(collector.latestCompleted.get("BTCUSDT:1").openTime, t2.openTime);
+  assert.deepEqual(events.map((event) => event.candle.openTime), [t2.openTime]);
+
+  releaseOldWrite();
+  assert.equal(await stalePersist, false);
+  assert.equal(collector.latestCompleted.get("BTCUSDT:1").openTime, t2.openTime);
+  assert.deepEqual(events.map((event) => event.candle.openTime), [t2.openTime]);
+});
+
+test("stale health completion reasserts the newer persistence-visible health", async () => {
+  let holdOldWrite = false;
+  let releaseOldWrite;
+  const oldWrite = new Promise((resolve) => { releaseOldWrite = resolve; });
+  const persistedHealth = [];
+  const { collector } = harness({
+    recordCollectorHealth: async (input) => {
+      if (holdOldWrite && input.errorMessage === "generation A") await oldWrite;
+      persistedHealth.push(input);
+    },
+  });
+  await collector.reconcile(["BTCUSDT"]);
+  persistedHealth.length = 0;
+  const t1 = canonical("BTCUSDT", 1, BASE - 60_000);
+  const t2 = canonical("BTCUSDT", 1, BASE);
+
+  const generationA = collector.beginCandleRecoveryTenure();
+  holdOldWrite = true;
+  const staleHealth = collector.setHealth(
+    t1,
+    "RECOVERING",
+    "generation A",
+    generationA,
+  );
+  collector.invalidateCandleRecoveryTenure(generationA);
+  const generationB = collector.beginCandleRecoveryTenure();
+  assert.equal(
+    await collector.setHealth(t2, "LIVE", "generation B", generationB),
+    true,
+  );
+
+  releaseOldWrite();
+  assert.equal(await staleHealth, false);
+  assert.equal(collector.health.get("BTCUSDT:1").status, "LIVE");
+  assert.equal(collector.health.get("BTCUSDT:1").lastCompletedOpenTime, t2.openTime);
+  assert.deepEqual(
+    persistedHealth.map((input) => input.errorMessage),
+    ["generation B", "generation A", "generation B"],
+  );
+});
+
+test("stale health persistence failure cannot poison newer authoritative health", async () => {
+  let rejectOldWrite;
+  const oldWrite = new Promise((resolve, reject) => { rejectOldWrite = reject; });
+  const persistedHealth = [];
+  const { collector } = harness({
+    recordCollectorHealth: async (input) => {
+      if (input.errorMessage === "generation A") await oldWrite;
+      persistedHealth.push(input);
+    },
+  });
+  await collector.reconcile(["BTCUSDT"]);
+  persistedHealth.length = 0;
+  const t1 = canonical("BTCUSDT", 1, BASE - 60_000);
+  const t2 = canonical("BTCUSDT", 1, BASE);
+
+  const generationA = collector.beginCandleRecoveryTenure();
+  const staleHealth = collector.setHealth(
+    t1,
+    "RECOVERING",
+    "generation A",
+    generationA,
+  );
+  collector.invalidateCandleRecoveryTenure(generationA);
+  const generationB = collector.beginCandleRecoveryTenure();
+  assert.equal(
+    await collector.setHealth(t2, "LIVE", "generation B", generationB),
+    true,
+  );
+
+  rejectOldWrite(new Error("obsolete health write failed"));
+  assert.equal(await staleHealth, false);
+  assert.equal(collector.health.get("BTCUSDT:1").status, "LIVE");
+  assert.equal(collector.health.get("BTCUSDT:1").lastCompletedOpenTime, t2.openTime);
+  assert.deepEqual(
+    persistedHealth.map((input) => input.errorMessage),
+    ["generation B"],
+  );
 });
 
 test("aggregate-trade buffers obey both time and hard-count bounds", async () => {
@@ -518,8 +628,10 @@ test("an exact retry preserves the original membership epoch across remove and r
 
   await assert.rejects(collector.advanceMovementBuckets(BASE), /transient Python failure/);
   const original = movementCalls[0];
+  assert.equal(original.symbols[0].membershipEpoch, 1);
   await collector.reconcile([]);
   await collector.reconcile(["ETHUSDT"]);
+  assert.equal(collector.movementMembershipEpochs.get("ETHUSDT"), 2);
   assert.equal(collector.accept({
     stream: "ethusdt@aggTrade",
     data: {
@@ -533,6 +645,7 @@ test("an exact retry preserves the original membership epoch across remove and r
   assert.equal(retried.sessionId, original.sessionId);
   assert.equal(retried.boundaryTime, original.boundaryTime);
   assert.equal(retried.symbols, original.symbols);
+  assert.equal(retried.symbols[0].membershipEpoch, 1);
   assert.equal(collector.movementSnapshot("ETHUSDT"), null);
   assert.deepEqual(
     collector.movementObservations.get("ETHUSDT").map((trade) => trade.aggregateId),

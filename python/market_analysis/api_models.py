@@ -178,6 +178,7 @@ class MovementObservationRequest(InputModel):
 class MovementSymbolBoundaryRequest(InputModel):
     symbol: str = Field(min_length=5, max_length=16)
     instrument_id: str = Field(min_length=3, max_length=128)
+    membership_epoch: Annotated[int, Field(strict=True, ge=1)]
     source_state: Literal["LIVE", "RECOVERING", "STALE", "UNAVAILABLE"]
     observations: Annotated[tuple[MovementObservationRequest, ...], Field(max_length=20_000)]
 
