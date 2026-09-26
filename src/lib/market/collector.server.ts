@@ -17,6 +17,7 @@ const LEASE_REFRESH_MS = 20_000;
 const STALE_AFTER_MS = 30_000;
 const CONNECTION_MAX_AGE_MS = 23 * 60 * 60_000 + 50 * 60_000;
 const MAX_BACKOFF_MS = 30_000;
+const RECOVERY_CLOSE_CODE = 4000;
 
 function enabled(env: Record<string, string | undefined> = process.env): boolean {
   const value = env["BINANCE_COLLECTOR_ENABLED"];
@@ -63,7 +64,8 @@ export class CollectorRuntime {
           retrievedAt: Date.parse(result.retrievedAt),
         });
       },
-      onOverload: () => this.socket?.close(1013, "bounded processing capacity exceeded"),
+      onOverload: () =>
+        this.socket?.close(RECOVERY_CLOSE_CODE, "bounded processing capacity exceeded"),
       advanceMovementBoundary: (sessionId, boundaryTime, symbols) =>
         advancePythonMovementBoundary(sessionId, boundaryTime, symbols),
     });
@@ -114,7 +116,7 @@ export class CollectorRuntime {
       this.collector.resetMovementTransportState();
       void this.movement.stop();
       this.rejectPendingRequests("collector startup failed");
-      this.socket?.close();
+      this.socket?.close(RECOVERY_CLOSE_CODE, "collector startup failed");
       this.socket = null;
       if (heldLease) {
         try {
@@ -148,7 +150,7 @@ export class CollectorRuntime {
         Date.now() - this.lastMessageAt > STALE_AFTER_MS
       ) {
         this.backgroundHealth("STALE", "Binance stream is stale");
-        this.socket.close(1013, "stale market stream");
+        this.socket.close(RECOVERY_CLOSE_CODE, "stale market stream");
       }
     }, 10_000);
     void this.movement.start();
@@ -169,7 +171,7 @@ export class CollectorRuntime {
     void this.movement.stop();
     this.rejectPendingRequests("authoritative collector lease lost");
     this.backgroundHealth("UNAVAILABLE", "authoritative collector lease lost");
-    this.socket?.close(1012, "collector lease lost");
+    this.socket?.close(RECOVERY_CLOSE_CODE, "collector lease lost");
     this.socket = null;
     this.retryStandby();
   }
@@ -202,7 +204,7 @@ export class CollectorRuntime {
       console.error(
         `[binance-collector] subscription reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      this.socket?.close(1013, "subscription reconciliation failed");
+      this.socket?.close(RECOVERY_CLOSE_CODE, "subscription reconciliation failed");
     }
   }
 
@@ -228,7 +230,7 @@ export class CollectorRuntime {
             "UNAVAILABLE",
             error instanceof Error ? error.message : String(error),
           );
-          socket.close(1013, "subscription or recovery failed");
+          socket.close(RECOVERY_CLOSE_CODE, "subscription or recovery failed");
         });
       this.lifetimeTimer = setTimeout(
         () => socket.close(1000, "scheduled Binance connection rotation"),
@@ -239,7 +241,7 @@ export class CollectorRuntime {
       this.lastMessageAt = Date.now();
       if (typeof event.data !== "string") {
         this.collector.markAllMovementUnavailable();
-        socket.close(1013, "non-text Binance movement frame");
+        socket.close(RECOVERY_CLOSE_CODE, "non-text Binance movement frame");
         return;
       }
       let payload: Record<string, unknown>;
@@ -247,7 +249,7 @@ export class CollectorRuntime {
         payload = JSON.parse(event.data) as Record<string, unknown>;
       } catch {
         this.collector.markAllMovementUnavailable();
-        socket.close(1013, "malformed Binance movement frame");
+        socket.close(RECOVERY_CLOSE_CODE, "malformed Binance movement frame");
         return;
       }
       try {
@@ -265,7 +267,7 @@ export class CollectorRuntime {
         this.collector.accept(payload, this.lastMessageAt);
       } catch {
         this.collector.markAllMovementUnavailable();
-        socket.close(1013, "invalid Binance movement frame");
+        socket.close(RECOVERY_CLOSE_CODE, "invalid Binance movement frame");
       }
     });
     socket.addEventListener("close", () => {
@@ -280,7 +282,9 @@ export class CollectorRuntime {
       this.backgroundHealth("RECOVERING", "Binance stream reconnecting");
       this.scheduleReconnect();
     });
-    socket.addEventListener("error", () => socket.close());
+    socket.addEventListener("error", () =>
+      socket.close(RECOVERY_CLOSE_CODE, "Binance transport error"),
+    );
   }
 
   private scheduleReconnect(): void {

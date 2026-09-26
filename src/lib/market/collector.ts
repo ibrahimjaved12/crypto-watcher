@@ -174,6 +174,12 @@ export function normalizeRestCandles(input: {
     });
 }
 
+function aggregateTradeStreamSymbol(stream: unknown): string | null {
+  if (typeof stream !== "string") return null;
+  const match = /^([a-z0-9]+)@aggTrade$/.exec(stream);
+  return match?.[1]?.toUpperCase() ?? null;
+}
+
 export function parseBinanceMarketMessage(
   raw: unknown,
   receivedAt: number,
@@ -187,6 +193,15 @@ export function parseBinanceMarketMessage(
       ? (envelope["data"] as Record<string, unknown>)
       : envelope;
   if (!value || typeof value !== "object") throw new Error("invalid websocket message");
+  const streamSymbol = aggregateTradeStreamSymbol(envelope?.["stream"]);
+  if (
+    streamSymbol !== null &&
+    (value["e"] !== "aggTrade" ||
+      typeof value["s"] !== "string" ||
+      value["s"].toUpperCase() !== streamSymbol)
+  ) {
+    throw new Error("mismatched aggregate-trade stream identity");
+  }
   if (value["id"] !== undefined || value["result"] !== undefined) return { kind: "control" };
   if (value["st"] !== undefined && value["st"] !== 1) {
     throw new Error("non-USD-M market event rejected");
@@ -577,16 +592,16 @@ export class BinanceFuturesCollector {
         ? envelope["data"] as Record<string, unknown>
         : envelope;
       const stream = envelope && typeof envelope === "object" ? envelope["stream"] : null;
-      const match = typeof stream === "string"
-        ? /^([a-z0-9]+)@aggTrade$/.exec(stream)
-        : null;
-      const streamSymbol = match?.[1]?.toUpperCase();
+      const streamSymbol = aggregateTradeStreamSymbol(stream);
       const dataSymbol = candidate && typeof candidate === "object" && candidate["e"] === "aggTrade"
         ? String(candidate["s"] ?? "").toUpperCase()
         : "";
-      const attributable = [streamSymbol, dataSymbol].find(
-        (symbol) => symbol && this.symbols.has(symbol),
-      );
+      let attributable: string | null = null;
+      if (streamSymbol !== null) {
+        if (this.symbols.has(streamSymbol)) attributable = streamSymbol;
+      } else if (dataSymbol && this.symbols.has(dataSymbol)) {
+        attributable = dataSymbol;
+      }
       if (attributable) {
         this.markMovementUnavailable(attributable);
         this.dependencies.onOverload?.();

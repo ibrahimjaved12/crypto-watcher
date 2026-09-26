@@ -94,6 +94,82 @@ class FakeWebSocket {
   close() {}
 }
 
+class ValidatingFakeWebSocket {
+  static OPEN = 1;
+  static CLOSED = 3;
+  static instances = [];
+
+  readyState = ValidatingFakeWebSocket.OPEN;
+  listeners = new Map();
+  closeCalls = [];
+
+  constructor(url) {
+    this.url = url;
+    ValidatingFakeWebSocket.instances.push(this);
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  emit(type, event) {
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+
+  send() {}
+
+  close(code, reason = "") {
+    if (
+      code !== undefined &&
+      (typeof code !== "number" ||
+        !Number.isInteger(code) ||
+        (code !== 1000 && (code < 3000 || code > 4999)))
+    ) {
+      throw new DOMException("invalid client close code", "InvalidAccessError");
+    }
+    if (Buffer.byteLength(reason) > 123) {
+      throw new DOMException("close reason is too long", "SyntaxError");
+    }
+    this.closeCalls.push({ code, reason });
+    this.readyState = ValidatingFakeWebSocket.CLOSED;
+  }
+}
+
+async function loadBehavioralCollectorRuntime() {
+  const collector = transpile(await read("../src/lib/market/collector.ts"), {
+    "./symbols": stub(
+      `export const isSupportedSymbol = (value) => ["BTCUSDT", "ETHUSDT"].includes(value);`,
+    ),
+    "./movement-contract": stub(`export const MOVEMENT_OBSERVATION_BATCH_MAX = 20000;`),
+  });
+  return import(
+    transpile(await read("../src/lib/market/collector.server.ts"), {
+      ...collectorReplacements,
+      "./collector": collector,
+    })
+  );
+}
+
+async function openBehavioralRuntime(module, symbols) {
+  const store = {
+    async recordCollectorCandles() {
+      return [];
+    },
+    async recordCollectorHealth() {},
+  };
+  const runtime = new module.CollectorRuntime(store);
+  await runtime.collector.reconcile(symbols);
+  await runtime.collector.markConnectionStatus("LIVE", null);
+  runtime.active = true;
+  runtime.connect();
+  return {
+    runtime,
+    socket: ValidatingFakeWebSocket.instances.at(-1),
+  };
+}
+
 test("the collector worker reads one shared subscription universe from the operational store", async () => {
   globalThis.__collectorBoundary = {
     reconciled: [],
@@ -156,10 +232,103 @@ test("movement transport resets on collector lease acquisition and loss", async 
   }
 });
 
-test("malformed WebSocket JSON fences movement continuity and closes for recovery", async () => {
-  const source = await read("../src/lib/market/collector.server.ts");
-  assert.match(source, /markAllMovementUnavailable\(\);\s*socket\.close\(1013, "malformed Binance movement frame"\)/);
-  assert.match(source, /markAllMovementUnavailable\(\);\s*socket\.close\(1013, "non-text Binance movement frame"\)/);
+test("malformed WebSocket JSON fences movement and closes with a valid client code", async () => {
+  const previousWebSocket = globalThis.WebSocket;
+  ValidatingFakeWebSocket.instances.length = 0;
+  globalThis.WebSocket = ValidatingFakeWebSocket;
+  try {
+    const module = await loadBehavioralCollectorRuntime();
+    const { runtime, socket } = await openBehavioralRuntime(module, ["BTCUSDT", "ETHUSDT"]);
+
+    assert.doesNotThrow(() => socket.emit("message", { data: "{" }));
+    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "UNAVAILABLE");
+    assert.equal(runtime.collector.movementSourceStatus("ETHUSDT"), "UNAVAILABLE");
+    assert.equal(socket.closeCalls.length, 1);
+    assert.ok(
+      socket.closeCalls[0].code === 1000 ||
+        (socket.closeCalls[0].code >= 3000 && socket.closeCalls[0].code <= 4999),
+    );
+    assert.equal(socket.closeCalls[0].reason, "malformed Binance movement frame");
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("an aggTrade stream rejects a valid trade for another symbol without cross-queuing", async () => {
+  const previousWebSocket = globalThis.WebSocket;
+  ValidatingFakeWebSocket.instances.length = 0;
+  globalThis.WebSocket = ValidatingFakeWebSocket;
+  try {
+    const module = await loadBehavioralCollectorRuntime();
+    const { runtime, socket } = await openBehavioralRuntime(module, ["BTCUSDT", "ETHUSDT"]);
+    const mismatchedTrade = {
+      stream: "btcusdt@aggTrade",
+      data: {
+        e: "aggTrade",
+        E: 1_800_000_000_001,
+        s: "ETHUSDT",
+        st: 1,
+        a: 42,
+        p: "123.4500",
+        q: "0.5000",
+        T: 1_800_000_000_000,
+      },
+    };
+
+    assert.doesNotThrow(() =>
+      socket.emit("message", { data: JSON.stringify(mismatchedTrade) }),
+    );
+    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "UNAVAILABLE");
+    assert.equal(runtime.collector.movementSourceStatus("ETHUSDT"), "LIVE");
+    assert.equal(runtime.collector.latestPrice("ETHUSDT"), null);
+    assert.deepEqual(runtime.collector.movementObservations.get("ETHUSDT"), []);
+    assert.equal(socket.closeCalls.length, 1);
+    assert.ok(socket.closeCalls[0].code >= 3000 && socket.closeCalls[0].code <= 4999);
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("an aggTrade stream rejects an otherwise valid kline event", async () => {
+  const previousWebSocket = globalThis.WebSocket;
+  ValidatingFakeWebSocket.instances.length = 0;
+  globalThis.WebSocket = ValidatingFakeWebSocket;
+  try {
+    const module = await loadBehavioralCollectorRuntime();
+    const { runtime, socket } = await openBehavioralRuntime(module, ["BTCUSDT"]);
+    const klineOnTradeStream = {
+      stream: "btcusdt@aggTrade",
+      data: {
+        e: "kline",
+        E: 60_000,
+        s: "BTCUSDT",
+        st: 1,
+        k: {
+          t: 0,
+          T: 59_999,
+          s: "BTCUSDT",
+          i: "1m",
+          o: "100",
+          h: "102",
+          l: "99",
+          c: "101",
+          v: "12",
+          x: false,
+        },
+      },
+    };
+
+    assert.doesNotThrow(() =>
+      socket.emit("message", { data: JSON.stringify(klineOnTradeStream) }),
+    );
+    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "UNAVAILABLE");
+    assert.equal(runtime.collector.developingCandle("BTCUSDT", 1), null);
+    assert.deepEqual(runtime.collector.movementObservations.get("BTCUSDT"), []);
+    assert.equal(socket.closeCalls.length, 1);
+    assert.ok(socket.closeCalls[0].code >= 3000 && socket.closeCalls[0].code <= 4999);
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
 });
 
 test("the collector runtime has no direct Lovable application dependency", async () => {
