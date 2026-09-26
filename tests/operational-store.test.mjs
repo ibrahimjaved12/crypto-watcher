@@ -513,7 +513,8 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
       volume: 5,
       // REST bootstrap/recovery has no exchange event; WebSocket candles keep the
       // exchange's actual event time, which need not equal the completion boundary.
-      source_event_at: index === 0 ? null : new Date(openTime + duration + 7).toISOString(),
+      source_event_at:
+        index === 0 ? null : new Date(openTime + duration + (index === 1 ? -7 : 7)).toISOString(),
       // Row 2's receive time precedes its exchange event time: the obsolete
       // `received_at >= source_event_at` constraint is gone, so the raw receive time is
       // stored and transported unchanged instead of being clamped.
@@ -555,6 +556,7 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
   // The exchange event time is transported exactly as recorded (never rewritten to the
   // completion boundary), and a REST candle honestly reports no exchange event.
   assert.equal(candles[0].source_event_at_ms, null);
+  assert.equal(candles[1].source_event_at_ms, observed + duration * 2 - 7);
   assert.equal(candles[2].source_event_at_ms, observed + 2 * duration + duration + 7);
   assert.equal(candles[2].received_at_ms, observed + 2 * duration + duration + 3);
 

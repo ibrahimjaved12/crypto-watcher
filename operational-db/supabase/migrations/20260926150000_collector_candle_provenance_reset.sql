@@ -42,10 +42,6 @@ BEGIN
 END;
 $$;
 
-ALTER TABLE public.collector_recent_candles
-  ADD CONSTRAINT collector_recent_candles_source_event_check
-  CHECK (source_event_at IS NULL OR source_event_at >= close_time);
-
 -- Provenance-preserving read adapter for the application-owned completed-candle TA path. The
 -- leased collector is the canonical writer of completed Binance USD-M trade klines; the
 -- application reads that same canonical history here instead of fetching a second live exchange

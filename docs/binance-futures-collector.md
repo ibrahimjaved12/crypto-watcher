@@ -89,6 +89,23 @@ transaction.
 
 ## Ownership and operation
 
+### Pre-release provenance cutover
+
+The timestamp provenance change is a destructive pre-release reset, not a
+production-compatible migration. Existing development data is disposable: clear
+`ta_signals` in the application database and `collector_recent_candles`,
+`collector_health`, and `collector_leases` in the operational database. Apply the
+TA provenance migration to the application database and the collector provenance
+reset migration to the operational database before starting the collector. No old
+rows are migrated, and no compatibility columns or legacy timestamp semantics are
+kept.
+
+After reset, WebSocket `source_event_at` is the actual Binance event time (`E`),
+REST `source_event_at` is `NULL`, and `received_at` is the actual receive or REST
+retrieval time. Candle completion is determined independently as
+`open_time + timeframe`; event and receive timestamps are provenance, not a
+completion boundary.
+
 With the collector enabled, `collector_recent_candles`, `collector_health`, and `collector_leases`
 in the operational database are the only shared completed-candle/checkpoint working-state path, and
 `collector_subscriptions` holds the application-assigned subscription universe. The old
@@ -102,14 +119,15 @@ authoritative for watchlists, settings, movement state/alerts, and permanent TA 
 is written only by TanStack: the worker holds no Lovable credentials and never reads watchlists or
 settings or writes TA. No candle is dual-written to Lovable.
 
-Apply `operational-db/supabase/migrations/20260925120000_binance_collector.sql`,
-`operational-db/supabase/migrations/20260926120000_collector_subscriptions.sql`,
-`operational-db/supabase/migrations/20260926130000_collector_ta_candles.sql`,
-`operational-db/supabase/migrations/20260926140000_collector_candle_retention.sql`, and
-`operational-db/supabase/migrations/20260926150000_collector_ta_candle_provenance.sql` only to the
-external operational database. The retention migration keeps each canonical series' newest 260
-completed candles even when that spans more than the day window, so the longest TA frame always has
-enough canonical history. Set this server-only flag (never a `VITE_*` variable) on both the
+Apply all unapplied SQL migrations in filename order to their designated databases. In particular,
+apply `supabase/migrations/20260926100000_ta_source_event_provenance.sql` to the application
+database and `operational-db/supabase/migrations/20260926150000_collector_candle_provenance_reset.sql`
+to the external operational database for this cutover. The operational retention migration keeps
+each canonical series' newest 260 completed candles even when that spans more than the day window,
+so the longest TA frame always has enough canonical history. After the reset, the REST bootstrap
+fetches 300 klines per frame and persists the completed ones (excluding the developing candle),
+rebuilding 299 candles for the 15m, 1h, and 4h TA frames. Set this server-only flag (never a
+`VITE_*` variable) on both the
 collector worker and the application server:
 
 ```text
