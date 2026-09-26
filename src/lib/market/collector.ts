@@ -1111,12 +1111,7 @@ export class BinanceFuturesCollector {
         continue;
       }
       const persisted = this.persistedHealthWrites.get(key);
-      if (
-        persisted?.desired === desired &&
-        this.healthInputIsCurrent(key, desired, persisted.input)
-      ) {
-        return true;
-      }
+      if (persisted?.desired === desired) return true;
     }
     return false;
   }
@@ -1134,9 +1129,15 @@ export class BinanceFuturesCollector {
   }
 
   private async drainHealthWrites(key: string): Promise<void> {
+    let activeDesired: DesiredHealthWrite | undefined;
+    let provenanceWrites = 0;
     while (true) {
       const desired = this.desiredHealthWrites.get(key);
       if (!desired) return;
+      if (desired !== activeDesired) {
+        activeDesired = desired;
+        provenanceWrites = 0;
+      }
       const input = this.healthInput(key, desired);
       try {
         await this.dependencies.store.recordCollectorHealth(input);
@@ -1152,7 +1153,14 @@ export class BinanceFuturesCollector {
         }
         continue;
       }
-      if (this.healthInputIsCurrent(key, desired, input)) return;
+      if (this.desiredHealthWrites.get(key) !== desired) continue;
+      provenanceWrites += 1;
+      if (
+        provenanceWrites >= 2 ||
+        this.healthInputIsCurrent(key, desired, input)
+      ) {
+        return;
+      }
     }
   }
 

@@ -435,16 +435,24 @@ test("replacement recovery tenure does not invalidate slow disconnect health", a
   assert.equal(persistedHealth.get("BTCUSDT:1").status, "RECOVERING");
 });
 
-test("new event provenance remains monotonic during slow health persistence", async () => {
-  let holdHealth = false;
-  let releaseHealth;
-  const deferredHealth = new Promise((resolve) => { releaseHealth = resolve; });
+test("health provenance uses one bounded trailing refresh while events continue", async () => {
+  let releaseFirstWrite;
+  let releaseTrailingWrite;
+  let observeTrailingWrite;
+  const firstWrite = new Promise((resolve) => { releaseFirstWrite = resolve; });
+  const trailingWrite = new Promise((resolve) => { releaseTrailingWrite = resolve; });
+  const trailingWriteStarted = new Promise((resolve) => { observeTrailingWrite = resolve; });
   const persistedHealth = [];
+  let slowWriteCount = 0;
   const { collector } = harness({
     recordCollectorHealth: async (input) => {
-      if (holdHealth && input.errorMessage === "slow health") {
-        holdHealth = false;
-        await deferredHealth;
+      if (input.errorMessage === "slow health") {
+        slowWriteCount += 1;
+        if (slowWriteCount === 1) await firstWrite;
+        if (slowWriteCount === 2) {
+          observeTrailingWrite();
+          await trailingWrite;
+        }
       }
       persistedHealth.push(input);
     },
@@ -454,9 +462,9 @@ test("new event provenance remains monotonic during slow health persistence", as
   const open = BASE - 60_000;
   const t1 = BASE - 1_000;
   const t2 = BASE - 500;
+  const t3 = BASE - 250;
   assert.equal(collector.accept(wsKline(open, 1, false, t1)), true);
 
-  holdHealth = true;
   const writing = collector.setHealth(
     canonical("BTCUSDT", 1, open),
     "LIVE",
@@ -465,13 +473,17 @@ test("new event provenance remains monotonic during slow health persistence", as
   assert.equal(collector.accept(wsKline(open, 1, false, t2)), true);
   assert.equal(collector.health.get("BTCUSDT:1").lastEventAt, t2);
 
-  releaseHealth();
+  releaseFirstWrite();
+  await trailingWriteStarted;
+  assert.equal(collector.accept(wsKline(open, 1, false, t3)), true);
+  releaseTrailingWrite();
   assert.equal(await writing, true);
-  assert.equal(collector.health.get("BTCUSDT:1").lastEventAt, t2);
+  assert.equal(collector.health.get("BTCUSDT:1").lastEventAt, t3);
   assert.deepEqual(
     persistedHealth.map((input) => input.lastEventAt),
     [t1, t2],
   );
+  assert.equal(slowWriteCount, 2);
 });
 
 test("aggregate-trade buffers obey both time and hard-count bounds", async () => {
