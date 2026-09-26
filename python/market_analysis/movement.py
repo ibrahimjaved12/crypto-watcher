@@ -11,7 +11,7 @@ from typing import Iterable
 BUCKET_INTERVAL_MS = 5_000
 MAX_LAST_TRADE_AGE_MS = 15_000
 DEFAULT_HISTORY_BUCKETS = 420
-WINDOW_BUCKETS = {1: 24, 5: 120, 15: 360}
+WINDOW_BUCKETS = {1: 25, 5: 121, 15: 361}
 BINANCE_USDM = "binance-usdm"
 TRADE_PRICE = "trade"
 COLLECTOR_STATES = {"LIVE", "RECOVERING", "STALE", "UNAVAILABLE"}
@@ -270,6 +270,10 @@ class MovementBucketEngine:
             bucket.boundary_time_ms for bucket in history
         ) != expected:
             return result("missing_history", "noncontiguous_live_history")
+        if any(bucket.price is None for bucket in history):
+            if any(bucket.last_real_trade_time_ms is None for bucket in history):
+                return result("unavailable", "no_real_trade_history")
+            return result("stale", "unusable_price_history")
         if last_trade_time is None:
             return result("unavailable", "no_real_trade_endpoint")
         return result("ready", None)

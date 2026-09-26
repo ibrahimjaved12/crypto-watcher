@@ -7,6 +7,7 @@ from market_analysis.movement import (
     MAX_LAST_TRADE_AGE_MS,
     MarketObservation,
     MovementBucketEngine,
+    WINDOW_BUCKETS,
 )
 
 BASE = 1_800_000_000_000
@@ -118,7 +119,40 @@ class MovementBucketTests(unittest.TestCase):
         self.assertEqual(history[0].boundary_time_ms, boundaries[-DEFAULT_HISTORY_BUCKETS])
         result = self.engine.readiness(boundaries[-1], 15, ENDPOINT)
         self.assertEqual(result.state, "ready")
-        self.assertEqual(len(result.history), 360)
+        self.assertEqual(len(result.history), 361)
+        self.assertEqual(
+            result.history[0].boundary_time_ms,
+            boundaries[-1] - 30 * 60_000,
+        )
+
+    def test_adjacent_window_readiness_requires_both_endpoint_anchors(self):
+        for window_minutes, required_count in ((1, 25), (5, 121), (15, 361)):
+            with self.subTest(window_minutes=window_minutes):
+                engine = MovementBucketEngine(INSTRUMENT)
+                self.assertEqual(WINDOW_BUCKETS[window_minutes], required_count)
+                boundaries = [
+                    BASE + index * BUCKET_INTERVAL_MS
+                    for index in range(1, required_count + 1)
+                ]
+
+                for boundary in boundaries[:-1]:
+                    engine.observe([observation(boundary, trade_time_ms=boundary)])
+                    engine.advance(boundary)
+                early = engine.readiness(boundaries[-2], window_minutes, ENDPOINT)
+                self.assertEqual(early.state, "warming")
+                self.assertEqual(len(early.history), required_count - 1)
+
+                engine.observe([observation(boundaries[-1], trade_time_ms=boundaries[-1])])
+                engine.advance(boundaries[-1])
+                ready = engine.readiness(boundaries[-1], window_minutes, ENDPOINT)
+                self.assertEqual(ready.state, "ready")
+                self.assertEqual(len(ready.history), required_count)
+                self.assertEqual(ready.history[-1].boundary_time_ms, boundaries[-1])
+                self.assertEqual(
+                    ready.history[0].boundary_time_ms,
+                    boundaries[-1] - 2 * window_minutes * 60_000,
+                )
+                self.assertEqual(ready.history[0].price, Decimal("100"))
 
     def test_restart_starts_empty_and_reports_warming_without_reconstructed_buckets(self):
         boundary = BASE + BUCKET_INTERVAL_MS
@@ -146,6 +180,49 @@ class MovementBucketTests(unittest.TestCase):
         self.assertEqual(stale.state, "stale")
         missing = self.engine.readiness(boundary - BUCKET_INTERVAL_MS, 1, ENDPOINT)
         self.assertEqual(missing.state, "missing_history")
+
+    def test_empty_pre_trade_buckets_never_make_history_ready(self):
+        count = WINDOW_BUCKETS[1]
+        boundaries = [
+            BASE + index * BUCKET_INTERVAL_MS for index in range(1, count + 1)
+        ]
+        for boundary in boundaries:
+            self.engine.advance(boundary)
+
+        result = self.engine.readiness(boundaries[-1], 1, ENDPOINT)
+        self.assertEqual(result.state, "unavailable")
+        self.assertEqual(result.reason, "no_real_trade_history")
+        self.assertTrue(all(bucket.price is None for bucket in result.history))
+
+    def test_stale_gap_blocks_readiness_until_it_leaves_adjacent_history(self):
+        first_boundary = BASE + BUCKET_INTERVAL_MS
+        self.engine.observe([observation(first_boundary, trade_time_ms=first_boundary)])
+        self.engine.advance(first_boundary)
+
+        # Let the real trade expire, producing finalized buckets without prices.
+        gap_end = first_boundary + 4 * BUCKET_INTERVAL_MS
+        for boundary in range(
+            first_boundary + BUCKET_INTERVAL_MS,
+            gap_end + BUCKET_INTERVAL_MS,
+            BUCKET_INTERVAL_MS,
+        ):
+            self.engine.advance(boundary)
+        self.assertIsNone(self.engine.history[-1].price)
+
+        recovery_start = gap_end + BUCKET_INTERVAL_MS
+        for index in range(WINDOW_BUCKETS[1]):
+            boundary = recovery_start + index * BUCKET_INTERVAL_MS
+            self.engine.observe([observation(boundary, trade_time_ms=boundary)])
+            self.engine.advance(boundary)
+            result = self.engine.readiness(boundary, 1, ENDPOINT)
+            if len(result.history) < WINDOW_BUCKETS[1]:
+                self.assertEqual(result.state, "warming")
+            elif index < WINDOW_BUCKETS[1] - 1:
+                self.assertEqual(result.state, "stale")
+                self.assertEqual(result.reason, "unusable_price_history")
+            else:
+                self.assertEqual(result.state, "ready")
+                self.assertTrue(all(bucket.price is not None for bucket in result.history))
 
     def test_boundaries_must_be_explicit_aligned_and_consecutive(self):
         with self.assertRaises(ValueError):
