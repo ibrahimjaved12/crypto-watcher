@@ -43,6 +43,8 @@ const collectorReplacements = {
       async markConnectionStatus() {}
       async markCandleConnectionStatus() {}
       markMovementConnectionStatus() {}
+      beginCandleRecoveryTenure() { return 1; }
+      invalidateCandleRecoveryTenure() {}
       noteReconnect() {}
       async recoverAfterReconnect() {}
       accept() { return true; }
@@ -173,6 +175,71 @@ async function openBehavioralRuntime(module, symbols) {
     runtime,
     socket: ValidatingFakeWebSocket.instances.at(-1),
   };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function acknowledge(socket) {
+  socket.emit("open", {});
+  const subscription = JSON.parse(socket.sent.at(-1));
+  socket.emit("message", { data: JSON.stringify({ result: null, id: subscription.id }) });
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function exerciseStaleRecoveryHandoff(settleOldRecovery) {
+  const previousWebSocket = globalThis.WebSocket;
+  ValidatingFakeWebSocket.instances.length = 0;
+  globalThis.WebSocket = ValidatingFakeWebSocket;
+  try {
+    const module = await loadBehavioralCollectorRuntime();
+    const { runtime, socket: socketA } = await openBehavioralRuntime(module, ["BTCUSDT"]);
+    const recoveryA = deferred();
+    const recoveryCalls = [];
+    runtime.collector.recoverAfterReconnect = (generation) => {
+      recoveryCalls.push(generation);
+      return recoveryCalls.length === 1 ? recoveryA.promise : Promise.resolve();
+    };
+    const candleStatuses = [];
+    const markCandleConnectionStatus =
+      runtime.collector.markCandleConnectionStatus.bind(runtime.collector);
+    runtime.collector.markCandleConnectionStatus = async (status, message, generation) => {
+      candleStatuses.push(status);
+      return markCandleConnectionStatus(status, message, generation);
+    };
+    runtime.scheduleReconnect = () => runtime.connect();
+
+    await acknowledge(socketA);
+    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "LIVE");
+    socketA.readyState = ValidatingFakeWebSocket.CLOSED;
+    socketA.emit("close", {});
+
+    const socketB = ValidatingFakeWebSocket.instances.at(-1);
+    assert.notEqual(socketB, socketA);
+    await acknowledge(socketB);
+    assert.equal(recoveryCalls.length, 2);
+    assert.notEqual(recoveryCalls[0], recoveryCalls[1]);
+    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "LIVE");
+    assert.deepEqual(candleStatuses, ["LIVE"]);
+
+    settleOldRecovery(recoveryA);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "LIVE");
+    assert.deepEqual(candleStatuses, ["LIVE"]);
+    assert.equal(ValidatingFakeWebSocket.instances.length, 2);
+
+    runtime.active = false;
+    await runtime.stop();
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
 }
 
 test("the collector worker reads one shared subscription universe from the operational store", async () => {
@@ -378,6 +445,61 @@ test("subscription acknowledgement makes movement LIVE while candle recovery is 
 
     finishRecovery();
     await recovery;
+    runtime.active = false;
+    await runtime.stop();
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("a stale failed recovery cannot poison the replacement connection", async () => {
+  await exerciseStaleRecoveryHandoff((recovery) => {
+    recovery.reject(new Error("old socket REST failure"));
+  });
+});
+
+test("a stale successful recovery cannot overwrite the replacement connection", async () => {
+  await exerciseStaleRecoveryHandoff((recovery) => {
+    recovery.resolve();
+  });
+});
+
+test("a transient candle recovery failure retries without another WebSocket", async () => {
+  const previousWebSocket = globalThis.WebSocket;
+  ValidatingFakeWebSocket.instances.length = 0;
+  globalThis.WebSocket = ValidatingFakeWebSocket;
+  try {
+    const module = await loadBehavioralCollectorRuntime();
+    const { runtime, socket } = await openBehavioralRuntime(module, ["BTCUSDT"]);
+    let recoveryCalls = 0;
+    runtime.collector.recoverAfterReconnect = async () => {
+      recoveryCalls += 1;
+      if (recoveryCalls === 1) throw new Error("transient REST failure");
+    };
+    const scheduleCandleRecoveryRetry = runtime.scheduleCandleRecoveryRetry.bind(runtime);
+    let scheduledRetries = 0;
+    runtime.scheduleCandleRecoveryRetry = (...args) => {
+      scheduledRetries += 1;
+      runtime.runCandleRecovery(...args);
+    };
+    let observeLive;
+    const candleLive = new Promise((resolve) => { observeLive = resolve; });
+    const markCandleConnectionStatus =
+      runtime.collector.markCandleConnectionStatus.bind(runtime.collector);
+    runtime.collector.markCandleConnectionStatus = async (status, message, generation) => {
+      const result = markCandleConnectionStatus(status, message, generation);
+      if (status === "LIVE") observeLive();
+      return result;
+    };
+
+    await acknowledge(socket);
+    await candleLive;
+    assert.equal(recoveryCalls, 2);
+    assert.equal(scheduledRetries, 1);
+    assert.equal(ValidatingFakeWebSocket.instances.length, 1);
+    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "LIVE");
+
+    runtime.scheduleCandleRecoveryRetry = scheduleCandleRecoveryRetry;
     runtime.active = false;
     await runtime.stop();
   } finally {

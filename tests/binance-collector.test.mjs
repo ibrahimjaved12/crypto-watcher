@@ -150,6 +150,58 @@ function harness(overrides = {}) {
   };
 }
 
+async function exerciseCollectorRecoveryTenure(oldOutcome) {
+  let recoveryMode = false;
+  let recoveryCalls = 0;
+  let oldRequest;
+  let resolveOld;
+  let rejectOld;
+  let observeOldStart;
+  const oldStarted = new Promise((resolve) => { observeOldStart = resolve; });
+  const oldLoad = new Promise((resolve, reject) => {
+    resolveOld = resolve;
+    rejectOld = reject;
+  });
+  const { collector, healthWrites } = harness({
+    loadRest: async (request) => {
+      const duration = request.timeframeMinutes * 60_000;
+      if (!recoveryMode) {
+        return [canonical(request.symbol, request.timeframeMinutes, BASE - 2 * duration)];
+      }
+      recoveryCalls += 1;
+      if (recoveryCalls === 1) {
+        oldRequest = request;
+        observeOldStart();
+        return oldLoad;
+      }
+      return [canonical(request.symbol, request.timeframeMinutes, request.startTime)];
+    },
+  });
+  await collector.reconcile(["BTCUSDT"]);
+  recoveryMode = true;
+
+  const generationA = collector.beginCandleRecoveryTenure();
+  const recoveryA = collector.recoverAfterReconnect(generationA);
+  await oldStarted;
+  collector.invalidateCandleRecoveryTenure(generationA);
+  const generationB = collector.beginCandleRecoveryTenure();
+  await collector.recoverAfterReconnect(generationB);
+  const healthCountAfterB = healthWrites.length;
+
+  if (oldOutcome === "failure") {
+    rejectOld(new Error("old recovery failed"));
+    await assert.rejects(recoveryA, /old recovery failed/);
+  } else {
+    resolveOld([
+      canonical(oldRequest.symbol, oldRequest.timeframeMinutes, oldRequest.startTime),
+    ]);
+    await recoveryA;
+  }
+
+  assert.equal(recoveryCalls, 5);
+  assert.equal(healthWrites.length, healthCountAfterB);
+}
+
 test("developing kline stays in memory and never enters completed persistence", async () => {
   const { collector, events, writes } = harness();
   await collector.reconcile(["BTCUSDT"]);
@@ -235,6 +287,14 @@ test("reconnect recovery and repeated final do not duplicate completion", async 
   collector.accept(wsKline(open));
   await collector.waitForIdle();
   assert.equal(events.filter((event) => event.origin === "live").length, 1);
+});
+
+test("a new candle recovery generation does not reuse an old failing single-flight", async () => {
+  await exerciseCollectorRecoveryTenure("failure");
+});
+
+test("stale candle recovery success cannot write health into a newer generation", async () => {
+  await exerciseCollectorRecoveryTenure("success");
 });
 
 test("aggregate-trade buffers obey both time and hard-count bounds", async () => {
@@ -435,6 +495,49 @@ test("an in-flight boundary response cannot restore a removed movement membershi
   assert.equal(collector.latestPrice("ETHUSDT"), null);
   assert.deepEqual(collector.latestTrades("ETHUSDT"), []);
   assert.equal(collector.movementRetry, null);
+});
+
+test("an exact retry preserves the original membership epoch across remove and re-add", async () => {
+  let requestCount = 0;
+  const oldSnapshot = { symbol: "ETHUSDT", marker: "epoch-1" };
+  const { collector, movementCalls } = harness({
+    advanceMovementBoundary: async () => {
+      requestCount += 1;
+      if (requestCount === 1) throw new Error("transient Python failure");
+      return { snapshots: [oldSnapshot], lateAfterFinalizationCount: 0 };
+    },
+  });
+  await collector.reconcile(["ETHUSDT"]);
+  assert.equal(collector.accept({
+    stream: "ethusdt@aggTrade",
+    data: {
+      e: "aggTrade", E: BASE, s: "ETHUSDT", st: 1,
+      a: 1, p: "2000.1", q: "0.1", T: BASE,
+    },
+  }, BASE), true);
+
+  await assert.rejects(collector.advanceMovementBuckets(BASE), /transient Python failure/);
+  const original = movementCalls[0];
+  await collector.reconcile([]);
+  await collector.reconcile(["ETHUSDT"]);
+  assert.equal(collector.accept({
+    stream: "ethusdt@aggTrade",
+    data: {
+      e: "aggTrade", E: BASE + 1, s: "ETHUSDT", st: 1,
+      a: 2, p: "2000.2", q: "0.2", T: BASE + 1,
+    },
+  }, BASE + 1), true);
+
+  await collector.advanceMovementBuckets(BASE);
+  const retried = movementCalls[1];
+  assert.equal(retried.sessionId, original.sessionId);
+  assert.equal(retried.boundaryTime, original.boundaryTime);
+  assert.equal(retried.symbols, original.symbols);
+  assert.equal(collector.movementSnapshot("ETHUSDT"), null);
+  assert.deepEqual(
+    collector.movementObservations.get("ETHUSDT").map((trade) => trade.aggregateId),
+    [2],
+  );
 });
 
 test("source outage within a bucket remains attached after source returns LIVE", async () => {

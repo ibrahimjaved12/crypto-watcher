@@ -312,13 +312,15 @@ export class BinanceFuturesCollector {
   private readonly health = new Map<string, HealthState>();
   private readonly queue: CollectorCandle[] = [];
   private processing: Promise<void> | null = null;
-  private recovery: Promise<void> | null = null;
+  private recovery: { generation: number; promise: Promise<void> } | null = null;
+  private candleRecoveryGeneration = 0;
   private reconnectCount = 0;
   private movementBoundary: number | null = null;
   private movementRetry: {
     sessionId: string;
     boundaryTime: number;
     symbols: MovementBoundarySymbolInput[];
+    membershipEpochs: Map<string, number>;
   } | null = null;
   private movementGeneration = 0;
   private movementMembershipEpoch = 0;
@@ -501,14 +503,25 @@ export class BinanceFuturesCollector {
         ? this.movementRetry.sessionId
         : this.movementSessionId;
       const input = retry;
-      const inputMembershipEpochs = new Map(
-        input.map((item) => [item.symbol, this.movementMembershipEpochs.get(item.symbol)]),
-      );
+      const inputMembershipEpochs = this.movementRetry?.boundaryTime === nextBoundary
+        ? this.movementRetry.membershipEpochs
+        : new Map<string, number>();
+      if (this.movementRetry?.boundaryTime !== nextBoundary) {
+        for (const item of input) {
+          const epoch = this.movementMembershipEpochs.get(item.symbol);
+          if (epoch !== undefined) inputMembershipEpochs.set(item.symbol, epoch);
+        }
+      }
       const isCurrentMembership = (symbol: string): boolean => {
         const inputEpoch = inputMembershipEpochs.get(symbol);
         return inputEpoch !== undefined && inputEpoch === this.movementMembershipEpochs.get(symbol);
       };
-      this.movementRetry = { sessionId, boundaryTime: nextBoundary, symbols: input };
+      this.movementRetry = {
+        sessionId,
+        boundaryTime: nextBoundary,
+        symbols: input,
+        membershipEpochs: inputMembershipEpochs,
+      };
       const result = await this.dependencies.advanceMovementBoundary(sessionId, nextBoundary, input);
       if (generation !== this.movementGeneration) return;
       for (const snapshot of result.snapshots) {
@@ -566,17 +579,25 @@ export class BinanceFuturesCollector {
   async markCandleConnectionStatus(
     status: CollectorHealthStatus,
     errorMessage: string | null,
+    recoveryGeneration?: number,
   ): Promise<void> {
-    await this.persistConnectionHealth(this.subscribedSymbols(), status, errorMessage);
+    await this.persistConnectionHealth(
+      this.subscribedSymbols(),
+      status,
+      errorMessage,
+      recoveryGeneration,
+    );
   }
 
   private async persistConnectionHealth(
     symbols: string[],
     status: CollectorHealthStatus,
     errorMessage: string | null,
+    recoveryGeneration?: number,
   ): Promise<void> {
     for (const symbol of symbols) {
       for (const timeframe of COLLECTOR_INTERVALS) {
+        if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
         const candle =
           this.latestCompleted.get(this.key(symbol, timeframe)) ??
           this.placeholder(symbol, timeframe);
@@ -732,35 +753,68 @@ export class BinanceFuturesCollector {
     return true;
   }
 
-  async recoverAfterReconnect(): Promise<void> {
-    if (this.recovery) return this.recovery;
-    this.recovery = (async () => {
+  beginCandleRecoveryTenure(): number {
+    this.candleRecoveryGeneration += 1;
+    this.recovery = null;
+    return this.candleRecoveryGeneration;
+  }
+
+  invalidateCandleRecoveryTenure(generation: number): void {
+    if (generation !== this.candleRecoveryGeneration) return;
+    this.candleRecoveryGeneration += 1;
+    if (this.recovery?.generation === generation) this.recovery = null;
+  }
+
+  async recoverAfterReconnect(
+    generation = this.candleRecoveryGeneration,
+  ): Promise<void> {
+    if (generation !== this.candleRecoveryGeneration) return;
+    if (this.recovery?.generation === generation) return this.recovery.promise;
+    const recovery = (async () => {
       for (const symbol of this.subscribedSymbols()) {
         for (const timeframe of COLLECTOR_INTERVALS) {
+          if (!this.isCandleRecoveryCurrent(generation)) return;
           const latest = this.latestCompleted.get(this.key(symbol, timeframe));
           if (!latest) {
-            await this.bootstrap(symbol, timeframe);
+            await this.bootstrap(symbol, timeframe, generation);
+            if (!this.isCandleRecoveryCurrent(generation)) return;
             if (!this.latestCompleted.has(this.key(symbol, timeframe))) {
               throw new Error(`REST continuity unavailable for ${symbol} ${timeframe}m`);
             }
-          } else await this.recoverThrough(symbol, timeframe, this.latestExpectedOpen(timeframe));
+          } else {
+            await this.recoverThrough(
+              symbol,
+              timeframe,
+              this.latestExpectedOpen(timeframe),
+              generation,
+            );
+          }
         }
       }
     })().finally(() => {
-      this.recovery = null;
-      this.startDrain();
+      if (this.recovery?.generation === generation) {
+        this.recovery = null;
+        this.startDrain();
+      }
     });
-    return this.recovery;
+    this.recovery = { generation, promise: recovery };
+    return recovery;
   }
 
   async waitForIdle(): Promise<void> {
-    await this.recovery;
+    await this.recovery?.promise;
     while (this.processing) await this.processing;
   }
 
-  private async bootstrap(symbol: string, timeframeMinutes: CollectorInterval): Promise<void> {
+  private async bootstrap(
+    symbol: string,
+    timeframeMinutes: CollectorInterval,
+    recoveryGeneration?: number,
+  ): Promise<void> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     const placeholder = this.placeholder(symbol, timeframeMinutes);
     await this.setHealth(placeholder, "RECOVERING", null);
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     const candles = (
       await this.dependencies.loadRest({
         symbol,
@@ -770,11 +824,13 @@ export class BinanceFuturesCollector {
     )
       .filter((candle) => candle.closeTime < this.now())
       .sort((left, right) => left.openTime - right.openTime);
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     if (candles.length === 0 || !this.contiguous(candles, timeframeMinutes)) {
       await this.setHealth(placeholder, "UNAVAILABLE", "REST bootstrap continuity unavailable");
       return;
     }
     await this.persist(candles, "bootstrap");
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     const latest = candles.at(-1)!;
     this.latestCompleted.set(this.key(symbol, timeframeMinutes), latest);
     await this.setHealth(latest, "RECOVERING", null);
@@ -835,18 +891,23 @@ export class BinanceFuturesCollector {
     symbol: string,
     timeframeMinutes: CollectorInterval,
     targetOpen: number,
+    recoveryGeneration?: number,
   ): Promise<void> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     const latest = this.latestCompleted.get(this.key(symbol, timeframeMinutes));
     if (!latest || targetOpen <= latest.openTime) return;
     await this.setHealth(latest, "RECOVERING", "reconnect recovery");
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     if (
       !(await this.recoverRange(
         symbol,
         timeframeMinutes,
         latest.openTime + timeframeMinutes * 60_000,
         targetOpen,
+        recoveryGeneration,
       ))
     ) {
+      if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
       await this.setHealth(latest, "UNAVAILABLE", "reconnect continuity unavailable");
       throw new Error(`REST reconnect continuity unavailable for ${symbol} ${timeframeMinutes}m`);
     }
@@ -857,7 +918,9 @@ export class BinanceFuturesCollector {
     timeframeMinutes: CollectorInterval,
     firstOpen: number,
     lastOpen: number,
+    recoveryGeneration?: number,
   ): Promise<boolean> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     if (lastOpen < firstOpen) return true;
     const duration = timeframeMinutes * 60_000;
     const count = Math.floor((lastOpen - firstOpen) / duration) + 1;
@@ -873,6 +936,7 @@ export class BinanceFuturesCollector {
     )
       .filter((candle) => candle.closeTime < this.now())
       .sort((left, right) => left.openTime - right.openTime);
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     if (
       candles.length !== count ||
       candles[0]?.openTime !== firstOpen ||
@@ -882,6 +946,7 @@ export class BinanceFuturesCollector {
       return false;
     }
     await this.persist(candles, "recovery");
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     const latest = candles.at(-1)!;
     this.latestCompleted.set(this.key(symbol, timeframeMinutes), latest);
     return true;
@@ -913,6 +978,10 @@ export class BinanceFuturesCollector {
 
   private key(symbol: string, timeframeMinutes: CollectorInterval): string {
     return `${symbol.toUpperCase()}:${timeframeMinutes}`;
+  }
+
+  private isCandleRecoveryCurrent(generation: number | undefined): boolean {
+    return generation === undefined || generation === this.candleRecoveryGeneration;
   }
 
   private state(key: string): HealthState {

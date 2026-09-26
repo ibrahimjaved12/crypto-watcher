@@ -17,6 +17,8 @@ const LEASE_REFRESH_MS = 20_000;
 const STALE_AFTER_MS = 30_000;
 const CONNECTION_MAX_AGE_MS = 23 * 60 * 60_000 + 50 * 60_000;
 const MAX_BACKOFF_MS = 30_000;
+const CANDLE_RECOVERY_RETRY_BASE_MS = 1_000;
+const CANDLE_RECOVERY_MAX_BACKOFF_MS = 30_000;
 const RECOVERY_CLOSE_CODE = 4000;
 
 function enabled(env: Record<string, string | undefined> = process.env): boolean {
@@ -47,6 +49,9 @@ export class CollectorRuntime {
   private leaseTimer: ReturnType<typeof setInterval> | null = null;
   private staleTimer: ReturnType<typeof setInterval> | null = null;
   private lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
+  private candleRecoveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private candleRecoveryAttempts = 0;
+  private candleRecoveryGeneration: number | null = null;
 
   constructor(private readonly store: OperationalStore) {
     this.collector = new BinanceFuturesCollector({
@@ -83,6 +88,7 @@ export class CollectorRuntime {
   async stop(): Promise<void> {
     this.stopped = true;
     this.streamReady = false;
+    this.invalidateCandleRecoveryTenure();
     this.clearTimers();
     this.collector.resetMovementTransportState();
     this.rejectPendingRequests("collector stopping");
@@ -112,6 +118,7 @@ export class CollectorRuntime {
       );
       const heldLease = this.active;
       this.active = false;
+      this.invalidateCandleRecoveryTenure();
       this.clearTimers();
       this.collector.resetMovementTransportState();
       void this.movement.stop();
@@ -166,6 +173,7 @@ export class CollectorRuntime {
     }
     this.active = false;
     this.streamReady = false;
+    this.invalidateCandleRecoveryTenure();
     this.clearTimers();
     this.collector.resetMovementTransportState();
     void this.movement.stop();
@@ -212,6 +220,7 @@ export class CollectorRuntime {
     if (this.stopped || !this.active || this.socket) return;
     this.streamReady = false;
     const socket = new WebSocket(BINANCE_USDM_WS_ENDPOINT);
+    const recoveryGeneration = this.beginCandleRecoveryTenure();
     this.socket = socket;
     socket.addEventListener("open", () => {
       this.lastMessageAt = Date.now();
@@ -230,33 +239,7 @@ export class CollectorRuntime {
           );
           socket.close(RECOVERY_CLOSE_CODE, "subscription failed");
         });
-      void this.collector.recoverAfterReconnect()
-        .then(async () => {
-          try {
-            await subscription;
-          } catch {
-            return;
-          }
-          if (
-            this.socket !== socket ||
-            !this.streamReady ||
-            socket.readyState !== WebSocket.OPEN
-          ) {
-            return;
-          }
-          await this.collector.markCandleConnectionStatus("LIVE", null);
-        })
-        .catch((error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          console.error(`[binance-collector] completed-candle recovery failed: ${message}`);
-          void this.collector.markCandleConnectionStatus("UNAVAILABLE", message).catch(
-            (healthError) => {
-              console.error(
-                `[binance-collector] candle health write failed: ${healthError instanceof Error ? healthError.message : String(healthError)}`,
-              );
-            },
-          );
-        });
+      this.runCandleRecovery(socket, recoveryGeneration, subscription);
       this.lifetimeTimer = setTimeout(
         () => socket.close(1000, "scheduled Binance connection rotation"),
         CONNECTION_MAX_AGE_MS,
@@ -299,6 +282,7 @@ export class CollectorRuntime {
       if (this.socket !== socket) return;
       this.socket = null;
       this.streamReady = false;
+      this.invalidateCandleRecoveryTenure(recoveryGeneration);
       this.rejectPendingRequests("Binance connection closed before subscription acknowledgement");
       if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
       this.lifetimeTimer = null;
@@ -321,6 +305,106 @@ export class CollectorRuntime {
       this.retryTimer = null;
       this.connect();
     }, delay);
+  }
+
+  private beginCandleRecoveryTenure(): number {
+    if (this.candleRecoveryRetryTimer) clearTimeout(this.candleRecoveryRetryTimer);
+    this.candleRecoveryRetryTimer = null;
+    this.candleRecoveryAttempts = 0;
+    const generation = this.collector.beginCandleRecoveryTenure();
+    this.candleRecoveryGeneration = generation;
+    return generation;
+  }
+
+  private invalidateCandleRecoveryTenure(generation = this.candleRecoveryGeneration): void {
+    if (generation === null || generation !== this.candleRecoveryGeneration) return;
+    if (this.candleRecoveryRetryTimer) clearTimeout(this.candleRecoveryRetryTimer);
+    this.candleRecoveryRetryTimer = null;
+    this.candleRecoveryAttempts = 0;
+    this.candleRecoveryGeneration = null;
+    this.collector.invalidateCandleRecoveryTenure(generation);
+  }
+
+  private runCandleRecovery(
+    socket: WebSocket,
+    generation: number,
+    subscription: Promise<void>,
+  ): void {
+    if (!this.isCurrentCandleRecovery(socket, generation)) return;
+    void this.collector.recoverAfterReconnect(generation).then(
+      () => void this.completeCandleRecovery(socket, generation, subscription),
+      (error) => void this.failCandleRecovery(socket, generation, subscription, error),
+    );
+  }
+
+  private async completeCandleRecovery(
+    socket: WebSocket,
+    generation: number,
+    subscription: Promise<void>,
+  ): Promise<void> {
+    try {
+      await subscription;
+    } catch {
+      return;
+    }
+    if (!this.isCurrentCandleRecovery(socket, generation)) return;
+    this.candleRecoveryAttempts = 0;
+    try {
+      await this.collector.markCandleConnectionStatus("LIVE", null, generation);
+    } catch (error) {
+      console.error(
+        `[binance-collector] candle health write failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async failCandleRecovery(
+    socket: WebSocket,
+    generation: number,
+    subscription: Promise<void>,
+    error: unknown,
+  ): Promise<void> {
+    if (!this.isCurrentCandleRecovery(socket, generation)) return;
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[binance-collector] completed-candle recovery failed: ${message}`);
+    try {
+      await this.collector.markCandleConnectionStatus("UNAVAILABLE", message, generation);
+    } catch (healthError) {
+      console.error(
+        `[binance-collector] candle health write failed: ${healthError instanceof Error ? healthError.message : String(healthError)}`,
+      );
+    }
+    this.scheduleCandleRecoveryRetry(socket, generation, subscription);
+  }
+
+  private scheduleCandleRecoveryRetry(
+    socket: WebSocket,
+    generation: number,
+    subscription: Promise<void>,
+  ): void {
+    if (
+      this.candleRecoveryRetryTimer ||
+      !this.isCurrentCandleRecovery(socket, generation)
+    ) return;
+    const delay = Math.min(
+      CANDLE_RECOVERY_MAX_BACKOFF_MS,
+      CANDLE_RECOVERY_RETRY_BASE_MS * 2 ** Math.min(this.candleRecoveryAttempts, 5),
+    );
+    this.candleRecoveryAttempts += 1;
+    this.candleRecoveryRetryTimer = setTimeout(() => {
+      this.candleRecoveryRetryTimer = null;
+      this.runCandleRecovery(socket, generation, subscription);
+    }, delay);
+  }
+
+  private isCurrentCandleRecovery(socket: WebSocket, generation: number): boolean {
+    return (
+      !this.stopped &&
+      this.active &&
+      this.socket === socket &&
+      this.candleRecoveryGeneration === generation &&
+      socket.readyState === WebSocket.OPEN
+    );
   }
 
   private sendSubscription(method: "SUBSCRIBE" | "UNSUBSCRIBE", streams: string[]): Promise<void> {
@@ -365,11 +449,13 @@ export class CollectorRuntime {
     }
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
+    if (this.candleRecoveryRetryTimer) clearTimeout(this.candleRecoveryRetryTimer);
     this.subscriptionTimer = null;
     this.leaseTimer = null;
     this.staleTimer = null;
     this.retryTimer = null;
     this.lifetimeTimer = null;
+    this.candleRecoveryRetryTimer = null;
   }
 }
 
