@@ -1,6 +1,7 @@
 """Versioned server-to-server input. Never accepts DB credentials or a user JWT."""
 from decimal import Decimal
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -17,6 +18,7 @@ Price = Annotated[Decimal, Field(gt=0, le=Decimal("1e20"), max_digits=40, decima
 Threshold = Annotated[Decimal, Field(ge=Decimal("0.1"), le=100)]
 Source = Literal["binance-usdm", "okx-usdt-swap", "kraken-futures"]
 Nonnegative = Annotated[Decimal, Field(ge=0, le=Decimal("1e30"), max_digits=40, decimal_places=20)]
+Positive = Annotated[Decimal, Field(gt=0, le=Decimal("1e30"), max_digits=40, decimal_places=20)]
 
 
 class InputModel(BaseModel):
@@ -162,3 +164,49 @@ class TechnicalAnalysisBatchRequest(InputModel):
     requests: Annotated[
         tuple[TechnicalAnalysisRequest, ...], Field(min_length=1, max_length=8)
     ]
+
+
+class MovementObservationRequest(InputModel):
+    price: Positive
+    quantity: Positive
+    event_time_ms: Timestamp
+    trade_time_ms: Timestamp
+    aggregate_trade_id: Annotated[int, Field(strict=True, ge=0)]
+    received_at_ms: Timestamp
+
+
+class MovementSymbolBoundaryRequest(InputModel):
+    symbol: str = Field(min_length=5, max_length=16)
+    instrument_id: str = Field(min_length=3, max_length=128)
+    source_state: Literal["LIVE", "RECOVERING", "STALE", "UNAVAILABLE"]
+    observations: Annotated[tuple[MovementObservationRequest, ...], Field(max_length=20_000)]
+
+    @model_validator(mode="after")
+    def exact_instrument(self):
+        if self.symbol not in SUPPORTED_SYMBOLS:
+            raise ValueError("unsupported USDT symbol")
+        if self.instrument_id != instrument_id(self.symbol):
+            raise ValueError("instrument identity does not match symbol")
+        previous_key = None
+        for observation in self.observations:
+            key = (observation.trade_time_ms, observation.aggregate_trade_id)
+            if previous_key is not None and key <= previous_key:
+                raise ValueError("movement observations must be strictly ordered")
+            previous_key = key
+        return self
+
+
+class MovementBoundaryRequest(InputModel):
+    schema_version: Literal[1]
+    session_id: UUID
+    boundary_time_ms: Timestamp
+    symbols: Annotated[tuple[MovementSymbolBoundaryRequest, ...], Field(min_length=1, max_length=100)]
+
+    @model_validator(mode="after")
+    def aligned_unique_symbols(self):
+        if self.boundary_time_ms % 5_000:
+            raise ValueError("movement boundary must align to five seconds")
+        symbols = [item.symbol for item in self.symbols]
+        if len(symbols) != len(set(symbols)):
+            raise ValueError("movement boundary symbols must be unique")
+        return self

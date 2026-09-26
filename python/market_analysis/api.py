@@ -12,9 +12,11 @@ import httpx
 
 from .api_models import (
     AnalysisRequest,
+    MovementBoundaryRequest,
     TechnicalAnalysisBatchRequest,
     TechnicalAnalysisRequest,
 )
+from .movement_service import MovementBoundaryService
 from .service import analyze_request
 from .technical import calculate_technical_analysis
 
@@ -33,6 +35,7 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
 
     app = FastAPI(title="Crypto Watch analysis", lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.movement_boundary_service = MovementBoundaryService()
 
     @app.middleware("http")
     async def private_responses(request, call_next):
@@ -81,6 +84,13 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
                 for item in body.requests
             ],
         }
+
+    @app.post("/v1/movement/boundary", dependencies=[Depends(authorize)])
+    async def movement_boundary(body: MovementBoundaryRequest, request: Request):
+        try:
+            return request.app.state.movement_boundary_service.advance(body)
+        except ValueError:
+            raise HTTPException(409, "Movement boundary could not be applied") from None
 
     return app
 

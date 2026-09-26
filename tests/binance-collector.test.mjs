@@ -4,14 +4,7 @@ import { test } from "node:test";
 import ts from "../node_modules/typescript/lib/typescript.js";
 
 const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-const movementSource = await readFile(
-  new URL("../src/lib/market/movement-buckets.ts", import.meta.url),
-  "utf8",
-);
-const movementOutput = ts.transpileModule(movementSource, {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const movementUrl = `data:text/javascript;base64,${Buffer.from(movementOutput).toString("base64")}`;
+const movementUrl = stub("export const MOVEMENT_OBSERVATION_BATCH_MAX=20000;");
 const source = await readFile(new URL("../src/lib/market/collector.ts", import.meta.url), "utf8");
 let { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
@@ -23,7 +16,7 @@ outputText = outputText.replaceAll(
   ),
 );
 outputText = outputText.replaceAll(
-  JSON.stringify("./movement-buckets"),
+  JSON.stringify("./movement-contract"),
   JSON.stringify(movementUrl),
 );
 const {
@@ -97,6 +90,7 @@ function harness(overrides = {}) {
   const writes = [];
   const healthWrites = [];
   const events = [];
+  const movementCalls = [];
   const loadRest = async (request) => {
     if (overrides.loadRest) return overrides.loadRest(request);
     const duration = request.timeframeMinutes * 60_000;
@@ -135,8 +129,15 @@ function harness(overrides = {}) {
     async onCompleted(event) {
       events.push(event);
     },
+    async advanceMovementBoundary(boundaryTime, symbols) {
+      movementCalls.push({ boundaryTime, symbols });
+      if (overrides.advanceMovementBoundary) {
+        return overrides.advanceMovementBoundary(boundaryTime, symbols);
+      }
+      return { snapshots: [], lateAfterFinalizationCount: 0 };
+    },
   });
-  return { collector, events, writes, healthWrites };
+  return { collector, events, writes, healthWrites, movementCalls };
 }
 
 test("developing kline stays in memory and never enters completed persistence", async () => {
@@ -261,8 +262,29 @@ test("aggregate-trade buffers obey both time and hard-count bounds", async () =>
   );
 });
 
-test("accepted aggregate trades feed movement buckets without persistence writes", async () => {
-  const { collector, writes, healthWrites } = harness();
+test("accepted aggregate trades are forwarded for Python movement calculation", async () => {
+  const pythonSnapshot = {
+    symbol: "BTCUSDT",
+    provider: "binance-usdm",
+    instrumentId: "binance-usdm:BTCUSDT",
+    priceType: "trade",
+    bucketMs: 5_000,
+    maxLastTradeAgeMs: 15_000,
+    buckets: [],
+    latestRealTradeTime: BASE,
+    latestRealReceivedAt: BASE,
+    readiness: {
+      1: { windowMinutes: 1, status: "WARMING" },
+      5: { windowMinutes: 5, status: "WARMING" },
+      15: { windowMinutes: 15, status: "WARMING" },
+    },
+  };
+  const { collector, writes, healthWrites, movementCalls } = harness({
+    advanceMovementBoundary: async () => ({
+      snapshots: [pythonSnapshot],
+      lateAfterFinalizationCount: 0,
+    }),
+  });
   await collector.reconcile(["BTCUSDT"]);
   writes.length = 0;
   healthWrites.length = 0;
@@ -282,31 +304,25 @@ test("accepted aggregate trades feed movement buckets without persistence writes
     },
     BASE,
   );
-  collector.advanceMovementBuckets(BASE);
+  await collector.advanceMovementBuckets(BASE);
 
   assert.equal(accepted, true);
   assert.equal(writes.length, 0);
   assert.equal(healthWrites.length, 0);
-  assert.equal(collector.movementSnapshot("BTCUSDT").buckets[0].endpointPrice, 101);
-});
-
-test("late-after-finalization trades are rejected and counted without rewriting history", async () => {
-  const { collector } = harness();
-  await collector.reconcile(["BTCUSDT"]);
-  const trade = (id, time) => ({
-    stream: "btcusdt@aggTrade",
-    data: { e: "aggTrade", E: time, s: "BTCUSDT", st: 1, a: id, p: "101", q: "2", T: time },
-  });
-
-  assert.equal(collector.accept(trade(1, BASE), BASE), true);
-  collector.advanceMovementBuckets(BASE);
-  assert.equal(collector.movementSnapshot("BTCUSDT").buckets.at(-1).boundaryTime, BASE);
-  assert.equal(collector.movementLateRejections(), 0);
-
-  // A later trade whose exchange time belongs to the finalized bucket is rejected.
-  assert.equal(collector.accept(trade(2, BASE), BASE), false);
-  assert.equal(collector.movementLateRejections(), 1);
-  assert.equal(collector.movementSnapshot("BTCUSDT").buckets.at(-1).endpointPrice, 101);
+  assert.equal(movementCalls.length, 1);
+  assert.equal(movementCalls[0].boundaryTime, BASE);
+  assert.deepEqual(movementCalls[0].symbols[0].observations, [
+    {
+      symbol: "BTCUSDT",
+      aggregateId: 1,
+      price: 101,
+      quantity: 2,
+      eventTime: BASE,
+      tradeTime: BASE,
+      receivedAt: BASE,
+    },
+  ]);
+  assert.equal(collector.movementSnapshot("BTCUSDT"), pythonSnapshot);
 });
 
 test("per-symbol source status reflects collector health for the movement gate", async () => {

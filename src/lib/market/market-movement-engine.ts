@@ -15,7 +15,7 @@ import {
   MOVEMENT_WINDOWS_MINUTES,
   type MovementBucketSnapshot,
   type MovementWindowMinutes,
-} from "./movement-buckets";
+} from "./movement-contract";
 import {
   calculateMarketMovement,
   DEFAULT_MARKET_MOVEMENT_CONFIG,

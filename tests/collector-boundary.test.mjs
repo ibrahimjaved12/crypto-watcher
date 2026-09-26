@@ -56,6 +56,11 @@ const collectorReplacements = {
       async stop() {}
     }
   `),
+  "./movement-python-client.server": stub(`
+    export async function advancePythonMovementBoundary() {
+      return { snapshots: [], lateAfterFinalizationCount: 0 };
+    }
+  `),
   "./movement-finalization": stub(`export function movementFinalizationConfig() { return {}; }`),
   "./collector-worker-env.server": stub(`export function validateCollectorWorkerEnvironment() {}`),
 };

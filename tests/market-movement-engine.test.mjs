@@ -16,10 +16,10 @@ async function transpile(path, rewrites = {}) {
   return stub(outputText);
 }
 
-const movementBucketsUrl = await transpile("../src/lib/market/movement-buckets.ts");
+const movementBucketsUrl = await transpile("../src/lib/market/movement-contract.ts");
 const stateUrl = await transpile("../src/lib/market/market-movement-state.ts");
 const metricsUrl = await transpile("../src/lib/market/movement-metrics.ts", {
-  "./movement-buckets": movementBucketsUrl,
+  "./movement-contract": movementBucketsUrl,
 });
 const classifierUrl = await transpile("../src/lib/market/market-state-classifier.ts");
 const lifecycleUrl = await transpile("../src/lib/market/market-episode-lifecycle.ts");
@@ -27,10 +27,10 @@ const universeUrl = await transpile("../src/lib/market/market-universe.ts", {
   "./market-movement-state": stateUrl,
 });
 const finalizationUrl = await transpile("../src/lib/market/movement-finalization.ts", {
-  "./movement-buckets": movementBucketsUrl,
+  "./movement-contract": movementBucketsUrl,
 });
 const engineUrl = await transpile("../src/lib/market/market-movement-engine.ts", {
-  "./movement-buckets": movementBucketsUrl,
+  "./movement-contract": movementBucketsUrl,
   "./movement-metrics": metricsUrl,
   "./market-state-classifier": classifierUrl,
   "./market-episode-lifecycle": lifecycleUrl,

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import ts from "../node_modules/typescript/lib/typescript.js";
 
 const movementSource = await readFile(
-  new URL("../src/lib/market/movement-buckets.ts", import.meta.url),
+  new URL("../src/lib/market/movement-contract.ts", import.meta.url),
   "utf8",
 );
 const movementOutput = ts.transpileModule(movementSource, {
@@ -19,7 +19,7 @@ let { outputText } = ts.transpileModule(metricsSource, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
 outputText = outputText.replaceAll(
-  JSON.stringify("./movement-buckets"),
+  JSON.stringify("./movement-contract"),
   JSON.stringify(movementUrl),
 );
 const { calculateMarketMovement, DEFAULT_MARKET_MOVEMENT_CONFIG } = await import(

@@ -7,6 +7,7 @@ import {
   normalizeRestCandles,
 } from "./collector";
 import { MovementEngineRuntime } from "./movement-engine.server";
+import { advancePythonMovementBoundary } from "./movement-python-client.server";
 import { movementFinalizationConfig } from "./movement-finalization";
 import { validateCollectorWorkerEnvironment } from "./collector-worker-env.server";
 
@@ -27,6 +28,7 @@ function enabled(env: Record<string, string | undefined> = process.env): boolean
 
 export class CollectorRuntime {
   private readonly instanceId = crypto.randomUUID();
+  private readonly movementSessionId = crypto.randomUUID();
   private readonly collector: BinanceFuturesCollector;
   private readonly movement: MovementEngineRuntime;
   private socket: WebSocket | null = null;
@@ -62,6 +64,8 @@ export class CollectorRuntime {
         });
       },
       onOverload: () => this.socket?.close(1013, "bounded processing capacity exceeded"),
+      advanceMovementBoundary: (boundaryTime, symbols) =>
+        advancePythonMovementBoundary(this.movementSessionId, boundaryTime, symbols),
     });
     this.movement = new MovementEngineRuntime({
       store,

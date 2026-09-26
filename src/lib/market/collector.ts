@@ -5,7 +5,13 @@ import type {
   CollectorHealthStatus,
   OperationalStore,
 } from "../operational/types";
-import { FuturesMovementBuckets, type MovementBucketSnapshot } from "./movement-buckets";
+import {
+  MOVEMENT_OBSERVATION_BATCH_MAX,
+  type MovementBoundaryResult,
+  type MovementBoundarySymbolInput,
+  type MovementBucketSnapshot,
+  type MovementSourceState,
+} from "./movement-contract";
 
 export const BINANCE_USDM_WS_ENDPOINT = "wss://fstream.binance.com/market/stream";
 export const BINANCE_USDM_REST_ENDPOINT = "/fapi/v1/klines";
@@ -52,6 +58,10 @@ type CollectorDependencies = {
   queueCapacity?: number;
   tradeWindowMs?: number;
   tradeMaxCount?: number;
+  advanceMovementBoundary(
+    boundaryTime: number,
+    symbols: MovementBoundarySymbolInput[],
+  ): Promise<MovementBoundaryResult>;
 };
 
 type HealthState = {
@@ -253,23 +263,32 @@ export class BinanceFuturesCollector {
   private readonly queueCapacity: number;
   private readonly tradeWindowMs: number;
   private readonly tradeMaxCount: number;
+  private readonly movementObservationMaxCount: number;
   private readonly symbols = new Set<string>();
   private readonly developing = new Map<string, CollectorCandle>();
   private readonly latestCompleted = new Map<string, CollectorCandle>();
   private readonly latestTrade = new Map<string, AggregateTrade>();
   private readonly trades = new Map<string, TradeBuffer>();
-  private readonly movementBuckets = new FuturesMovementBuckets();
+  private readonly movementObservations = new Map<string, AggregateTrade[]>();
+  private readonly movementResults = new Map<string, MovementBucketSnapshot>();
   private readonly health = new Map<string, HealthState>();
   private readonly queue: CollectorCandle[] = [];
   private processing: Promise<void> | null = null;
   private recovery: Promise<void> | null = null;
   private reconnectCount = 0;
+  private movementBoundary: number | null = null;
+  private movementRetry: {
+    boundaryTime: number;
+    symbols: MovementBoundarySymbolInput[];
+  } | null = null;
+  private movementLateRejections = 0;
 
   constructor(private readonly dependencies: CollectorDependencies) {
     this.now = dependencies.now ?? Date.now;
     this.queueCapacity = dependencies.queueCapacity ?? 256;
     this.tradeWindowMs = dependencies.tradeWindowMs ?? 5 * 60_000;
     this.tradeMaxCount = dependencies.tradeMaxCount ?? 2_000;
+    this.movementObservationMaxCount = MOVEMENT_OBSERVATION_BATCH_MAX;
     if (this.queueCapacity < 1 || this.tradeWindowMs < 1 || this.tradeMaxCount < 1) {
       throw new Error("invalid collector bounds");
     }
@@ -298,16 +317,18 @@ export class BinanceFuturesCollector {
   }
 
   movementSnapshot(symbol: string): MovementBucketSnapshot | null {
-    return this.movementBuckets.snapshot(symbol);
+    return this.movementResults.get(symbol.toUpperCase()) ?? null;
   }
 
   movementSnapshots(): MovementBucketSnapshot[] {
-    return this.movementBuckets.snapshots();
+    return [...this.movementResults.values()].sort((left, right) =>
+      left.symbol.localeCompare(right.symbol),
+    );
   }
 
   /** Trades rejected because their exchange-time bucket had already been finalized. */
   movementLateRejections(): number {
-    return this.movementBuckets.lateAfterFinalizationCount;
+    return this.movementLateRejections;
   }
 
   /**
@@ -331,8 +352,60 @@ export class BinanceFuturesCollector {
     return best;
   }
 
-  advanceMovementBuckets(boundaryTime: number): void {
-    this.movementBuckets.advanceTo(boundaryTime);
+  async advanceMovementBuckets(boundaryTime: number): Promise<void> {
+    safeTimestamp(boundaryTime, "movement boundary");
+    if (boundaryTime % 5_000 !== 0) throw new Error("movement boundary is not aligned to five seconds");
+    if (this.movementBoundary !== null && boundaryTime <= this.movementBoundary) return;
+
+    const earliestObservedBoundary = [...this.movementObservations.values()]
+      .flatMap((trades) => trades.map((trade) => Math.ceil(trade.tradeTime / 5_000) * 5_000))
+      .filter((value) => value <= boundaryTime)
+      .sort((left, right) => left - right)[0];
+    let nextBoundary = this.movementRetry?.boundaryTime ?? (
+      this.movementBoundary === null
+        ? earliestObservedBoundary ?? boundaryTime
+        : this.movementBoundary + 5_000
+    );
+
+    while (nextBoundary <= boundaryTime) {
+      const input = this.movementRetry?.boundaryTime === nextBoundary
+        ? this.movementRetry.symbols
+        : this.subscribedSymbols().map((symbol) => {
+            const observations = (this.movementObservations.get(symbol) ?? []).filter(
+              (trade) => Math.ceil(trade.tradeTime / 5_000) * 5_000 <= nextBoundary,
+            );
+            return {
+              symbol,
+              sourceState: this.symbolSourceStatus(symbol) as MovementSourceState,
+              observations: observations.map((trade) => ({
+                symbol,
+                aggregateId: trade.aggregateId,
+                price: trade.price,
+                quantity: trade.quantity,
+                eventTime: trade.eventTime,
+                tradeTime: trade.tradeTime,
+                receivedAt: trade.receivedAt,
+              })),
+            };
+          });
+      this.movementRetry = { boundaryTime: nextBoundary, symbols: input };
+      const result = await this.dependencies.advanceMovementBoundary(nextBoundary, input);
+      for (const snapshot of result.snapshots) {
+        this.movementResults.set(snapshot.symbol, snapshot);
+      }
+      this.movementLateRejections = result.lateAfterFinalizationCount;
+      for (const item of input) {
+        const consumedIds = new Set(item.observations.map((trade) => trade.aggregateId));
+        const pending = this.movementObservations.get(item.symbol) ?? [];
+        this.movementObservations.set(
+          item.symbol,
+          pending.filter((trade) => !consumedIds.has(trade.aggregateId)),
+        );
+      }
+      this.movementBoundary = nextBoundary;
+      this.movementRetry = null;
+      nextBoundary += 5_000;
+    }
   }
 
   developingCandle(symbol: string, timeframeMinutes: CollectorInterval): CollectorCandle | null {
@@ -364,12 +437,13 @@ export class BinanceFuturesCollector {
       if (!isSupportedSymbol(symbol)) throw new Error(`unsupported futures contract: ${symbol}`);
       next.add(symbol);
     }
-    this.movementBuckets.reconcile(next);
     for (const symbol of this.symbols) {
       if (next.has(symbol)) continue;
       this.symbols.delete(symbol);
       this.trades.delete(symbol);
       this.latestTrade.delete(symbol);
+      this.movementObservations.delete(symbol);
+      this.movementResults.delete(symbol);
       for (const interval of COLLECTOR_INTERVALS)
         this.developing.delete(this.key(symbol, interval));
     }
@@ -377,6 +451,7 @@ export class BinanceFuturesCollector {
       if (this.symbols.has(symbol)) continue;
       this.symbols.add(symbol);
       this.trades.set(symbol, new TradeBuffer(this.tradeWindowMs, this.tradeMaxCount));
+      this.movementObservations.set(symbol, []);
       for (const interval of COLLECTOR_INTERVALS) await this.bootstrap(symbol, interval);
     }
   }
@@ -401,11 +476,12 @@ export class BinanceFuturesCollector {
       ) {
         return false;
       }
-      try {
-        if (!this.movementBuckets.accept(event.trade)) return false;
-      } catch {
+      const movementQueue = this.movementObservations.get(event.trade.symbol)!;
+      if (movementQueue.length >= this.movementObservationMaxCount) {
+        this.dependencies.onOverload?.();
         return false;
       }
+      movementQueue.push(event.trade);
       this.latestTrade.set(event.trade.symbol, event.trade);
       this.trades.get(event.trade.symbol)!.push(event.trade);
       return true;

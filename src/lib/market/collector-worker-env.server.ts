@@ -1,5 +1,6 @@
 import { validatePublicSecrets } from "../environment";
 import { operationalDbConfig } from "../operational/config.server";
+import { pythonServiceConfig } from "../python-service.server";
 import { movementFinalizationConfig } from "./movement-finalization";
 
 type Env = Record<string, string | undefined>;
@@ -19,6 +20,13 @@ export function validateCollectorWorkerEnvironment(env: Env = process.env): void
   validatePublicSecrets(env);
   if (!operationalDbConfig(env).enabled) {
     throw new Error("Binance collector requires OPERATIONAL_DB_ENABLED=true");
+  }
+  try {
+    pythonServiceConfig("/v1/movement/boundary", env);
+  } catch {
+    throw new Error(
+      "Binance collector requires PYTHON_ANALYSIS_ENABLED=true and a valid Python service URL/token",
+    );
   }
   movementFinalizationConfig(env); // MOVEMENT_FINALIZATION_GRACE_MS
 }

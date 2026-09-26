@@ -10,7 +10,7 @@
  * evaluated once for identical market data.
  */
 import type { OperationalStore, PersistedMarketStateCurrent } from "../operational/types";
-import type { MovementBucketSnapshot } from "./movement-buckets";
+import type { MovementBucketSnapshot } from "./movement-contract";
 import type { BinanceFuturesCollector } from "./collector";
 import {
   buildMovementCurrentEvidence,
@@ -211,7 +211,7 @@ export class MovementEngineRuntime {
     }
     const universe = buildMarketUniverse(symbols);
     // Finalize quiet/no-trade symbols only through the safe boundary.
-    this.deps.collector.advanceMovementBuckets(finalizable);
+    await this.deps.collector.advanceMovementBuckets(finalizable);
     await this.refreshHistorical(universe, now);
     if (tenure !== this.tenure) return;
     const snapshots = new Map<string, MovementBucketSnapshot>();

@@ -49,6 +49,27 @@ def technical_payload():
     }
 
 
+def movement_payload(session_id="2af3e7c8-b777-4e58-9ad2-18e36daac160"):
+    return {
+        "schema_version": 1,
+        "session_id": session_id,
+        "boundary_time_ms": NOW,
+        "symbols": [{
+            "symbol": "BTCUSDT",
+            "instrument_id": "binance-usdm:BTCUSDT",
+            "source_state": "LIVE",
+            "observations": [{
+                "price": "101",
+                "quantity": "2",
+                "event_time_ms": NOW + 20,
+                "trade_time_ms": NOW,
+                "aggregate_trade_id": 17,
+                "received_at_ms": NOW + 30,
+            }],
+        }],
+    }
+
+
 def series(price="102"):
     return {interval: [Candle(NOW - n * interval * MINUTE, Decimal(price))
                        for n in range(count, -1, -1)]
@@ -137,6 +158,32 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["candle_open_time_ms"], latest["candles"][-1]["open_ms"])
         self.assertEqual(results[1]["candle_open_time_ms"], target)
+
+    def test_movement_boundary_uses_python_engine_and_replays_identically(self):
+        app = create_app(TOKEN, analyzer_for())
+        body = movement_payload()
+        first = self.request(
+            app,
+            "POST",
+            "/v1/movement/boundary",
+            json=body,
+            headers=HEADERS,
+        )
+        second = self.request(
+            app,
+            "POST",
+            "/v1/movement/boundary",
+            json=body,
+            headers=HEADERS,
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json(), second.json())
+        result = first.json()
+        self.assertEqual(result["snapshots"][0]["buckets"][0]["endpointPrice"], 101)
+        self.assertEqual(result["snapshots"][0]["buckets"][0]["lastRealTradeTime"], NOW)
+        self.assertEqual(result["snapshots"][0]["buckets"][0]["lastRealEventTime"], NOW + 20)
+        self.assertEqual(result["snapshots"][0]["buckets"][0]["lastRealReceivedAt"], NOW + 30)
 
     def test_batch_provenance_and_completion_boundary(self):
         app = create_app(TOKEN, analyzer_for())

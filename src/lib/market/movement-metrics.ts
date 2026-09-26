@@ -4,7 +4,7 @@ import {
   type MovementBucket,
   type MovementBucketSnapshot,
   type MovementWindowMinutes,
-} from "./movement-buckets";
+} from "./movement-contract";
 import type { CollectorHealthStatus } from "../operational/types";
 
 export const MARKET_MOVEMENT_ALGORITHM_VERSION = "market-movement-v1";
