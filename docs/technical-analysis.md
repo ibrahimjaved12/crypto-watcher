@@ -5,18 +5,46 @@ scheduled completed-candle TA, and chronological replay. TanStack remains the
 scheduler, authorization boundary, market-data adapter, response validator, and
 only database writer.
 
+## Pre-release provenance cutover (destructive)
+
+The provenance schema — `schema_version: 2` with a nullable `source_event_time_ms` —
+is a **destructive pre-release reset, not a production-compatible migration**. Rows
+written under the old synthetic-boundary semantics are disposable development data:
+
+- the operational database wipes `collector_recent_candles`, `collector_health`, and
+  `collector_leases`; the collector then rebuilds the required completed history
+  through its REST bootstrap;
+- every `ta_signals` row is cleared before the corrected constraint is applied.
+
+No compatibility column, legacy-version marker, or dual timestamp semantics is kept.
+The TA formula (`ta-v2`) and strategy (`interpretation-v1`) versions are unchanged
+because the calculations did not change.
+
 ## Scheduled flow
 
 For each enabled account and watched perpetual-futures contract, the monitor:
 
 1. asks PostgreSQL which 15m, 1h, and 4h candles and forward outcomes are due;
-2. fetches 250 trade-price candles only for frames with due work;
+2. loads completed trade-price candle history only for frames with due work — from
+   the exchange provider normally, or from the operational collector store through
+   the read-only adapter while `BINANCE_COLLECTOR_ENABLED=true`;
 3. sends at most eight target candles per frame to the authenticated FastAPI
-   `POST /v1/technical-analysis/batch` endpoint;
+   `POST /v1/technical-analysis/batch` endpoint, carrying the source event time the
+   input recorded (absent when the source has none) rather than one recomputed from
+   the candle open;
 4. validates the complete versioned response and its contract, source, candle,
    evaluation, detection, and calculation-version fields; and
 5. idempotently inserts `ta_signals` using the unique key
-   `(user_id, symbol, timeframe, candle_at, version)`.
+   `(user_id, symbol, timeframe, candle_at, version)`, persisting the exact
+   per-candle endpoint and source event time that produced the conclusion.
+
+While the collector owns market data, the monitor never fetches a second live
+exchange candle series: missing or stale canonical collector history fails the
+affected frame visibly instead of falling back to another source. The read adapter
+carries each candle's recorded provenance — endpoint, transport, candle close time,
+the exchange event time when one exists (absent for REST) and receive time — so
+WebSocket live candles are never persisted with REST provenance. See
+[the collector design](./binance-futures-collector.md).
 
 FastAPI calls `market_analysis.technical.calculate_technical_analysis`, the same
 pure function used by manual Python analysis and `market_analysis.replay`. It has
@@ -32,13 +60,20 @@ baselines, and movement alerts remain independent.
 
 ## Calculation contract
 
-- Versions: `ta-v2` and `interpretation-v1`, request/response schema version 1.
+- Versions: `ta-v2` and `interpretation-v1`, request/response schema version 2.
 - Instruments: supported linear USDT perpetual futures using trade-price candles.
 - Timeframes: 15m, 1h, and 4h.
 - Data: at least 200 completed, aligned, consecutive, valid OHLCV candles from a
-  250-candle provider request; forming candles are excluded.
+  bounded provider/bootstrap request; forming candles are excluded.
+- Provenance: `source_event_time_ms` is the actual exchange event time (WebSocket
+  `E`) or `null` when the source has none (REST bootstrap/recovery and the manual
+  REST path). It is never synthesized from the completion boundary.
 - Freshness: the latest provider candle may lag by at most one interval plus two
   minutes.
+- Finality: a target candle is complete at evaluation time when
+  `target_open + timeframe <= evaluation_time`. The exchange event time is
+  provenance only and never defines completion; an absent event time (REST
+  bootstrap/recovery) is valid.
 - Indicators: EMA20/50/200, RSI14, Wilder ATR14, MACD12/26/9, Bollinger20/2,
   Wilder ADX14/+DI/-DI, prior 20-candle range, and 20-candle volume comparison.
 - Patterns: doji, hammer, shooting star, bullish/bearish engulfing, EMA20/50

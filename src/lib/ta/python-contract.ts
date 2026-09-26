@@ -64,7 +64,7 @@ const indicators = z
 
 export const technicalAnalysisResult = z
   .object({
-    schema_version: z.literal(1),
+    schema_version: z.literal(2),
     status: z.enum(["ok", "insufficient", "unavailable"]),
     reason: z.string().max(80).nullable(),
     classification: z.enum(["bullish", "bearish", "neutral", "unavailable"]),
@@ -81,7 +81,7 @@ export const technicalAnalysisResult = z
     timeframe_minutes: z.union([z.literal(15), z.literal(60), z.literal(240)]),
     candle_open_time_ms: timestamp.nullable(),
     candle_close_time_ms: timestamp.nullable(),
-    source_event_time_ms: timestamp,
+    source_event_time_ms: timestamp.nullable(),
     evaluation_time_ms: timestamp,
     detection_time_ms: timestamp,
     ta_version: z.literal("ta-v2"),
@@ -110,7 +110,8 @@ export const technicalAnalysisResult = z
       value.provenance.exchange !== value.provenance.source ||
       value.provenance.instrument_id !==
         `${value.provenance.exchange}:${value.provenance.native_symbol}` ||
-      value.source_event_time_ms > value.evaluation_time_ms ||
+      (value.source_event_time_ms !== null &&
+        value.source_event_time_ms > value.evaluation_time_ms) ||
       value.detection_time_ms > value.evaluation_time_ms
     ) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid provenance" });
@@ -141,7 +142,7 @@ export const technicalAnalysisResult = z
 
 export const technicalAnalysisBatchResponse = z
   .object({
-    schema_version: z.literal(1),
+    schema_version: z.literal(2),
     results: z.array(technicalAnalysisResult).min(1).max(8),
   })
   .strict();
@@ -149,7 +150,7 @@ export const technicalAnalysisBatchResponse = z
 export type TechnicalAnalysisResult = z.infer<typeof technicalAnalysisResult>;
 
 export type TechnicalAnalysisRequest = {
-  schema_version: 1;
+  schema_version: 2;
   instrument: {
     instrument_id: string;
     exchange: MarketSource;
@@ -170,7 +171,12 @@ export type TechnicalAnalysisRequest = {
   warmup_candles: [];
   missing_open_times_ms: [];
   source: MarketSource;
-  source_event_time_ms: number;
+  /**
+   * Actual exchange event time for the target candle, or null when the source has
+   * none (e.g. REST bootstrap/recovery). This is provenance only; candle completion
+   * is `target_candle_open_time_ms + timeframe_minutes`.
+   */
+  source_event_time_ms: number | null;
   evaluation_time_ms: number;
   detection_time_ms: number;
   price_type: "trade";

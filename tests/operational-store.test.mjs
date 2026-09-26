@@ -15,6 +15,26 @@ async function moduleUrl(path, imports = {}) {
 }
 const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 
+// The operational repository now resolves canonical futures identity at runtime.
+const symbolsStub = stub(`
+  export const MARKET_SOURCE = "binance-usdm";
+  export const MARKET_PRICE_TYPE = "trade";
+  export function futuresInstrument(symbol) {
+    const native = symbol.toUpperCase();
+    return {
+      id: "binance-usdm:" + native, exchange: "binance", nativeSymbol: native,
+      marketType: "futures", contractType: "perpetual", baseAsset: native.replace(/USDT$/, ""),
+      quoteAsset: "USDT", marginAsset: "USDT", settlementAsset: "USDT", linear: true,
+      contractMultiplier: 1,
+    };
+  }
+`);
+const repositoryStubs = {
+  "@supabase/supabase-js": stub("export const createClient=()=>({});"),
+  "./config.server": stub("export const operationalDbConfig=()=>({enabled:false});"),
+  "../market/symbols": symbolsStub,
+};
+
 const db = new PGlite();
 const user = "00000000-0000-0000-0000-000000000001";
 const other = "00000000-0000-0000-0000-000000000002";
@@ -48,7 +68,36 @@ before(async () => {
   await db.exec(
     await readFile(
       new URL(
+        "../operational-db/supabase/migrations/20260926120000_collector_subscriptions.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  await db.exec(
+    await readFile(
+      new URL(
         "../operational-db/supabase/migrations/20260925200000_movement_normalization_history.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  await db.exec(
+    await readFile(
+      new URL(
+        "../operational-db/supabase/migrations/20260926140000_collector_candle_retention.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  // Destructive pre-release provenance cutover: wipes disposable collector state, replaces the
+  // obsolete provenance constraints, and defines the provenance-preserving read adapter.
+  await db.exec(
+    await readFile(
+      new URL(
+        "../operational-db/supabase/migrations/20260926150000_collector_candle_provenance_reset.sql",
         import.meta.url,
       ),
       "utf8",
@@ -59,7 +108,7 @@ beforeEach(async () => {
   await db.exec(`RESET ROLE;
     TRUNCATE sync_outbox, operational_results, monitor_runs,
       market_data_checkpoints, recent_candles, collector_recent_candles,
-      collector_health, collector_leases CASCADE;`);
+      collector_health, collector_leases, collector_subscriptions CASCADE;`);
 });
 after(() => db.close());
 
@@ -228,9 +277,26 @@ test("browser roles cannot read or mutate the service-role-only operational sche
   try {
     await assert.rejects(db.query("SELECT * FROM recent_candles"), /permission denied/);
     await assert.rejects(recordCandles(user), /permission denied/);
+    await assert.rejects(db.query("SELECT * FROM collector_subscriptions"), /permission denied/);
   } finally {
     await db.exec("RESET ROLE");
   }
+});
+
+test("the collector subscription universe is normalized and replaced as one shared set", async () => {
+  await db.query(
+    `SELECT assign_collector_subscriptions('{" ethusdt ","BTCUSDT","btcusdt"}'::text[])`,
+  );
+  const assigned = await db.query("SELECT get_collector_subscriptions() AS symbols");
+  assert.deepEqual(assigned.rows[0].symbols, ["BTCUSDT", "ETHUSDT"]);
+  // A later assignment replaces the set rather than accumulating.
+  await db.query(`SELECT assign_collector_subscriptions('{"SOLUSDT"}'::text[])`);
+  const replaced = await db.query("SELECT get_collector_subscriptions() AS symbols");
+  assert.deepEqual(replaced.rows[0].symbols, ["SOLUSDT"]);
+  // The application owns the set, so an empty universe is a valid assignment.
+  await db.query(`SELECT assign_collector_subscriptions('{}'::text[])`);
+  const empty = await db.query("SELECT get_collector_subscriptions() AS symbols");
+  assert.deepEqual(empty.rows[0].symbols, []);
 });
 
 test("server config is opt-in, bounded and requires a separate secure target", async () => {
@@ -261,10 +327,10 @@ test("server config is opt-in, bounded and requires a separate secure target", a
 });
 
 test("repository reads and writes always carry the authenticated user scope", async () => {
-  const repositoryUrl = await moduleUrl("../src/lib/operational/repository.server.ts", {
-    "@supabase/supabase-js": stub("export const createClient=()=>({});"),
-    "./config.server": stub("export const operationalDbConfig=()=>({enabled:false});"),
-  });
+  const repositoryUrl = await moduleUrl(
+    "../src/lib/operational/repository.server.ts",
+    repositoryStubs,
+  );
   const { createOperationalStore } = await import(repositoryUrl);
   const seen = { predicates: [], rpc: [] };
   const query = {
@@ -315,10 +381,10 @@ test("repository reads and writes always carry the authenticated user scope", as
 });
 
 test("market movement append rejects null and unexpected RPC statuses", async () => {
-  const repositoryUrl = await moduleUrl("../src/lib/operational/repository.server.ts", {
-    "@supabase/supabase-js": stub("export const createClient=()=>({});"),
-    "./config.server": stub("export const operationalDbConfig=()=>({enabled:false});"),
-  });
+  const repositoryUrl = await moduleUrl(
+    "../src/lib/operational/repository.server.ts",
+    repositoryStubs,
+  );
   const { createOperationalStore } = await import(repositoryUrl);
   let status = null;
   const store = createOperationalStore(
@@ -397,7 +463,7 @@ test("movement normalization history RPC returns compact one-minute candles per 
       low: 90,
       close: 100 + index,
       volume: 5,
-      source_event_at: new Date(openTime + 60_000 - 1).toISOString(),
+      source_event_at: new Date(openTime + 60_000).toISOString(),
       received_at: new Date(openTime + 60_000).toISOString(),
       transport: "rest",
     };
@@ -425,11 +491,275 @@ test("movement normalization history RPC returns compact one-minute candles per 
   assert.deepEqual(empty, {});
 });
 
-test("repository movement history read maps compact rows and skips malformed entries", async () => {
-  const repositoryUrl = await moduleUrl("../src/lib/operational/repository.server.ts", {
-    "@supabase/supabase-js": stub("export const createClient=()=>({});"),
-    "./config.server": stub("export const operationalDbConfig=()=>({enabled:false});"),
+test("collector TA candle RPC returns full ascending provenance for one frame", async () => {
+  const duration = 15 * 60_000;
+  const observed = Math.floor(Date.now() / duration) * duration - duration;
+  const rows = [0, 1, 2].map((index) => {
+    const openTime = observed + index * duration;
+    return {
+      instrument_id: "binance-usdm:BTCUSDT",
+      symbol: "BTCUSDT",
+      native_symbol: "BTCUSDT",
+      provider: "binance-usdm",
+      endpoint: index === 0 ? "/fapi/v1/klines" : "wss://fstream.binance.com/market/stream",
+      price_type: "trade",
+      timeframe_minutes: 15,
+      open_time: new Date(openTime).toISOString(),
+      close_time: new Date(openTime + duration - 1).toISOString(),
+      open: 100,
+      high: 110,
+      low: 90,
+      close: 100 + index,
+      volume: 5,
+      // REST bootstrap/recovery has no exchange event; WebSocket candles keep the
+      // exchange's actual event time, which need not equal the completion boundary.
+      source_event_at:
+        index === 0 ? null : new Date(openTime + duration + (index === 1 ? -7 : 7)).toISOString(),
+      // Row 2's receive time precedes its exchange event time: the obsolete
+      // `received_at >= source_event_at` constraint is gone, so the raw receive time is
+      // stored and transported unchanged instead of being clamped.
+      received_at: new Date(openTime + duration + (index === 2 ? 3 : 250)).toISOString(),
+      transport: index === 0 ? "rest" : "websocket",
+    };
   });
+  await db.query("SELECT record_collector_candles($1,$2)", [JSON.stringify(rows), 7]);
+
+  const candles = (await db.query("SELECT get_collector_ta_candles('btcusdt',15,10) AS candles"))
+    .rows[0].candles;
+  assert.equal(candles.length, 3);
+  // Ascending order, and every candle keeps its recorded provenance rather than a
+  // market-level endpoint or a fabricated retrieval time.
+  assert.deepEqual(
+    candles.map((candle) => [
+      candle.open_time_ms,
+      candle.open,
+      candle.high,
+      candle.low,
+      candle.close,
+      candle.volume,
+    ]),
+    [
+      [observed, 100, 110, 90, 100, 5],
+      [observed + duration, 100, 110, 90, 101, 5],
+      [observed + 2 * duration, 100, 110, 90, 102, 5],
+    ],
+  );
+  assert.equal(candles[0].endpoint, "/fapi/v1/klines");
+  assert.equal(candles[0].transport, "rest");
+  assert.equal(candles[2].endpoint, "wss://fstream.binance.com/market/stream");
+  assert.equal(candles[2].transport, "websocket");
+  assert.equal(candles[2].provider, "binance-usdm");
+  assert.equal(candles[2].instrument_id, "binance-usdm:BTCUSDT");
+  assert.equal(candles[2].native_symbol, "BTCUSDT");
+  assert.equal(candles[2].price_type, "trade");
+  assert.equal(candles[2].close_time_ms, observed + 2 * duration + duration - 1);
+  // The exchange event time is transported exactly as recorded (never rewritten to the
+  // completion boundary), and a REST candle honestly reports no exchange event.
+  assert.equal(candles[0].source_event_at_ms, null);
+  assert.equal(candles[1].source_event_at_ms, observed + duration * 2 - 7);
+  assert.equal(candles[2].source_event_at_ms, observed + 2 * duration + duration + 7);
+  assert.equal(candles[2].received_at_ms, observed + 2 * duration + duration + 3);
+
+  // Another timeframe or symbol has no history rather than leaking the wrong series.
+  assert.deepEqual(
+    (await db.query("SELECT get_collector_ta_candles('BTCUSDT',60,10) AS candles")).rows[0].candles,
+    [],
+  );
+  assert.deepEqual(
+    (await db.query("SELECT get_collector_ta_candles('ETHUSDT',15,10) AS candles")).rows[0].candles,
+    [],
+  );
+  await assert.rejects(
+    db.query("SELECT get_collector_ta_candles('BTCUSDT',7,10)"),
+    /Invalid collector TA candle timeframe/,
+  );
+});
+
+test("repository collector TA read transports recorded provenance without fabricating it", async () => {
+  const repositoryUrl = await moduleUrl(
+    "../src/lib/operational/repository.server.ts",
+    repositoryStubs,
+  );
+  const { createOperationalStore } = await import(repositoryUrl);
+  const base = 1_800_000_000_000;
+  const step = 900_000;
+  const row = (index, transport, endpoint, sourceEventTime = undefined) => ({
+    provider: "binance-usdm",
+    instrument_id: "binance-usdm:BTCUSDT",
+    native_symbol: "BTCUSDT",
+    price_type: "trade",
+    endpoint,
+    transport,
+    open_time_ms: base + index * step,
+    close_time_ms: base + index * step + step - 1,
+    // REST rows have no exchange event; WebSocket rows carry the actual event time,
+    // deliberately offset from the completion boundary to prove it is not rewritten.
+    source_event_at_ms:
+      sourceEventTime ?? (transport === "rest" ? null : base + index * step + step + 7),
+    received_at_ms: base + index * step + step + 120,
+    open: 100,
+    high: 110,
+    low: 90,
+    close: 101,
+    volume: 3,
+  });
+  const rows = [
+    row(0, "rest", "/fapi/v1/klines"),
+    row(1, "websocket", "wss://fstream.binance.com/market/stream", base + 2 * step - 7),
+  ];
+  const store = createOperationalStore(
+    {
+      async rpc(name, args) {
+        assert.equal(name, "get_collector_ta_candles");
+        assert.deepEqual(args, {
+          p_symbol: "BTCUSDT",
+          p_timeframe_minutes: 15,
+          p_limit: 260,
+        });
+        return { data: rows, error: null };
+      },
+    },
+    { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
+  );
+  const result = await store.readCollectorTACandles("btcusdt", 15);
+  assert.equal(result.source, "binance-usdm");
+  assert.equal(result.instrument.id, "binance-usdm:BTCUSDT");
+  assert.equal(result.priceType, "trade");
+  assert.equal("endpoint" in result, false);
+  assert.equal("retrievedAt" in result, false);
+  assert.deepEqual(result.candles, [
+    {
+      time: base,
+      open: 100,
+      high: 110,
+      low: 90,
+      close: 101,
+      volume: 3,
+      complete: true,
+      closeTime: base + step - 1,
+      // REST provenance: no exchange event is invented.
+      sourceEventTime: null,
+      receivedAt: base + step + 120,
+      endpoint: "/fapi/v1/klines",
+      transport: "rest",
+    },
+    {
+      time: base + step,
+      open: 100,
+      high: 110,
+      low: 90,
+      close: 101,
+      volume: 3,
+      complete: true,
+      closeTime: base + 2 * step - 1,
+      // WebSocket provenance: even an event before completion survives unchanged.
+      sourceEventTime: base + 2 * step - 7,
+      receivedAt: base + 2 * step + 120,
+      endpoint: "wss://fstream.binance.com/market/stream",
+      transport: "websocket",
+    },
+  ]);
+
+  const malformed = createOperationalStore(
+    {
+      async rpc() {
+        return {
+          data: [{ ...row(0, "rest", "/fapi/v1/klines"), close: "bad" }],
+          error: null,
+        };
+      },
+    },
+    { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
+  );
+  await assert.rejects(
+    malformed.readCollectorTACandles("BTCUSDT", 15),
+    /invalid collector TA candle row/,
+  );
+
+  // Structural corruption remains rejected instead of being silently normalised.
+  for (const corrupt of [{ ...row(0, "rest", "/fapi/v1/klines"), transport: "carrier-pigeon" }]) {
+    const invalid = createOperationalStore(
+      {
+        async rpc() {
+          return { data: [corrupt], error: null };
+        },
+      },
+      { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
+    );
+    await assert.rejects(
+      invalid.readCollectorTACandles("BTCUSDT", 15),
+      /invalid collector TA candle row/,
+    );
+  }
+});
+
+test("collector retention keeps enough canonical history for the longest TA frame", async () => {
+  const series = (symbol, timeframeMinutes, count, endOpenTime) => {
+    const step = timeframeMinutes * 60_000;
+    return Array.from({ length: count }, (_, index) => {
+      const openTime = endOpenTime - (count - 1 - index) * step;
+      return {
+        instrument_id: `binance-usdm:${symbol}`,
+        symbol,
+        native_symbol: symbol,
+        provider: "binance-usdm",
+        endpoint: "wss://fstream.binance.com/market/stream",
+        price_type: "trade",
+        timeframe_minutes: timeframeMinutes,
+        open_time: new Date(openTime).toISOString(),
+        close_time: new Date(openTime + step - 1).toISOString(),
+        open: 100,
+        high: 110,
+        low: 90,
+        close: 101,
+        volume: 5,
+        source_event_at: new Date(openTime + step).toISOString(),
+        received_at: new Date(openTime + step).toISOString(),
+        transport: "websocket",
+      };
+    });
+  };
+
+  // A long frame keeps its newest 260 candles even though that spans ~43 days,
+  // far beyond the seven-day window that bounds the bulk of the store.
+  const step4h = 240 * 60_000;
+  const recent4h = Math.floor(Date.now() / step4h) * step4h - step4h;
+  await db.query("SELECT record_collector_candles($1,$2)", [
+    JSON.stringify(series("BTCUSDT", 240, 300, recent4h)),
+    7,
+  ]);
+  const kept4h = (
+    await db.query(
+      "SELECT count(*)::int AS count, min(open_time) AS oldest FROM collector_recent_candles WHERE timeframe_minutes = 240",
+    )
+  ).rows[0];
+  assert.equal(kept4h.count, 260);
+  assert.equal(new Date(kept4h.oldest).getTime(), recent4h - 259 * step4h);
+
+  // The high-volume one-minute series is still bounded by the day window.
+  const step1m = 60_000;
+  const recent1m = Math.floor(Date.now() / step1m) * step1m - step1m;
+  await db.query("SELECT record_collector_candles($1,$2)", [
+    JSON.stringify(series("ETHUSDT", 1, 1000, recent1m - 1000 * step1m)),
+    1,
+  ]);
+  await db.query("SELECT record_collector_candles($1,$2)", [
+    JSON.stringify(series("ETHUSDT", 1, 1000, recent1m)),
+    1,
+  ]);
+  const kept1m = (
+    await db.query(
+      "SELECT count(*)::int AS count FROM collector_recent_candles WHERE timeframe_minutes = 1",
+    )
+  ).rows[0];
+  assert.equal(kept1m.count, 1440);
+});
+
+test("repository movement history read maps compact rows and skips malformed entries", async () => {
+  const repositoryUrl = await moduleUrl(
+    "../src/lib/operational/repository.server.ts",
+    repositoryStubs,
+  );
   const { createOperationalStore } = await import(repositoryUrl);
   const store = createOperationalStore(
     {
@@ -453,10 +783,10 @@ test("repository movement history read maps compact rows and skips malformed ent
 
 test("market-state-current read forwards only known fields and never service credentials", async () => {
   const baseTime = 1_800_000_000_000;
-  const repositoryUrl = await moduleUrl("../src/lib/operational/repository.server.ts", {
-    "@supabase/supabase-js": stub("export const createClient=()=>({});"),
-    "./config.server": stub("export const operationalDbConfig=()=>({enabled:false});"),
-  });
+  const repositoryUrl = await moduleUrl(
+    "../src/lib/operational/repository.server.ts",
+    repositoryStubs,
+  );
   const { createOperationalStore } = await import(repositoryUrl);
   const row = {
     universe_id: "binance-usdm-public-market",

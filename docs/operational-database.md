@@ -2,24 +2,47 @@
 
 Lovable PostgreSQL remains the permanent application database. A second Supabase/PostgreSQL
 instance owns bounded, frequently updated working state when `OPERATIONAL_DB_ENABLED=true`.
-TanStack is the only privileged writer to both databases; Python remains calculation-only.
+TanStack remains the only privileged writer to Lovable. The collector worker is a headless
+ingestion process that is privileged only on the operational database and holds no Lovable
+credentials; Python remains calculation-only.
 
 ## Ownership
 
-| State domain                                             | Authoritative owner when enabled | Writer                                             |
-| -------------------------------------------------------- | -------------------------------- | -------------------------------------------------- |
-| Shared Binance completed candles (1m, 15m, 1h, 4h)       | Operational DB                   | Leased TanStack WebSocket collector                |
-| Collector checkpoint/freshness/health                    | Operational DB                   | Leased TanStack WebSocket collector                |
-| Legacy per-user candles/checkpoints (collector disabled) | Operational DB                   | Request-driven TanStack monitor                    |
-| Monitor-run diagnostics                                  | Operational DB                   | TanStack operational repository                    |
-| Outbox/retry/dead-letter state                           | Operational DB                   | TanStack operational repository; currently dormant |
-| Auth, users, watchlists, settings, notes                 | Lovable                          | Existing Lovable paths                             |
-| Baseline, directional cooldown and alert insertion       | Lovable                          | `process_cumulative_observation` transaction       |
-| TA conclusions/outcomes and other permanent user history | Lovable                          | Existing TanStack paths                            |
+| State domain                                             | Authoritative owner when enabled | Writer                                                                       |
+| -------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------- |
+| Shared Binance completed candles (1m, 15m, 1h, 4h)       | Operational DB                   | Leased collector worker                                                      |
+| Completed-candle TA input (collector mode)               | Operational DB                   | Collector worker writes; TanStack reads, then writes `ta_signals` to Lovable |
+| Collector checkpoint/freshness/health                    | Operational DB                   | Leased collector worker                                                      |
+| Collector subscription universe (derived input)          | Operational DB                   | TanStack operational repository assigns; collector worker reads              |
+| Legacy per-user candles/checkpoints (collector disabled) | Operational DB                   | Request-driven TanStack monitor                                              |
+| Monitor-run diagnostics                                  | Operational DB                   | TanStack operational repository                                              |
+| Outbox/retry/dead-letter state                           | Operational DB                   | TanStack operational repository; currently dormant                           |
+| Auth, users, watchlists, settings, notes                 | Lovable                          | Existing Lovable paths (TanStack only)                                       |
+| Baseline, directional cooldown and alert insertion       | Lovable                          | `process_cumulative_observation` transaction                                 |
+| TA conclusions/outcomes and other permanent user history | Lovable                          | Existing TanStack paths                                                      |
 
 No domain is dual-written. With the flag enabled, checkpoint and monitor-run writes do not
 touch their legacy Lovable tables. Operational-store failure is visible and never falls back to
-Lovable. Completed candles have no Lovable copy.
+Lovable. Completed candles have no Lovable copy. The application derives the collector's shared
+subscription universe from Lovable watchlists and assigns it as operational input; that set is
+derived collector state, never a second watchlist authority. Reconciliation of that set is
+application-owned and independent of `SCHEDULED_MONITOR_ENABLED`: the dedicated
+`/api/public/hooks/sync-collector-subscriptions` hook is the initial and ongoing mechanism the
+deployment schedules, and the server's best-effort first-request pass is only a safety net for a
+missed run. The scheduled monitor route never reads Lovable while disabled.
+
+While `BINANCE_COLLECTOR_ENABLED=true`, the application's completed-candle TA reads canonical
+completed candles from this operational store through `readCollectorTACandles` instead of fetching
+a second live exchange candle series. The read carries the collector's recorded per-candle
+provenance — exact provider/instrument identity, endpoint, transport, candle open/close time,
+the exchange event time when one exists (absent for REST), receive time, and OHLCV — and never
+reconstructs an endpoint, retrieval time, or exchange event time.
+A single series can mix WebSocket live candles with REST bootstrap/recovery candles, so the
+endpoint and transport are per candle: `/fapi/v1/klines` is recorded only for actual REST rows.
+Missing or stale operational history fails the affected TA frame visibly; it is never silently
+substituted with another calculator or live source. TanStack still determines due work, builds the
+versioned Python request from that persisted evidence, validates responses, and is the sole
+privileged `ta_signals` writer in Lovable.
 
 ## Configuration and migrations
 
@@ -35,7 +58,10 @@ OPERATIONAL_OUTBOX_MAX_ATTEMPTS=10
 BINANCE_COLLECTOR_ENABLED=true
 ```
 
-Never create `VITE_*` forms. Startup validation rejects them. Apply only
+Never create `VITE_*` forms. Startup validation rejects them. The collector worker needs only the
+operational variables above plus `BINANCE_COLLECTOR_ENABLED` and `MOVEMENT_FINALIZATION_GRACE_MS`;
+it never requires the main Lovable `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY`, because it holds no
+Lovable credentials. Only the TanStack application is configured for the main database. Apply only
 `operational-db/supabase/migrations/` to the operational project; never add these files to or
 apply them through the root `supabase/migrations/`, which remains the Lovable chain. The nested
 `supabase/` directory is required by the CLI when `operational-db` is its workdir.
@@ -51,21 +77,28 @@ npx supabase db push --workdir operational-db \
 Alternatively, apply the SQL file through that operational project's SQL editor. Neither method
 requires or authorizes a Lovable login or Lovable schema change.
 
-Local development uses two isolated Supabase stacks:
+Local development uses two isolated Supabase stacks and runs the application and the collector
+worker as separate processes:
 
 ```sh
 npx supabase start
 npx supabase start --workdir operational-db
 npm run env:local                 # new .env.local
 npm run env:local:operational     # existing .env.local only
-npm run dev
+npm run dev:local:all             # app + collector worker
+# or run them independently:
+npm run dev                       # app only, no collector
+npm run collector:worker          # collector worker only
 ```
 
-`npm run dev:local` starts only the original main local stack and explicitly disables operational
-ownership. `npm run dev:local:all` starts both stacks and enables the operational store.
-`npm run dev:local:stop` stops both. The main API is at port 54321 and the operational API at 55321.
+`npm run dev:local` starts only the original main local stack, runs the app alone, and explicitly
+disables operational ownership. `npm run dev:local:all` starts both stacks and runs the app plus a
+separate collector worker process. `npm run dev:local:stop` stops both. The main API is at port
+54321 and the operational API at 55321.
 Local operational Supabase Auth runs only to issue its API/service-role credentials; application
-users and authentication remain exclusively in the main local database or Lovable.
+users and authentication remain exclusively in the main local database or Lovable. The collector
+worker process inherits `.env.local` but reads only the operational and collector variables; the
+main-database values in that file are for the application.
 
 ## Reads, retention and synchronization
 
@@ -75,7 +108,9 @@ and never returns the operational service-role credential.
 
 Shared and legacy completed candles default to seven-day retention (allowed range 1–30 days);
 monitor runs default to 30 days (allowed range 1–90 days), and inactive checkpoints expire after
-30 days. Writes perform database-wide bounded cleanup.
+30 days. Writes perform database-wide bounded cleanup. Each canonical collector series always keeps
+its newest 260 completed candles regardless of the day window, so the longest completed-candle TA
+frame still has the minimum history and bounded catch-up it needs.
 The authenticated read reports per-user storage counts; operators can call
 `get_global_storage_diagnostics()` for total row counts, oldest candle time, outbox state counts
 and the oldest undelivered event, and `get_collector_storage_diagnostics()` for shared candle and
@@ -92,10 +127,13 @@ purged. A future domain must define its Lovable destination before activating de
 
 ## Cutover and rollback
 
-Deploy the operational migration and credentials first, then switch all long-lived TanStack
-instances to `OPERATIONAL_DB_ENABLED=true` and `BINANCE_COLLECTOR_ENABLED=true` together. Roll the
-collector back by switching `BINANCE_COLLECTOR_ENABLED=false` across the whole fleet; the legacy
-request-driven operational candle/checkpoint path resumes. Switching `OPERATIONAL_DB_ENABLED=false`
-as well returns all legacy operational ownership to Lovable. Operational data is retained. Never
-run a mixed fleet with different flag values, because that would create two writers for those
-domains. Do not enable fallback-on-error.
+Deploy the operational migration and credentials first, then start the collector worker and switch
+the application fleet to `OPERATIONAL_DB_ENABLED=true` and `BINANCE_COLLECTOR_ENABLED=true`
+together. Roll the collector back by stopping the worker and switching
+`BINANCE_COLLECTOR_ENABLED=false` across the whole fleet; the legacy request-driven operational
+candle/checkpoint path resumes, and completed-candle TA returns to reading the exchange REST
+provider rather than the operational store. Switching `OPERATIONAL_DB_ENABLED=false` as well
+returns all legacy operational ownership to Lovable. Operational data is retained. Never run a
+mixed fleet with different flag values, because that would create two writers for those domains,
+and never read collector candles for TA while the worker is stopped. Do not enable
+fallback-on-error.

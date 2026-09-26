@@ -49,7 +49,10 @@ class TechnicalInput:
     timeframe_minutes: int
     candles: tuple[TechnicalCandle, ...]
     source: str
-    source_event_time_ms: int
+    # Actual exchange event time, or None when the source has no exchange event
+    # (e.g. REST bootstrap/recovery). Provenance only: completion is
+    # `target_candle_open_time_ms + timeframe_minutes * MINUTE`.
+    source_event_time_ms: int | None
     evaluation_time_ms: int
     detection_time_ms: int
     price_type: str = "trade"
@@ -69,7 +72,7 @@ def _finite_or_none(value):
 
 def _base_result(request, status, reason):
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": status,
         "reason": reason,
         "classification": "unavailable",
@@ -129,23 +132,23 @@ def _validate_contract(request):
         request.evaluation_time_ms,
         request.detection_time_ms,
     )
-    if any(type(value) is not int or value < 0 for value in timestamps):
+    if any(value is not None and (type(value) is not int or value < 0)
+           for value in timestamps):
         return "invalid_timestamp"
     if (
-        request.source_event_time_ms > request.evaluation_time_ms
+        (request.source_event_time_ms is not None
+         and request.source_event_time_ms > request.evaluation_time_ms)
         or request.detection_time_ms > request.evaluation_time_ms
     ):
         return "future_timestamp"
-    if (
-        request.target_candle_open_time_ms is not None
-        and (
-            type(request.target_candle_open_time_ms) is not int
-            or request.target_candle_open_time_ms < 0
-            or request.target_candle_open_time_ms
-            + request.timeframe_minutes * MINUTE != request.source_event_time_ms
-        )
-    ):
-        return "mismatched_source_event_time"
+    if request.target_candle_open_time_ms is not None:
+        target = request.target_candle_open_time_ms
+        if type(target) is not int or target < 0:
+            return "invalid_target_candle"
+        # Finality/no-lookahead uses the deterministic completion boundary, never the
+        # exchange event time. The target candle must be complete at evaluation time.
+        if target + request.timeframe_minutes * MINUTE > request.evaluation_time_ms:
+            return "target_candle_not_complete"
     return None
 
 

@@ -115,17 +115,17 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `VITE_SUPABASE_PUBLISHABLE_KEY`                   | Browser                             | Required; identical public/anon key; secret/service-role keys rejected                                  |
 | `SUPABASE_SERVICE_ROLE_KEY`                       | TanStack secret                     | Empty; required for admin monitoring operations; local value from status                                |
 | `SUPABASE_PROJECT_ID`, `VITE_SUPABASE_PROJECT_ID` | Server / browser metadata           | Optional; not used to choose targets                                                                    |
-| `OPERATIONAL_DB_ENABLED`                          | TanStack                            | `false` for rollback; exact `true` transfers checkpoint/run ownership and enables recent-candle storage |
-| `OPERATIONAL_SUPABASE_URL`                        | TanStack                            | Separate local/hosted operational Supabase origin; required when enabled                                |
-| `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`           | TanStack secret                     | Operational project service-role key; required when enabled; never `VITE_*`                             |
-| `OPERATIONAL_CANDLE_RETENTION_DAYS`               | TanStack                            | `7`; allowed range 1–30                                                                                 |
-| `OPERATIONAL_MONITOR_RUN_RETENTION_DAYS`          | TanStack                            | `30`; allowed range 1–90                                                                                |
-| `OPERATIONAL_OUTBOX_MAX_ATTEMPTS`                 | TanStack                            | `10`; allowed range 1–100 before dead-letter                                                            |
-| `BINANCE_COLLECTOR_ENABLED`                       | TanStack server                     | Server-only cutover; requires operational DB and a long-lived runtime                                   |
+| `OPERATIONAL_DB_ENABLED`                          | TanStack + collector worker         | `false` for rollback; exact `true` transfers checkpoint/run ownership and enables recent-candle storage |
+| `OPERATIONAL_SUPABASE_URL`                        | TanStack + collector worker         | Separate local/hosted operational Supabase origin; required when enabled                                |
+| `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`           | TanStack + collector worker secret  | Operational project service-role key; required when enabled; never `VITE_*`                             |
+| `OPERATIONAL_CANDLE_RETENTION_DAYS`               | TanStack + collector worker         | `7`; allowed range 1–30                                                                                 |
+| `OPERATIONAL_MONITOR_RUN_RETENTION_DAYS`          | TanStack + collector worker         | `30`; allowed range 1–90                                                                                |
+| `OPERATIONAL_OUTBOX_MAX_ATTEMPTS`                 | TanStack + collector worker         | `10`; allowed range 1–100 before dead-letter                                                            |
+| `BINANCE_COLLECTOR_ENABLED`                       | Collector worker + app server       | Server-only cutover; requires operational DB and the separate collector worker process                  |
 | `PYTHON_ANALYSIS_ENABLED`                         | TanStack                            | `false`; explicit `true` enables manual analysis and scheduled TA calculations                          |
 | `PYTHON_ANALYSIS_URL`                             | TanStack                            | `http://127.0.0.1:8000`; required when enabled                                                          |
 | `PYTHON_ANALYSIS_TOKEN`                           | TanStack + FastAPI secret           | Empty/disabled; matching 32–256 URL-safe characters required when enabled                               |
-| `MONITOR_CRON_TOKEN`                              | Scheduler caller + TanStack secret  | Empty; required for the public monitor hook                                                             |
+| `MONITOR_CRON_TOKEN`                              | Scheduler caller + TanStack secret  | Empty; required for the public monitor and collector-universe hooks                                     |
 | `LOVABLE_CRON_SECRET`                             | Lovable scheduler + TanStack secret | Empty; used by Lovable cron authentication                                                              |
 | `LOVABLE_CRON_SECRET_PREVIOUS`                    | TanStack secret                     | Empty; optional rotation overlap                                                                        |
 | `SCHEDULED_MONITOR_ENABLED`                       | TanStack                            | `false`                                                                                                 |
@@ -139,6 +139,20 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 Never prefix tokens, passwords, private keys, or secrets with `VITE_`. Startup rejects
 secret variable names and copied server-secret values in public configuration, as
 well as Supabase secret/service-role keys used as publishable keys.
+
+The collector worker is a headless ingestion process with its own server-only runtime
+configuration boundary. It validates only the operational database variables and
+`MOVEMENT_FINALIZATION_GRACE_MS` from the host's runtime `process.env`; it needs no main
+Lovable credential and never reads browser `VITE_*` values or build-time public
+configuration, so one built artifact stays host-independent. Only the TanStack
+application additionally proves its runtime matches the browser bundle it serves and owns
+the main-database credentials. See
+[the collector design](./binance-futures-collector.md).
+
+The scheduled monitor hook and the collector-universe reconciliation hook authenticate with
+`MONITOR_CRON_TOKEN` or the platform cron secret. Reconciling the collector's shared
+subscription universe does not depend on `SCHEDULED_MONITOR_ENABLED`; disabling scheduled
+monitoring never leaves the collector empty or stale.
 
 ## Actions and services
 

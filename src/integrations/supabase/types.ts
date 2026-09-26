@@ -568,7 +568,7 @@ export type Database = {
           return_pct: number | null
           score: number | null
           source: string
-          source_event_at: string
+          source_event_at: string | null
           source_instrument_id: string
           source_native_symbol: string
           strategy_version: string
@@ -598,7 +598,7 @@ export type Database = {
           return_pct?: number | null
           score?: number | null
           source: string
-          source_event_at: string
+          source_event_at?: string | null
           source_instrument_id: string
           source_native_symbol: string
           strategy_version: string
@@ -628,7 +628,7 @@ export type Database = {
           return_pct?: number | null
           score?: number | null
           source?: string
-          source_event_at?: string
+          source_event_at?: string | null
           source_instrument_id?: string
           source_native_symbol?: string
           strategy_version?: string

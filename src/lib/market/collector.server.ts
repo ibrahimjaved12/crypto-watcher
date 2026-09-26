@@ -1,20 +1,16 @@
-import { supabaseAdmin } from "../../integrations/supabase/client.server";
 import { getOperationalStore } from "../operational/repository.server";
 import type { OperationalStore } from "../operational/types";
-import { createMonitorRunContext } from "../monitor/run-context";
-import { DEFAULT_SETTINGS, type MonitorSettings } from "../monitor/engine.server";
-import { runTA } from "../ta/engine.server";
 import { loadBinanceFuturesKlines } from "./providers.server";
 import {
   BINANCE_USDM_WS_ENDPOINT,
   BinanceFuturesCollector,
   normalizeRestCandles,
-  type CompletedCandleEvent,
 } from "./collector";
 import { MovementEngineRuntime } from "./movement-engine.server";
 import { movementFinalizationConfig } from "./movement-finalization";
+import { validateCollectorWorkerEnvironment } from "./collector-worker-env.server";
 
-const WATCHLIST_REFRESH_MS = 30_000;
+const SUBSCRIPTION_REFRESH_MS = 30_000;
 const LEASE_SECONDS = 60;
 const LEASE_REFRESH_MS = 20_000;
 const STALE_AFTER_MS = 30_000;
@@ -29,53 +25,7 @@ function enabled(env: Record<string, string | undefined> = process.env): boolean
   return value === "true";
 }
 
-async function watchedSymbols(): Promise<string[]> {
-  const { data, error } = await supabaseAdmin.from("watchlist_items").select("symbol");
-  if (error) throw new Error(`Collector watchlist read failed: ${error.message}`);
-  return [...new Set((data ?? []).map((row) => row.symbol.toUpperCase()))].sort();
-}
-
-async function analyzeCompletedCandle(event: CompletedCandleEvent): Promise<void> {
-  if (event.origin !== "live" || event.candle.timeframeMinutes === 1) return;
-  const { data: watchers, error } = await supabaseAdmin
-    .from("watchlist_items")
-    .select("user_id")
-    .eq("symbol", event.candle.symbol);
-  if (error) throw new Error(`Collector TA audience read failed: ${error.message}`);
-  const userIds = [...new Set((watchers ?? []).map((row) => row.user_id))];
-  if (userIds.length === 0) return;
-  const { data: rows, error: settingsError } = await supabaseAdmin
-    .from("monitor_settings")
-    .select(
-      "user_id, threshold_pct, window_minutes, cooldown_minutes, monitoring_enabled, market_data_collection_enabled, completed_candle_ta_enabled, movement_alerts_enabled, developing_setup_evaluation_enabled, paper_trading_enabled",
-    )
-    .in("user_id", userIds);
-  if (settingsError) throw new Error(`Collector TA settings read failed: ${settingsError.message}`);
-  const byUser = new Map(
-    (rows ?? []).map((row) => [row.user_id, row as unknown as MonitorSettings]),
-  );
-  for (const userId of userIds) {
-    const settings = { ...DEFAULT_SETTINGS, ...byUser.get(userId) };
-    if (
-      !settings.monitoring_enabled ||
-      !settings.market_data_collection_enabled ||
-      !settings.completed_candle_ta_enabled
-    ) {
-      continue;
-    }
-    const errors = await runTA(
-      supabaseAdmin,
-      userId,
-      event.candle.symbol,
-      createMonitorRunContext(),
-      undefined,
-      null,
-    );
-    if (errors.length > 0) console.error(`[binance-collector] ${errors.join(" | ")}`);
-  }
-}
-
-class CollectorRuntime {
+export class CollectorRuntime {
   private readonly instanceId = crypto.randomUUID();
   private readonly collector: BinanceFuturesCollector;
   private readonly movement: MovementEngineRuntime;
@@ -90,7 +40,7 @@ class CollectorRuntime {
     { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
   >();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private watchlistTimer: ReturnType<typeof setInterval> | null = null;
+  private subscriptionTimer: ReturnType<typeof setInterval> | null = null;
   private leaseTimer: ReturnType<typeof setInterval> | null = null;
   private staleTimer: ReturnType<typeof setInterval> | null = null;
   private lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -111,7 +61,6 @@ class CollectorRuntime {
           retrievedAt: Date.parse(result.retrievedAt),
         });
       },
-      onCompleted: analyzeCompletedCandle,
       onOverload: () => this.socket?.close(1013, "bounded processing capacity exceeded"),
     });
     this.movement = new MovementEngineRuntime({
@@ -131,6 +80,9 @@ class CollectorRuntime {
     this.rejectPendingRequests("collector stopping");
     this.socket?.close(1000, "collector stopping");
     this.socket = null;
+    // An explicit shutdown must be a complete barrier for collector-owned runtime
+    // work: await the movement engine's teardown before releasing ownership.
+    await this.movement.stop();
     if (this.active) await this.store.releaseCollectorLease(this.instanceId);
     this.active = false;
   }
@@ -140,7 +92,7 @@ class CollectorRuntime {
     try {
       this.active = await this.store.claimCollectorLease(this.instanceId, LEASE_SECONDS);
       if (!this.active) return this.retryStandby();
-      await this.collector.reconcile(await watchedSymbols());
+      await this.collector.reconcile(await this.store.readCollectorSubscriptions());
       this.startTimers();
       this.connect();
       console.info("[binance-collector] active lease acquired");
@@ -151,6 +103,7 @@ class CollectorRuntime {
       const heldLease = this.active;
       this.active = false;
       this.clearTimers();
+      void this.movement.stop();
       this.rejectPendingRequests("collector startup failed");
       this.socket?.close();
       this.socket = null;
@@ -175,7 +128,10 @@ class CollectorRuntime {
 
   private startTimers(): void {
     this.leaseTimer = setInterval(() => void this.renewLease(), LEASE_REFRESH_MS);
-    this.watchlistTimer = setInterval(() => void this.reconcileWatchlist(), WATCHLIST_REFRESH_MS);
+    this.subscriptionTimer = setInterval(
+      () => void this.reconcileSubscriptions(),
+      SUBSCRIPTION_REFRESH_MS,
+    );
     this.staleTimer = setInterval(() => {
       if (
         this.socket?.readyState === WebSocket.OPEN &&
@@ -199,6 +155,7 @@ class CollectorRuntime {
     }
     this.active = false;
     this.clearTimers();
+    void this.movement.stop();
     this.rejectPendingRequests("authoritative collector lease lost");
     this.backgroundHealth("UNAVAILABLE", "authoritative collector lease lost");
     this.socket?.close(1012, "collector lease lost");
@@ -206,11 +163,16 @@ class CollectorRuntime {
     this.retryStandby();
   }
 
-  private async reconcileWatchlist(): Promise<void> {
+  /**
+   * Re-reads the application-assigned subscription universe from the operational
+   * store. The worker never reads Lovable user watchlists; the application owns
+   * them and assigns the shared set as derived collector input.
+   */
+  private async reconcileSubscriptions(): Promise<void> {
     if (!this.active) return;
     try {
       const before = new Set(this.collector.streamNames());
-      await this.collector.reconcile(await watchedSymbols());
+      await this.collector.reconcile(await this.store.readCollectorSubscriptions());
       const after = new Set(this.collector.streamNames());
       await Promise.all([
         this.sendSubscription(
@@ -342,17 +304,16 @@ class CollectorRuntime {
   }
 
   private clearTimers(): void {
-    for (const timer of [this.watchlistTimer, this.leaseTimer, this.staleTimer]) {
+    for (const timer of [this.subscriptionTimer, this.leaseTimer, this.staleTimer]) {
       if (timer) clearInterval(timer);
     }
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
-    this.watchlistTimer = null;
+    this.subscriptionTimer = null;
     this.leaseTimer = null;
     this.staleTimer = null;
     this.retryTimer = null;
     this.lifetimeTimer = null;
-    void this.movement.stop();
   }
 }
 
@@ -360,8 +321,18 @@ type CollectorGlobal = typeof globalThis & {
   __cryptoWatcherBinanceCollector?: CollectorRuntime;
 };
 
+/**
+ * Shared collector startup path. Starts the one authoritative collector and returns
+ * its runtime handle, or null when `BINANCE_COLLECTOR_ENABLED` is not true. It does
+ * not wire process signal handling: an independent worker entrypoint owns graceful
+ * shutdown and lease release.
+ *
+ * When enabled, it first validates the collector worker's server-only runtime
+ * configuration, so a misconfigured host fails visibly instead of half-starting.
+ */
 export function startBinanceCollector(): CollectorRuntime | null {
   if (!enabled()) return null;
+  validateCollectorWorkerEnvironment();
   const global = globalThis as CollectorGlobal;
   if (global.__cryptoWatcherBinanceCollector) return global.__cryptoWatcherBinanceCollector;
   const store = getOperationalStore();
@@ -369,9 +340,5 @@ export function startBinanceCollector(): CollectorRuntime | null {
   const runtime = new CollectorRuntime(store);
   global.__cryptoWatcherBinanceCollector = runtime;
   runtime.start();
-  if (typeof process !== "undefined" && typeof process.once === "function") {
-    process.once("SIGTERM", () => void runtime.stop());
-    process.once("SIGINT", () => void runtime.stop());
-  }
   return runtime;
 }

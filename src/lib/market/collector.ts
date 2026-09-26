@@ -11,6 +11,13 @@ export const BINANCE_USDM_WS_ENDPOINT = "wss://fstream.binance.com/market/stream
 export const BINANCE_USDM_REST_ENDPOINT = "/fapi/v1/klines";
 export const COLLECTOR_INTERVALS = [1, 15, 60, 240] as const;
 export type CollectorInterval = (typeof COLLECTOR_INTERVALS)[number];
+/**
+ * Completed-candle history the REST bootstrap rebuilds after a reset. The application TA path
+ * needs the 200-candle minimum history plus a bounded catch-up batch, and the operational store
+ * retains the newest 260 candles per series, so fetch one extra kline (the still-developing REST
+ * candle is excluded) with margin.
+ */
+export const COLLECTOR_BOOTSTRAP_LIMIT = 300;
 export type CompletedCandleOrigin = "bootstrap" | "recovery" | "live";
 
 export type AggregateTrade = {
@@ -132,8 +139,10 @@ export function normalizeRestCandles(input: {
         low: finitePositive(candle.low, "low price"),
         close: finitePositive(candle.close, "close price"),
         volume: finiteNonnegative(candle.volume, "volume"),
-        sourceEventTime: closeTime,
-        receivedAt: Math.max(input.retrievedAt, closeTime),
+        // REST bootstrap/recovery has no exchange event, so the source event time is
+        // honestly absent. The deterministic completion boundary is open + timeframe.
+        sourceEventTime: null,
+        receivedAt: input.retrievedAt,
         transport: "rest" as const,
       };
     });
@@ -189,6 +198,7 @@ export function parseBinanceMarketMessage(
     throw new Error("invalid kline boundary");
   }
   const sourceEventTime = safeTimestamp(value["E"], "event time");
+  const completed = kline["x"] === true;
   const candle: CollectorCandle = {
     ...canonicalBase(symbol, timeframeMinutes),
     endpoint: BINANCE_USDM_WS_ENDPOINT,
@@ -199,11 +209,14 @@ export function parseBinanceMarketMessage(
     low: finitePositive(kline["l"], "low price"),
     close: finitePositive(kline["c"], "close price"),
     volume: finiteNonnegative(kline["v"], "volume"),
+    // The exchange event time is preserved exactly as received; completion is
+    // defined by openTime + timeframeMinutes, not by this timestamp.
     sourceEventTime,
-    receivedAt: Math.max(receivedAt, sourceEventTime),
+    // The collector receive time is preserved exactly as passed in.
+    receivedAt,
     transport: "websocket",
   };
-  return { kind: kline["x"] === true ? "completed" : "developing", candle };
+  return { kind: completed ? "completed" : "developing", candle };
 }
 
 class TradeBuffer {
@@ -402,13 +415,18 @@ export class BinanceFuturesCollector {
     state.lastEventAt = event.candle.sourceEventTime;
     if (event.kind === "developing") {
       const previous = this.developing.get(key);
-      if (
-        previous &&
-        (event.candle.openTime < previous.openTime ||
+      if (previous) {
+        const previousEventTime = previous.sourceEventTime;
+        const eventTime = event.candle.sourceEventTime;
+        if (
+          event.candle.openTime < previous.openTime ||
           (event.candle.openTime === previous.openTime &&
-            event.candle.sourceEventTime < previous.sourceEventTime))
-      ) {
-        return false;
+            eventTime !== null &&
+            previousEventTime !== null &&
+            eventTime < previousEventTime)
+        ) {
+          return false;
+        }
       }
       this.developing.set(key, event.candle);
       return true;
@@ -461,7 +479,7 @@ export class BinanceFuturesCollector {
       await this.dependencies.loadRest({
         symbol,
         timeframeMinutes,
-        limit: 250,
+        limit: COLLECTOR_BOOTSTRAP_LIMIT,
       })
     )
       .filter((candle) => candle.closeTime < this.now())

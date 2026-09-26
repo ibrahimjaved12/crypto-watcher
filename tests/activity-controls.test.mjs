@@ -135,6 +135,7 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
       "./schedule": stub(
         "export const TA_FRAMES=[15,60,240],TA_VERSION='ta-v2',TA_INTERPRETATION_VERSION='interpretation-v1',TA_MINIMUM_HISTORY=200; export const completedCandles=x=>x; export const outcomeDue=()=>0;",
       ),
+      "../market/symbols": stub("export const MARKET_SOURCE='binance-usdm';"),
     })
   );
   const db = {
@@ -203,6 +204,9 @@ test("scheduled endpoint defaults disabled, authenticates and skips before datab
       "@/integrations/supabase/cron-auth": stub(
         "export const authenticateCronRequest=async()=>new Response('Unauthorized',{status:401});",
       ),
+      "@/lib/scheduled-auth.server": stub(
+        "export const authenticateScheduledRequest=async(request)=>{const m=/^Bearer ([^,]+)$/.exec(request.headers.get('authorization')||'');const t=process.env.MONITOR_CRON_TOKEN;if(t&&m&&m[1]===t)return null;return new Response('Unauthorized',{status:401});};",
+      ),
       "@/lib/monitor/engine.server": stub(
         "export const DEFAULT_SETTINGS={}; export const recordRun=()=>{throw Error('must not write')}; export const runLeasedMonitorForUser=()=>{throw Error('must not run')};",
       ),
@@ -233,5 +237,49 @@ test("scheduled endpoint defaults disabled, authenticates and skips before datab
     else process.env.SCHEDULED_MONITOR_ENABLED = oldFlag;
     if (oldToken === undefined) delete process.env.MONITOR_CRON_TOKEN;
     else process.env.MONITOR_CRON_TOKEN = oldToken;
+  }
+});
+
+test("the collector universe hook reconciles even while scheduled monitoring is disabled", async () => {
+  const { Route } = await import(
+    await moduleUrl("../src/routes/api/public/hooks/sync-collector-subscriptions.ts", {
+      "@tanstack/react-router": stub("export const createFileRoute=()=>x=>x;"),
+      "@/lib/scheduled-auth.server": stub(
+        "export const authenticateScheduledRequest=async(request)=>{const m=/^Bearer ([^,]+)$/.exec(request.headers.get('authorization')||'');const t=process.env.MONITOR_CRON_TOKEN;if(t&&m&&m[1]===t)return null;return new Response('Unauthorized',{status:401});};",
+      ),
+      "@/lib/market/collector-subscriptions.server": stub(
+        "export const syncCollectorUniverse=async()=>{globalThis.__universeHook.calls++;return {status:'assigned',symbols:['BTCUSDT']};};",
+      ),
+      "@/integrations/supabase/client.server": stub("export const supabaseAdmin={};"),
+      "@/lib/operational/repository.server": stub(
+        "export const getOperationalStore=()=>({enabled:true});",
+      ),
+    })
+  );
+  const oldFlag = process.env.SCHEDULED_MONITOR_ENABLED;
+  const oldToken = process.env.MONITOR_CRON_TOKEN;
+  process.env.SCHEDULED_MONITOR_ENABLED = "false";
+  process.env.MONITOR_CRON_TOKEN = "test-only";
+  globalThis.__universeHook = { calls: 0 };
+  try {
+    const handle = Route.server.handlers.POST;
+    assert.equal((await handle({ request: new Request("https://example.test") })).status, 401);
+    const response = await handle({
+      request: new Request("https://example.test", {
+        headers: { authorization: "Bearer test-only" },
+      }),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.status, "assigned");
+    assert.deepEqual(body.symbols, ["BTCUSDT"]);
+    assert.equal(globalThis.__universeHook.calls, 1);
+  } finally {
+    if (oldFlag === undefined) delete process.env.SCHEDULED_MONITOR_ENABLED;
+    else process.env.SCHEDULED_MONITOR_ENABLED = oldFlag;
+    if (oldToken === undefined) delete process.env.MONITOR_CRON_TOKEN;
+    else process.env.MONITOR_CRON_TOKEN = oldToken;
+    delete globalThis.__universeHook;
   }
 });

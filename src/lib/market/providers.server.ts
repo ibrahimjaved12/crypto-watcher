@@ -49,6 +49,37 @@ export type TACandleResult = {
   candles: Candle[];
 };
 
+/**
+ * A completed candle read back from the leased collector's operational store. Its
+ * provenance is recorded at ingestion (#26), so unlike the REST provider result it
+ * carries the exact endpoint/transport that produced this candle, the exchange
+ * kline close time, the actual source event time, and the collector receive time.
+ */
+export type CollectorTACandle = Candle & {
+  closeTime: number;
+  /**
+   * Actual exchange event time (WebSocket `E`), or null for REST bootstrap/recovery,
+   * which has no exchange event. It is provenance only; candle completion is defined
+   * by `time + timeframeMinutes`.
+   */
+  sourceEventTime: number | null;
+  receivedAt: number;
+  endpoint: string;
+  transport: "rest" | "websocket";
+};
+
+/**
+ * Canonical completed candles for the application-owned TA path (#20). Provenance is
+ * per candle because one series can mix WebSocket live candles with REST
+ * bootstrap/recovery candles; the application must not reconstruct or fabricate it.
+ */
+export type CollectorTACandleHistory = {
+  source: MarketSource;
+  instrument: FuturesContract;
+  priceType: typeof MARKET_PRICE_TYPE;
+  candles: CollectorTACandle[];
+};
+
 export type ProviderObserver = {
   request(source: MarketSource, kind: "metadata" | "candles", timeframe?: number): void;
   candleRows(source: MarketSource, timeframe: number, rows: number): void;

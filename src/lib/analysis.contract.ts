@@ -70,7 +70,7 @@ const factor = z
   .strict();
 const technicalResult = z
   .object({
-    schema_version: z.literal(1),
+    schema_version: z.literal(2),
     status: z.enum(["ok", "insufficient", "unavailable"]),
     reason: z.string().max(80).nullable(),
     classification: z.enum(["bullish", "bearish", "neutral", "unavailable"]),
@@ -85,7 +85,7 @@ const technicalResult = z
     timeframe_minutes: z.union([z.literal(15), z.literal(60), z.literal(240)]),
     candle_open_time_ms: timestamp.nullable(),
     candle_close_time_ms: timestamp.nullable(),
-    source_event_time_ms: timestamp,
+    source_event_time_ms: timestamp.nullable(),
     evaluation_time_ms: timestamp,
     detection_time_ms: timestamp,
     ta_version: z.literal("ta-v2"),

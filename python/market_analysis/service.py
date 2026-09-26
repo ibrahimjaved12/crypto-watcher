@@ -136,16 +136,14 @@ def technical_results(candles_by_frame, provider, symbol, now_ms):
     output = {}
     for timeframe in SUPPORTED_TIMEFRAMES:
         candles = candles_by_frame[timeframe]
-        duration = timeframe * MINUTE
-        completed_closes = [c.open_ms + duration for c in candles
-                            if c.complete and c.open_ms + duration <= now_ms]
-        source_time = max(completed_closes, default=0)
         request = TechnicalInput(
             instrument=contract,
             timeframe_minutes=timeframe,
             candles=candles,
             source=provider,
-            source_event_time_ms=source_time,
+            # The manual path fetches REST klines, which carry no exchange event time;
+            # record the absence honestly instead of synthesizing the completion boundary.
+            source_event_time_ms=None,
             evaluation_time_ms=now_ms,
             detection_time_ms=now_ms,
             price_type="trade",

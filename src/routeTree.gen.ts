@@ -17,6 +17,7 @@ import { Route as AuthenticatedDashboardRouteImport } from './routes/_authentica
 import { Route as AuthenticatedNotesRouteImport } from './routes/_authenticated/notes'
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
 import { Route as ApiPublicHooksMonitorPricesRouteImport } from './routes/api/public/hooks/monitor-prices'
+import { Route as ApiPublicHooksSyncCollectorSubscriptionsRouteImport } from './routes/api/public/hooks/sync-collector-subscriptions'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -58,6 +59,12 @@ const ApiPublicHooksMonitorPricesRoute =
     path: '/api/public/hooks/monitor-prices',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicHooksSyncCollectorSubscriptionsRoute =
+  ApiPublicHooksSyncCollectorSubscriptionsRouteImport.update({
+    id: '/api/public/hooks/sync-collector-subscriptions',
+    path: '/api/public/hooks/sync-collector-subscriptions',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -67,6 +74,7 @@ export interface FileRoutesByFullPath {
   '/notes': typeof AuthenticatedNotesRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
+  '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -76,6 +84,7 @@ export interface FileRoutesByTo {
   '/notes': typeof AuthenticatedNotesRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
+  '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -87,6 +96,7 @@ export interface FileRoutesById {
   '/_authenticated/notes': typeof AuthenticatedNotesRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
+  '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -98,6 +108,7 @@ export interface FileRouteTypes {
     | '/notes'
     | '/settings'
     | '/api/public/hooks/monitor-prices'
+    | '/api/public/hooks/sync-collector-subscriptions'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -107,6 +118,7 @@ export interface FileRouteTypes {
     | '/notes'
     | '/settings'
     | '/api/public/hooks/monitor-prices'
+    | '/api/public/hooks/sync-collector-subscriptions'
   id:
     | '__root__'
     | '/'
@@ -117,6 +129,7 @@ export interface FileRouteTypes {
     | '/_authenticated/notes'
     | '/_authenticated/settings'
     | '/api/public/hooks/monitor-prices'
+    | '/api/public/hooks/sync-collector-subscriptions'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -124,6 +137,7 @@ export interface RootRouteChildren {
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   AuthRoute: typeof AuthRoute
   ApiPublicHooksMonitorPricesRoute: typeof ApiPublicHooksMonitorPricesRoute
+  ApiPublicHooksSyncCollectorSubscriptionsRoute: typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -184,6 +198,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicHooksMonitorPricesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/hooks/sync-collector-subscriptions': {
+      id: '/api/public/hooks/sync-collector-subscriptions'
+      path: '/api/public/hooks/sync-collector-subscriptions'
+      fullPath: '/api/public/hooks/sync-collector-subscriptions'
+      preLoaderRoute: typeof ApiPublicHooksSyncCollectorSubscriptionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -209,6 +230,8 @@ const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AuthRoute: AuthRoute,
   ApiPublicHooksMonitorPricesRoute: ApiPublicHooksMonitorPricesRoute,
+  ApiPublicHooksSyncCollectorSubscriptionsRoute:
+    ApiPublicHooksSyncCollectorSubscriptionsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { activityEnabled, logActivity } from "@/lib/activity-controls";
 
-import { authenticateCronRequest } from "@/integrations/supabase/cron-auth";
+import { authenticateScheduledRequest } from "@/lib/scheduled-auth.server";
 import {
   DEFAULT_SETTINGS,
   recordRun,
@@ -13,16 +13,15 @@ import { createMonitorRunContext } from "@/lib/monitor/run-context";
 /**
  * Scheduled price monitoring. When explicitly enabled, the backend scheduler can
  * call this route every five minutes so monitoring runs with no browser open.
+ *
+ * The collector's shared subscription universe is reconciled separately by
+ * `/api/public/hooks/sync-collector-subscriptions`, so pausing scheduled monitoring
+ * never leaves the collector empty or stale. A disabled request still returns before
+ * loading the privileged database client (#22).
  */
 async function handle(request: Request) {
-  // The scheduler authenticates with a shared token; the platform cron secret
-  // is accepted too so either caller works.
-  const bearer = /^Bearer ([^\s,]+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
-  const token = process.env["MONITOR_CRON_TOKEN"];
-  if (!token || bearer !== token) {
-    const unauthorized = await authenticateCronRequest(request);
-    if (unauthorized) return unauthorized;
-  }
+  const unauthorized = await authenticateScheduledRequest(request);
+  if (unauthorized) return unauthorized;
 
   if (!activityEnabled(process.env["SCHEDULED_MONITOR_ENABLED"], false)) {
     logActivity(process.env["ACTIVITY_DIAGNOSTICS"], "scheduled-monitor", "skipped");
@@ -38,7 +37,9 @@ async function handle(request: Request) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   // Every user with at least one watched symbol gets checked.
-  const { data: watchers, error } = await supabaseAdmin.from("watchlist_items").select("user_id");
+  const { data: watchers, error } = await supabaseAdmin
+    .from("watchlist_items")
+    .select("user_id, symbol");
 
   if (error) {
     return Response.json({ ok: false, error: error.message }, { status: 500 });

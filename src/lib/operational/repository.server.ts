@@ -14,6 +14,8 @@ import type {
   StorageDiagnostics,
 } from "./types";
 import type { MovementCandle } from "../market/market-movement-state";
+import type { CollectorTACandle, FuturesContract } from "../market/providers.server";
+import { futuresInstrument, MARKET_PRICE_TYPE, MARKET_SOURCE } from "../market/symbols";
 import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
@@ -22,6 +24,9 @@ import type {
 import type { MarketEpisodeTransitionType } from "../market/market-episode-lifecycle";
 
 type RpcClient = Pick<SupabaseClient, "from" | "rpc">;
+
+/** Canonical completed collector-candle read bound shared by the TA adapter. */
+const COLLECTOR_TA_LIMIT = 260;
 
 function createOperationalFetch(serviceRoleKey: string): typeof fetch {
   return (input, init) => {
@@ -79,6 +84,15 @@ const disabledStore: OperationalStore = {
   async collectorDiagnostics() {
     return { candle_rows: 0, health_rows: 0, oldest_candle_at: null, newest_candle_at: null };
   },
+  async assignCollectorSubscriptions() {
+    throw new Error("Operational collector subscriptions are disabled");
+  },
+  async readCollectorSubscriptions() {
+    return [];
+  },
+  async readCollectorTACandles() {
+    throw new Error("Operational collector ownership is disabled");
+  },
   async readMovementCandleHistory() {
     return new Map<string, MovementCandle[]>();
   },
@@ -123,6 +137,20 @@ function nativeSymbol(source: string, symbol: string) {
   if (source === "okx-usdt-swap") return `${base}-USDT-SWAP`;
   if (source === "kraken-futures") return `PF_${base === "BTC" ? "XBT" : base}USD`;
   return symbol;
+}
+
+/** Canonical Binance USD-M perpetual identity for collector-sourced TA candles. */
+function collectorInstrument(symbol: string): FuturesContract {
+  return {
+    ...futuresInstrument(symbol),
+    status: "TRADING",
+    listedAt: 0,
+    expiresAt: null,
+    priceTick: null,
+    quantityStep: null,
+    minQuantity: null,
+    minNotional: null,
+  };
 }
 
 function rpcError(error: { message: string } | null, operation: string): void {
@@ -251,7 +279,8 @@ export function createOperationalStore(
           low: candle.low,
           close: candle.close,
           volume: candle.volume,
-          source_event_at: new Date(candle.sourceEventTime).toISOString(),
+          source_event_at:
+            candle.sourceEventTime === null ? null : new Date(candle.sourceEventTime).toISOString(),
           received_at: new Date(candle.receivedAt).toISOString(),
           transport: candle.transport,
         })),
@@ -298,6 +327,88 @@ export function createOperationalStore(
       const row = Array.isArray(data) ? data[0] : data;
       if (!row) throw new Error("Operational database returned no collector diagnostics");
       return row as CollectorStorageDiagnostics;
+    },
+    async assignCollectorSubscriptions(symbols) {
+      const { error } = await client.rpc("assign_collector_subscriptions", {
+        p_symbols: symbols.map((symbol) => symbol.toUpperCase()),
+      });
+      rpcError(error, "collector subscription assign");
+    },
+    async readCollectorSubscriptions() {
+      const { data, error } = await client.rpc("get_collector_subscriptions");
+      rpcError(error, "collector subscription read");
+      return Array.isArray(data)
+        ? (data as string[]).map((symbol) => String(symbol).toUpperCase())
+        : [];
+    },
+    async readCollectorTACandles(symbol, timeframeMinutes, limit = COLLECTOR_TA_LIMIT) {
+      const { data, error } = await client.rpc("get_collector_ta_candles", {
+        p_symbol: symbol.toUpperCase(),
+        p_timeframe_minutes: timeframeMinutes,
+        p_limit: limit,
+      });
+      rpcError(error, "collector TA candle read");
+      const rows = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [];
+      // The adapter only transports the collector's recorded provenance. It never
+      // reconstructs an endpoint, a retrieval time, or a source event time: a row
+      // that is not exactly what the collector persisted fails visibly.
+      const candles: CollectorTACandle[] = rows.map((row) => {
+        const openTime = Number(row["open_time_ms"]);
+        const closeTime = Number(row["close_time_ms"]);
+        const sourceEventTime =
+          row["source_event_at_ms"] === null ? null : Number(row["source_event_at_ms"]);
+        const receivedAt = Number(row["received_at_ms"]);
+        const [open, high, low, close, volume] = [
+          row["open"],
+          row["high"],
+          row["low"],
+          row["close"],
+          row["volume"],
+        ].map(Number);
+        const nativeSymbol = row["native_symbol"];
+        const endpoint = row["endpoint"];
+        const transport = row["transport"];
+        if (
+          row["provider"] !== MARKET_SOURCE ||
+          row["price_type"] !== MARKET_PRICE_TYPE ||
+          row["instrument_id"] !== `${MARKET_SOURCE}:${String(nativeSymbol)}` ||
+          (transport !== "rest" && transport !== "websocket") ||
+          typeof endpoint !== "string" ||
+          endpoint.length === 0 ||
+          !Number.isSafeInteger(openTime) ||
+          !Number.isSafeInteger(closeTime) ||
+          !Number.isSafeInteger(receivedAt) ||
+          (sourceEventTime !== null && !Number.isSafeInteger(sourceEventTime)) ||
+          ![open, high, low, close, volume].every(Number.isFinite) ||
+          low! <= 0 ||
+          volume! < 0 ||
+          high! < Math.max(open!, close!) ||
+          low! > Math.min(open!, close!) ||
+          closeTime <= openTime
+        ) {
+          throw new Error("Operational database returned an invalid collector TA candle row");
+        }
+        return {
+          time: openTime,
+          open: open!,
+          high: high!,
+          low: low!,
+          close: close!,
+          volume: volume!,
+          complete: true,
+          closeTime,
+          sourceEventTime,
+          receivedAt,
+          endpoint,
+          transport,
+        };
+      });
+      return {
+        source: MARKET_SOURCE,
+        instrument: collectorInstrument(symbol),
+        priceType: MARKET_PRICE_TYPE,
+        candles,
+      };
     },
     async readMovementCandleHistory(symbols, sinceMs) {
       if (symbols.length === 0) return new Map<string, MovementCandle[]>();

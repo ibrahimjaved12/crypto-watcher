@@ -49,7 +49,12 @@ export function validatePublicSecrets(env: Env) {
   }
 }
 
-export function validateTarget(profile: unknown, optIn: unknown, rawUrl: unknown, key: unknown) {
+/**
+ * Shared profile/origin validation: `APP_PROFILE`, the Supabase origin shape, the
+ * local-loopback rule, and the hosted HTTPS opt-in. It reads no browser value, so
+ * both the application and a headless backend process can reuse it.
+ */
+export function validateProfileAndOrigin(profile: unknown, optIn: unknown, rawUrl: unknown) {
   if (profile !== "local" && profile !== "production")
     fail("APP_PROFILE must be local or production. Run npm run env:local for local setup.");
   let url: URL;
@@ -74,6 +79,11 @@ export function validateTarget(profile: unknown, optIn: unknown, rawUrl: unknown
     );
   if (!loopback && (optIn !== "true" || url.protocol !== "https:"))
     fail("Hosted Supabase requires ALLOW_HOSTED_SUPABASE=true and HTTPS.");
+  return url.origin;
+}
+
+export function validateTarget(profile: unknown, optIn: unknown, rawUrl: unknown, key: unknown) {
+  const origin = validateProfileAndOrigin(profile, optIn, rawUrl);
   if (typeof key !== "string" || !key)
     fail("Supabase publishable key is missing. Run npm run env:local.");
   if (key.startsWith("sb_secret_")) fail("A secret key cannot be used as a publishable key.");
@@ -85,7 +95,31 @@ export function validateTarget(profile: unknown, optIn: unknown, rawUrl: unknown
       fail("Invalid public Supabase JWT (only anon keys are permitted).");
     }
   }
-  return url.origin;
+  return origin;
+}
+
+/**
+ * Server-only main-Supabase validation for a headless backend process.
+ *
+ * It validates the runtime server credential and never reads browser `VITE_*`
+ * values, so one built artifact can be configured on any host without a matching
+ * browser build. The application keeps its own browser/server consistency check
+ * in `validateEnvironment`.
+ */
+export function validateServerSupabase(env: Env): string {
+  const origin = validateProfileAndOrigin(
+    env["APP_PROFILE"],
+    env["ALLOW_HOSTED_SUPABASE"],
+    env["SUPABASE_URL"],
+  );
+  const key = env["SUPABASE_SERVICE_ROLE_KEY"];
+  if (typeof key !== "string" || !key)
+    fail("SUPABASE_SERVICE_ROLE_KEY is required for server-side Supabase access.");
+  if (key.startsWith("sb_publishable_"))
+    fail("A publishable key cannot be used as SUPABASE_SERVICE_ROLE_KEY.");
+  if (key.split(".").length === 3 && !isPrivilegedKey(key))
+    fail("SUPABASE_SERVICE_ROLE_KEY must have the service_role role.");
+  return origin;
 }
 
 export function validateEnvironment(env: Env, browser: Env = env) {

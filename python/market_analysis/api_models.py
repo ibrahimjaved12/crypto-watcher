@@ -110,7 +110,7 @@ class TechnicalConfigurationRequest(InputModel):
 
 
 class TechnicalAnalysisRequest(InputModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     instrument: TechnicalInstrumentRequest
     timeframe_minutes: Literal[15, 60, 240]
     candles: Annotated[
@@ -123,7 +123,7 @@ class TechnicalAnalysisRequest(InputModel):
         tuple[Timestamp, ...], Field(max_length=1000)
     ] = ()
     source: Source
-    source_event_time_ms: Timestamp
+    source_event_time_ms: Timestamp | None = None
     evaluation_time_ms: Timestamp
     detection_time_ms: Timestamp
     price_type: Literal["trade", "mark", "index"]
@@ -134,7 +134,7 @@ class TechnicalAnalysisRequest(InputModel):
     def ordered_and_matching(self):
         if self.source != self.instrument.exchange:
             raise ValueError("candle source does not match the futures contract")
-        if self.source_event_time_ms > self.evaluation_time_ms:
+        if self.source_event_time_ms is not None and self.source_event_time_ms > self.evaluation_time_ms:
             raise ValueError("source event time must not follow evaluation time")
         if self.detection_time_ms > self.evaluation_time_ms:
             raise ValueError("detection time must not follow evaluation time")
@@ -158,7 +158,7 @@ class TechnicalAnalysisRequest(InputModel):
 
 
 class TechnicalAnalysisBatchRequest(InputModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     requests: Annotated[
         tuple[TechnicalAnalysisRequest, ...], Field(min_length=1, max_length=8)
     ]

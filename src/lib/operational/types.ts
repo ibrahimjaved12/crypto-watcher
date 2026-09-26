@@ -1,4 +1,4 @@
-import type { Candle } from "../market/providers.server";
+import type { Candle, CollectorTACandleHistory } from "../market/providers.server";
 import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
@@ -42,7 +42,13 @@ export type CollectorCandle = {
   low: number;
   close: number;
   volume: number;
-  sourceEventTime: number;
+  /**
+   * Actual exchange event time for this candle. WebSocket klines carry the
+   * exchange event timestamp (`E`); REST bootstrap/recovery has no exchange event,
+   * so the absence is recorded as null rather than an invented timestamp. Candle
+   * completion is defined by `openTime + timeframeMinutes`, never by this value.
+   */
+  sourceEventTime: number | null;
   receivedAt: number;
   transport: "rest" | "websocket";
 };
@@ -211,6 +217,27 @@ export interface OperationalStore {
   }): Promise<void>;
   listCollectorHealth(symbols: string[]): Promise<CollectorHealth[]>;
   collectorDiagnostics(): Promise<CollectorStorageDiagnostics>;
+  /**
+   * Derived collector input: the shared symbol set the application assigns to the
+   * collector worker. The application owns user watchlists; the collector reads
+   * this operational representation instead of querying Lovable user tables.
+   */
+  assignCollectorSubscriptions(symbols: string[]): Promise<void>;
+  readCollectorSubscriptions(): Promise<string[]>;
+  /**
+   * Canonical completed candles the leased collector already persisted, read back
+   * for the application-owned completed-candle TA path (#20). Each candle keeps the
+   * provenance the collector recorded (#24/#26) — endpoint, transport, candle close
+   * time, source event time and receive time — so the application never fabricates
+   * it. While collector mode is active this replaces a second live exchange candle
+   * fetch; missing or stale history must surface as a visible TA failure, never a
+   * silent fallback.
+   */
+  readCollectorTACandles(
+    symbol: string,
+    timeframeMinutes: number,
+    limit?: number,
+  ): Promise<CollectorTACandleHistory>;
   /** Canonical completed one-minute candles used to derive #71 normalization history. */
   readMovementCandleHistory(
     symbols: string[],

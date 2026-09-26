@@ -1,6 +1,5 @@
 import { validateServerEnvironment } from "./lib/environment.server";
 import "./lib/error-capture";
-import { startBinanceCollector } from "./lib/market/collector.server";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
@@ -11,8 +10,25 @@ type ServerEntry = {
 
 let serverEntryPromise: Promise<ServerEntry> | undefined;
 
-// Starts once per long-lived backend process and never depends on a dashboard request.
-startBinanceCollector();
+// Best-effort first-request reconciliation of the collector's shared subscription
+// universe. This is only a safety net for a missed scheduled run — the initial and
+// ongoing reconciliation is the dedicated authenticated hook the deployment
+// schedules. It is loaded lazily so the server entry stays light, runs at most once
+// per process, and never starts or hosts the collector itself (#82).
+let collectorUniverseReconciled = false;
+function reconcileCollectorUniverseOnFirstRequest(): void {
+  if (collectorUniverseReconciled) return;
+  collectorUniverseReconciled = true;
+  void import("./lib/market/collector-subscriptions.server")
+    .then((module) => module.bootstrapCollectorUniverse())
+    .catch((error) => {
+      console.error(
+        `[collector-universe] bootstrap unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+}
 
 async function getServerEntry(): Promise<ServerEntry> {
   if (!serverEntryPromise) {
@@ -53,6 +69,7 @@ export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
       validateServerEnvironment();
+      reconcileCollectorUniverseOnFirstRequest();
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);

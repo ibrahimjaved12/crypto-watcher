@@ -1,10 +1,20 @@
 # Binance USD-M futures collector
 
-The backend process owns one public Binance USD-M WebSocket connection for the union of all
-watched contracts. It starts with the TanStack server process, runs without an open dashboard,
-and is enabled only when both `BINANCE_COLLECTOR_ENABLED=true` and the operational database are
-enabled. A renewable operational-database lease prevents two application instances from acting
-as authoritative collectors.
+The collector is an independently runnable persistent backend worker. It owns one public Binance
+USD-M WebSocket connection for the application-assigned shared subscription universe, runs without
+an open dashboard, and is enabled only when both `BINANCE_COLLECTOR_ENABLED=true` and the
+operational database are enabled. The application owns user watchlists; it derives the union of
+watched contracts and assigns that set to the operational database as collector input, and the
+worker reads it there rather than querying Lovable user tables. That reconciliation is
+application-owned and independent of scheduled monitoring: the dedicated authenticated
+`/api/public/hooks/sync-collector-subscriptions` hook is the initial and ongoing mechanism the
+deployment schedules, and the server's best-effort first-request pass is only a safety net for a
+missed run, so pausing scheduled monitoring never leaves the collector empty or stale. A renewable
+operational-database
+lease prevents two worker instances from acting as authoritative collectors. The TanStack
+application server does not start the collector: importing or starting the app never opens a market
+stream. Production hosting for the worker remains an open decision in
+[#19](https://github.com/ibrahimjaved12/crypto-watcher/issues/19).
 
 ## Inputs and candle semantics
 
@@ -19,10 +29,17 @@ trade history is retained for simulated execution. Add either only with its cons
 
 Binance-native klines are canonical. Exchange open and close timestamps identify a candle.
 Developing (`x=false`) updates stay only in bounded process memory. Final (`x=true`) candles are
-normalized, inserted idempotently into the operational database, emitted once after a successful
-new insert, and then trigger the existing Python completed-candle TA path. The direct 15m/1h/4h
-streams remain authoritative; they are not assembled from 1m data. Spot or non-USD-M events are
-rejected.
+normalized and inserted idempotently into the operational database. Each persisted completed candle
+keeps the exchange kline close time, the actual exchange event time when one exists, and the
+collector receive time as distinct fields, together with its exact endpoint and transport, so a
+WebSocket live candle is never recorded with REST provenance and vice versa. Candle completion is
+always the deterministic boundary `open + timeframe`; the exchange event time is provenance, not the
+definition of completion, and REST bootstrap/recovery records no exchange event at all. The
+worker owns no TA: the application's completed-candle orchestration determines due work, reads
+canonical completed candles back from the operational store (`readCollectorTACandles`) rather than
+fetching a second live exchange series, calls the shared Python service, validates the response, and
+writes conclusions to Lovable. The direct 15m/1h/4h streams remain
+authoritative; they are not assembled from 1m data. Spot or non-USD-M events are rejected.
 
 The endpoint and operating limits were checked against Binance documentation on 2026-09-25:
 
@@ -38,7 +55,10 @@ The WebSocket implementation answers protocol ping frames automatically.
 ## Bootstrap, recovery, and bounds
 
 For each contract/timeframe, startup loads recent completed `/fapi/v1/klines` history and excludes
-the still-developing REST candle. A skipped final interval changes health to `RECOVERING`, fetches
+the still-developing REST candle. REST bootstrap/recovery has no exchange event, so it records no
+source event rather than inventing one; the kline's own close time and the collector receive time
+are stored separately, and completion remains `open + timeframe`. A skipped final interval changes
+health to `RECOVERING`, fetches
 only the bounded missing range, verifies exact chronological continuity, deduplicates REST/WS
 overlap in the database, and processes the incoming live final last. An unprovable or over-1,000
 candle gap becomes `UNAVAILABLE`.
@@ -63,32 +83,78 @@ continuous live history spans two adjacent 1m, 5m, or 15m windows. A new process
 not reconstruct this path from REST candles. The deterministic component can be advanced by an
 aligned boundary for live evaluation or replay, and it performs no database writes.
 
-Recovered/bootstrap candles carry their origin and do not directly trigger live analysis or a
-new movement alert. A subsequent genuinely live completed candle invokes the existing idempotent
-Python TA orchestration, which may catch up due conclusions. Movement baseline/cooldown/alert
-state remains wholly in its Lovable transaction.
+Recovered/bootstrap candles carry their origin and never bypass the application's due-work check;
+the collector performs no TA. Movement baseline/cooldown/alert state remains wholly in its Lovable
+transaction.
 
 ## Ownership and operation
 
-With the collector enabled, `collector_recent_candles`, `collector_health`, and `collector_leases`
-in the operational database are the only completed-candle/checkpoint working-state path. The old
-request-driven per-user operational candle/checkpoint writes and scheduled TA trigger are disabled;
-Lovable remains authoritative for watchlists, settings, movement state/alerts, and permanent TA
-conclusions. No candle is dual-written to Lovable.
+### Pre-release provenance cutover
 
-Apply `operational-db/supabase/migrations/20260925120000_binance_collector.sql` only to the external
-operational database. Set this server-only flag (never a `VITE_*` variable):
+The timestamp provenance change is a destructive pre-release reset, not a
+production-compatible migration. Existing development data is disposable: clear
+`ta_signals` in the application database and `collector_recent_candles`,
+`collector_health`, and `collector_leases` in the operational database. Apply the
+TA provenance migration to the application database and the collector provenance
+reset migration to the operational database before starting the collector. No old
+rows are migrated, and no compatibility columns or legacy timestamp semantics are
+kept.
+
+After reset, WebSocket `source_event_at` is the actual Binance event time (`E`),
+REST `source_event_at` is `NULL`, and `received_at` is the actual receive or REST
+retrieval time. Candle completion is determined independently as
+`open_time + timeframe`; event and receive timestamps are provenance, not a
+completion boundary.
+
+With the collector enabled, `collector_recent_candles`, `collector_health`, and `collector_leases`
+in the operational database are the only shared completed-candle/checkpoint working-state path, and
+`collector_subscriptions` holds the application-assigned subscription universe. The old
+request-driven per-user operational candle/checkpoint writes are disabled. The application reads
+canonical completed candles back through `get_collector_ta_candles` for its own TA input; the read
+transports each candle's recorded endpoint, transport, close time, source event time and receive
+time rather than reconstructing them, and missing or
+stale operational history fails the affected TA frame visibly instead of falling back to a live
+exchange series. Lovable remains
+authoritative for watchlists, settings, movement state/alerts, and permanent TA conclusions, and it
+is written only by TanStack: the worker holds no Lovable credentials and never reads watchlists or
+settings or writes TA. No candle is dual-written to Lovable.
+
+Apply all unapplied SQL migrations in filename order to their designated databases. In particular,
+apply `supabase/migrations/20260926100000_ta_source_event_provenance.sql` to the application
+database and `operational-db/supabase/migrations/20260926150000_collector_candle_provenance_reset.sql`
+to the external operational database for this cutover. The operational retention migration keeps
+each canonical series' newest 260 completed candles even when that spans more than the day window,
+so the longest TA frame always has enough canonical history. After the reset, the REST bootstrap
+fetches 300 klines per frame and persists the completed ones (excluding the developing candle),
+rebuilding 299 candles for the 15m, 1h, and 4h TA frames. Set this server-only flag (never a
+`VITE_*` variable) on both the
+collector worker and the application server:
 
 ```text
 BINANCE_COLLECTOR_ENABLED=true
 ```
 
-`npm run dev:local:all` enables it for that local process. `npm run dev:local` disables it and uses
-the legacy request-driven path. In production, enable it only on a long-lived TanStack server
-runtime; the operational lease elects one collector across instances. Disable the flag on the
-whole fleet to roll back without simultaneous writers. Health (`LIVE`, `RECOVERING`, `STALE`, or
-`UNAVAILABLE`) is returned only through the authenticated operational-state server function and is
-filtered to the caller's watchlist.
+The worker reads it to start the collector; the application reads it to assign the shared
+subscription universe, to know that the collector owns completed-candle/checkpoint state, and to
+source completed-candle TA input from the operational store instead of the exchange REST provider.
+Locally, `npm run dev:local:all` starts the
+collector worker as a separate process and enables the flag for both processes, while
+`npm run dev:local` disables it and uses the legacy request-driven path. `npm run collector:worker`
+runs the worker on its own. `npm run collector:worker:build` produces the self-contained
+`dist/collector-worker/collector-worker.mjs` artifact, which `npm run collector:worker:start` runs
+with plain `node`; that production path needs no devDependencies. In production, run the collector
+as a persistent worker process and select its host from the evidence in #19; the operational lease
+elects one collector across instances. Disable the flag on the whole fleet and stop the worker to
+roll back without simultaneous writers. Health (`LIVE`, `RECOVERING`, `STALE`, or `UNAVAILABLE`) is
+returned only through the authenticated operational-state server function and is filtered to the
+caller's watchlist.
+
+The worker has its own server-only runtime configuration boundary. When enabled it validates the
+operational database variables and `MOVEMENT_FINALIZATION_GRACE_MS` from the host's runtime
+`process.env`, and fails visibly before starting if any are missing or invalid. It needs no main
+Lovable credential and never reads browser `VITE_*` values or build-time public configuration, so
+the artifact built once is host-independent. Only the TanStack application additionally proves its
+runtime matches the browser bundle it serves. See [environment setup](./environments.md).
 
 ## Monitor overlap and freshness
 
@@ -98,8 +164,10 @@ releases it; a crashed process is recoverable after expiry. A competing request 
 without doing market, movement, or TA work. Existing database idempotency remains the final defense:
 `process_cumulative_observation` still owns the atomic baseline/cooldown/alert transition, while TA
 uses the unique `(user_id, symbol, timeframe, candle_at, version)` identity and pending-only outcome
-updates. Collector mode still disables the request-driven TA trigger; disabling collector mode keeps
-that path available.
+updates. The application's completed-candle TA orchestration runs in both modes: the collector never
+owns TA, so enabling it does not disable the application path. In collector mode the orchestration
+sources its candle history from the operational store; when the collector is disabled it uses the
+exchange REST provider, and the two modes are never mixed for one frame.
 
 Apply `supabase/migrations/20260926090000_monitor_run_leases.sql` through the normal Lovable/main
 database migration chain. It does not belong in the external operational migration chain.
