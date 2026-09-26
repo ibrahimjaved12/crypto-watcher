@@ -77,8 +77,21 @@ type HealthState = {
 type CollectorHealthInput = Parameters<OperationalStore["recordCollectorHealth"]>[0];
 
 type DesiredHealthWrite = {
+  instrumentId: string;
+  symbol: string;
+  timeframeMinutes: CollectorInterval;
+  status: CollectorHealthStatus;
+  errorMessage: string | null;
+};
+
+type PersistedHealthWrite = {
+  desired: DesiredHealthWrite;
   input: CollectorHealthInput;
-  recoveryGeneration: number | undefined;
+};
+
+type FailedHealthWrite = {
+  desired: DesiredHealthWrite;
+  error: unknown;
 };
 
 type MovementSourceTransition = {
@@ -318,7 +331,9 @@ export class BinanceFuturesCollector {
   private readonly movementSourceTransitions = new Map<string, MovementSourceTransition[]>();
   private readonly health = new Map<string, HealthState>();
   private readonly desiredHealthWrites = new Map<string, DesiredHealthWrite>();
-  private readonly authoritativeHealthInputs = new Map<string, CollectorHealthInput>();
+  private readonly persistedHealthWrites = new Map<string, PersistedHealthWrite>();
+  private readonly failedHealthWrites = new Map<string, FailedHealthWrite>();
+  private readonly healthWriteFlights = new Map<string, Promise<void>>();
   private readonly queue: CollectorCandle[] = [];
   private processing: Promise<void> | null = null;
   private recovery: { generation: number; promise: Promise<void> } | null = null;
@@ -571,17 +586,11 @@ export class BinanceFuturesCollector {
     status: CollectorHealthStatus,
     errorMessage: string | null,
   ): Promise<void> {
-    const recoveryGeneration = this.candleRecoveryGeneration;
     const symbols = this.subscribedSymbols();
     for (const symbol of symbols) {
       this.recordMovementSourceTransition(symbol, status);
     }
-    await this.persistConnectionHealth(
-      symbols,
-      status,
-      errorMessage,
-      recoveryGeneration,
-    );
+    await this.persistConnectionHealth(symbols, status, errorMessage);
   }
 
   async markCandleConnectionStatus(
@@ -730,7 +739,11 @@ export class BinanceFuturesCollector {
     }
     const key = this.key(event.candle.symbol, event.candle.timeframeMinutes);
     const state = this.state(key);
-    state.lastEventAt = event.candle.sourceEventTime;
+    if (event.candle.sourceEventTime !== null) {
+      state.lastEventAt = state.lastEventAt === null
+        ? event.candle.sourceEventTime
+        : Math.max(state.lastEventAt, event.candle.sourceEventTime);
+    }
     if (event.kind === "developing") {
       const previous = this.developing.get(key);
       if (previous) {
@@ -1067,92 +1080,116 @@ export class BinanceFuturesCollector {
   ): Promise<boolean> {
     if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     const key = this.key(candle.symbol, candle.timeframeMinutes);
-    const current = this.health.get(key) ?? {
-      status: "RECOVERING",
-      lastEventAt: null,
-      lastCompletedOpenTime: null,
-      errorMessage: null,
-    };
-    const nextState: HealthState = {
-      ...current,
-      status,
-      errorMessage,
-      lastCompletedOpenTime:
-        candle.openTime > 0 ? candle.openTime : current.lastCompletedOpenTime,
-    };
-    const input: CollectorHealthInput = {
+    const state = this.state(key);
+    state.status = status;
+    state.errorMessage = errorMessage;
+    if (candle.openTime > 0) {
+      state.lastCompletedOpenTime = state.lastCompletedOpenTime === null
+        ? candle.openTime
+        : Math.max(state.lastCompletedOpenTime, candle.openTime);
+    }
+    const desired: DesiredHealthWrite = {
       instrumentId: candle.instrumentId,
       symbol: candle.symbol,
       timeframeMinutes: candle.timeframeMinutes,
       status,
-      lastEventAt: nextState.lastEventAt,
-      lastCompletedOpenTime: nextState.lastCompletedOpenTime,
-      lagMs:
-        nextState.lastEventAt === null
-          ? null
-          : Math.max(0, this.now() - nextState.lastEventAt),
-      queueDepth: this.queue.length,
-      reconnectCount: this.reconnectCount,
       errorMessage,
     };
-    const desired: DesiredHealthWrite = {
-      input,
-      recoveryGeneration,
-    };
     this.desiredHealthWrites.set(key, desired);
-    try {
-      await this.dependencies.store.recordCollectorHealth(input);
-    } catch (error) {
-      if (
-        !this.isCandleRecoveryCurrent(recoveryGeneration) ||
-        this.desiredHealthWrites.get(key) !== desired
-      ) {
-        return false;
+    while (this.desiredHealthWrites.get(key) === desired) {
+      try {
+        await this.persistLatestHealth(key);
+      } catch {
+        const failure = this.failedHealthWrites.get(key);
+        if (
+          this.desiredHealthWrites.get(key) === desired &&
+          failure?.desired === desired
+        ) {
+          throw failure.error;
+        }
+        if (this.desiredHealthWrites.get(key) !== desired) return false;
+        continue;
       }
-      this.desiredHealthWrites.delete(key);
-      throw error;
+      const persisted = this.persistedHealthWrites.get(key);
+      if (
+        persisted?.desired === desired &&
+        this.healthInputIsCurrent(key, desired, persisted.input)
+      ) {
+        return true;
+      }
     }
-    if (
-      !this.isCandleRecoveryCurrent(recoveryGeneration) ||
-      this.desiredHealthWrites.get(key) !== desired
-    ) {
-      await this.persistAuthoritativeHealth(key, desired);
-      return false;
-    }
-    this.health.set(key, nextState);
-    this.authoritativeHealthInputs.set(key, input);
-    return true;
+    return false;
   }
 
-  private async persistAuthoritativeHealth(
-    key: string,
-    obsolete: DesiredHealthWrite,
-  ): Promise<void> {
-    // The operational upsert has no compare-and-swap token. If an older RPC
-    // returns after a newer one, write the still-current desired (or last
-    // committed) value again so the obsolete completion cannot remain final.
+  private persistLatestHealth(key: string): Promise<void> {
+    const existing = this.healthWriteFlights.get(key);
+    if (existing) return existing;
+    const flight = this.drainHealthWrites(key).finally(() => {
+      if (this.healthWriteFlights.get(key) === flight) {
+        this.healthWriteFlights.delete(key);
+      }
+    });
+    this.healthWriteFlights.set(key, flight);
+    return flight;
+  }
+
+  private async drainHealthWrites(key: string): Promise<void> {
     while (true) {
       const desired = this.desiredHealthWrites.get(key);
-      let restoreDesired = false;
-      let input = this.authoritativeHealthInputs.get(key);
-      if (
-        desired !== undefined &&
-        desired !== obsolete &&
-        this.isCandleRecoveryCurrent(desired.recoveryGeneration)
-      ) {
-        restoreDesired = true;
-        input = desired.input;
+      if (!desired) return;
+      const input = this.healthInput(key, desired);
+      try {
+        await this.dependencies.store.recordCollectorHealth(input);
+        this.persistedHealthWrites.set(key, { desired, input });
+        this.failedHealthWrites.delete(key);
+      } catch (error) {
+        // A failed RPC may still have committed remotely. If this intent was
+        // superseded while it was in flight, continue and reassert the newest
+        // intent. Only a failure of the still-current intent is surfaced.
+        if (this.desiredHealthWrites.get(key) === desired) {
+          this.failedHealthWrites.set(key, { desired, error });
+          throw error;
+        }
+        continue;
       }
-      if (!input) return;
-      await this.dependencies.store.recordCollectorHealth(input);
-      if (
-        this.desiredHealthWrites.get(key) === desired &&
-        (!restoreDesired ||
-          this.isCandleRecoveryCurrent(desired?.recoveryGeneration))
-      ) {
-        return;
-      }
+      if (this.healthInputIsCurrent(key, desired, input)) return;
     }
+  }
+
+  private healthInput(key: string, desired: DesiredHealthWrite): CollectorHealthInput {
+    const state = this.state(key);
+    return {
+      instrumentId: desired.instrumentId,
+      symbol: desired.symbol,
+      timeframeMinutes: desired.timeframeMinutes,
+      status: desired.status,
+      lastEventAt: state.lastEventAt,
+      lastCompletedOpenTime: state.lastCompletedOpenTime,
+      lagMs:
+        state.lastEventAt === null
+          ? null
+          : Math.max(0, this.now() - state.lastEventAt),
+      queueDepth: this.queue.length,
+      reconnectCount: this.reconnectCount,
+      errorMessage: desired.errorMessage,
+    };
+  }
+
+  private healthInputIsCurrent(
+    key: string,
+    desired: DesiredHealthWrite,
+    input: CollectorHealthInput,
+  ): boolean {
+    const state = this.health.get(key);
+    return (
+      this.desiredHealthWrites.get(key) === desired &&
+      state !== undefined &&
+      input.status === state.status &&
+      input.errorMessage === state.errorMessage &&
+      input.lastEventAt === state.lastEventAt &&
+      input.lastCompletedOpenTime === state.lastCompletedOpenTime &&
+      input.reconnectCount === this.reconnectCount
+    );
   }
 
   private recordMovementSourceTransition(

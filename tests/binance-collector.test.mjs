@@ -353,18 +353,16 @@ test("stale health completion reasserts the newer persistence-visible health", a
   );
   collector.invalidateCandleRecoveryTenure(generationA);
   const generationB = collector.beginCandleRecoveryTenure();
-  assert.equal(
-    await collector.setHealth(t2, "LIVE", "generation B", generationB),
-    true,
-  );
+  const currentHealth = collector.setHealth(t2, "LIVE", "generation B", generationB);
 
   releaseOldWrite();
   assert.equal(await staleHealth, false);
+  assert.equal(await currentHealth, true);
   assert.equal(collector.health.get("BTCUSDT:1").status, "LIVE");
   assert.equal(collector.health.get("BTCUSDT:1").lastCompletedOpenTime, t2.openTime);
   assert.deepEqual(
     persistedHealth.map((input) => input.errorMessage),
-    ["generation B", "generation A", "generation B"],
+    ["generation A", "generation B"],
   );
 });
 
@@ -392,18 +390,87 @@ test("stale health persistence failure cannot poison newer authoritative health"
   );
   collector.invalidateCandleRecoveryTenure(generationA);
   const generationB = collector.beginCandleRecoveryTenure();
-  assert.equal(
-    await collector.setHealth(t2, "LIVE", "generation B", generationB),
-    true,
-  );
+  const currentHealth = collector.setHealth(t2, "LIVE", "generation B", generationB);
 
   rejectOldWrite(new Error("obsolete health write failed"));
   assert.equal(await staleHealth, false);
+  assert.equal(await currentHealth, true);
   assert.equal(collector.health.get("BTCUSDT:1").status, "LIVE");
   assert.equal(collector.health.get("BTCUSDT:1").lastCompletedOpenTime, t2.openTime);
   assert.deepEqual(
     persistedHealth.map((input) => input.errorMessage),
     ["generation B"],
+  );
+});
+
+test("replacement recovery tenure does not invalidate slow disconnect health", async () => {
+  let holdDisconnect = false;
+  let releaseDisconnect;
+  const disconnectWrite = new Promise((resolve) => { releaseDisconnect = resolve; });
+  const persistedHealth = new Map();
+  const { collector } = harness({
+    recordCollectorHealth: async (input) => {
+      if (
+        holdDisconnect &&
+        input.timeframeMinutes === 1 &&
+        input.errorMessage === "fixture disconnect"
+      ) {
+        await disconnectWrite;
+      }
+      persistedHealth.set(`${input.symbol}:${input.timeframeMinutes}`, input);
+    },
+  });
+  await collector.reconcile(["BTCUSDT"]);
+  await collector.markConnectionStatus("LIVE", null);
+
+  holdDisconnect = true;
+  const recovering = collector.markConnectionStatus("RECOVERING", "fixture disconnect");
+  assert.equal(collector.health.get("BTCUSDT:1").status, "RECOVERING");
+  collector.beginCandleRecoveryTenure();
+  assert.equal(collector.health.get("BTCUSDT:1").status, "RECOVERING");
+
+  releaseDisconnect();
+  await recovering;
+  assert.equal(collector.health.get("BTCUSDT:1").status, "RECOVERING");
+  assert.equal(persistedHealth.get("BTCUSDT:1").status, "RECOVERING");
+});
+
+test("new event provenance remains monotonic during slow health persistence", async () => {
+  let holdHealth = false;
+  let releaseHealth;
+  const deferredHealth = new Promise((resolve) => { releaseHealth = resolve; });
+  const persistedHealth = [];
+  const { collector } = harness({
+    recordCollectorHealth: async (input) => {
+      if (holdHealth && input.errorMessage === "slow health") {
+        holdHealth = false;
+        await deferredHealth;
+      }
+      persistedHealth.push(input);
+    },
+  });
+  await collector.reconcile(["BTCUSDT"]);
+  persistedHealth.length = 0;
+  const open = BASE - 60_000;
+  const t1 = BASE - 1_000;
+  const t2 = BASE - 500;
+  assert.equal(collector.accept(wsKline(open, 1, false, t1)), true);
+
+  holdHealth = true;
+  const writing = collector.setHealth(
+    canonical("BTCUSDT", 1, open),
+    "LIVE",
+    "slow health",
+  );
+  assert.equal(collector.accept(wsKline(open, 1, false, t2)), true);
+  assert.equal(collector.health.get("BTCUSDT:1").lastEventAt, t2);
+
+  releaseHealth();
+  assert.equal(await writing, true);
+  assert.equal(collector.health.get("BTCUSDT:1").lastEventAt, t2);
+  assert.deepEqual(
+    persistedHealth.map((input) => input.lastEventAt),
+    [t1, t2],
   );
 });
 
