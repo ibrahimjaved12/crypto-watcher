@@ -4,7 +4,7 @@ Callers prepare historical returns and comparable completed-window notionals.
 No clock, history acquisition, or provider access is performed here.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 import math
 from types import MappingProxyType
@@ -570,7 +570,6 @@ def _aggregates(included, eligible, config):
 
 
 def _outliers(results, config):
-    from dataclasses import replace
     included = [item for item in results if item.included]
     if not included:
         return results
@@ -602,12 +601,19 @@ def calculate_market_movement(request: MarketMovementInput) -> MarketMovementEva
     windows = {}
     for window in WINDOWS:
         results = tuple(_symbol_result(request, symbol, window) for symbol in request.universe.symbols)
-        results = _outliers(results, request.config)
         included = tuple(item for item in results if item.included)
         count = len(included)
         fraction = count / len(request.universe.symbols) if request.universe.symbols else 0.0
         eligible = (count >= request.config.minimum_eligible_count
                     and fraction >= request.config.minimum_eligible_fraction)
+        if eligible:
+            results = _outliers(results, request.config)
+        else:
+            results = tuple(replace(
+                item,
+                cross_sectional_z=Metric.missing("MARKET_UNIVERSE_INELIGIBLE"),
+                outlier_candidate=False,
+            ) for item in results)
         windows[window] = MarketMovementWindowResult(
             algorithm_version=ALGORITHM_VERSION, config_version=request.config.version,
             universe_id=request.universe.id, universe_version=request.universe.version,

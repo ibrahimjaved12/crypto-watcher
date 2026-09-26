@@ -195,6 +195,38 @@ class EligibilityBreadthTests(unittest.TestCase):
                     self.assertEqual(result.aggregates.median_normalized_movement.reason,
                                      "MARKET_UNIVERSE_INELIGIBLE")
 
+    def test_stale_trades_close_market_gate_and_suppress_outliers(self):
+        returns = (0.50, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07)
+        symbols = tuple(f"S{i}" for i in range(len(returns)))
+        inputs = {symbol: symbol_input(symbol, current=str(100 * math.exp(value)))
+                  for symbol, value in zip(symbols, returns)}
+        before = evaluate(inputs)
+        self.assertTrue(before.market_wide_eligible)
+        self.assertEqual(before.eligible_count, 8)
+        self.assertEqual(before.eligible_fraction, 1)
+        self.assertTrue(before.symbols[0].cross_sectional_z.available)
+        self.assertTrue(before.symbols[0].outlier_candidate)
+
+        for symbol, value in zip(symbols[4:], returns[4:]):
+            inputs[symbol] = symbol_input(
+                symbol, current=str(100 * math.exp(value)),
+                states={1: ("stale", "last_real_trade_expired")},
+            )
+        after = evaluate(inputs)
+        self.assertFalse(after.market_wide_eligible)
+        self.assertEqual(after.eligible_count, 4)
+        self.assertEqual(after.eligible_fraction, 0.5)
+        self.assertEqual(after.included_symbols, symbols[:4])
+        self.assertEqual(tuple(item.symbol for item in after.excluded_symbols), symbols[4:])
+        self.assertTrue(all(item.reasons == ("STALE_LAST_TRADE",)
+                            for item in after.excluded_symbols))
+        self.assertFalse(after.breadth.available)
+        self.assertEqual(after.breadth.reason, "MARKET_UNIVERSE_INELIGIBLE")
+        self.assertEqual(after.aggregates.median_normalized_movement.reason,
+                         "MARKET_UNIVERSE_INELIGIBLE")
+        self.assertTrue(all(item.cross_sectional_z.reason == "MARKET_UNIVERSE_INELIGIBLE"
+                            and not item.outlier_candidate for item in after.symbols))
+
     def test_material_breadth_is_distinct_from_direction(self):
         inputs = {f"S{i}": symbol_input(f"S{i}", current="101.2") for i in range(5)}
         result = evaluate(inputs)
