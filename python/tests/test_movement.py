@@ -398,6 +398,66 @@ class MovementBucketTests(unittest.TestCase):
                 self.assertEqual(result.state, "ready")
                 self.assertTrue(all(bucket.price is not None for bucket in result.history))
 
+    def test_outage_preserves_factual_provenance_but_breaks_price_carry(self):
+        boundary = BASE + BUCKET_INTERVAL_MS
+        first = observation(
+            boundary - 100,
+            "100",
+            trade_time_ms=boundary,
+            received_at_ms=boundary + 100,
+            aggregate_trade_id=1,
+        )
+        self.engine.observe([first])
+        self.engine.advance(boundary, "LIVE")
+
+        recovering = self.engine.advance(
+            boundary + BUCKET_INTERVAL_MS,
+            "RECOVERING",
+        )
+        self.assertIsNone(recovering.price)
+        self.assertFalse(recovering.carried_forward)
+        self.assertEqual(recovering.last_real_trade_time_ms, boundary)
+        self.assertEqual(recovering.last_real_event_time_ms, boundary - 100)
+        self.assertEqual(recovering.last_received_at_ms, boundary + 100)
+
+        resumed = self.engine.advance(
+            boundary + 2 * BUCKET_INTERVAL_MS,
+            "LIVE",
+        )
+        self.assertIsNone(resumed.price)
+        self.assertFalse(resumed.carried_forward)
+        self.assertEqual(resumed.last_real_trade_time_ms, boundary)
+        self.assertEqual(resumed.last_real_event_time_ms, boundary - 100)
+        self.assertEqual(resumed.last_received_at_ms, boundary + 100)
+        self.assertEqual(
+            self.engine.readiness(
+                boundary + 2 * BUCKET_INTERVAL_MS,
+                1,
+                "LIVE",
+            ).last_real_trade_age_ms,
+            2 * BUCKET_INTERVAL_MS,
+        )
+
+        new_boundary = boundary + 3 * BUCKET_INTERVAL_MS
+        new_trade = observation(
+            new_boundary - 50,
+            "110",
+            trade_time_ms=new_boundary,
+            received_at_ms=new_boundary + 25,
+            aggregate_trade_id=2,
+        )
+        self.engine.observe([new_trade])
+        renewed = self.engine.advance(new_boundary, "LIVE")
+        self.assertEqual(renewed.price, Decimal("110"))
+        self.assertFalse(renewed.carried_forward)
+
+        carried = self.engine.advance(new_boundary + BUCKET_INTERVAL_MS, "LIVE")
+        self.assertEqual(carried.price, Decimal("110"))
+        self.assertTrue(carried.carried_forward)
+        self.assertEqual(carried.last_real_trade_time_ms, new_boundary)
+        self.assertEqual(carried.last_real_event_time_ms, new_boundary - 50)
+        self.assertEqual(carried.last_received_at_ms, new_boundary + 25)
+
     def test_short_source_outage_is_not_bridged_and_ages_out_for_every_window(self):
         for window_minutes, required_count in ((1, 25), (5, 121), (15, 361)):
             with self.subTest(window_minutes=window_minutes):

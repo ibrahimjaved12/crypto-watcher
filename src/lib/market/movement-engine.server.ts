@@ -136,7 +136,6 @@ export class MovementEngineRuntime {
   async start(): Promise<void> {
     if (this.active) return;
     this.active = true;
-    if (!this.lifecycleRestored) await this.attemptLifecycleRestore(this.now());
     if (!this.timer) {
       this.timer = setInterval(() => void this.tick(), MOVEMENT_ENGINE_TICK_MS);
       this.timer.unref?.();
@@ -191,14 +190,6 @@ export class MovementEngineRuntime {
    */
   async runOnce(): Promise<void> {
     const tenure = this.tenure;
-    // Fail closed: never evaluate against a lifecycle state that has not been
-    // established by a successful operational read.
-    if (!this.lifecycleRestored && !(await this.attemptLifecycleRestore(this.now()))) return;
-    if (tenure !== this.tenure) return;
-    // Durable persistence is mandatory: an outstanding batch must be persisted
-    // before any later boundary is evaluated, so its transitions cannot be lost.
-    if (this.pendingPersistence && !(await this.flushPendingPersistence())) return;
-    if (tenure !== this.tenure) return;
     const symbols = this.deps.collector.subscribedSymbols();
     if (symbols.length === 0) return;
     const now = this.now();
@@ -210,8 +201,18 @@ export class MovementEngineRuntime {
       return;
     }
     const universe = buildMarketUniverse(symbols);
-    // Finalize quiet/no-trade symbols only through the safe boundary.
+    // Canonical #70 finalization is upstream of lifecycle storage. It must keep
+    // consuming safe explicit boundaries even while #73 restore/write I/O fails.
     await this.deps.collector.advanceMovementBuckets(finalizable);
+    if (tenure !== this.tenure) return;
+    // Fail closed downstream: never evaluate against lifecycle state that has
+    // not been established by a successful operational read.
+    if (!this.lifecycleRestored && !(await this.attemptLifecycleRestore(now))) return;
+    if (tenure !== this.tenure) return;
+    // An outstanding #73 batch must persist before any later lifecycle boundary
+    // is evaluated, but it no longer blocks upstream #70 bucket finalization.
+    if (this.pendingPersistence && !(await this.flushPendingPersistence())) return;
+    if (tenure !== this.tenure) return;
     await this.refreshHistorical(universe, now);
     if (tenure !== this.tenure) return;
     const snapshots = new Map<string, MovementBucketSnapshot>();

@@ -144,6 +144,7 @@ class MovementBucketEngine:
         self._pending = {}
         self._last_finalized_boundary_ms = None
         self._last_real_observation = None
+        self._carry_observation = None
         self._last_accepted_order_key = None
         self._rejected_late_observations = 0
 
@@ -225,29 +226,31 @@ class MovementBucketEngine:
             raise ValueError("finalize earlier observed bucket boundaries first")
 
         pending = self._pending.pop(boundary_time_ms, _PendingBucket())
-        previous_real_observation = self._last_real_observation
-        if source_state == "LIVE" and pending.latest is not None:
+        if pending.latest is not None:
             self._last_real_observation = pending.latest
-        elif source_state != "LIVE":
-            self._last_real_observation = None
-        latest = (
-            self._last_real_observation
-            if source_state == "LIVE"
-            else pending.latest or previous_real_observation
+        if source_state != "LIVE":
+            self._carry_observation = None
+        elif pending.latest is not None:
+            self._carry_observation = pending.latest
+        factual = self._last_real_observation
+        carry = self._carry_observation
+        carry_age_ms = None if carry is None else boundary_time_ms - carry.trade_time_ms
+        fresh = (
+            source_state == "LIVE"
+            and carry is not None
+            and carry_age_ms <= MAX_LAST_TRADE_AGE_MS
         )
-        age_ms = None if latest is None else boundary_time_ms - latest.trade_time_ms
-        fresh = source_state == "LIVE" and latest is not None and age_ms <= MAX_LAST_TRADE_AGE_MS
         bucket = MovementBucket(
             boundary_time_ms=boundary_time_ms,
             source_state=source_state,
-            price=latest.price if fresh else None,
-            last_real_price=None if latest is None else latest.price,
+            price=carry.price if fresh else None,
+            last_real_price=None if factual is None else factual.price,
             base_volume=pending.base_volume,
             quote_volume=pending.quote_volume,
             trade_count=pending.trade_count,
-            last_real_trade_time_ms=None if latest is None else latest.trade_time_ms,
-            last_real_event_time_ms=None if latest is None else latest.event_time_ms,
-            last_received_at_ms=None if latest is None else latest.received_at_ms,
+            last_real_trade_time_ms=None if factual is None else factual.trade_time_ms,
+            last_real_event_time_ms=None if factual is None else factual.event_time_ms,
+            last_received_at_ms=None if factual is None else factual.received_at_ms,
             carried_forward=pending.trade_count == 0 and fresh,
             provider=self.provider,
             instrument_id=self.instrument_id,
