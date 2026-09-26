@@ -63,6 +63,7 @@ class MarketObservation:
 @dataclass(frozen=True)
 class MovementBucket:
     boundary_time_ms: int
+    source_state: str
     price: Decimal | None
     last_real_price: Decimal | None
     base_volume: Decimal
@@ -101,7 +102,7 @@ class _PendingBucket:
         self.base_volume += observation.quantity
         self.quote_volume += observation.price * observation.quantity
         self.trade_count += 1
-        if self.latest is None or observation.event_time_ms >= self.latest.event_time_ms:
+        if self.latest is None or observation.trade_time_ms >= self.latest.trade_time_ms:
             self.latest = observation
 
 
@@ -145,16 +146,16 @@ class MovementBucketEngine:
         return self._rejected_late_observations
 
     @staticmethod
-    def _bucket_boundary(event_time_ms):
-        # Right-closed intervals make an event exactly at t part of the bucket
-        # ending at t, matching the endpoint rule (event_time <= t).
-        return ((event_time_ms + BUCKET_INTERVAL_MS - 1) // BUCKET_INTERVAL_MS
+    def _bucket_boundary(trade_time_ms):
+        # Right-closed intervals make a trade exactly at t part of the bucket
+        # ending at t, matching the endpoint rule (trade_time <= t).
+        return ((trade_time_ms + BUCKET_INTERVAL_MS - 1) // BUCKET_INTERVAL_MS
                 * BUCKET_INTERVAL_MS)
 
     def observe(self, observations: Iterable[MarketObservation]):
         """Aggregate an ordered batch without retaining raw observations."""
         batch = tuple(observations)
-        previous_event_time = None
+        previous_trade_time = None
         for observation in batch:
             if not isinstance(observation, MarketObservation):
                 raise ValueError("observations must be MarketObservation values")
@@ -162,16 +163,16 @@ class MovementBucketEngine:
                     or observation.instrument_id != self.instrument_id
                     or observation.price_type != self.price_type):
                 raise ValueError("observation provenance does not match this instrument")
-            if (previous_event_time is not None
-                    and observation.event_time_ms < previous_event_time):
-                raise ValueError("observations must be ordered by exchange event time")
-            previous_event_time = observation.event_time_ms
+            if (previous_trade_time is not None
+                    and observation.trade_time_ms < previous_trade_time):
+                raise ValueError("observations must be ordered by trade time")
+            previous_trade_time = observation.trade_time_ms
 
         pending_boundaries = {
-            self._bucket_boundary(observation.event_time_ms)
+            self._bucket_boundary(observation.trade_time_ms)
             for observation in batch
             if (self._last_finalized_boundary_ms is None
-                    or self._bucket_boundary(observation.event_time_ms)
+                    or self._bucket_boundary(observation.trade_time_ms)
                     > self._last_finalized_boundary_ms)
         }
         if len(self._pending) + len(pending_boundaries.difference(self._pending)) > self.capacity:
@@ -179,7 +180,7 @@ class MovementBucketEngine:
 
         accepted = 0
         for observation in batch:
-            boundary = self._bucket_boundary(observation.event_time_ms)
+            boundary = self._bucket_boundary(observation.trade_time_ms)
             if (self._last_finalized_boundary_ms is not None
                     and boundary <= self._last_finalized_boundary_ms):
                 self._rejected_late_observations += 1
@@ -188,9 +189,11 @@ class MovementBucketEngine:
             accepted += 1
         return accepted
 
-    def advance(self, boundary_time_ms):
-        """Permanently finalize one explicit boundary; skipped boundaries are errors."""
+    def advance(self, boundary_time_ms, source_state):
+        """Finalize one boundary with its explicit source state; skipped boundaries are errors."""
         boundary_time_ms = _timestamp(boundary_time_ms, "boundary_time_ms")
+        if source_state not in COLLECTOR_STATES:
+            raise ValueError("invalid source state")
         if boundary_time_ms % BUCKET_INTERVAL_MS:
             raise ValueError("boundary_time_ms must align to the five-second grid")
         previous = self._last_finalized_boundary_ms
@@ -200,13 +203,21 @@ class MovementBucketEngine:
             raise ValueError("finalize earlier observed bucket boundaries first")
 
         pending = self._pending.pop(boundary_time_ms, _PendingBucket())
-        if pending.latest is not None:
+        previous_real_observation = self._last_real_observation
+        if source_state == "LIVE" and pending.latest is not None:
             self._last_real_observation = pending.latest
-        latest = self._last_real_observation
+        elif source_state != "LIVE":
+            self._last_real_observation = None
+        latest = (
+            self._last_real_observation
+            if source_state == "LIVE"
+            else pending.latest or previous_real_observation
+        )
         age_ms = None if latest is None else boundary_time_ms - latest.trade_time_ms
-        fresh = latest is not None and age_ms <= MAX_LAST_TRADE_AGE_MS
+        fresh = source_state == "LIVE" and latest is not None and age_ms <= MAX_LAST_TRADE_AGE_MS
         bucket = MovementBucket(
             boundary_time_ms=boundary_time_ms,
+            source_state=source_state,
             price=latest.price if fresh else None,
             last_real_price=None if latest is None else latest.price,
             base_volume=pending.base_volume,
@@ -271,6 +282,8 @@ class MovementBucketEngine:
         ) != expected:
             return result("missing_history", "noncontiguous_live_history")
         if any(bucket.price is None for bucket in history):
+            if any(bucket.source_state != "LIVE" for bucket in history):
+                return result("unavailable", "source_unavailable_in_required_history")
             if any(bucket.last_real_trade_time_ms is None for bucket in history):
                 return result("unavailable", "no_real_trade_history")
             return result("stale", "unusable_price_history")
