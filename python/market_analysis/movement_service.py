@@ -29,17 +29,17 @@ class MovementBoundaryService:
     ):
         if type(cache_capacity) is not int or cache_capacity < 1:
             raise ValueError("cache_capacity must be a positive integer")
-        if type(session_capacity) is not int or session_capacity < 2:
-            raise ValueError("session_capacity must be an integer of at least two")
+        if type(session_capacity) is not int or session_capacity < 1:
+            raise ValueError("session_capacity must be a positive integer")
         self.cache_capacity = cache_capacity
         self.session_capacity = session_capacity
         self.sessions = OrderedDict()
-        self.retired_sessions = OrderedDict()
 
     @staticmethod
     def _new_session():
         return {
             "engines": {},
+            "late_after_finalization_count": 0,
             "responses": OrderedDict(),
             "response_hashes": {},
         }
@@ -48,10 +48,7 @@ class MovementBoundaryService:
         if is_new:
             self.sessions[session_id] = session
             while len(self.sessions) > self.session_capacity:
-                expired_id, _ = self.sessions.popitem(last=False)
-                self.retired_sessions[expired_id] = None
-                while len(self.retired_sessions) > self.session_capacity * 4:
-                    self.retired_sessions.popitem(last=False)
+                self.sessions.popitem(last=False)
         else:
             self.sessions.move_to_end(session_id)
 
@@ -62,8 +59,6 @@ class MovementBoundaryService:
         session = self.sessions.get(session_id)
         is_new_session = session is None
         if is_new_session:
-            if session_id in self.retired_sessions:
-                raise ValueError("movement session has expired")
             session = self._new_session()
         cached = session["responses"].get(cache_key)
         if cached is not None:
@@ -75,6 +70,11 @@ class MovementBoundaryService:
             return cached
 
         active_symbols = {item.symbol for item in request.symbols}
+        previous_late_total = sum(
+            session["engines"][item.symbol].rejected_late_observations
+            for item in request.symbols
+            if item.symbol in session["engines"]
+        )
         staged_engines = {
             symbol: deepcopy(engine) for symbol, engine in session["engines"].items()
             if symbol in active_symbols
@@ -112,12 +112,15 @@ class MovementBoundaryService:
         response = {
             "sessionId": session_id,
             "boundaryTime": request.boundary_time_ms,
-            "lateAfterFinalizationCount": sum(
-                engine.rejected_late_observations for engine in staged_engines.values()
+            "lateAfterFinalizationCount": session["late_after_finalization_count"] + max(
+                0,
+                sum(engine.rejected_late_observations for engine in staged_engines.values())
+                - previous_late_total,
             ),
             "snapshots": snapshots,
         }
         session["engines"] = staged_engines
+        session["late_after_finalization_count"] = response["lateAfterFinalizationCount"]
         session["responses"][cache_key] = response
         session["response_hashes"][cache_key] = fingerprint
         while len(session["responses"]) > self.cache_capacity:

@@ -309,6 +309,7 @@ export class BinanceFuturesCollector {
   private movementGeneration = 0;
   private movementSessionId = crypto.randomUUID();
   private movementLateRejections = 0;
+  private movementPythonLateRejections = 0;
 
   constructor(private readonly dependencies: CollectorDependencies) {
     this.now = dependencies.now ?? Date.now;
@@ -391,6 +392,7 @@ export class BinanceFuturesCollector {
     this.movementBoundary = null;
     this.movementRetry = null;
     this.movementLateRejections = 0;
+    this.movementPythonLateRejections = 0;
     this.movementResults.clear();
     this.movementLastAcceptedTrade.clear();
     this.movementSeenTrades.clear();
@@ -471,7 +473,15 @@ export class BinanceFuturesCollector {
       for (const snapshot of result.snapshots) {
         this.movementResults.set(snapshot.symbol, snapshot);
       }
-      this.movementLateRejections = result.lateAfterFinalizationCount;
+      const pythonLateDelta = Math.max(
+        0,
+        result.lateAfterFinalizationCount - this.movementPythonLateRejections,
+      );
+      this.movementLateRejections += pythonLateDelta;
+      this.movementPythonLateRejections = Math.max(
+        this.movementPythonLateRejections,
+        result.lateAfterFinalizationCount,
+      );
       for (const item of input) {
         const consumedIds = new Set(item.observations.map((trade) => trade.aggregateId));
         const pending = this.movementObservations.get(item.symbol) ?? [];
@@ -576,22 +586,23 @@ export class BinanceFuturesCollector {
           event.trade.priceText,
           event.trade.quantityText,
         ].join("|");
-        if (incomingFingerprint === seenFingerprint) {
-          const boundary = Math.ceil(event.trade.tradeTime / 5_000) * 5_000;
-          if (this.movementBoundary !== null && boundary <= this.movementBoundary) {
-            this.movementLateRejections += 1;
-          }
-          return false;
-        }
+        if (incomingFingerprint === seenFingerprint) return false;
         this.markMovementUnavailable(event.trade.symbol);
         this.dependencies.onOverload?.();
+        return false;
+      }
+      const tradeBoundary = Math.ceil(event.trade.tradeTime / 5_000) * 5_000;
+      if (this.movementBoundary !== null && tradeBoundary <= this.movementBoundary) {
+        this.movementLateRejections += 1;
+        this.rememberMovementTrade(event.trade);
         return false;
       }
       const previous = this.movementLastAcceptedTrade.get(event.trade.symbol);
       if (
         previous &&
-        (event.trade.aggregateId < previous.aggregateId ||
-          event.trade.tradeTime < previous.tradeTime)
+        (event.trade.tradeTime < previous.tradeTime ||
+          (event.trade.tradeTime === previous.tradeTime &&
+            event.trade.aggregateId <= previous.aggregateId))
       ) {
         this.markMovementUnavailable(event.trade.symbol);
         this.dependencies.onOverload?.();

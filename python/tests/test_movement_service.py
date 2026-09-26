@@ -137,37 +137,55 @@ class MovementBoundaryServiceTests(unittest.TestCase):
         self.assertEqual(observed.price, Decimal("101.000000000000000001"))
         self.assertEqual(observed.quantity, Decimal("2.000000000000000009"))
 
-    def test_interleaved_old_session_request_does_not_replace_new_session_state(self):
+    def test_evicted_session_restarts_empty_after_two_delayed_old_sessions(self):
         service = MovementBoundaryService(session_capacity=2)
-        old_session = "2af3e7c8-b777-4e58-9ad2-18e36daac160"
-        new_session = "3bf4e8d9-c888-4f69-8be3-29f47ebbd271"
-        old_first = request(
-            BASE,
-            [symbol_input("BTCUSDT", [observation(BASE, 1)])],
-            old_session,
-        )
-        new_first = request(
+        session_n = "3bf4e8d9-c888-4f69-8be3-29f47ebbd271"
+        session_o1 = "4c05f9ea-d999-407a-9c04-30f58fccd382"
+        session_o2 = "5d160afb-eaaa-418b-ad15-41a690dde493"
+        n_first = request(
             BASE,
             [symbol_input("BTCUSDT", [observation(BASE, 1, "200")])],
-            new_session,
+            session_n,
         )
-        new_result = service.advance(new_first)
+        o1_first = request(
+            BASE,
+            [symbol_input("BTCUSDT", [observation(BASE, 1, "300")])],
+            session_o1,
+        )
+        o2_first = request(
+            BASE,
+            [symbol_input("BTCUSDT", [observation(BASE, 1, "400")])],
+            session_o2,
+        )
+        service.advance(n_first)
+        service.advance(o1_first)
+        service.advance(o2_first)
+        self.assertNotIn(session_n, service.sessions)
+        self.assertEqual(
+            service.sessions[session_o2]["engines"]["BTCUSDT"].history[0].price,
+            Decimal("400"),
+        )
 
-        old_result = service.advance(old_first)
-        self.assertEqual(old_result["snapshots"][0]["buckets"][-1]["endpointPrice"], 100.0)
-        self.assertIn(new_session, service.sessions)
-        self.assertIn(old_session, service.sessions)
-
-        new_next = request(
+        # N's next valid request is accepted as a fresh empty session, never a 409.
+        n_next = request(
             BASE + 5_000,
             [symbol_input("BTCUSDT", [observation(BASE + 5_000, 2, "201")])],
-            new_session,
+            session_n,
         )
-        new_result = service.advance(new_next)
-        self.assertEqual(new_result["sessionId"], new_session)
-        self.assertEqual(len(new_result["snapshots"][0]["buckets"]), 2)
+        n_result = service.advance(n_next)
+        self.assertEqual(n_result["sessionId"], session_n)
+        self.assertEqual(len(n_result["snapshots"][0]["buckets"]), 1)
+        self.assertEqual(n_result["snapshots"][0]["readiness"][1]["state"], "warming")
+        self.assertEqual(n_result["snapshots"][0]["buckets"][0]["endpointPrice"], 201.0)
+        self.assertIn(session_n, service.sessions)
+        self.assertNotIn(session_o1, service.sessions)
         self.assertEqual(
-            new_result["snapshots"][0]["buckets"][0]["endpointPrice"], 200.0
+            service.sessions[session_n]["engines"]["BTCUSDT"].history[0].price,
+            Decimal("201"),
+        )
+        self.assertEqual(
+            service.sessions[session_o2]["engines"]["BTCUSDT"].history[0].price,
+            Decimal("400"),
         )
 
     def test_small_response_cache_does_not_shrink_engine_history(self):

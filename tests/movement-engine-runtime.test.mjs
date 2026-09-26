@@ -82,7 +82,6 @@ function bucket(symbol, boundaryTime, endpointPrice) {
   return {
     boundaryTime,
     sourceState: "LIVE",
-    sourceState: "LIVE",
     endpointPrice,
     baseQuantity: 1,
     quoteVolume: endpointPrice,

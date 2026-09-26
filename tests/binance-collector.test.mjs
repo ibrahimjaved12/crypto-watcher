@@ -481,6 +481,80 @@ test("known duplicate aggTrade is ignored but a unique ordering regression fence
   assert.equal(movementCalls.at(-1).symbols[0].observations.length, 1);
 });
 
+test("unseen late trade increments diagnostics without poisoning live source or history", async () => {
+  const baseSnapshot = {
+    symbol: "BTCUSDT",
+    provider: "binance-usdm",
+    instrumentId: "binance-usdm:BTCUSDT",
+    priceType: "trade",
+    bucketMs: 5_000,
+    maxLastTradeAgeMs: 15_000,
+    buckets: [{ boundaryTime: BASE, endpointPrice: 101 }],
+    latestRealTradeTime: BASE,
+    latestRealReceivedAt: BASE,
+    readiness: {
+      1: { windowMinutes: 1, status: "WARMING", state: "warming", reason: "insufficient_exact_live_history" },
+      5: { windowMinutes: 5, status: "WARMING", state: "warming", reason: "insufficient_exact_live_history" },
+      15: { windowMinutes: 15, status: "WARMING", state: "warming", reason: "insufficient_exact_live_history" },
+    },
+  };
+  const { collector, movementCalls } = harness({
+    advanceMovementBoundary: async () => ({
+      snapshots: [baseSnapshot],
+      lateAfterFinalizationCount: 0,
+    }),
+  });
+  await collector.reconcile(["BTCUSDT"]);
+  await collector.markConnectionStatus("LIVE", null);
+  await collector.advanceMovementBuckets(BASE);
+  const trade = (id, time, eventTime = time + 10) => ({
+    stream: "btcusdt@aggTrade",
+    data: { e: "aggTrade", E: eventTime, s: "BTCUSDT", st: 1, a: id, p: "999", q: "9", T: time },
+  });
+
+  assert.equal(collector.accept(trade(50, BASE - 1, BASE + 8_000), BASE + 9_000), false);
+  assert.equal(collector.movementLateRejections(), 1);
+  assert.equal(collector.movementSourceStatus("BTCUSDT"), "LIVE");
+  assert.equal(collector.movementSnapshot("BTCUSDT").buckets[0].endpointPrice, 101);
+  assert.equal(collector.accept(trade(50, BASE - 1, BASE + 8_000), BASE + 10_000), false);
+  assert.equal(collector.movementLateRejections(), 1);
+
+  await collector.advanceMovementBuckets(BASE + 5_000);
+  assert.equal(collector.movementLateRejections(), 1);
+  assert.equal(movementCalls.at(-1).symbols[0].sourceState, "LIVE");
+});
+
+test("Python cumulative late diagnostics cannot decrease transport late counts", async () => {
+  let responseCount = 0;
+  const { collector } = harness({
+    advanceMovementBoundary: async () => {
+      responseCount += 1;
+      return {
+        snapshots: [],
+        lateAfterFinalizationCount: responseCount === 1 ? 0 : responseCount === 2 ? 2 : 1,
+      };
+    },
+  });
+  await collector.reconcile(["BTCUSDT"]);
+  await collector.markConnectionStatus("LIVE", null);
+  const late = {
+    stream: "btcusdt@aggTrade",
+    data: {
+      e: "aggTrade", E: BASE - 1, s: "BTCUSDT", st: 1,
+      a: 99, p: "100", q: "1", T: BASE - 1,
+    },
+  };
+  await collector.advanceMovementBuckets(BASE);
+  assert.equal(collector.accept(late, BASE + 1), false);
+  assert.equal(collector.movementLateRejections(), 1);
+
+  await collector.advanceMovementBuckets(BASE + 5_000);
+  assert.equal(collector.movementLateRejections(), 3);
+
+  await collector.advanceMovementBuckets(BASE + 10_000);
+  assert.equal(collector.movementLateRejections(), 3);
+});
+
 test("WebSocket event and receive times are preserved exactly; REST invents no event", () => {
   const duration = 60_000;
   const openTime = BASE - duration;
