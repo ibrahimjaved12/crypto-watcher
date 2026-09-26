@@ -166,6 +166,11 @@ test("the app keeps its browser/server check while the worker validates server-o
   const workerEnv = read("../src/lib/market/collector-worker-env.server.ts");
   assert.doesNotMatch(workerEnv, /import\.meta/);
   assert.doesNotMatch(workerEnv, /["']VITE_/);
+  // The collector owns only operational working state, so its boundary must not
+  // require a main Lovable database credential or a browser build to match.
+  assert.doesNotMatch(workerEnv, /validateServerSupabase/);
+  assert.doesNotMatch(workerEnv, /SUPABASE_URL|SUPABASE_SERVICE_ROLE_KEY|APP_PROFILE/);
+  assert.match(workerEnv, /operationalDbConfig/);
   assert.match(
     read("../src/lib/market/collector.server.ts"),
     /validateCollectorWorkerEnvironment\(\)/,

@@ -211,6 +211,13 @@ export interface OperationalStore {
   }): Promise<void>;
   listCollectorHealth(symbols: string[]): Promise<CollectorHealth[]>;
   collectorDiagnostics(): Promise<CollectorStorageDiagnostics>;
+  /**
+   * Derived collector input: the shared symbol set the application assigns to the
+   * collector worker. The application owns user watchlists; the collector reads
+   * this operational representation instead of querying Lovable user tables.
+   */
+  assignCollectorSubscriptions(symbols: string[]): Promise<void>;
+  readCollectorSubscriptions(): Promise<string[]>;
   /** Canonical completed one-minute candles used to derive #71 normalization history. */
   readMovementCandleHistory(
     symbols: string[],

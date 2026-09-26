@@ -243,3 +243,31 @@ test("enabling both current consumers runs both paths", async () => {
   assert.equal(calls.rpc, 2);
   assert.deepEqual(calls.ta, ["BTCUSDT", "ETHUSDT"]);
 });
+
+test("completed-candle TA stays application-owned while the collector owns market data", async () => {
+  const previous = process.env.BINANCE_COLLECTOR_ENABLED;
+  process.env.BINANCE_COLLECTOR_ENABLED = "true";
+  try {
+    const store = {
+      enabled: true,
+      async recordCandles() {
+        globalThis.__domains.operational++;
+      },
+      async recordCheckpoint() {
+        globalThis.__domains.operational++;
+        return "recorded";
+      },
+    };
+    const { result, calls } = await run({}, store);
+    assert.equal(result.status, "success");
+    // The collector owns canonical candles and checkpoints, so the app writes none.
+    assert.equal(calls.checkpoints, 0);
+    assert.equal(calls.operational, 0);
+    // Completed-candle TA remains application-orchestrated and application-written;
+    // removing the collector's TA path must not remove the application's.
+    assert.deepEqual(calls.ta, ["BTCUSDT", "ETHUSDT"]);
+  } finally {
+    if (previous === undefined) delete process.env.BINANCE_COLLECTOR_ENABLED;
+    else process.env.BINANCE_COLLECTOR_ENABLED = previous;
+  }
+});

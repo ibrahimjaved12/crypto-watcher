@@ -1,21 +1,16 @@
-import { supabaseAdmin } from "../../integrations/supabase/client.server";
 import { getOperationalStore } from "../operational/repository.server";
 import type { OperationalStore } from "../operational/types";
-import { createMonitorRunContext } from "../monitor/run-context";
-import { DEFAULT_SETTINGS, type MonitorSettings } from "../monitor/engine.server";
-import { runTA } from "../ta/engine.server";
 import { loadBinanceFuturesKlines } from "./providers.server";
 import {
   BINANCE_USDM_WS_ENDPOINT,
   BinanceFuturesCollector,
   normalizeRestCandles,
-  type CompletedCandleEvent,
 } from "./collector";
 import { MovementEngineRuntime } from "./movement-engine.server";
 import { movementFinalizationConfig } from "./movement-finalization";
 import { validateCollectorWorkerEnvironment } from "./collector-worker-env.server";
 
-const WATCHLIST_REFRESH_MS = 30_000;
+const SUBSCRIPTION_REFRESH_MS = 30_000;
 const LEASE_SECONDS = 60;
 const LEASE_REFRESH_MS = 20_000;
 const STALE_AFTER_MS = 30_000;
@@ -28,52 +23,6 @@ function enabled(env: Record<string, string | undefined> = process.env): boolean
     throw new Error("BINANCE_COLLECTOR_ENABLED must be true or false");
   }
   return value === "true";
-}
-
-async function watchedSymbols(): Promise<string[]> {
-  const { data, error } = await supabaseAdmin.from("watchlist_items").select("symbol");
-  if (error) throw new Error(`Collector watchlist read failed: ${error.message}`);
-  return [...new Set((data ?? []).map((row) => row.symbol.toUpperCase()))].sort();
-}
-
-async function analyzeCompletedCandle(event: CompletedCandleEvent): Promise<void> {
-  if (event.origin !== "live" || event.candle.timeframeMinutes === 1) return;
-  const { data: watchers, error } = await supabaseAdmin
-    .from("watchlist_items")
-    .select("user_id")
-    .eq("symbol", event.candle.symbol);
-  if (error) throw new Error(`Collector TA audience read failed: ${error.message}`);
-  const userIds = [...new Set((watchers ?? []).map((row) => row.user_id))];
-  if (userIds.length === 0) return;
-  const { data: rows, error: settingsError } = await supabaseAdmin
-    .from("monitor_settings")
-    .select(
-      "user_id, threshold_pct, window_minutes, cooldown_minutes, monitoring_enabled, market_data_collection_enabled, completed_candle_ta_enabled, movement_alerts_enabled, developing_setup_evaluation_enabled, paper_trading_enabled",
-    )
-    .in("user_id", userIds);
-  if (settingsError) throw new Error(`Collector TA settings read failed: ${settingsError.message}`);
-  const byUser = new Map(
-    (rows ?? []).map((row) => [row.user_id, row as unknown as MonitorSettings]),
-  );
-  for (const userId of userIds) {
-    const settings = { ...DEFAULT_SETTINGS, ...byUser.get(userId) };
-    if (
-      !settings.monitoring_enabled ||
-      !settings.market_data_collection_enabled ||
-      !settings.completed_candle_ta_enabled
-    ) {
-      continue;
-    }
-    const errors = await runTA(
-      supabaseAdmin,
-      userId,
-      event.candle.symbol,
-      createMonitorRunContext(),
-      undefined,
-      null,
-    );
-    if (errors.length > 0) console.error(`[binance-collector] ${errors.join(" | ")}`);
-  }
 }
 
 export class CollectorRuntime {
@@ -91,7 +40,7 @@ export class CollectorRuntime {
     { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
   >();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private watchlistTimer: ReturnType<typeof setInterval> | null = null;
+  private subscriptionTimer: ReturnType<typeof setInterval> | null = null;
   private leaseTimer: ReturnType<typeof setInterval> | null = null;
   private staleTimer: ReturnType<typeof setInterval> | null = null;
   private lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -112,7 +61,6 @@ export class CollectorRuntime {
           retrievedAt: Date.parse(result.retrievedAt),
         });
       },
-      onCompleted: analyzeCompletedCandle,
       onOverload: () => this.socket?.close(1013, "bounded processing capacity exceeded"),
     });
     this.movement = new MovementEngineRuntime({
@@ -144,7 +92,7 @@ export class CollectorRuntime {
     try {
       this.active = await this.store.claimCollectorLease(this.instanceId, LEASE_SECONDS);
       if (!this.active) return this.retryStandby();
-      await this.collector.reconcile(await watchedSymbols());
+      await this.collector.reconcile(await this.store.readCollectorSubscriptions());
       this.startTimers();
       this.connect();
       console.info("[binance-collector] active lease acquired");
@@ -180,7 +128,10 @@ export class CollectorRuntime {
 
   private startTimers(): void {
     this.leaseTimer = setInterval(() => void this.renewLease(), LEASE_REFRESH_MS);
-    this.watchlistTimer = setInterval(() => void this.reconcileWatchlist(), WATCHLIST_REFRESH_MS);
+    this.subscriptionTimer = setInterval(
+      () => void this.reconcileSubscriptions(),
+      SUBSCRIPTION_REFRESH_MS,
+    );
     this.staleTimer = setInterval(() => {
       if (
         this.socket?.readyState === WebSocket.OPEN &&
@@ -212,11 +163,16 @@ export class CollectorRuntime {
     this.retryStandby();
   }
 
-  private async reconcileWatchlist(): Promise<void> {
+  /**
+   * Re-reads the application-assigned subscription universe from the operational
+   * store. The worker never reads Lovable user watchlists; the application owns
+   * them and assigns the shared set as derived collector input.
+   */
+  private async reconcileSubscriptions(): Promise<void> {
     if (!this.active) return;
     try {
       const before = new Set(this.collector.streamNames());
-      await this.collector.reconcile(await watchedSymbols());
+      await this.collector.reconcile(await this.store.readCollectorSubscriptions());
       const after = new Set(this.collector.streamNames());
       await Promise.all([
         this.sendSubscription(
@@ -348,12 +304,12 @@ export class CollectorRuntime {
   }
 
   private clearTimers(): void {
-    for (const timer of [this.watchlistTimer, this.leaseTimer, this.staleTimer]) {
+    for (const timer of [this.subscriptionTimer, this.leaseTimer, this.staleTimer]) {
       if (timer) clearInterval(timer);
     }
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
-    this.watchlistTimer = null;
+    this.subscriptionTimer = null;
     this.leaseTimer = null;
     this.staleTimer = null;
     this.retryTimer = null;

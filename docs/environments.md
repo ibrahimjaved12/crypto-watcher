@@ -115,12 +115,12 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `VITE_SUPABASE_PUBLISHABLE_KEY`                   | Browser                             | Required; identical public/anon key; secret/service-role keys rejected                                  |
 | `SUPABASE_SERVICE_ROLE_KEY`                       | TanStack secret                     | Empty; required for admin monitoring operations; local value from status                                |
 | `SUPABASE_PROJECT_ID`, `VITE_SUPABASE_PROJECT_ID` | Server / browser metadata           | Optional; not used to choose targets                                                                    |
-| `OPERATIONAL_DB_ENABLED`                          | TanStack                            | `false` for rollback; exact `true` transfers checkpoint/run ownership and enables recent-candle storage |
-| `OPERATIONAL_SUPABASE_URL`                        | TanStack                            | Separate local/hosted operational Supabase origin; required when enabled                                |
-| `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`           | TanStack secret                     | Operational project service-role key; required when enabled; never `VITE_*`                             |
-| `OPERATIONAL_CANDLE_RETENTION_DAYS`               | TanStack                            | `7`; allowed range 1–30                                                                                 |
-| `OPERATIONAL_MONITOR_RUN_RETENTION_DAYS`          | TanStack                            | `30`; allowed range 1–90                                                                                |
-| `OPERATIONAL_OUTBOX_MAX_ATTEMPTS`                 | TanStack                            | `10`; allowed range 1–100 before dead-letter                                                            |
+| `OPERATIONAL_DB_ENABLED`                          | TanStack + collector worker         | `false` for rollback; exact `true` transfers checkpoint/run ownership and enables recent-candle storage |
+| `OPERATIONAL_SUPABASE_URL`                        | TanStack + collector worker         | Separate local/hosted operational Supabase origin; required when enabled                                |
+| `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`           | TanStack + collector worker secret  | Operational project service-role key; required when enabled; never `VITE_*`                             |
+| `OPERATIONAL_CANDLE_RETENTION_DAYS`               | TanStack + collector worker         | `7`; allowed range 1–30                                                                                 |
+| `OPERATIONAL_MONITOR_RUN_RETENTION_DAYS`          | TanStack + collector worker         | `30`; allowed range 1–90                                                                                |
+| `OPERATIONAL_OUTBOX_MAX_ATTEMPTS`                 | TanStack + collector worker         | `10`; allowed range 1–100 before dead-letter                                                            |
 | `BINANCE_COLLECTOR_ENABLED`                       | Collector worker + app server       | Server-only cutover; requires operational DB and the separate collector worker process                  |
 | `PYTHON_ANALYSIS_ENABLED`                         | TanStack                            | `false`; explicit `true` enables manual analysis and scheduled TA calculations                          |
 | `PYTHON_ANALYSIS_URL`                             | TanStack                            | `http://127.0.0.1:8000`; required when enabled                                                          |
@@ -140,13 +140,13 @@ Never prefix tokens, passwords, private keys, or secrets with `VITE_`. Startup r
 secret variable names and copied server-secret values in public configuration, as
 well as Supabase secret/service-role keys used as publishable keys.
 
-The collector worker is a headless backend process with its own server-only runtime
-configuration boundary. It validates `APP_PROFILE`, `SUPABASE_URL`,
-`SUPABASE_SERVICE_ROLE_KEY`, the operational database variables, and
-`MOVEMENT_FINALIZATION_GRACE_MS` from the host's runtime `process.env`; it never reads
-browser `VITE_*` values or build-time public configuration, so one built artifact stays
-host-independent. Only the TanStack application additionally proves its runtime matches
-the browser bundle it serves. See
+The collector worker is a headless ingestion process with its own server-only runtime
+configuration boundary. It validates only the operational database variables and
+`MOVEMENT_FINALIZATION_GRACE_MS` from the host's runtime `process.env`; it needs no main
+Lovable credential and never reads browser `VITE_*` values or build-time public
+configuration, so one built artifact stays host-independent. Only the TanStack
+application additionally proves its runtime matches the browser bundle it serves and owns
+the main-database credentials. See
 [the collector design](./binance-futures-collector.md).
 
 ## Actions and services

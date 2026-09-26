@@ -79,6 +79,12 @@ const disabledStore: OperationalStore = {
   async collectorDiagnostics() {
     return { candle_rows: 0, health_rows: 0, oldest_candle_at: null, newest_candle_at: null };
   },
+  async assignCollectorSubscriptions() {
+    throw new Error("Operational collector subscriptions are disabled");
+  },
+  async readCollectorSubscriptions() {
+    return [];
+  },
   async readMovementCandleHistory() {
     return new Map<string, MovementCandle[]>();
   },
@@ -298,6 +304,19 @@ export function createOperationalStore(
       const row = Array.isArray(data) ? data[0] : data;
       if (!row) throw new Error("Operational database returned no collector diagnostics");
       return row as CollectorStorageDiagnostics;
+    },
+    async assignCollectorSubscriptions(symbols) {
+      const { error } = await client.rpc("assign_collector_subscriptions", {
+        p_symbols: symbols.map((symbol) => symbol.toUpperCase()),
+      });
+      rpcError(error, "collector subscription assign");
+    },
+    async readCollectorSubscriptions() {
+      const { data, error } = await client.rpc("get_collector_subscriptions");
+      rpcError(error, "collector subscription read");
+      return Array.isArray(data)
+        ? (data as string[]).map((symbol) => String(symbol).toUpperCase())
+        : [];
     },
     async readMovementCandleHistory(symbols, sinceMs) {
       if (symbols.length === 0) return new Map<string, MovementCandle[]>();

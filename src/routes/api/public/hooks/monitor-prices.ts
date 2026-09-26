@@ -38,13 +38,27 @@ async function handle(request: Request) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   // Every user with at least one watched symbol gets checked.
-  const { data: watchers, error } = await supabaseAdmin.from("watchlist_items").select("user_id");
+  const { data: watchers, error } = await supabaseAdmin
+    .from("watchlist_items")
+    .select("user_id, symbol");
 
   if (error) {
     return Response.json({ ok: false, error: error.message }, { status: 500 });
   }
 
   const userIds = [...new Set((watchers ?? []).map((w) => w.user_id))];
+
+  // The application owns watchlists; it assigns the shared collector subscription
+  // universe as derived operational input. The collector worker reads this set from
+  // the operational database and never reads Lovable user tables itself.
+  if (process.env["BINANCE_COLLECTOR_ENABLED"] === "true") {
+    const { getOperationalStore } = await import("@/lib/operational/repository.server");
+    const operationalStore = getOperationalStore();
+    if (operationalStore.enabled) {
+      const universe = [...new Set((watchers ?? []).map((w) => w.symbol))].sort();
+      await operationalStore.assignCollectorSubscriptions(universe);
+    }
+  }
 
   const { data: settingsRows, error: settingsError } = await supabaseAdmin
     .from("monitor_settings")

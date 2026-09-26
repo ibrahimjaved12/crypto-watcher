@@ -48,6 +48,15 @@ before(async () => {
   await db.exec(
     await readFile(
       new URL(
+        "../operational-db/supabase/migrations/20260926120000_collector_subscriptions.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  await db.exec(
+    await readFile(
+      new URL(
         "../operational-db/supabase/migrations/20260925200000_movement_normalization_history.sql",
         import.meta.url,
       ),
@@ -59,7 +68,7 @@ beforeEach(async () => {
   await db.exec(`RESET ROLE;
     TRUNCATE sync_outbox, operational_results, monitor_runs,
       market_data_checkpoints, recent_candles, collector_recent_candles,
-      collector_health, collector_leases CASCADE;`);
+      collector_health, collector_leases, collector_subscriptions CASCADE;`);
 });
 after(() => db.close());
 
@@ -228,9 +237,26 @@ test("browser roles cannot read or mutate the service-role-only operational sche
   try {
     await assert.rejects(db.query("SELECT * FROM recent_candles"), /permission denied/);
     await assert.rejects(recordCandles(user), /permission denied/);
+    await assert.rejects(db.query("SELECT * FROM collector_subscriptions"), /permission denied/);
   } finally {
     await db.exec("RESET ROLE");
   }
+});
+
+test("the collector subscription universe is normalized and replaced as one shared set", async () => {
+  await db.query(
+    `SELECT assign_collector_subscriptions('{" ethusdt ","BTCUSDT","btcusdt"}'::text[])`,
+  );
+  const assigned = await db.query("SELECT get_collector_subscriptions() AS symbols");
+  assert.deepEqual(assigned.rows[0].symbols, ["BTCUSDT", "ETHUSDT"]);
+  // A later assignment replaces the set rather than accumulating.
+  await db.query(`SELECT assign_collector_subscriptions('{"SOLUSDT"}'::text[])`);
+  const replaced = await db.query("SELECT get_collector_subscriptions() AS symbols");
+  assert.deepEqual(replaced.rows[0].symbols, ["SOLUSDT"]);
+  // The application owns the set, so an empty universe is a valid assignment.
+  await db.query(`SELECT assign_collector_subscriptions('{}'::text[])`);
+  const empty = await db.query("SELECT get_collector_subscriptions() AS symbols");
+  assert.deepEqual(empty.rows[0].symbols, []);
 });
 
 test("server config is opt-in, bounded and requires a separate secure target", async () => {

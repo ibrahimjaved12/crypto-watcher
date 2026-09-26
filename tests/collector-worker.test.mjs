@@ -199,12 +199,10 @@ test("the production worker artifact builds and runs with plain node", async () 
   assert.match(run.stdout, /no collector to run/);
 });
 
-// A complete server-only worker configuration. No browser VITE_* value appears.
+// A complete worker configuration. The collector owns only operational working
+// state, so it needs no main Lovable database credential and no browser VITE_* value.
 function workerEnv(overrides = {}) {
   return {
-    APP_PROFILE: "local",
-    SUPABASE_URL: "http://127.0.0.1:54321",
-    SUPABASE_SERVICE_ROLE_KEY: "test-service-role",
     OPERATIONAL_DB_ENABLED: "true",
     OPERATIONAL_SUPABASE_URL: "http://127.0.0.1:55321",
     OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY: "test-operational-service-role",
@@ -224,11 +222,12 @@ test("the built worker reads its collector configuration at runtime", async () =
   const artifact = buildWorkerArtifact(root);
 
   // The tracked production build bakes BINANCE_COLLECTOR_ENABLED=false. A runtime
-  // override must win; otherwise enablement was bound at build time. Validation is
-  // server-only, so the first missing requirement is APP_PROFILE, not a VITE_* value.
+  // override must win; otherwise enablement was bound at build time. The worker
+  // needs no main-database credential, so the first missing requirement is the
+  // operational database, never a Lovable Supabase value.
   const enabled = runWorker(artifact, { BINANCE_COLLECTOR_ENABLED: "true" });
   assert.equal(enabled.status, 1, enabled.stderr);
-  assert.match(enabled.stderr, /APP_PROFILE must be local or production/);
+  assert.match(enabled.stderr, /requires OPERATIONAL_DB_ENABLED=true/);
 
   const invalid = runWorker(artifact, { BINANCE_COLLECTOR_ENABLED: "yes" });
   assert.equal(invalid.status, 1, invalid.stderr);
@@ -246,9 +245,26 @@ test("the built worker reads its collector configuration at runtime", async () =
     "OPERATIONAL_SUPABASE_URL",
     "OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY",
     "MOVEMENT_FINALIZATION_GRACE_MS",
-    "SUPABASE_SERVICE_ROLE_KEY",
   ]) {
     assert.match(output, new RegExp(`"${name}"`), `${name} must stay runtime-configurable`);
+  }
+  // The worker owns no Lovable state, so its artifact must carry no main-database
+  // credential requirement and no application-table name.
+  for (const forbidden of [
+    '"SUPABASE_SERVICE_ROLE_KEY"',
+    '"SUPABASE_PUBLISHABLE_KEY"',
+    "watchlist_items",
+    "monitor_settings",
+    "ta_signals",
+    "supabaseAdmin",
+    "validateServerEnvironment",
+    "validateServerSupabase",
+  ]) {
+    assert.equal(
+      output.includes(forbidden),
+      false,
+      `${forbidden} must not appear in the collector artifact`,
+    );
   }
 });
 
@@ -257,11 +273,17 @@ test("invalid or missing worker configuration fails visibly", async () => {
   const artifact = buildWorkerArtifact(root);
 
   const cases = [
-    [{ BINANCE_COLLECTOR_ENABLED: "true" }, /APP_PROFILE must be local or production/],
-    [omitWorkerEnv("SUPABASE_SERVICE_ROLE_KEY"), /SUPABASE_SERVICE_ROLE_KEY is required/],
-    [omitWorkerEnv("OPERATIONAL_DB_ENABLED"), /requires OPERATIONAL_DB_ENABLED=true/],
+    [{ BINANCE_COLLECTOR_ENABLED: "true" }, /requires OPERATIONAL_DB_ENABLED=true/],
+    [
+      workerEnv({ OPERATIONAL_DB_ENABLED: "maybe" }),
+      /OPERATIONAL_DB_ENABLED must be true or false/,
+    ],
     [
       omitWorkerEnv("OPERATIONAL_SUPABASE_URL"),
+      /OPERATIONAL_SUPABASE_URL and OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY are required/,
+    ],
+    [
+      omitWorkerEnv("OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY"),
       /OPERATIONAL_SUPABASE_URL and OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY are required/,
     ],
     [
@@ -279,7 +301,7 @@ test("invalid or missing worker configuration fails visibly", async () => {
 async function startFakeServer(handler) {
   const server = createServer((request, response) => {
     request.resume();
-    handler(response);
+    handler(response, request);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   return { server, port: server.address().port };
@@ -290,31 +312,23 @@ function stopFakeServer(server) {
   return new Promise((resolve) => server.close(resolve));
 }
 
-test("the built collector artifact is configurable without VITE_* values", async () => {
+test("the built collector artifact runs with operational credentials only", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const artifact = buildWorkerArtifact(root);
 
-  // The fake operational Supabase grants the lease, so the worker proceeds to its
-  // first supabaseAdmin use and would run the app's browser cross-check if it still
-  // depended on it. The fake main Supabase answers 401, so the watchlist read fails
-  // fast with an HTTP error — no real service is contacted.
+  // The fake operational Supabase declines the lease, so the worker validates its
+  // runtime configuration, stays in standby, and never opens a market stream. No
+  // real service is contacted.
   const operational = await startFakeServer((response) => {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end("true");
-  });
-  const main = await startFakeServer((response) => {
-    response.writeHead(401, { "content-type": "application/json" });
-    response.end(JSON.stringify({ message: "invalid api key", code: "401" }));
+    response.end("false");
   });
 
   const child = spawn(process.execPath, [artifact], {
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
-      ...workerEnv({
-        SUPABASE_URL: `http://127.0.0.1:${main.port}`,
-        OPERATIONAL_SUPABASE_URL: `http://127.0.0.1:${operational.port}`,
-      }),
+      ...workerEnv({ OPERATIONAL_SUPABASE_URL: `http://127.0.0.1:${operational.port}` }),
       // Deliberately mismatched browser values must be ignored by the worker.
       VITE_APP_PROFILE: "production",
       VITE_SUPABASE_URL: "https://elsewhere.example",
@@ -327,17 +341,55 @@ test("the built collector artifact is configurable without VITE_* values", async
   child.stdout.on("data", (chunk) => (stdout += chunk));
   child.stderr.on("data", (chunk) => (stderr += chunk));
   try {
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
     assert.match(stdout, /collector started/);
-    // Reaching the watchlist read proves the server-only configuration passed and
-    // supabaseAdmin was created. The mismatched VITE_* build must not surface as the
-    // application's browser/server consistency error.
-    assert.match(stderr, /Collector watchlist read failed/);
+    // No APP_PROFILE, SUPABASE_URL, or SUPABASE_SERVICE_ROLE_KEY was provided, yet
+    // the worker validated and started: its boundary is operational-only, and the
+    // mismatched VITE_* build must never surface as an environment error.
     assert.doesNotMatch(stderr, /\[Environment\]/);
+    assert.doesNotMatch(stderr, /SUPABASE_SERVICE_ROLE_KEY/);
     assert.equal(child.exitCode, null, "the worker must keep running");
   } finally {
     child.kill("SIGKILL");
-    await Promise.all([stopFakeServer(operational.server), stopFakeServer(main.server)]);
+    await stopFakeServer(operational.server);
+  }
+});
+
+test("the built worker reads its subscription universe from the operational database", async () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const artifact = buildWorkerArtifact(root);
+
+  // The fake operational Supabase grants the lease but fails the subscription
+  // universe read. The worker surfaces it and stays in standby: it never opens a
+  // market stream and never contacts a main Lovable database.
+  const operational = await startFakeServer((response, request) => {
+    const isLease = String(request.url).includes("claim_collector_lease");
+    response.writeHead(isLease ? 200 : 400, { "content-type": "application/json" });
+    response.end(
+      isLease ? "true" : JSON.stringify({ message: "universe unavailable", code: "400" }),
+    );
+  });
+
+  const child = spawn(process.execPath, [artifact], {
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      ...workerEnv({ OPERATIONAL_SUPABASE_URL: `http://127.0.0.1:${operational.port}` }),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.match(
+      stderr,
+      /startup unavailable: Operational database collector subscription read failed/,
+    );
+    assert.equal(child.exitCode, null, "the worker must keep running");
+  } finally {
+    child.kill("SIGKILL");
+    await stopFakeServer(operational.server);
   }
 });
 

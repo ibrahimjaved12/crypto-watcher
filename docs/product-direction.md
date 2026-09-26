@@ -154,7 +154,7 @@ directional accuracy alone is not evidence of profitable trading.
 | Monitoring      | TanStack scheduled route and authenticated manual check invoke the server monitor. Authenticated scheduled requests default to a skipped result before database access and require an explicit runtime flag to run; this does not disable manual checks or the external scheduler invocation itself. User controls independently gate REST collection/checkpointing, movement alerts, and completed-candle TA. TanStack holds privileged write access; PostgreSQL RPCs own ordered latest-candle checkpoints and atomic cumulative baselines, directional cooldowns, and alert insertion. See [independent activity controls](activity-domains.md). |
 | TA and outcomes | The shared Python package calculates completed 15m, 1h, and 4h TA. TanStack selects due work, validates responses, and is the sole `ta_signals` writer. Failures are visible and have no alternate calculator. Outcome evaluation remains in TanStack and measures forward returns, not ordered futures-trade profitability.                                                                                                                                                                                                                                                                                                                        |
 | Python service  | The authenticated FastAPI service provides pure manual, scheduled, and replay-compatible calculations. It has no application database credentials and performs no persistence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| Providers       | Futures trade-price REST polling in order: Binance USDⓈ-M, OKX USDT swaps, then Kraken perpetuals. A persistent shared Binance USDⓈ-M collector exists: it ingests public futures klines and aggTrades with REST bootstrap and gap recovery, and it runs as a separate backend worker rather than through TanStack application-server startup. Selecting its production host remains unresolved under [#19](https://github.com/ibrahimjaved12/crypto-watcher/issues/19).                                                                                                                                                                            |
+| Providers       | Futures trade-price REST polling in order: Binance USDⓈ-M, OKX USDT swaps, then Kraken perpetuals. A persistent shared Binance USDⓈ-M collector exists: it ingests public futures klines and aggTrades with REST bootstrap and gap recovery, and it runs as a separate backend worker rather than through TanStack application-server startup. The application assigns its shared subscription universe through the operational database, and the worker holds no Lovable credentials. Selecting its production host remains unresolved under [#19](https://github.com/ibrahimjaved12/crypto-watcher/issues/19).                                    |
 
 The scheduler's configured intent is a five-minute monitor invocation. However,
 [#13](https://github.com/ibrahimjaved12/crypto-watcher/issues/13) reports that
@@ -172,12 +172,11 @@ flowchart TD
     TS -->|Due candle batches|API[FastAPI calculation service]
     API -->|Shared deterministic TA|TS
     TS -->|Privileged orchestration and RPC calls|Lovable
-    TS -->|Collector health and diagnostics reads|Operational[(External operational PostgreSQL)]
+    TS -->|Assigns collector subscription universe|Operational[(External operational PostgreSQL)]
+    TS -->|Collector health and diagnostics reads|Operational
     Futures -->|Binance USD-M WebSocket live events|Worker[Leased Binance USD-M collector worker - separate process]
     Futures -->|Binance USD-M REST bootstrap and gap recovery|Worker
     Worker -->|Completed candles, checkpoints, and health|Operational
-    Worker -->|Completed-candle TA|API
-    Worker -->|Watchlist reads and TA conclusions|Lovable
     Browser -->|Manual Python preview|Bridge[TanStack authenticated bridge]
     Bridge -->|User-scoped reads|Supabase
     Bridge -->|Server-only service token|API
