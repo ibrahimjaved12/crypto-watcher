@@ -321,6 +321,8 @@ export class BinanceFuturesCollector {
     symbols: MovementBoundarySymbolInput[];
   } | null = null;
   private movementGeneration = 0;
+  private movementMembershipEpoch = 0;
+  private readonly movementMembershipEpochs = new Map<string, number>();
   private movementSessionId = crypto.randomUUID();
   private movementLateRejections = 0;
   private movementPythonLateRejections = 0;
@@ -499,11 +501,20 @@ export class BinanceFuturesCollector {
         ? this.movementRetry.sessionId
         : this.movementSessionId;
       const input = retry;
+      const inputMembershipEpochs = new Map(
+        input.map((item) => [item.symbol, this.movementMembershipEpochs.get(item.symbol)]),
+      );
+      const isCurrentMembership = (symbol: string): boolean => {
+        const inputEpoch = inputMembershipEpochs.get(symbol);
+        return inputEpoch !== undefined && inputEpoch === this.movementMembershipEpochs.get(symbol);
+      };
       this.movementRetry = { sessionId, boundaryTime: nextBoundary, symbols: input };
       const result = await this.dependencies.advanceMovementBoundary(sessionId, nextBoundary, input);
       if (generation !== this.movementGeneration) return;
       for (const snapshot of result.snapshots) {
-        this.movementResults.set(snapshot.symbol, snapshot);
+        if (isCurrentMembership(snapshot.symbol)) {
+          this.movementResults.set(snapshot.symbol, snapshot);
+        }
       }
       if (result.lateAfterFinalizationCount < this.movementPythonLateRejections) {
         this.movementPythonLateRejections = result.lateAfterFinalizationCount;
@@ -513,6 +524,7 @@ export class BinanceFuturesCollector {
         this.movementPythonLateRejections = result.lateAfterFinalizationCount;
       }
       for (const item of input) {
+        if (!isCurrentMembership(item.symbol)) continue;
         const consumedIds = new Set(item.observations.map((trade) => trade.aggregateId));
         const pending = this.movementObservations.get(item.symbol) ?? [];
         this.movementObservations.set(
@@ -534,12 +546,36 @@ export class BinanceFuturesCollector {
     this.reconnectCount += 1;
   }
 
+  markMovementConnectionStatus(status: MovementSourceState): void {
+    for (const symbol of this.subscribedSymbols()) {
+      this.recordMovementSourceTransition(symbol, status);
+    }
+  }
+
   async markConnectionStatus(
     status: CollectorHealthStatus,
     errorMessage: string | null,
   ): Promise<void> {
-    for (const symbol of this.subscribedSymbols()) {
+    const symbols = this.subscribedSymbols();
+    for (const symbol of symbols) {
       this.recordMovementSourceTransition(symbol, status);
+    }
+    await this.persistConnectionHealth(symbols, status, errorMessage);
+  }
+
+  async markCandleConnectionStatus(
+    status: CollectorHealthStatus,
+    errorMessage: string | null,
+  ): Promise<void> {
+    await this.persistConnectionHealth(this.subscribedSymbols(), status, errorMessage);
+  }
+
+  private async persistConnectionHealth(
+    symbols: string[],
+    status: CollectorHealthStatus,
+    errorMessage: string | null,
+  ): Promise<void> {
+    for (const symbol of symbols) {
       for (const timeframe of COLLECTOR_INTERVALS) {
         const candle =
           this.latestCompleted.get(this.key(symbol, timeframe)) ??
@@ -566,6 +602,7 @@ export class BinanceFuturesCollector {
       this.movementObservations.delete(symbol);
       this.movementResults.delete(symbol);
       this.movementSourceTransitions.delete(symbol);
+      this.movementMembershipEpochs.delete(symbol);
       for (const interval of COLLECTOR_INTERVALS)
         this.developing.delete(this.key(symbol, interval));
     }
@@ -575,6 +612,8 @@ export class BinanceFuturesCollector {
       this.trades.set(symbol, new TradeBuffer(this.tradeWindowMs, this.tradeMaxCount));
       this.movementSeenTrades.set(symbol, new Map());
       this.movementObservations.set(symbol, []);
+      this.movementMembershipEpoch += 1;
+      this.movementMembershipEpochs.set(symbol, this.movementMembershipEpoch);
       this.movementSourceTransitions.set(symbol, [
         { at: this.now(), state: "RECOVERING" },
       ]);

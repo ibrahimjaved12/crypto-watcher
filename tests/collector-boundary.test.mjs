@@ -41,6 +41,8 @@ const collectorReplacements = {
       streamNames() { return []; }
       subscribedSymbols() { return []; }
       async markConnectionStatus() {}
+      async markCandleConnectionStatus() {}
+      markMovementConnectionStatus() {}
       noteReconnect() {}
       async recoverAfterReconnect() {}
       accept() { return true; }
@@ -102,6 +104,7 @@ class ValidatingFakeWebSocket {
   readyState = ValidatingFakeWebSocket.OPEN;
   listeners = new Map();
   closeCalls = [];
+  sent = [];
 
   constructor(url) {
     this.url = url;
@@ -118,7 +121,9 @@ class ValidatingFakeWebSocket {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
   }
 
-  send() {}
+  send(payload) {
+    this.sent.push(payload);
+  }
 
   close(code, reason = "") {
     if (
@@ -326,6 +331,55 @@ test("an aggTrade stream rejects an otherwise valid kline event", async () => {
     assert.deepEqual(runtime.collector.movementObservations.get("BTCUSDT"), []);
     assert.equal(socket.closeCalls.length, 1);
     assert.ok(socket.closeCalls[0].code >= 3000 && socket.closeCalls[0].code <= 4999);
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("subscription acknowledgement makes movement LIVE while candle recovery is pending", async () => {
+  const previousWebSocket = globalThis.WebSocket;
+  ValidatingFakeWebSocket.instances.length = 0;
+  globalThis.WebSocket = ValidatingFakeWebSocket;
+  try {
+    const module = await loadBehavioralCollectorRuntime();
+    const { runtime, socket } = await openBehavioralRuntime(module, ["BTCUSDT"]);
+    await runtime.collector.markConnectionStatus("RECOVERING", "fixture reconnect");
+
+    let finishRecovery;
+    let recoverySettled = false;
+    const recovery = new Promise((resolve) => {
+      finishRecovery = () => {
+        recoverySettled = true;
+        resolve();
+      };
+    });
+    runtime.collector.recoverAfterReconnect = () => recovery;
+
+    let observeLive;
+    const movementLive = new Promise((resolve) => { observeLive = resolve; });
+    const markMovementConnectionStatus =
+      runtime.collector.markMovementConnectionStatus.bind(runtime.collector);
+    runtime.collector.markMovementConnectionStatus = (status) => {
+      markMovementConnectionStatus(status);
+      if (status === "LIVE") observeLive();
+    };
+
+    socket.emit("open", {});
+    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "RECOVERING");
+    assert.equal(socket.sent.length, 1);
+    const subscription = JSON.parse(socket.sent[0]);
+    socket.emit("message", { data: JSON.stringify({ result: null, id: subscription.id }) });
+    await movementLive;
+
+    assert.equal(recoverySettled, false);
+    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "LIVE");
+    assert.equal(runtime.collector.symbolSourceStatus("BTCUSDT"), "RECOVERING");
+    assert.equal(socket.closeCalls.length, 0);
+
+    finishRecovery();
+    await recovery;
+    runtime.active = false;
+    await runtime.stop();
   } finally {
     globalThis.WebSocket = previousWebSocket;
   }

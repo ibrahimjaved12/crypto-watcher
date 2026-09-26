@@ -124,6 +124,7 @@ function harness(overrides = {}) {
       },
       async recordCollectorHealth(input) {
         healthWrites.push(input);
+        await overrides.recordCollectorHealth?.(input);
       },
     },
     loadRest,
@@ -361,6 +362,79 @@ test("movement reset fences late replies from the prior collector tenure", async
   });
   await priorAdvance;
   assert.equal(collector.movementSnapshot("BTCUSDT"), freshSnapshot);
+});
+
+test("connection movement state changes synchronously before deferred health persistence", async () => {
+  let deferHealth = false;
+  let releaseHealth;
+  const deferredHealth = new Promise((resolve) => { releaseHealth = resolve; });
+  const { collector } = harness({
+    recordCollectorHealth: async () => {
+      if (!deferHealth) return;
+      deferHealth = false;
+      await deferredHealth;
+    },
+  });
+  await collector.reconcile(["BTCUSDT", "ETHUSDT"]);
+  await collector.markConnectionStatus("LIVE", null);
+  assert.equal(collector.movementSourceStatus("BTCUSDT"), "LIVE");
+  assert.equal(collector.movementSourceStatus("ETHUSDT"), "LIVE");
+
+  deferHealth = true;
+  const recovering = collector.markConnectionStatus("RECOVERING", "fixture reconnect");
+  assert.equal(collector.movementSourceStatus("BTCUSDT"), "RECOVERING");
+  assert.equal(collector.movementSourceStatus("ETHUSDT"), "RECOVERING");
+
+  releaseHealth();
+  await recovering;
+});
+
+test("an in-flight boundary response cannot restore a removed movement membership", async () => {
+  let finishBoundary;
+  const deferredBoundary = new Promise((resolve) => { finishBoundary = resolve; });
+  const { collector, movementCalls } = harness({
+    advanceMovementBoundary: async () => deferredBoundary,
+  });
+  await collector.reconcile(["BTCUSDT", "ETHUSDT"]);
+  await collector.markConnectionStatus("LIVE", null);
+  assert.equal(collector.accept({
+    stream: "ethusdt@aggTrade",
+    data: {
+      e: "aggTrade",
+      E: BASE,
+      s: "ETHUSDT",
+      st: 1,
+      a: 7,
+      p: "2000.00000001",
+      q: "0.25",
+      T: BASE,
+    },
+  }, BASE), true);
+
+  const advancing = collector.advanceMovementBuckets(BASE);
+  assert.deepEqual(movementCalls[0].symbols.map((item) => item.symbol), ["BTCUSDT", "ETHUSDT"]);
+  await collector.reconcile(["BTCUSDT"]);
+  finishBoundary({
+    snapshots: [
+      { symbol: "BTCUSDT", marker: "current" },
+      { symbol: "ETHUSDT", marker: "removed" },
+    ],
+    lateAfterFinalizationCount: 0,
+  });
+  await advancing;
+
+  assert.deepEqual(collector.subscribedSymbols(), ["BTCUSDT"]);
+  assert.equal(collector.movementSnapshot("BTCUSDT").marker, "current");
+  assert.equal(collector.movementSnapshot("ETHUSDT"), null);
+  assert.equal(collector.movementResults.has("ETHUSDT"), false);
+  assert.equal(collector.movementObservations.has("ETHUSDT"), false);
+  assert.equal(collector.movementSeenTrades.has("ETHUSDT"), false);
+  assert.equal(collector.movementLastAcceptedTrade.has("ETHUSDT"), false);
+  assert.equal(collector.movementSourceTransitions.has("ETHUSDT"), false);
+  assert.equal(collector.movementMembershipEpochs.has("ETHUSDT"), false);
+  assert.equal(collector.latestPrice("ETHUSDT"), null);
+  assert.deepEqual(collector.latestTrades("ETHUSDT"), []);
+  assert.equal(collector.movementRetry, null);
 });
 
 test("source outage within a bucket remains attached after source returns LIVE", async () => {

@@ -198,7 +198,7 @@ export class CollectorRuntime {
         ),
       ]);
       if (this.streamReady && this.socket?.readyState === WebSocket.OPEN) {
-        await this.collector.markConnectionStatus("LIVE", null);
+        this.collector.markMovementConnectionStatus("LIVE");
       }
     } catch (error) {
       console.error(
@@ -215,14 +215,12 @@ export class CollectorRuntime {
     this.socket = socket;
     socket.addEventListener("open", () => {
       this.lastMessageAt = Date.now();
-      void Promise.all([
-        this.sendSubscription("SUBSCRIBE", this.collector.streamNames()),
-        this.collector.recoverAfterReconnect(),
-      ])
+      const subscription = this.sendSubscription("SUBSCRIBE", this.collector.streamNames());
+      void subscription
         .then(() => {
           this.reconnectAttempts = 0;
           this.streamReady = true;
-          return this.collector.markConnectionStatus("LIVE", null);
+          this.collector.markMovementConnectionStatus("LIVE");
         })
         .catch((error) => {
           this.streamReady = false;
@@ -230,7 +228,34 @@ export class CollectorRuntime {
             "UNAVAILABLE",
             error instanceof Error ? error.message : String(error),
           );
-          socket.close(RECOVERY_CLOSE_CODE, "subscription or recovery failed");
+          socket.close(RECOVERY_CLOSE_CODE, "subscription failed");
+        });
+      void this.collector.recoverAfterReconnect()
+        .then(async () => {
+          try {
+            await subscription;
+          } catch {
+            return;
+          }
+          if (
+            this.socket !== socket ||
+            !this.streamReady ||
+            socket.readyState !== WebSocket.OPEN
+          ) {
+            return;
+          }
+          await this.collector.markCandleConnectionStatus("LIVE", null);
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`[binance-collector] completed-candle recovery failed: ${message}`);
+          void this.collector.markCandleConnectionStatus("UNAVAILABLE", message).catch(
+            (healthError) => {
+              console.error(
+                `[binance-collector] candle health write failed: ${healthError instanceof Error ? healthError.message : String(healthError)}`,
+              );
+            },
+          );
         });
       this.lifetimeTimer = setTimeout(
         () => socket.close(1000, "scheduled Binance connection rotation"),
