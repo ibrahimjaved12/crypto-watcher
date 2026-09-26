@@ -15,9 +15,13 @@ depends on a browser timer or a per-user engine.
   -> bounded `market_state_current` (operational DB)
 ```
 
-Accepted `aggTrade` observations feed the existing `FuturesMovementBuckets` inside
-`BinanceFuturesCollector`. No additional WebSocket, no raw tick persistence, and no per-five-second
-append-only stream is created. #26 completed-candle bootstrap/recovery is unchanged.
+Accepted, validated `aggTrade` observations remain in a bounded collector transport buffer and are
+sent with each explicit finalization boundary to the authenticated Python movement endpoint. The
+Python service invokes the shared pure `market_analysis.movement` engine and returns the bucket
+snapshots consumed by the downstream metrics, classification, and lifecycle layers. TypeScript owns
+WebSocket ingestion, boundary scheduling, transport, and persistence, not a second bucket
+calculation. No additional WebSocket, raw tick persistence, or per-five-second append-only stream
+is created. #26 completed-candle bootstrap/recovery is unchanged.
 
 Each finalized bucket retains its provider/instrument/price type and the last real trade's exchange
 event/trade times plus its local receive time (`lastRealReceivedAt`); carry-forward buckets preserve
@@ -31,8 +35,7 @@ exactly once for the shared universe.
 
 ## Live finalization / lateness watermark
 
-`advanceTo(boundary)` permanently finalizes exchange-time buckets, so the live path delays
-finalization by an explicit grace:
+The existing collector runtime delays each explicit Python boundary request by an explicit grace:
 
 ```text
 MOVEMENT_FINALIZATION_GRACE_MS = 2000   # V1 default, server-only

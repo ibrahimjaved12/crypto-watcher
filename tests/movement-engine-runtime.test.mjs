@@ -16,10 +16,10 @@ async function transpile(path, rewrites = {}) {
   return stub(outputText);
 }
 
-const movementBucketsUrl = await transpile("../src/lib/market/movement-buckets.ts");
+const movementBucketsUrl = await transpile("../src/lib/market/movement-contract.ts");
 const stateUrl = await transpile("../src/lib/market/market-movement-state.ts");
 const metricsUrl = await transpile("../src/lib/market/movement-metrics.ts", {
-  "./movement-buckets": movementBucketsUrl,
+  "./movement-contract": movementBucketsUrl,
 });
 const classifierUrl = await transpile("../src/lib/market/market-state-classifier.ts");
 const lifecycleUrl = await transpile("../src/lib/market/market-episode-lifecycle.ts");
@@ -27,10 +27,10 @@ const universeUrl = await transpile("../src/lib/market/market-universe.ts", {
   "./market-movement-state": stateUrl,
 });
 const finalizationUrl = await transpile("../src/lib/market/movement-finalization.ts", {
-  "./movement-buckets": movementBucketsUrl,
+  "./movement-contract": movementBucketsUrl,
 });
 const engineUrl = await transpile("../src/lib/market/market-movement-engine.ts", {
-  "./movement-buckets": movementBucketsUrl,
+  "./movement-contract": movementBucketsUrl,
   "./movement-metrics": metricsUrl,
   "./market-state-classifier": classifierUrl,
   "./market-episode-lifecycle": lifecycleUrl,
@@ -81,6 +81,7 @@ function historicalCandles() {
 function bucket(symbol, boundaryTime, endpointPrice) {
   return {
     boundaryTime,
+    sourceState: "LIVE",
     endpointPrice,
     baseQuantity: 1,
     quoteVolume: endpointPrice,
@@ -118,8 +119,8 @@ function snapshotFor(symbol, boundary) {
         {
           windowMinutes,
           status: "READY",
-          requiredHistoryMs: windowMinutes * 2 * MINUTE,
-          availableHistoryMs: windowMinutes * 2 * MINUTE,
+          state: "ready",
+          reason: null,
         },
       ]),
     ),
@@ -137,7 +138,7 @@ function createHarness() {
   const collector = {
     subscribedSymbols: () => [...control.symbols],
     advanceMovementBuckets: (boundary) => state.advanced.push(boundary),
-    symbolSourceStatus: () => "LIVE",
+    movementSourceStatus: () => "LIVE",
     movementLateRejections: () => 0,
     movementSnapshot: (symbol) => snapshotFor(symbol, state.boundary),
   };
@@ -200,7 +201,7 @@ test("runtime persists the effective finalization config and receive-time proven
   assert.equal(evidence.timestamps.lastReceivedAt, BASE + 123);
 });
 
-test("a required persistence batch is retried until it succeeds without losing its transition", async () => {
+test("pending lifecycle persistence does not block newer bucket finalization", async () => {
   const harness = createHarness();
 
   // Boundary one: candidate accumulation only, so no transition is emitted yet.
@@ -219,10 +220,11 @@ test("a required persistence batch is retried until it succeeds without losing i
   assert.equal(attempted[0].transition, "STARTED");
   assert.equal(harness.persistedEvents.size, 0, "a failed write must not record the event");
 
-  // While the batch is pending the engine still retries it before any later
-  // boundary, so the transition is persisted exactly once and evaluation resumes.
+  // A newer safe #70 boundary is finalized even when the required #73 retry
+  // fails again. Downstream evaluation must remain at the pending boundary.
   harness.state.now = BASE + 10_000;
   harness.state.boundary = BASE + 10_000;
+  harness.control.failPersist = true;
   await harness.runtime.runOnce();
   assert.equal(harness.calls.persist.length, 3, "the pending batch is retried");
   assert.equal(harness.calls.persist[2].events.length, 1);
@@ -231,21 +233,36 @@ test("a required persistence batch is retried until it succeeds without losing i
     attempted[0].eventId,
     "the retried batch reuses the deterministic event ID",
   );
+  assert.equal(harness.state.advanced.at(-1), BASE + 10_000);
+  assert.equal(harness.runtime.engine.lastEvaluatedBoundary, BASE + 5_000);
+  assert.equal(harness.persistedEvents.size, 0);
+
+  // Once the exact pending batch succeeds, deterministic downstream processing
+  // resumes without having evaluated the newer boundary during the outage.
+  await harness.runtime.runOnce();
   assert.equal(harness.persistedEvents.size, 1, "the transition persists exactly once");
-  assert.equal(
-    harness.state.advanced.at(-1),
-    BASE + 10_000,
-    "later boundary processing continues after the retry succeeds",
-  );
+  assert.equal(harness.runtime.engine.lastEvaluatedBoundary, BASE + 10_000);
 });
 
-test("a transient lifecycle restore failure defers evaluation and retries with bounded backoff", async () => {
+test("start installs the #70 timer without waiting for lifecycle restore", async () => {
+  const harness = createHarness();
+  try {
+    await harness.runtime.start();
+    assert.notEqual(harness.runtime.timer, null);
+    assert.equal(harness.calls.restore, 0);
+  } finally {
+    await harness.runtime.stop();
+  }
+});
+
+test("a transient lifecycle restore failure blocks downstream work but not #70", async () => {
   const harness = createHarness();
   harness.control.failRestore = 1;
 
   await harness.runtime.runOnce();
   assert.equal(harness.calls.restore, 1);
-  assert.equal(harness.state.advanced.length, 0, "no evaluation before restore succeeds");
+  assert.deepEqual(harness.state.advanced, [BASE]);
+  assert.equal(harness.runtime.engine.lastEvaluatedBoundary, null);
   assert.equal(harness.calls.history, 0);
   assert.equal(harness.calls.persist.length, 0);
 
@@ -253,14 +270,18 @@ test("a transient lifecycle restore failure defers evaluation and retries with b
   harness.state.now = BASE + 1_000;
   await harness.runtime.runOnce();
   assert.equal(harness.calls.restore, 1, "restore is not retried before the backoff elapses");
-  assert.equal(harness.state.advanced.length, 0);
+  assert.equal(harness.state.advanced.length, 2);
+  assert.equal(harness.runtime.engine.lastEvaluatedBoundary, null);
+  assert.equal(harness.calls.history, 0);
+  assert.equal(harness.calls.persist.length, 0);
 
   // Once the backoff elapses the read succeeds and evaluation begins.
   harness.state.now = BASE + MOVEMENT_RETRY_BASE_MS + 1_000;
   harness.state.boundary = BASE + 5_000;
   await harness.runtime.runOnce();
   assert.equal(harness.calls.restore, 2);
-  assert.ok(harness.state.advanced.length > 0, "evaluation starts only after a successful restore");
+  assert.equal(harness.state.advanced.at(-1), BASE + 5_000);
+  assert.equal(harness.runtime.engine.lastEvaluatedBoundary, BASE + 5_000);
   assert.ok(harness.calls.persist.length > 0);
 });
 

@@ -5,7 +5,13 @@ import type {
   CollectorHealthStatus,
   OperationalStore,
 } from "../operational/types";
-import { FuturesMovementBuckets, type MovementBucketSnapshot } from "./movement-buckets";
+import {
+  MOVEMENT_OBSERVATION_BATCH_MAX,
+  type MovementBoundaryResult,
+  type MovementBoundarySymbolInput,
+  type MovementBucketSnapshot,
+  type MovementSourceState,
+} from "./movement-contract";
 
 export const BINANCE_USDM_WS_ENDPOINT = "wss://fstream.binance.com/market/stream";
 export const BINANCE_USDM_REST_ENDPOINT = "/fapi/v1/klines";
@@ -25,6 +31,8 @@ export type AggregateTrade = {
   aggregateId: number;
   price: number;
   quantity: number;
+  priceText: string;
+  quantityText: string;
   eventTime: number;
   tradeTime: number;
   receivedAt: number;
@@ -52,6 +60,11 @@ type CollectorDependencies = {
   queueCapacity?: number;
   tradeWindowMs?: number;
   tradeMaxCount?: number;
+  advanceMovementBoundary(
+    sessionId: string,
+    boundaryTime: number,
+    symbols: MovementBoundarySymbolInput[],
+  ): Promise<MovementBoundaryResult>;
 };
 
 type HealthState = {
@@ -61,10 +74,43 @@ type HealthState = {
   errorMessage: string | null;
 };
 
+type CollectorHealthInput = Parameters<OperationalStore["recordCollectorHealth"]>[0];
+
+type DesiredHealthWrite = {
+  instrumentId: string;
+  symbol: string;
+  timeframeMinutes: CollectorInterval;
+  status: CollectorHealthStatus;
+  errorMessage: string | null;
+};
+
+type PersistedHealthWrite = {
+  desired: DesiredHealthWrite;
+  input: CollectorHealthInput;
+};
+
+type FailedHealthWrite = {
+  desired: DesiredHealthWrite;
+  error: unknown;
+};
+
+type MovementSourceTransition = {
+  at: number;
+  state: MovementSourceState;
+};
+
 function finitePositive(value: unknown, label: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`invalid ${label}`);
   return parsed;
+}
+
+function positiveDecimalText(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value)) {
+    throw new Error(`invalid ${label}`);
+  }
+  if (!Number.isFinite(Number(value)) || Number(value) <= 0) throw new Error(`invalid ${label}`);
+  return value;
 }
 
 function finiteNonnegative(value: unknown, label: string): number {
@@ -148,6 +194,12 @@ export function normalizeRestCandles(input: {
     });
 }
 
+function aggregateTradeStreamSymbol(stream: unknown): string | null {
+  if (typeof stream !== "string") return null;
+  const match = /^([a-z0-9]+)@aggTrade$/.exec(stream);
+  return match?.[1]?.toUpperCase() ?? null;
+}
+
 export function parseBinanceMarketMessage(
   raw: unknown,
   receivedAt: number,
@@ -161,6 +213,15 @@ export function parseBinanceMarketMessage(
       ? (envelope["data"] as Record<string, unknown>)
       : envelope;
   if (!value || typeof value !== "object") throw new Error("invalid websocket message");
+  const streamSymbol = aggregateTradeStreamSymbol(envelope?.["stream"]);
+  if (
+    streamSymbol !== null &&
+    (value["e"] !== "aggTrade" ||
+      typeof value["s"] !== "string" ||
+      value["s"].toUpperCase() !== streamSymbol)
+  ) {
+    throw new Error("mismatched aggregate-trade stream identity");
+  }
   if (value["id"] !== undefined || value["result"] !== undefined) return { kind: "control" };
   if (value["st"] !== undefined && value["st"] !== 1) {
     throw new Error("non-USD-M market event rejected");
@@ -169,13 +230,17 @@ export function parseBinanceMarketMessage(
   if (value["e"] === "aggTrade") {
     const symbol = String(value["s"] ?? "").toUpperCase();
     canonicalBase(symbol, 1);
+    const priceText = positiveDecimalText(value["p"], "movement trade price");
+    const quantityText = positiveDecimalText(value["q"], "movement trade quantity");
     return {
       kind: "trade",
       trade: {
         symbol,
         aggregateId: safeTimestamp(value["a"], "aggregate trade id"),
-        price: finitePositive(value["p"], "trade price"),
-        quantity: finitePositive(value["q"], "trade quantity"),
+        price: finitePositive(priceText, "trade price"),
+        quantity: finitePositive(quantityText, "trade quantity"),
+        priceText,
+        quantityText,
         eventTime: safeTimestamp(value["E"], "event time"),
         tradeTime: safeTimestamp(value["T"], "trade time"),
         receivedAt,
@@ -253,23 +318,46 @@ export class BinanceFuturesCollector {
   private readonly queueCapacity: number;
   private readonly tradeWindowMs: number;
   private readonly tradeMaxCount: number;
+  private readonly movementObservationMaxCount: number;
   private readonly symbols = new Set<string>();
   private readonly developing = new Map<string, CollectorCandle>();
   private readonly latestCompleted = new Map<string, CollectorCandle>();
   private readonly latestTrade = new Map<string, AggregateTrade>();
+  private readonly movementLastAcceptedTrade = new Map<string, AggregateTrade>();
+  private readonly movementSeenTrades = new Map<string, Map<number, string>>();
   private readonly trades = new Map<string, TradeBuffer>();
-  private readonly movementBuckets = new FuturesMovementBuckets();
+  private readonly movementObservations = new Map<string, AggregateTrade[]>();
+  private readonly movementResults = new Map<string, MovementBucketSnapshot>();
+  private readonly movementSourceTransitions = new Map<string, MovementSourceTransition[]>();
   private readonly health = new Map<string, HealthState>();
+  private readonly desiredHealthWrites = new Map<string, DesiredHealthWrite>();
+  private readonly persistedHealthWrites = new Map<string, PersistedHealthWrite>();
+  private readonly failedHealthWrites = new Map<string, FailedHealthWrite>();
+  private readonly healthWriteFlights = new Map<string, Promise<void>>();
   private readonly queue: CollectorCandle[] = [];
   private processing: Promise<void> | null = null;
-  private recovery: Promise<void> | null = null;
+  private recovery: { generation: number; promise: Promise<void> } | null = null;
+  private candleRecoveryGeneration = 0;
   private reconnectCount = 0;
+  private movementBoundary: number | null = null;
+  private movementRetry: {
+    sessionId: string;
+    boundaryTime: number;
+    symbols: MovementBoundarySymbolInput[];
+  } | null = null;
+  private movementGeneration = 0;
+  private movementMembershipEpoch = 0;
+  private readonly movementMembershipEpochs = new Map<string, number>();
+  private movementSessionId = crypto.randomUUID();
+  private movementLateRejections = 0;
+  private movementPythonLateRejections = 0;
 
   constructor(private readonly dependencies: CollectorDependencies) {
     this.now = dependencies.now ?? Date.now;
     this.queueCapacity = dependencies.queueCapacity ?? 256;
     this.tradeWindowMs = dependencies.tradeWindowMs ?? 5 * 60_000;
     this.tradeMaxCount = dependencies.tradeMaxCount ?? 2_000;
+    this.movementObservationMaxCount = MOVEMENT_OBSERVATION_BATCH_MAX;
     if (this.queueCapacity < 1 || this.tradeWindowMs < 1 || this.tradeMaxCount < 1) {
       throw new Error("invalid collector bounds");
     }
@@ -298,16 +386,67 @@ export class BinanceFuturesCollector {
   }
 
   movementSnapshot(symbol: string): MovementBucketSnapshot | null {
-    return this.movementBuckets.snapshot(symbol);
+    return this.movementResults.get(symbol.toUpperCase()) ?? null;
   }
 
   movementSnapshots(): MovementBucketSnapshot[] {
-    return this.movementBuckets.snapshots();
+    return [...this.movementResults.values()].sort((left, right) =>
+      left.symbol.localeCompare(right.symbol),
+    );
   }
 
   /** Trades rejected because their exchange-time bucket had already been finalized. */
   movementLateRejections(): number {
-    return this.movementBuckets.lateAfterFinalizationCount;
+    return this.movementLateRejections;
+  }
+
+  movementSourceStatus(symbol: string): MovementSourceState {
+    return this.movementSourceTransitions.get(symbol.toUpperCase())?.at(-1)?.state ?? "UNAVAILABLE";
+  }
+
+  markMovementUnavailable(symbol: string): void {
+    this.recordMovementSourceTransition(symbol, "UNAVAILABLE");
+  }
+
+  markAllMovementUnavailable(): void {
+    for (const symbol of this.subscribedSymbols()) {
+      this.markMovementUnavailable(symbol);
+    }
+  }
+
+  private rememberMovementTrade(trade: AggregateTrade): void {
+    const seen = this.movementSeenTrades.get(trade.symbol) ?? new Map<number, string>();
+    const fingerprint = [
+      trade.tradeTime,
+      trade.eventTime,
+      trade.priceText,
+      trade.quantityText,
+    ].join("|");
+    seen.set(trade.aggregateId, fingerprint);
+    while (seen.size > 4_096) {
+      const oldest = seen.keys().next().value;
+      if (oldest === undefined) break;
+      seen.delete(oldest);
+    }
+    this.movementSeenTrades.set(trade.symbol, seen);
+  }
+
+  resetMovementTransportState(): void {
+    this.movementGeneration += 1;
+    this.movementSessionId = crypto.randomUUID();
+    this.movementBoundary = null;
+    this.movementRetry = null;
+    this.movementLateRejections = 0;
+    this.movementPythonLateRejections = 0;
+    this.movementResults.clear();
+    this.movementLastAcceptedTrade.clear();
+    this.movementSeenTrades.clear();
+    for (const [symbol, observations] of this.movementObservations) {
+      observations.length = 0;
+      this.movementSourceTransitions.set(symbol, [
+        { at: this.now(), state: "UNAVAILABLE" },
+      ]);
+    }
   }
 
   /**
@@ -331,8 +470,102 @@ export class BinanceFuturesCollector {
     return best;
   }
 
-  advanceMovementBuckets(boundaryTime: number): void {
-    this.movementBuckets.advanceTo(boundaryTime);
+  async advanceMovementBuckets(boundaryTime: number): Promise<void> {
+    const generation = this.movementGeneration;
+    safeTimestamp(boundaryTime, "movement boundary");
+    if (boundaryTime % 5_000 !== 0) throw new Error("movement boundary is not aligned to five seconds");
+    if (this.movementBoundary !== null && boundaryTime <= this.movementBoundary) return;
+
+    const earliestObservedBoundary = [...this.movementObservations.values()]
+      .flatMap((trades) => trades.map((trade) => Math.ceil(trade.tradeTime / 5_000) * 5_000))
+      .filter((value) => value <= boundaryTime)
+      .sort((left, right) => left - right)[0];
+    let nextBoundary = this.movementRetry?.boundaryTime ?? (
+      this.movementBoundary === null
+        ? earliestObservedBoundary ?? boundaryTime
+        : this.movementBoundary + 5_000
+    );
+
+    while (nextBoundary <= boundaryTime) {
+      const isExactRetry = this.movementRetry?.boundaryTime === nextBoundary;
+      if (!isExactRetry && this.movementBoundary !== null) {
+        for (const [symbol, pending] of this.movementObservations) {
+          const retained: AggregateTrade[] = [];
+          for (const trade of pending) {
+            const assignedBoundary = Math.ceil(trade.tradeTime / 5_000) * 5_000;
+            if (assignedBoundary <= this.movementBoundary) {
+              this.movementLateRejections += 1;
+            } else {
+              retained.push(trade);
+            }
+          }
+          this.movementObservations.set(symbol, retained);
+        }
+      }
+      const retry = this.movementRetry?.boundaryTime === nextBoundary
+        ? this.movementRetry.symbols
+        : this.subscribedSymbols().map((symbol) => {
+            const observations = (this.movementObservations.get(symbol) ?? []).filter(
+              (trade) => Math.ceil(trade.tradeTime / 5_000) * 5_000 <= nextBoundary,
+            );
+            return {
+              symbol,
+              membershipEpoch: this.movementMembershipEpochs.get(symbol)!,
+              sourceState: this.movementSourceStateForBoundary(symbol, nextBoundary),
+              observations: observations.map((trade) => ({
+                symbol,
+                aggregateId: trade.aggregateId,
+                price: trade.priceText,
+                quantity: trade.quantityText,
+                eventTime: trade.eventTime,
+                tradeTime: trade.tradeTime,
+                receivedAt: trade.receivedAt,
+              })),
+            };
+          });
+      const sessionId = this.movementRetry?.boundaryTime === nextBoundary
+        ? this.movementRetry.sessionId
+        : this.movementSessionId;
+      const input = retry;
+      const requestMembershipEpochs = new Map(
+        input.map((item) => [item.symbol, item.membershipEpoch]),
+      );
+      const isCurrentMembership = (symbol: string): boolean => {
+        const inputEpoch = requestMembershipEpochs.get(symbol);
+        return inputEpoch !== undefined && inputEpoch === this.movementMembershipEpochs.get(symbol);
+      };
+      this.movementRetry = {
+        sessionId,
+        boundaryTime: nextBoundary,
+        symbols: input,
+      };
+      const result = await this.dependencies.advanceMovementBoundary(sessionId, nextBoundary, input);
+      if (generation !== this.movementGeneration) return;
+      for (const snapshot of result.snapshots) {
+        if (isCurrentMembership(snapshot.symbol)) {
+          this.movementResults.set(snapshot.symbol, snapshot);
+        }
+      }
+      if (result.lateAfterFinalizationCount < this.movementPythonLateRejections) {
+        this.movementPythonLateRejections = result.lateAfterFinalizationCount;
+      } else {
+        this.movementLateRejections +=
+          result.lateAfterFinalizationCount - this.movementPythonLateRejections;
+        this.movementPythonLateRejections = result.lateAfterFinalizationCount;
+      }
+      for (const item of input) {
+        if (!isCurrentMembership(item.symbol)) continue;
+        const consumedIds = new Set(item.observations.map((trade) => trade.aggregateId));
+        const pending = this.movementObservations.get(item.symbol) ?? [];
+        this.movementObservations.set(
+          item.symbol,
+          pending.filter((trade) => !consumedIds.has(trade.aggregateId)),
+        );
+      }
+      this.movementBoundary = nextBoundary;
+      this.movementRetry = null;
+      nextBoundary += 5_000;
+    }
   }
 
   developingCandle(symbol: string, timeframeMinutes: CollectorInterval): CollectorCandle | null {
@@ -343,16 +576,49 @@ export class BinanceFuturesCollector {
     this.reconnectCount += 1;
   }
 
+  markMovementConnectionStatus(status: MovementSourceState): void {
+    for (const symbol of this.subscribedSymbols()) {
+      this.recordMovementSourceTransition(symbol, status);
+    }
+  }
+
   async markConnectionStatus(
     status: CollectorHealthStatus,
     errorMessage: string | null,
   ): Promise<void> {
-    for (const symbol of this.subscribedSymbols()) {
+    const symbols = this.subscribedSymbols();
+    for (const symbol of symbols) {
+      this.recordMovementSourceTransition(symbol, status);
+    }
+    await this.persistConnectionHealth(symbols, status, errorMessage);
+  }
+
+  async markCandleConnectionStatus(
+    status: CollectorHealthStatus,
+    errorMessage: string | null,
+    recoveryGeneration = this.candleRecoveryGeneration,
+  ): Promise<void> {
+    await this.persistConnectionHealth(
+      this.subscribedSymbols(),
+      status,
+      errorMessage,
+      recoveryGeneration,
+    );
+  }
+
+  private async persistConnectionHealth(
+    symbols: string[],
+    status: CollectorHealthStatus,
+    errorMessage: string | null,
+    recoveryGeneration?: number,
+  ): Promise<void> {
+    for (const symbol of symbols) {
       for (const timeframe of COLLECTOR_INTERVALS) {
+        if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
         const candle =
           this.latestCompleted.get(this.key(symbol, timeframe)) ??
           this.placeholder(symbol, timeframe);
-        await this.setHealth(candle, status, errorMessage);
+        await this.setHealth(candle, status, errorMessage, recoveryGeneration);
       }
     }
   }
@@ -364,12 +630,17 @@ export class BinanceFuturesCollector {
       if (!isSupportedSymbol(symbol)) throw new Error(`unsupported futures contract: ${symbol}`);
       next.add(symbol);
     }
-    this.movementBuckets.reconcile(next);
     for (const symbol of this.symbols) {
       if (next.has(symbol)) continue;
       this.symbols.delete(symbol);
       this.trades.delete(symbol);
       this.latestTrade.delete(symbol);
+      this.movementLastAcceptedTrade.delete(symbol);
+      this.movementSeenTrades.delete(symbol);
+      this.movementObservations.delete(symbol);
+      this.movementResults.delete(symbol);
+      this.movementSourceTransitions.delete(symbol);
+      this.movementMembershipEpochs.delete(symbol);
       for (const interval of COLLECTOR_INTERVALS)
         this.developing.delete(this.key(symbol, interval));
     }
@@ -377,7 +648,17 @@ export class BinanceFuturesCollector {
       if (this.symbols.has(symbol)) continue;
       this.symbols.add(symbol);
       this.trades.set(symbol, new TradeBuffer(this.tradeWindowMs, this.tradeMaxCount));
-      for (const interval of COLLECTOR_INTERVALS) await this.bootstrap(symbol, interval);
+      this.movementSeenTrades.set(symbol, new Map());
+      this.movementObservations.set(symbol, []);
+      this.movementMembershipEpoch += 1;
+      this.movementMembershipEpochs.set(symbol, this.movementMembershipEpoch);
+      this.movementSourceTransitions.set(symbol, [
+        { at: this.now(), state: "RECOVERING" },
+      ]);
+      const recoveryGeneration = this.candleRecoveryGeneration;
+      for (const interval of COLLECTOR_INTERVALS) {
+        await this.bootstrap(symbol, interval, recoveryGeneration);
+      }
     }
   }
 
@@ -386,6 +667,25 @@ export class BinanceFuturesCollector {
     try {
       event = parseBinanceMarketMessage(raw, receivedAt);
     } catch {
+      const envelope = raw as Record<string, unknown> | null;
+      const candidate = envelope && typeof envelope === "object" && envelope["data"]
+        ? envelope["data"] as Record<string, unknown>
+        : envelope;
+      const stream = envelope && typeof envelope === "object" ? envelope["stream"] : null;
+      const streamSymbol = aggregateTradeStreamSymbol(stream);
+      const dataSymbol = candidate && typeof candidate === "object" && candidate["e"] === "aggTrade"
+        ? String(candidate["s"] ?? "").toUpperCase()
+        : "";
+      let attributable: string | null = null;
+      if (streamSymbol !== null) {
+        if (this.symbols.has(streamSymbol)) attributable = streamSymbol;
+      } else if (dataSymbol && this.symbols.has(dataSymbol)) {
+        attributable = dataSymbol;
+      }
+      if (attributable) {
+        this.markMovementUnavailable(attributable);
+        this.dependencies.onOverload?.();
+      }
       return false;
     }
     if (event.kind === "control") return true;
@@ -393,26 +693,57 @@ export class BinanceFuturesCollector {
       return false;
     }
     if (event.kind === "trade") {
-      const previous = this.latestTrade.get(event.trade.symbol);
+      const seen = this.movementSeenTrades.get(event.trade.symbol);
+      const seenFingerprint = seen?.get(event.trade.aggregateId);
+      if (seenFingerprint !== undefined) {
+        const incomingFingerprint = [
+          event.trade.tradeTime,
+          event.trade.eventTime,
+          event.trade.priceText,
+          event.trade.quantityText,
+        ].join("|");
+        if (incomingFingerprint === seenFingerprint) return false;
+        this.markMovementUnavailable(event.trade.symbol);
+        this.dependencies.onOverload?.();
+        return false;
+      }
+      const tradeBoundary = Math.ceil(event.trade.tradeTime / 5_000) * 5_000;
+      if (this.movementBoundary !== null && tradeBoundary <= this.movementBoundary) {
+        this.movementLateRejections += 1;
+        this.rememberMovementTrade(event.trade);
+        return false;
+      }
+      const previous = this.movementLastAcceptedTrade.get(event.trade.symbol);
       if (
         previous &&
-        (event.trade.aggregateId <= previous.aggregateId ||
-          event.trade.tradeTime < previous.tradeTime)
+        (event.trade.tradeTime < previous.tradeTime ||
+          (event.trade.tradeTime === previous.tradeTime &&
+            event.trade.aggregateId <= previous.aggregateId))
       ) {
+        this.markMovementUnavailable(event.trade.symbol);
+        this.dependencies.onOverload?.();
         return false;
       }
-      try {
-        if (!this.movementBuckets.accept(event.trade)) return false;
-      } catch {
+      const movementQueue = this.movementObservations.get(event.trade.symbol)!;
+      if (movementQueue.length >= this.movementObservationMaxCount) {
+        this.markMovementUnavailable(event.trade.symbol);
+        this.dependencies.onOverload?.();
         return false;
       }
+      movementQueue.push(event.trade);
+      this.rememberMovementTrade(event.trade);
+      this.movementLastAcceptedTrade.set(event.trade.symbol, event.trade);
       this.latestTrade.set(event.trade.symbol, event.trade);
       this.trades.get(event.trade.symbol)!.push(event.trade);
       return true;
     }
     const key = this.key(event.candle.symbol, event.candle.timeframeMinutes);
     const state = this.state(key);
-    state.lastEventAt = event.candle.sourceEventTime;
+    if (event.candle.sourceEventTime !== null) {
+      state.lastEventAt = state.lastEventAt === null
+        ? event.candle.sourceEventTime
+        : Math.max(state.lastEventAt, event.candle.sourceEventTime);
+    }
     if (event.kind === "developing") {
       const previous = this.developing.get(key);
       if (previous) {
@@ -433,10 +764,12 @@ export class BinanceFuturesCollector {
     }
     this.developing.delete(key);
     if (this.queue.length >= this.queueCapacity) {
+      const recoveryGeneration = this.candleRecoveryGeneration;
       void this.setHealth(
         event.candle,
         "STALE",
         "completed-candle processing capacity exceeded",
+        recoveryGeneration,
       ).catch(() => undefined);
       this.dependencies.onOverload?.();
       return false;
@@ -446,35 +779,68 @@ export class BinanceFuturesCollector {
     return true;
   }
 
-  async recoverAfterReconnect(): Promise<void> {
-    if (this.recovery) return this.recovery;
-    this.recovery = (async () => {
+  beginCandleRecoveryTenure(): number {
+    this.candleRecoveryGeneration += 1;
+    this.recovery = null;
+    return this.candleRecoveryGeneration;
+  }
+
+  invalidateCandleRecoveryTenure(generation: number): void {
+    if (generation !== this.candleRecoveryGeneration) return;
+    this.candleRecoveryGeneration += 1;
+    if (this.recovery?.generation === generation) this.recovery = null;
+  }
+
+  async recoverAfterReconnect(
+    generation = this.candleRecoveryGeneration,
+  ): Promise<void> {
+    if (generation !== this.candleRecoveryGeneration) return;
+    if (this.recovery?.generation === generation) return this.recovery.promise;
+    const recovery = (async () => {
       for (const symbol of this.subscribedSymbols()) {
         for (const timeframe of COLLECTOR_INTERVALS) {
+          if (!this.isCandleRecoveryCurrent(generation)) return;
           const latest = this.latestCompleted.get(this.key(symbol, timeframe));
           if (!latest) {
-            await this.bootstrap(symbol, timeframe);
+            await this.bootstrap(symbol, timeframe, generation);
+            if (!this.isCandleRecoveryCurrent(generation)) return;
             if (!this.latestCompleted.has(this.key(symbol, timeframe))) {
               throw new Error(`REST continuity unavailable for ${symbol} ${timeframe}m`);
             }
-          } else await this.recoverThrough(symbol, timeframe, this.latestExpectedOpen(timeframe));
+          } else {
+            await this.recoverThrough(
+              symbol,
+              timeframe,
+              this.latestExpectedOpen(timeframe),
+              generation,
+            );
+          }
         }
       }
     })().finally(() => {
-      this.recovery = null;
-      this.startDrain();
+      if (this.recovery?.generation === generation) {
+        this.recovery = null;
+        this.startDrain();
+      }
     });
-    return this.recovery;
+    this.recovery = { generation, promise: recovery };
+    return recovery;
   }
 
   async waitForIdle(): Promise<void> {
-    await this.recovery;
+    await this.recovery?.promise;
     while (this.processing) await this.processing;
   }
 
-  private async bootstrap(symbol: string, timeframeMinutes: CollectorInterval): Promise<void> {
+  private async bootstrap(
+    symbol: string,
+    timeframeMinutes: CollectorInterval,
+    recoveryGeneration?: number,
+  ): Promise<void> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     const placeholder = this.placeholder(symbol, timeframeMinutes);
-    await this.setHealth(placeholder, "RECOVERING", null);
+    await this.setHealth(placeholder, "RECOVERING", null, recoveryGeneration);
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     const candles = (
       await this.dependencies.loadRest({
         symbol,
@@ -484,14 +850,19 @@ export class BinanceFuturesCollector {
     )
       .filter((candle) => candle.closeTime < this.now())
       .sort((left, right) => left.openTime - right.openTime);
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     if (candles.length === 0 || !this.contiguous(candles, timeframeMinutes)) {
-      await this.setHealth(placeholder, "UNAVAILABLE", "REST bootstrap continuity unavailable");
+      await this.setHealth(
+        placeholder,
+        "UNAVAILABLE",
+        "REST bootstrap continuity unavailable",
+        recoveryGeneration,
+      );
       return;
     }
-    await this.persist(candles, "bootstrap");
+    if (!(await this.persist(candles, "bootstrap", recoveryGeneration))) return;
     const latest = candles.at(-1)!;
-    this.latestCompleted.set(this.key(symbol, timeframeMinutes), latest);
-    await this.setHealth(latest, "RECOVERING", null);
+    await this.setHealth(latest, "RECOVERING", null, recoveryGeneration);
   }
 
   private startDrain(): void {
@@ -499,13 +870,15 @@ export class BinanceFuturesCollector {
     this.processing = (async () => {
       while (this.queue.length > 0 && !this.recovery) {
         const candle = this.queue.shift()!;
+        const recoveryGeneration = this.candleRecoveryGeneration;
         try {
-          await this.processFinal(candle);
+          await this.processFinal(candle, recoveryGeneration);
         } catch (error) {
           await this.setHealth(
             candle,
             "UNAVAILABLE",
             error instanceof Error ? error.message : String(error),
+            recoveryGeneration,
           );
         }
       }
@@ -519,49 +892,75 @@ export class BinanceFuturesCollector {
       });
   }
 
-  private async processFinal(candle: CollectorCandle): Promise<void> {
+  private async processFinal(
+    candle: CollectorCandle,
+    recoveryGeneration: number,
+  ): Promise<void> {
     const key = this.key(candle.symbol, candle.timeframeMinutes);
     let latest = this.latestCompleted.get(key);
     if (!latest) {
-      await this.bootstrap(candle.symbol, candle.timeframeMinutes);
+      await this.bootstrap(candle.symbol, candle.timeframeMinutes, recoveryGeneration);
+      if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
       latest = this.latestCompleted.get(key);
     }
     if (latest && candle.openTime <= latest.openTime) return;
     const duration = candle.timeframeMinutes * 60_000;
     if (latest && candle.openTime !== latest.openTime + duration) {
-      await this.setHealth(candle, "RECOVERING", "completed-candle gap detected");
+      await this.setHealth(
+        candle,
+        "RECOVERING",
+        "completed-candle gap detected",
+        recoveryGeneration,
+      );
+      if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
       const recovered = await this.recoverRange(
         candle.symbol,
         candle.timeframeMinutes,
         latest.openTime + duration,
         candle.openTime - duration,
+        recoveryGeneration,
       );
       if (!recovered) {
+        if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
         throw new Error("REST recovery could not prove candle continuity");
       }
     }
-    await this.persist([candle], "live");
-    this.latestCompleted.set(key, candle);
-    await this.setHealth(candle, "LIVE", null);
+    if (!(await this.persist([candle], "live", recoveryGeneration))) return;
+    await this.setHealth(candle, "LIVE", null, recoveryGeneration);
   }
 
   private async recoverThrough(
     symbol: string,
     timeframeMinutes: CollectorInterval,
     targetOpen: number,
+    recoveryGeneration?: number,
   ): Promise<void> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     const latest = this.latestCompleted.get(this.key(symbol, timeframeMinutes));
     if (!latest || targetOpen <= latest.openTime) return;
-    await this.setHealth(latest, "RECOVERING", "reconnect recovery");
+    await this.setHealth(
+      latest,
+      "RECOVERING",
+      "reconnect recovery",
+      recoveryGeneration,
+    );
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
     if (
       !(await this.recoverRange(
         symbol,
         timeframeMinutes,
         latest.openTime + timeframeMinutes * 60_000,
         targetOpen,
+        recoveryGeneration,
       ))
     ) {
-      await this.setHealth(latest, "UNAVAILABLE", "reconnect continuity unavailable");
+      if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
+      await this.setHealth(
+        latest,
+        "UNAVAILABLE",
+        "reconnect continuity unavailable",
+        recoveryGeneration,
+      );
       throw new Error(`REST reconnect continuity unavailable for ${symbol} ${timeframeMinutes}m`);
     }
   }
@@ -571,7 +970,9 @@ export class BinanceFuturesCollector {
     timeframeMinutes: CollectorInterval,
     firstOpen: number,
     lastOpen: number,
+    recoveryGeneration?: number,
   ): Promise<boolean> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     if (lastOpen < firstOpen) return true;
     const duration = timeframeMinutes * 60_000;
     const count = Math.floor((lastOpen - firstOpen) / duration) + 1;
@@ -587,6 +988,7 @@ export class BinanceFuturesCollector {
     )
       .filter((candle) => candle.closeTime < this.now())
       .sort((left, right) => left.openTime - right.openTime);
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     if (
       candles.length !== count ||
       candles[0]?.openTime !== firstOpen ||
@@ -595,20 +997,25 @@ export class BinanceFuturesCollector {
     ) {
       return false;
     }
-    await this.persist(candles, "recovery");
-    const latest = candles.at(-1)!;
-    this.latestCompleted.set(this.key(symbol, timeframeMinutes), latest);
-    return true;
+    return this.persist(candles, "recovery", recoveryGeneration);
   }
 
-  private async persist(candles: CollectorCandle[], origin: CompletedCandleOrigin): Promise<void> {
+  private async persist(
+    candles: CollectorCandle[],
+    origin: CompletedCandleOrigin,
+    recoveryGeneration?: number,
+  ): Promise<boolean> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     const inserted = new Set(await this.dependencies.store.recordCollectorCandles(candles));
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     for (const candle of candles) {
+      if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
       this.latestCompleted.set(this.key(candle.symbol, candle.timeframeMinutes), candle);
       if (inserted.has(candleIdentity(candle))) {
         await this.dependencies.onCompleted?.({ candle, origin });
       }
     }
+    return true;
   }
 
   private contiguous(candles: CollectorCandle[], timeframeMinutes: CollectorInterval): boolean {
@@ -627,6 +1034,10 @@ export class BinanceFuturesCollector {
 
   private key(symbol: string, timeframeMinutes: CollectorInterval): string {
     return `${symbol.toUpperCase()}:${timeframeMinutes}`;
+  }
+
+  private isCandleRecoveryCurrent(generation: number | undefined): boolean {
+    return generation === undefined || generation === this.candleRecoveryGeneration;
   }
 
   private state(key: string): HealthState {
@@ -665,23 +1076,176 @@ export class BinanceFuturesCollector {
     candle: CollectorCandle,
     status: CollectorHealthStatus,
     errorMessage: string | null,
-  ): Promise<void> {
+    recoveryGeneration?: number,
+  ): Promise<boolean> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     const key = this.key(candle.symbol, candle.timeframeMinutes);
     const state = this.state(key);
     state.status = status;
     state.errorMessage = errorMessage;
-    if (candle.openTime > 0) state.lastCompletedOpenTime = candle.openTime;
-    await this.dependencies.store.recordCollectorHealth({
+    if (candle.openTime > 0) {
+      state.lastCompletedOpenTime = state.lastCompletedOpenTime === null
+        ? candle.openTime
+        : Math.max(state.lastCompletedOpenTime, candle.openTime);
+    }
+    const desired: DesiredHealthWrite = {
       instrumentId: candle.instrumentId,
       symbol: candle.symbol,
       timeframeMinutes: candle.timeframeMinutes,
       status,
+      errorMessage,
+    };
+    this.desiredHealthWrites.set(key, desired);
+    while (this.desiredHealthWrites.get(key) === desired) {
+      try {
+        await this.persistLatestHealth(key);
+      } catch {
+        const failure = this.failedHealthWrites.get(key);
+        if (
+          this.desiredHealthWrites.get(key) === desired &&
+          failure?.desired === desired
+        ) {
+          throw failure.error;
+        }
+        if (this.desiredHealthWrites.get(key) !== desired) return false;
+        continue;
+      }
+      const persisted = this.persistedHealthWrites.get(key);
+      if (persisted?.desired === desired) return true;
+    }
+    return false;
+  }
+
+  private persistLatestHealth(key: string): Promise<void> {
+    const existing = this.healthWriteFlights.get(key);
+    if (existing) return existing;
+    const flight = this.drainHealthWrites(key).finally(() => {
+      if (this.healthWriteFlights.get(key) === flight) {
+        this.healthWriteFlights.delete(key);
+      }
+    });
+    this.healthWriteFlights.set(key, flight);
+    return flight;
+  }
+
+  private async drainHealthWrites(key: string): Promise<void> {
+    let activeDesired: DesiredHealthWrite | undefined;
+    let provenanceWrites = 0;
+    while (true) {
+      const desired = this.desiredHealthWrites.get(key);
+      if (!desired) return;
+      if (desired !== activeDesired) {
+        activeDesired = desired;
+        provenanceWrites = 0;
+      }
+      const input = this.healthInput(key, desired);
+      try {
+        await this.dependencies.store.recordCollectorHealth(input);
+        this.persistedHealthWrites.set(key, { desired, input });
+        this.failedHealthWrites.delete(key);
+      } catch (error) {
+        // A failed RPC may still have committed remotely. If this intent was
+        // superseded while it was in flight, continue and reassert the newest
+        // intent. Only a failure of the still-current intent is surfaced.
+        if (this.desiredHealthWrites.get(key) === desired) {
+          this.failedHealthWrites.set(key, { desired, error });
+          throw error;
+        }
+        continue;
+      }
+      if (this.desiredHealthWrites.get(key) !== desired) continue;
+      provenanceWrites += 1;
+      if (
+        provenanceWrites >= 2 ||
+        this.healthInputIsCurrent(key, desired, input)
+      ) {
+        return;
+      }
+    }
+  }
+
+  private healthInput(key: string, desired: DesiredHealthWrite): CollectorHealthInput {
+    const state = this.state(key);
+    return {
+      instrumentId: desired.instrumentId,
+      symbol: desired.symbol,
+      timeframeMinutes: desired.timeframeMinutes,
+      status: desired.status,
       lastEventAt: state.lastEventAt,
       lastCompletedOpenTime: state.lastCompletedOpenTime,
-      lagMs: state.lastEventAt === null ? null : Math.max(0, this.now() - state.lastEventAt),
+      lagMs:
+        state.lastEventAt === null
+          ? null
+          : Math.max(0, this.now() - state.lastEventAt),
       queueDepth: this.queue.length,
       reconnectCount: this.reconnectCount,
-      errorMessage,
-    });
+      errorMessage: desired.errorMessage,
+    };
+  }
+
+  private healthInputIsCurrent(
+    key: string,
+    desired: DesiredHealthWrite,
+    input: CollectorHealthInput,
+  ): boolean {
+    const state = this.health.get(key);
+    return (
+      this.desiredHealthWrites.get(key) === desired &&
+      state !== undefined &&
+      input.status === state.status &&
+      input.errorMessage === state.errorMessage &&
+      input.lastEventAt === state.lastEventAt &&
+      input.lastCompletedOpenTime === state.lastCompletedOpenTime &&
+      input.reconnectCount === this.reconnectCount
+    );
+  }
+
+  private recordMovementSourceTransition(
+    symbol: string,
+    state: MovementSourceState,
+  ): void {
+    const normalized = symbol.toUpperCase();
+    const transitions = this.movementSourceTransitions.get(normalized) ?? [];
+    if (transitions.at(-1)?.state === state) return;
+    transitions.push({ at: this.now(), state });
+    if (transitions.length > 1_024) {
+      this.movementSourceTransitions.set(normalized, transitions.slice(-1_023));
+    } else {
+      this.movementSourceTransitions.set(normalized, transitions);
+    }
+  }
+
+  private movementSourceStateForBoundary(
+    symbol: string,
+    boundaryTime: number,
+  ): MovementSourceState {
+    const transitions = this.movementSourceTransitions.get(symbol) ?? [];
+    const intervalStart = boundaryTime - 5_000;
+    let stateAtStart: MovementSourceState = "UNAVAILABLE";
+    let stateAtEnd: MovementSourceState = "UNAVAILABLE";
+    const intervalStates: MovementSourceState[] = [];
+    for (const transition of transitions) {
+      if (transition.at <= intervalStart) stateAtStart = transition.state;
+      if (transition.at > intervalStart && transition.at <= boundaryTime) {
+        intervalStates.push(transition.state);
+      }
+      if (transition.at <= boundaryTime) stateAtEnd = transition.state;
+    }
+    const nonLive = [stateAtStart, ...intervalStates].filter((state) => state !== "LIVE");
+    let intervalState: MovementSourceState;
+    if (nonLive.includes("UNAVAILABLE")) intervalState = "UNAVAILABLE";
+    else if (nonLive.includes("STALE")) intervalState = "STALE";
+    else if (nonLive.includes("RECOVERING")) intervalState = "RECOVERING";
+    else intervalState = stateAtEnd;
+
+    const retainFrom = boundaryTime - 5_000;
+    let anchorIndex = -1;
+    for (let index = 0; index < transitions.length; index += 1) {
+      if (transitions[index]!.at <= retainFrom) anchorIndex = index;
+    }
+    if (anchorIndex > 0) {
+      this.movementSourceTransitions.set(symbol, transitions.slice(anchorIndex));
+    }
+    return intervalState;
   }
 }

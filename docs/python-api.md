@@ -1,7 +1,8 @@
 # Python analysis service and Lovable integration
 
-The service handles authenticated manual analysis and scheduled completed-candle
-TA calculations. It is disabled until the app's server configuration is supplied.
+The service handles authenticated manual analysis, scheduled completed-candle TA,
+and canonical in-memory movement-bucket calculations. It is disabled until the
+app's server configuration is supplied.
 
 ## Request and ownership path
 
@@ -24,6 +25,17 @@ snapshots. Python calls
 the existing `cumulative.observe` function but **discards its proposed state**.
 Running analysis repeatedly cannot initialize or reset a baseline or save an alert.
 The service does not add a scheduler, login mechanism, or browser-accessible token.
+
+### Movement service deployment invariant
+
+The `/v1/movement/boundary` adapter keeps bounded session engines and retry
+responses in process-local memory. V1 therefore requires exactly one Python service
+replica running exactly one Uvicorn worker. Do not use `--workers` greater than one
+or load-balance movement requests across replicas: sequential boundaries could land
+on different independent engines and produce false warm-up or split history. Keep
+the existing single-worker local and Docker commands. Distributed Python session
+state is not implemented; a future architecture change is required before scaling
+this endpoint horizontally.
 
 ## Configuration
 
@@ -113,9 +125,13 @@ unavailable here, so the image build/start must still be verified before deploym
 - `POST /v1/technical-analysis/batch`: calculates one to eight due snapshots. The
   scheduled monitor uses this endpoint and strictly validates contract, candle,
   timestamps, versions, score, reasons, and provenance before writing.
-- No database client, persistence, scheduler or browser CORS access is installed in
-  Python. Do not expose the service token to frontend callers. `/docs` and OpenAPI
-  routes are disabled in this minimal deployed service.
+- `POST /v1/movement/boundary`: accepts one explicit five-second boundary, ordered
+   aggTrade observations, and source state per symbol. It delegates directly to the
+   shared pure Python movement engine and returns bounded bucket snapshots. State is
+   volatile and scoped to the collector session; a new session starts empty.
+- No database client, durable persistence, scheduler or browser CORS access is
+   installed in Python. Do not expose the service token to frontend callers. `/docs`
+   and OpenAPI routes are disabled in this minimal deployed service.
 
 Example body (state is normally supplied by TanStack, not entered by the user):
 

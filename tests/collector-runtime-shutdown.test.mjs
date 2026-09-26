@@ -30,7 +30,7 @@ const replacements = {
   `,
   "./collector": `
     export const BINANCE_USDM_WS_ENDPOINT = "wss://example.invalid/stream";
-    export const BinanceFuturesCollector = class {};
+    export const BinanceFuturesCollector = class { resetMovementTransportState() {} };
     export function normalizeRestCandles() { return []; }
   `,
   "./movement-engine.server": movementStub,

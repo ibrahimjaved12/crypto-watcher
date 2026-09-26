@@ -1,4 +1,4 @@
-import type { MovementWindowMinutes } from "./movement-buckets";
+import type { MovementWindowMinutes } from "./movement-contract";
 import type {
   MarketMovementEvaluation,
   MarketMovementWindowResult,

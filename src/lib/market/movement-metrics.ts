@@ -4,7 +4,7 @@ import {
   type MovementBucket,
   type MovementBucketSnapshot,
   type MovementWindowMinutes,
-} from "./movement-buckets";
+} from "./movement-contract";
 import type { CollectorHealthStatus } from "../operational/types";
 
 export const MARKET_MOVEMENT_ALGORITHM_VERSION = "market-movement-v1";
@@ -78,6 +78,7 @@ export type SymbolExclusionReason =
   | "WARMING_INSUFFICIENT_LIVE_HISTORY"
   | "STALE_LAST_TRADE"
   | "MISSING_EXACT_BOUNDARY"
+  | "MOVEMENT_HISTORY_UNAVAILABLE"
   | "INVALID_ENDPOINT_PRICE"
   | "INSUFFICIENT_NORMALIZATION_HISTORY"
   | "INVALID_NORMALIZATION_HISTORY"
@@ -337,10 +338,32 @@ function calculateSymbol(
   }
 
   const readiness = snapshot.readiness[windowMinutes];
-  if (readiness.status === "WARMING") {
-    addReason(result.exclusionReasons, "WARMING_INSUFFICIENT_LIVE_HISTORY");
-  } else if (readiness.status === "STALE") {
-    addReason(result.exclusionReasons, "STALE_LAST_TRADE");
+  switch (readiness.state) {
+    case "warming":
+      addReason(result.exclusionReasons, "WARMING_INSUFFICIENT_LIVE_HISTORY");
+      break;
+    case "stale":
+      if (readiness.reason === "collector_stale") {
+        addReason(result.exclusionReasons, "SOURCE_STALE");
+      } else if (readiness.reason === "last_real_trade_expired") {
+        addReason(result.exclusionReasons, "STALE_LAST_TRADE");
+      } else {
+        addReason(result.exclusionReasons, "MOVEMENT_HISTORY_UNAVAILABLE");
+      }
+      break;
+    case "missing_history":
+      addReason(result.exclusionReasons, "MISSING_EXACT_BOUNDARY");
+      break;
+    case "unavailable":
+      if (readiness.reason === "collector_recovering") {
+        addReason(result.exclusionReasons, "SOURCE_RECOVERING");
+      } else if (readiness.reason === "collector_unavailable" ||
+             readiness.reason === "source_unavailable_in_required_history") {
+        addReason(result.exclusionReasons, "SOURCE_UNAVAILABLE");
+      } else {
+        addReason(result.exclusionReasons, "MOVEMENT_HISTORY_UNAVAILABLE");
+      }
+      break;
   }
 
   const windowMs = windowMinutes * 60_000;

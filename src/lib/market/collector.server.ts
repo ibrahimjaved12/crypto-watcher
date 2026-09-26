@@ -7,6 +7,7 @@ import {
   normalizeRestCandles,
 } from "./collector";
 import { MovementEngineRuntime } from "./movement-engine.server";
+import { advancePythonMovementBoundary } from "./movement-python-client.server";
 import { movementFinalizationConfig } from "./movement-finalization";
 import { validateCollectorWorkerEnvironment } from "./collector-worker-env.server";
 
@@ -16,6 +17,9 @@ const LEASE_REFRESH_MS = 20_000;
 const STALE_AFTER_MS = 30_000;
 const CONNECTION_MAX_AGE_MS = 23 * 60 * 60_000 + 50 * 60_000;
 const MAX_BACKOFF_MS = 30_000;
+const CANDLE_RECOVERY_RETRY_BASE_MS = 1_000;
+const CANDLE_RECOVERY_MAX_BACKOFF_MS = 30_000;
+const RECOVERY_CLOSE_CODE = 4000;
 
 function enabled(env: Record<string, string | undefined> = process.env): boolean {
   const value = env["BINANCE_COLLECTOR_ENABLED"];
@@ -32,6 +36,7 @@ export class CollectorRuntime {
   private socket: WebSocket | null = null;
   private stopped = false;
   private active = false;
+  private streamReady = false;
   private reconnectAttempts = 0;
   private requestId = 1;
   private lastMessageAt = 0;
@@ -44,6 +49,9 @@ export class CollectorRuntime {
   private leaseTimer: ReturnType<typeof setInterval> | null = null;
   private staleTimer: ReturnType<typeof setInterval> | null = null;
   private lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
+  private candleRecoveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private candleRecoveryAttempts = 0;
+  private candleRecoveryGeneration: number | null = null;
 
   constructor(private readonly store: OperationalStore) {
     this.collector = new BinanceFuturesCollector({
@@ -61,7 +69,10 @@ export class CollectorRuntime {
           retrievedAt: Date.parse(result.retrievedAt),
         });
       },
-      onOverload: () => this.socket?.close(1013, "bounded processing capacity exceeded"),
+      onOverload: () =>
+        this.socket?.close(RECOVERY_CLOSE_CODE, "bounded processing capacity exceeded"),
+      advanceMovementBoundary: (sessionId, boundaryTime, symbols) =>
+        advancePythonMovementBoundary(sessionId, boundaryTime, symbols),
     });
     this.movement = new MovementEngineRuntime({
       store,
@@ -76,7 +87,10 @@ export class CollectorRuntime {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.streamReady = false;
+    this.invalidateCandleRecoveryTenure();
     this.clearTimers();
+    this.collector.resetMovementTransportState();
     this.rejectPendingRequests("collector stopping");
     this.socket?.close(1000, "collector stopping");
     this.socket = null;
@@ -85,6 +99,7 @@ export class CollectorRuntime {
     await this.movement.stop();
     if (this.active) await this.store.releaseCollectorLease(this.instanceId);
     this.active = false;
+    this.streamReady = false;
   }
 
   private async tryBecomeActive(): Promise<void> {
@@ -92,6 +107,7 @@ export class CollectorRuntime {
     try {
       this.active = await this.store.claimCollectorLease(this.instanceId, LEASE_SECONDS);
       if (!this.active) return this.retryStandby();
+      this.collector.resetMovementTransportState();
       await this.collector.reconcile(await this.store.readCollectorSubscriptions());
       this.startTimers();
       this.connect();
@@ -102,10 +118,12 @@ export class CollectorRuntime {
       );
       const heldLease = this.active;
       this.active = false;
+      this.invalidateCandleRecoveryTenure();
       this.clearTimers();
+      this.collector.resetMovementTransportState();
       void this.movement.stop();
       this.rejectPendingRequests("collector startup failed");
-      this.socket?.close();
+      this.socket?.close(RECOVERY_CLOSE_CODE, "collector startup failed");
       this.socket = null;
       if (heldLease) {
         try {
@@ -139,7 +157,7 @@ export class CollectorRuntime {
         Date.now() - this.lastMessageAt > STALE_AFTER_MS
       ) {
         this.backgroundHealth("STALE", "Binance stream is stale");
-        this.socket.close(1013, "stale market stream");
+        this.socket.close(RECOVERY_CLOSE_CODE, "stale market stream");
       }
     }, 10_000);
     void this.movement.start();
@@ -154,11 +172,14 @@ export class CollectorRuntime {
       );
     }
     this.active = false;
+    this.streamReady = false;
+    this.invalidateCandleRecoveryTenure();
     this.clearTimers();
+    this.collector.resetMovementTransportState();
     void this.movement.stop();
     this.rejectPendingRequests("authoritative collector lease lost");
     this.backgroundHealth("UNAVAILABLE", "authoritative collector lease lost");
-    this.socket?.close(1012, "collector lease lost");
+    this.socket?.close(RECOVERY_CLOSE_CODE, "collector lease lost");
     this.socket = null;
     this.retryStandby();
   }
@@ -184,38 +205,41 @@ export class CollectorRuntime {
           [...after].filter((stream) => !before.has(stream)),
         ),
       ]);
-      if (this.socket?.readyState === WebSocket.OPEN) {
-        await this.collector.markConnectionStatus("LIVE", null);
+      if (this.streamReady && this.socket?.readyState === WebSocket.OPEN) {
+        this.collector.markMovementConnectionStatus("LIVE");
       }
     } catch (error) {
       console.error(
         `[binance-collector] subscription reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      this.socket?.close(1013, "subscription reconciliation failed");
+      this.socket?.close(RECOVERY_CLOSE_CODE, "subscription reconciliation failed");
     }
   }
 
   private connect(): void {
     if (this.stopped || !this.active || this.socket) return;
+    this.streamReady = false;
     const socket = new WebSocket(BINANCE_USDM_WS_ENDPOINT);
+    const recoveryGeneration = this.beginCandleRecoveryTenure();
     this.socket = socket;
     socket.addEventListener("open", () => {
       this.lastMessageAt = Date.now();
-      void Promise.all([
-        this.sendSubscription("SUBSCRIBE", this.collector.streamNames()),
-        this.collector.recoverAfterReconnect(),
-      ])
+      const subscription = this.sendSubscription("SUBSCRIBE", this.collector.streamNames());
+      void subscription
         .then(() => {
           this.reconnectAttempts = 0;
-          return this.collector.markConnectionStatus("LIVE", null);
+          this.streamReady = true;
+          this.collector.markMovementConnectionStatus("LIVE");
         })
         .catch((error) => {
+          this.streamReady = false;
           this.backgroundHealth(
             "UNAVAILABLE",
             error instanceof Error ? error.message : String(error),
           );
-          socket.close(1013, "subscription or recovery failed");
+          socket.close(RECOVERY_CLOSE_CODE, "subscription failed");
         });
+      this.runCandleRecovery(socket, recoveryGeneration, subscription);
       this.lifetimeTimer = setTimeout(
         () => socket.close(1000, "scheduled Binance connection rotation"),
         CONNECTION_MAX_AGE_MS,
@@ -223,9 +247,20 @@ export class CollectorRuntime {
     });
     socket.addEventListener("message", (event) => {
       this.lastMessageAt = Date.now();
-      if (typeof event.data !== "string") return;
+      if (typeof event.data !== "string") {
+        this.collector.markAllMovementUnavailable();
+        socket.close(RECOVERY_CLOSE_CODE, "non-text Binance movement frame");
+        return;
+      }
+      let payload: Record<string, unknown>;
       try {
-        const payload = JSON.parse(event.data) as Record<string, unknown>;
+        payload = JSON.parse(event.data) as Record<string, unknown>;
+      } catch {
+        this.collector.markAllMovementUnavailable();
+        socket.close(RECOVERY_CLOSE_CODE, "malformed Binance movement frame");
+        return;
+      }
+      try {
         const requestId = typeof payload["id"] === "number" ? payload["id"] : null;
         if (requestId !== null) {
           const pending = this.pendingRequests.get(requestId);
@@ -239,12 +274,15 @@ export class CollectorRuntime {
         }
         this.collector.accept(payload, this.lastMessageAt);
       } catch {
-        // Malformed messages are rejected; the stream remains available for recovery.
+        this.collector.markAllMovementUnavailable();
+        socket.close(RECOVERY_CLOSE_CODE, "invalid Binance movement frame");
       }
     });
     socket.addEventListener("close", () => {
       if (this.socket !== socket) return;
       this.socket = null;
+      this.streamReady = false;
+      this.invalidateCandleRecoveryTenure(recoveryGeneration);
       this.rejectPendingRequests("Binance connection closed before subscription acknowledgement");
       if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
       this.lifetimeTimer = null;
@@ -253,7 +291,9 @@ export class CollectorRuntime {
       this.backgroundHealth("RECOVERING", "Binance stream reconnecting");
       this.scheduleReconnect();
     });
-    socket.addEventListener("error", () => socket.close());
+    socket.addEventListener("error", () =>
+      socket.close(RECOVERY_CLOSE_CODE, "Binance transport error"),
+    );
   }
 
   private scheduleReconnect(): void {
@@ -265,6 +305,106 @@ export class CollectorRuntime {
       this.retryTimer = null;
       this.connect();
     }, delay);
+  }
+
+  private beginCandleRecoveryTenure(): number {
+    if (this.candleRecoveryRetryTimer) clearTimeout(this.candleRecoveryRetryTimer);
+    this.candleRecoveryRetryTimer = null;
+    this.candleRecoveryAttempts = 0;
+    const generation = this.collector.beginCandleRecoveryTenure();
+    this.candleRecoveryGeneration = generation;
+    return generation;
+  }
+
+  private invalidateCandleRecoveryTenure(generation = this.candleRecoveryGeneration): void {
+    if (generation === null || generation !== this.candleRecoveryGeneration) return;
+    if (this.candleRecoveryRetryTimer) clearTimeout(this.candleRecoveryRetryTimer);
+    this.candleRecoveryRetryTimer = null;
+    this.candleRecoveryAttempts = 0;
+    this.candleRecoveryGeneration = null;
+    this.collector.invalidateCandleRecoveryTenure(generation);
+  }
+
+  private runCandleRecovery(
+    socket: WebSocket,
+    generation: number,
+    subscription: Promise<void>,
+  ): void {
+    if (!this.isCurrentCandleRecovery(socket, generation)) return;
+    void this.collector.recoverAfterReconnect(generation).then(
+      () => void this.completeCandleRecovery(socket, generation, subscription),
+      (error) => void this.failCandleRecovery(socket, generation, subscription, error),
+    );
+  }
+
+  private async completeCandleRecovery(
+    socket: WebSocket,
+    generation: number,
+    subscription: Promise<void>,
+  ): Promise<void> {
+    try {
+      await subscription;
+    } catch {
+      return;
+    }
+    if (!this.isCurrentCandleRecovery(socket, generation)) return;
+    this.candleRecoveryAttempts = 0;
+    try {
+      await this.collector.markCandleConnectionStatus("LIVE", null, generation);
+    } catch (error) {
+      console.error(
+        `[binance-collector] candle health write failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async failCandleRecovery(
+    socket: WebSocket,
+    generation: number,
+    subscription: Promise<void>,
+    error: unknown,
+  ): Promise<void> {
+    if (!this.isCurrentCandleRecovery(socket, generation)) return;
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[binance-collector] completed-candle recovery failed: ${message}`);
+    try {
+      await this.collector.markCandleConnectionStatus("UNAVAILABLE", message, generation);
+    } catch (healthError) {
+      console.error(
+        `[binance-collector] candle health write failed: ${healthError instanceof Error ? healthError.message : String(healthError)}`,
+      );
+    }
+    this.scheduleCandleRecoveryRetry(socket, generation, subscription);
+  }
+
+  private scheduleCandleRecoveryRetry(
+    socket: WebSocket,
+    generation: number,
+    subscription: Promise<void>,
+  ): void {
+    if (
+      this.candleRecoveryRetryTimer ||
+      !this.isCurrentCandleRecovery(socket, generation)
+    ) return;
+    const delay = Math.min(
+      CANDLE_RECOVERY_MAX_BACKOFF_MS,
+      CANDLE_RECOVERY_RETRY_BASE_MS * 2 ** Math.min(this.candleRecoveryAttempts, 5),
+    );
+    this.candleRecoveryAttempts += 1;
+    this.candleRecoveryRetryTimer = setTimeout(() => {
+      this.candleRecoveryRetryTimer = null;
+      this.runCandleRecovery(socket, generation, subscription);
+    }, delay);
+  }
+
+  private isCurrentCandleRecovery(socket: WebSocket, generation: number): boolean {
+    return (
+      !this.stopped &&
+      this.active &&
+      this.socket === socket &&
+      this.candleRecoveryGeneration === generation &&
+      socket.readyState === WebSocket.OPEN
+    );
   }
 
   private sendSubscription(method: "SUBSCRIBE" | "UNSUBSCRIBE", streams: string[]): Promise<void> {
@@ -309,11 +449,13 @@ export class CollectorRuntime {
     }
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
+    if (this.candleRecoveryRetryTimer) clearTimeout(this.candleRecoveryRetryTimer);
     this.subscriptionTimer = null;
     this.leaseTimer = null;
     this.staleTimer = null;
     this.retryTimer = null;
     this.lifetimeTimer = null;
+    this.candleRecoveryRetryTimer = null;
   }
 }
 

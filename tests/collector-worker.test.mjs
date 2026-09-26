@@ -199,13 +199,16 @@ test("the production worker artifact builds and runs with plain node", async () 
   assert.match(run.stdout, /no collector to run/);
 });
 
-// A complete worker configuration. The collector owns only operational working
-// state, so it needs no main Lovable database credential and no browser VITE_* value.
+// A complete worker configuration. The collector owns operational working state
+// and delegates movement buckets to the configured Python service.
 function workerEnv(overrides = {}) {
   return {
     OPERATIONAL_DB_ENABLED: "true",
     OPERATIONAL_SUPABASE_URL: "http://127.0.0.1:55321",
     OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY: "test-operational-service-role",
+    PYTHON_ANALYSIS_ENABLED: "true",
+    PYTHON_ANALYSIS_URL: "http://127.0.0.1:8000",
+    PYTHON_ANALYSIS_TOKEN: "test-python-analysis-service-token-123456",
     BINANCE_COLLECTOR_ENABLED: "true",
     ...overrides,
   };
@@ -285,6 +288,10 @@ test("invalid or missing worker configuration fails visibly", async () => {
     [
       omitWorkerEnv("OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY"),
       /OPERATIONAL_SUPABASE_URL and OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY are required/,
+    ],
+    [
+      omitWorkerEnv("PYTHON_ANALYSIS_TOKEN"),
+      /requires PYTHON_ANALYSIS_ENABLED=true and a valid Python service URL\/token/,
     ],
     [
       workerEnv({ MOVEMENT_FINALIZATION_GRACE_MS: "999999" }),

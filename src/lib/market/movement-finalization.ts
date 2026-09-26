@@ -1,13 +1,10 @@
 /**
  * Live 5-second finalization watermark for the market-movement engine (Issue #74).
  *
- * #70's `advanceTo(boundary)` permanently finalizes exchange-time buckets. The
- * live path must therefore delay finalization by an explicit grace so a quiet or
- * slightly-late contract cannot have a still-open bucket closed early. Wall clock
- * decides only *when* an exchange-time bucket is safe; the bucket identity stays
- * exchange/event-time based.
+* Python #70 finalizes each explicit boundary permanently. The live path delays
+* boundary requests by an explicit grace:
  */
-import { MOVEMENT_BUCKET_MS } from "./movement-buckets";
+import { MOVEMENT_BUCKET_MS } from "./movement-contract";
 
 /** V1 config family. The effective version also carries the grace in force. */
 export const MOVEMENT_FINALIZATION_CONFIG_FAMILY = "movement-finalization-config-v1";
