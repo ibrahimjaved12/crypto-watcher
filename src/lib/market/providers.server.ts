@@ -53,11 +53,16 @@ export type TACandleResult = {
  * A completed candle read back from the leased collector's operational store. Its
  * provenance is recorded at ingestion (#26), so unlike the REST provider result it
  * carries the exact endpoint/transport that produced this candle, the exchange
- * kline close time, the canonical source event time, and the collector receive time.
+ * kline close time, the actual source event time, and the collector receive time.
  */
 export type CollectorTACandle = Candle & {
   closeTime: number;
-  sourceEventTime: number;
+  /**
+   * Actual exchange event time (WebSocket `E`), or null for REST bootstrap/recovery,
+   * which has no exchange event. It is provenance only; candle completion is defined
+   * by `time + timeframeMinutes`.
+   */
+  sourceEventTime: number | null;
   receivedAt: number;
   endpoint: string;
   transport: "rest" | "websocket";

@@ -122,11 +122,6 @@ export function normalizeRestCandles(input: {
         throw new Error("invalid REST candle boundary");
       }
       const closeTime = candle.time + duration - 1;
-      // REST bootstrap/recovery carries no exchange event, so the completed-candle
-      // source event is the exchange kline-close boundary. The kline's own close
-      // time (closeTime) and the collector receive time (receivedAt) stay distinct
-      // so #26 provenance survives into the application-owned TA path.
-      const sourceEventTime = candle.time + duration;
       return {
         ...canonicalBase(input.symbol, input.timeframeMinutes),
         endpoint: BINANCE_USDM_REST_ENDPOINT,
@@ -137,8 +132,10 @@ export function normalizeRestCandles(input: {
         low: finitePositive(candle.low, "low price"),
         close: finitePositive(candle.close, "close price"),
         volume: finiteNonnegative(candle.volume, "volume"),
-        sourceEventTime,
-        receivedAt: Math.max(input.retrievedAt, sourceEventTime),
+        // REST bootstrap/recovery has no exchange event, so the source event time is
+        // honestly absent. The deterministic completion boundary is open + timeframe.
+        sourceEventTime: null,
+        receivedAt: input.retrievedAt,
         transport: "rest" as const,
       };
     });
@@ -195,10 +192,6 @@ export function parseBinanceMarketMessage(
   }
   const sourceEventTime = safeTimestamp(value["E"], "event time");
   const completed = kline["x"] === true;
-  // A completed candle's canonical source event is the exchange kline-close
-  // boundary; a developing candle keeps the live event time so lag/health stay
-  // meaningful. The raw exchange event time bounds the collector receive time.
-  const completedSourceEventTime = openTime + duration;
   const candle: CollectorCandle = {
     ...canonicalBase(symbol, timeframeMinutes),
     endpoint: BINANCE_USDM_WS_ENDPOINT,
@@ -209,8 +202,11 @@ export function parseBinanceMarketMessage(
     low: finitePositive(kline["l"], "low price"),
     close: finitePositive(kline["c"], "close price"),
     volume: finiteNonnegative(kline["v"], "volume"),
-    sourceEventTime: completed ? completedSourceEventTime : sourceEventTime,
-    receivedAt: Math.max(receivedAt, sourceEventTime, completedSourceEventTime),
+    // The exchange event time is preserved exactly as received; completion is
+    // defined by openTime + timeframeMinutes, not by this timestamp.
+    sourceEventTime,
+    // The collector receive time is preserved exactly as passed in.
+    receivedAt,
     transport: "websocket",
   };
   return { kind: completed ? "completed" : "developing", candle };
@@ -412,13 +408,18 @@ export class BinanceFuturesCollector {
     state.lastEventAt = event.candle.sourceEventTime;
     if (event.kind === "developing") {
       const previous = this.developing.get(key);
-      if (
-        previous &&
-        (event.candle.openTime < previous.openTime ||
+      if (previous) {
+        const previousEventTime = previous.sourceEventTime;
+        const eventTime = event.candle.sourceEventTime;
+        if (
+          event.candle.openTime < previous.openTime ||
           (event.candle.openTime === previous.openTime &&
-            event.candle.sourceEventTime < previous.sourceEventTime))
-      ) {
-        return false;
+            eventTime !== null &&
+            previousEventTime !== null &&
+            eventTime < previousEventTime)
+        ) {
+          return false;
+        }
       }
       this.developing.set(key, event.candle);
       return true;

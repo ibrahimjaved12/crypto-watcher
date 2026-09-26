@@ -30,9 +30,11 @@ trade history is retained for simulated execution. Add either only with its cons
 Binance-native klines are canonical. Exchange open and close timestamps identify a candle.
 Developing (`x=false`) updates stay only in bounded process memory. Final (`x=true`) candles are
 normalized and inserted idempotently into the operational database. Each persisted completed candle
-keeps the exchange kline close time, the collector receive time, and the canonical completed-candle
-source event (the kline-close boundary) as distinct fields, together with its exact endpoint and
-transport, so a WebSocket live candle is never recorded with REST provenance and vice versa. The
+keeps the exchange kline close time, the actual exchange event time when one exists, and the
+collector receive time as distinct fields, together with its exact endpoint and transport, so a
+WebSocket live candle is never recorded with REST provenance and vice versa. Candle completion is
+always the deterministic boundary `open + timeframe`; the exchange event time is provenance, not the
+definition of completion, and REST bootstrap/recovery records no exchange event at all. The
 worker owns no TA: the application's completed-candle orchestration determines due work, reads
 canonical completed candles back from the operational store (`readCollectorTACandles`) rather than
 fetching a second live exchange series, calls the shared Python service, validates the response, and
@@ -53,10 +55,10 @@ The WebSocket implementation answers protocol ping frames automatically.
 ## Bootstrap, recovery, and bounds
 
 For each contract/timeframe, startup loads recent completed `/fapi/v1/klines` history and excludes
-the still-developing REST candle. REST bootstrap/recovery has no exchange event, so the recorded
-completed-candle source event is the exchange kline-close boundary; the kline's own close time and
-the collector receive time are stored separately. A skipped final interval changes health to
-`RECOVERING`, fetches
+the still-developing REST candle. REST bootstrap/recovery has no exchange event, so it records no
+source event rather than inventing one; the kline's own close time and the collector receive time
+are stored separately, and completion remains `open + timeframe`. A skipped final interval changes
+health to `RECOVERING`, fetches
 only the bounded missing range, verifies exact chronological continuity, deduplicates REST/WS
 overlap in the database, and processes the incoming live final last. An unprovable or over-1,000
 candle gap becomes `UNAVAILABLE`.

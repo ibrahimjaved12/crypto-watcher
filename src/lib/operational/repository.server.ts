@@ -279,7 +279,8 @@ export function createOperationalStore(
           low: candle.low,
           close: candle.close,
           volume: candle.volume,
-          source_event_at: new Date(candle.sourceEventTime).toISOString(),
+          source_event_at:
+            candle.sourceEventTime === null ? null : new Date(candle.sourceEventTime).toISOString(),
           received_at: new Date(candle.receivedAt).toISOString(),
           transport: candle.transport,
         })),
@@ -354,7 +355,8 @@ export function createOperationalStore(
       const candles: CollectorTACandle[] = rows.map((row) => {
         const openTime = Number(row["open_time_ms"]);
         const closeTime = Number(row["close_time_ms"]);
-        const sourceEventTime = Number(row["source_event_at_ms"]);
+        const sourceEventTime =
+          row["source_event_at_ms"] === null ? null : Number(row["source_event_at_ms"]);
         const receivedAt = Number(row["received_at_ms"]);
         const [open, high, low, close, volume] = [
           row["open"],
@@ -373,15 +375,17 @@ export function createOperationalStore(
           (transport !== "rest" && transport !== "websocket") ||
           typeof endpoint !== "string" ||
           endpoint.length === 0 ||
-          ![openTime, closeTime, sourceEventTime, receivedAt].every(Number.isSafeInteger) ||
+          !Number.isSafeInteger(openTime) ||
+          !Number.isSafeInteger(closeTime) ||
+          !Number.isSafeInteger(receivedAt) ||
+          (sourceEventTime !== null && !Number.isSafeInteger(sourceEventTime)) ||
           ![open, high, low, close, volume].every(Number.isFinite) ||
           low! <= 0 ||
           volume! < 0 ||
           high! < Math.max(open!, close!) ||
           low! > Math.min(open!, close!) ||
           closeTime <= openTime ||
-          sourceEventTime < closeTime ||
-          receivedAt < sourceEventTime
+          (sourceEventTime !== null && sourceEventTime < closeTime)
         ) {
           throw new Error("Operational database returned an invalid collector TA candle row");
         }

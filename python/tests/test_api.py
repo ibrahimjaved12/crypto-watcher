@@ -138,6 +138,39 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(results[0]["candle_open_time_ms"], latest["candles"][-1]["open_ms"])
         self.assertEqual(results[1]["candle_open_time_ms"], target)
 
+    def test_batch_provenance_and_completion_boundary(self):
+        app = create_app(TOKEN, analyzer_for())
+        duration = 15 * MINUTE
+        absent = technical_payload()
+        target = absent["candles"][-8]["open_ms"]
+        # REST bootstrap/recovery carries no exchange event; a boundary-complete target
+        # is still valid.
+        absent["target_candle_open_time_ms"] = target
+        absent["source_event_time_ms"] = None
+        absent["evaluation_time_ms"] = target + duration
+        absent["detection_time_ms"] = target + duration
+        # A WebSocket event time that differs from the completion boundary is preserved
+        # and must not fail.
+        shifted = deepcopy(absent)
+        shifted["source_event_time_ms"] = target + duration - 7
+        # An incomplete target candle is rejected via the deterministic boundary.
+        incomplete = deepcopy(absent)
+        incomplete["evaluation_time_ms"] = target + duration - 1
+        incomplete["detection_time_ms"] = target + duration - 1
+        response = self.request(
+            app,
+            "POST",
+            "/v1/technical-analysis/batch",
+            json={"schema_version": 1, "requests": [absent, shifted, incomplete]},
+            headers=HEADERS,
+        )
+        self.assertEqual(response.status_code, 200)
+        results = response.json()["results"]
+        self.assertEqual([row["status"] for row in results], ["ok", "ok", "unavailable"])
+        self.assertIsNone(results[0]["source_event_time_ms"])
+        self.assertEqual(results[1]["source_event_time_ms"], target + duration - 7)
+        self.assertEqual(results[2]["reason"], "target_candle_not_complete")
+
     def test_missing_configuration_fails_closed(self):
         app = create_app("")
         self.assertEqual(self.request(app, "GET", "/health").status_code, 503)

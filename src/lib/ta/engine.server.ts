@@ -38,11 +38,12 @@ type OutcomePatch = {
 
 /**
  * A completed candle with the provenance needed to build a versioned Python request
- * and to persist an immutable conclusion (#24). Collector candles carry the
- * endpoint/source event time the collector recorded; REST provider candles carry the
- * provider endpoint and the completed-candle close boundary.
+ * and to persist an immutable conclusion (#24). Collector candles carry the endpoint
+ * and actual exchange event time the collector recorded; REST provider candles carry
+ * the provider endpoint and no exchange event time. Candle completion is always the
+ * deterministic boundary `time + timeframe`.
  */
-type MarketCandle = Candle & { endpoint: string; sourceEventTime: number };
+type MarketCandle = Candle & { endpoint: string; sourceEventTime: number | null };
 
 type MarketHistory = {
   source: MarketSource;
@@ -131,8 +132,8 @@ export async function runTA(
           completedCandles(candles, timeframe, now);
         };
         // Collector mode transports the collector's recorded provenance (#24/#26);
-        // the REST provider path stays the non-collector source and keeps the
-        // completed-candle close boundary as its source event time.
+        // the REST provider path stays the non-collector source and has no exchange
+        // event time. Completion is the deterministic boundary `time + timeframe`.
         const loadMarket = async (
           requestedSource?: string,
         ): Promise<{ market: MarketHistory; provider: TACandleResult | null }> => {
@@ -163,7 +164,8 @@ export async function runTA(
               candles: provider.candles.map((value) => ({
                 ...value,
                 endpoint: provider.endpoint,
-                sourceEventTime: value.time + duration,
+                // REST klines carry no exchange event time; do not invent one.
+                sourceEventTime: null,
               })),
             },
             provider,
@@ -288,7 +290,12 @@ export async function runTA(
               version: result.ta_version,
               strategy_version: result.strategy_version,
               candle_at: new Date(result.candle_open_time_ms).toISOString(),
-              source_event_at: new Date(candle.sourceEventTime).toISOString(),
+              // Actual exchange event time is provenance; it is null when the source
+              // has none. Candle completion is `candle_at + timeframe`.
+              source_event_at:
+                candle.sourceEventTime === null
+                  ? null
+                  : new Date(candle.sourceEventTime).toISOString(),
               evaluated_at: new Date(result.evaluation_time_ms).toISOString(),
               detected_at: new Date(result.detection_time_ms).toISOString(),
               price: result.indicators.candle.close,

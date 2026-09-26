@@ -49,22 +49,26 @@ function canonical(symbol, timeframeMinutes, openTime, transport = "rest") {
     low: 99,
     close: 101,
     volume: 12,
-    // A completed candle's canonical source event is the kline-close boundary for
-    // both transports; the collector receive time stays distinct.
-    sourceEventTime: openTime + duration,
-    receivedAt: Math.max(BASE, openTime + duration),
+    // REST has no exchange event time; a WebSocket fixture uses the event time.
+    sourceEventTime: transport === "rest" ? null : openTime + duration,
+    receivedAt: BASE,
     transport,
   };
 }
 
-function wsKline(openTime, timeframeMinutes = 1, closed = true) {
+function wsKline(
+  openTime,
+  timeframeMinutes = 1,
+  closed = true,
+  eventTime = openTime + timeframeMinutes * 60_000,
+) {
   const duration = timeframeMinutes * 60_000;
   const interval = { 1: "1m", 15: "15m", 60: "1h", 240: "4h" }[timeframeMinutes];
   return {
     stream: `btcusdt@kline_${interval}`,
     data: {
       e: "kline",
-      E: openTime + duration,
+      E: eventTime,
       s: "BTCUSDT",
       st: 1,
       k: {
@@ -311,13 +315,12 @@ test("per-symbol source status reflects collector health for the movement gate",
   assert.equal(collector.symbolSourceStatus("BTCUSDT"), "LIVE");
 });
 
-test("completed candles record the canonical source event and keep close/receive times", () => {
+test("WebSocket event and receive times are preserved exactly; REST invents no event", () => {
   const duration = 60_000;
   const openTime = BASE - duration;
 
-  // REST bootstrap/recovery: the exchange close time and the collector receive time
-  // are preserved, while the completed-candle source event is the kline-close
-  // boundary so it matches the versioned Python/immutable-conclusion contract.
+  // REST bootstrap/recovery has no exchange event time, so the absence is recorded
+  // honestly as null. The completion boundary stays open + timeframe.
   const rest = normalizeRestCandles({
     symbol: "BTCUSDT",
     timeframeMinutes: 1,
@@ -338,22 +341,26 @@ test("completed candles record the canonical source event and keep close/receive
   assert.equal(rest.endpoint, "/fapi/v1/klines");
   assert.equal(rest.openTime, openTime);
   assert.equal(rest.closeTime, openTime + duration - 1);
-  assert.equal(rest.sourceEventTime, openTime + duration);
-  assert.equal(rest.receivedAt, Math.max(BASE, openTime + duration));
+  assert.equal(rest.sourceEventTime, null);
+  assert.equal(rest.receivedAt, BASE);
 
-  // WebSocket live: the raw event time bounds the receive time, the completed
-  // candle's source event is still the boundary, and the transport/endpoint are kept.
-  const completed = parseBinanceMarketMessage(wsKline(openTime, 1, true), BASE);
+  // A completed WebSocket candle keeps the exchange event time verbatim, even when
+  // it differs from the deterministic completion boundary, and the raw receive time.
+  const eventTime = openTime + duration + 7;
+  const receivedAt = BASE + 3;
+  const completed = parseBinanceMarketMessage(wsKline(openTime, 1, true, eventTime), receivedAt);
   assert.equal(completed.kind, "completed");
   assert.equal(completed.candle.transport, "websocket");
   assert.equal(completed.candle.endpoint, "wss://fstream.binance.com/market/stream");
   assert.equal(completed.candle.closeTime, openTime + duration - 1);
-  assert.equal(completed.candle.sourceEventTime, openTime + duration);
-  assert.equal(completed.candle.receivedAt, Math.max(BASE, openTime + duration));
+  assert.equal(completed.candle.sourceEventTime, eventTime);
+  assert.notEqual(completed.candle.sourceEventTime, openTime + duration);
+  assert.equal(completed.candle.receivedAt, receivedAt);
 
-  // A developing candle keeps the live event time instead of a future boundary.
-  const developing = parseBinanceMarketMessage(wsKline(openTime, 1, false), BASE);
+  // A developing candle preserves the live event and receive times unchanged.
+  const developingEvent = BASE - 5;
+  const developing = parseBinanceMarketMessage(wsKline(openTime, 1, false, developingEvent), BASE);
   assert.equal(developing.kind, "developing");
-  assert.equal(developing.candle.sourceEventTime, openTime + duration);
+  assert.equal(developing.candle.sourceEventTime, developingEvent);
   assert.equal(developing.candle.receivedAt, BASE);
 });

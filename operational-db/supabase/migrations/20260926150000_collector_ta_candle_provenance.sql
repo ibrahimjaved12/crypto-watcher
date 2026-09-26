@@ -9,9 +9,26 @@
 -- market-level endpoint or retrieval time, because one series mixes WebSocket live
 -- candles with REST bootstrap/recovery candles.
 --
+-- `source_event_at` is the actual exchange event time and is nullable: REST
+-- bootstrap/recovery has no exchange event, so it is recorded as NULL rather than an
+-- invented timestamp. Candle completion is the deterministic boundary
+-- `open_time + timeframe_minutes`, never `source_event_at`.
+--
 -- Replaces the reduced six-column payload from
 -- 20260926130000_collector_ta_candles.sql. Read-only, service-role only, external
 -- operational database.
+
+-- The exchange event time is provenance, so REST rows legitimately have none.
+ALTER TABLE public.collector_recent_candles ALTER COLUMN source_event_at DROP NOT NULL;
+-- Drop the constraints that assumed a source event always exists and always follows
+-- the collector receive time; the raw receive time is preserved as observed.
+ALTER TABLE public.collector_recent_candles
+  DROP CONSTRAINT IF EXISTS collector_recent_candles_check3;
+ALTER TABLE public.collector_recent_candles
+  DROP CONSTRAINT IF EXISTS collector_recent_candles_check4;
+ALTER TABLE public.collector_recent_candles
+  ADD CONSTRAINT collector_recent_candles_source_event_check
+  CHECK (source_event_at IS NULL OR source_event_at >= close_time);
 
 CREATE OR REPLACE FUNCTION public.get_collector_ta_candles(
   p_symbol TEXT, p_timeframe_minutes INTEGER, p_limit INTEGER
@@ -43,7 +60,9 @@ BEGIN
           'transport', newest.transport,
           'open_time_ms', (extract(epoch FROM newest.open_time) * 1000)::BIGINT,
           'close_time_ms', (extract(epoch FROM newest.close_time) * 1000)::BIGINT,
-          'source_event_at_ms', (extract(epoch FROM newest.source_event_at) * 1000)::BIGINT,
+          'source_event_at_ms',
+            CASE WHEN newest.source_event_at IS NULL THEN NULL
+                 ELSE (extract(epoch FROM newest.source_event_at) * 1000)::BIGINT END,
           'received_at_ms', (extract(epoch FROM newest.received_at) * 1000)::BIGINT,
           'open', newest.open,
           'high', newest.high,

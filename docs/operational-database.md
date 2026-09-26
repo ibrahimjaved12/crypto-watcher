@@ -35,7 +35,8 @@ While `BINANCE_COLLECTOR_ENABLED=true`, the application's completed-candle TA re
 completed candles from this operational store through `readCollectorTACandles` instead of fetching
 a second live exchange candle series. The read carries the collector's recorded per-candle
 provenance — exact provider/instrument identity, endpoint, transport, candle open/close time,
-source event time, receive time, and OHLCV — and never reconstructs an endpoint or retrieval time.
+the exchange event time when one exists (absent for REST), receive time, and OHLCV — and never
+reconstructs an endpoint, retrieval time, or exchange event time.
 A single series can mix WebSocket live candles with REST bootstrap/recovery candles, so the
 endpoint and transport are per candle: `/fapi/v1/klines` is recorded only for actual REST rows.
 Missing or stale operational history fails the affected TA frame visibly; it is never silently

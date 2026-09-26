@@ -42,7 +42,13 @@ export type CollectorCandle = {
   low: number;
   close: number;
   volume: number;
-  sourceEventTime: number;
+  /**
+   * Actual exchange event time for this candle. WebSocket klines carry the
+   * exchange event timestamp (`E`); REST bootstrap/recovery has no exchange event,
+   * so the absence is recorded as null rather than an invented timestamp. Candle
+   * completion is defined by `openTime + timeframeMinutes`, never by this value.
+   */
+  sourceEventTime: number | null;
   receivedAt: number;
   transport: "rest" | "websocket";
 };

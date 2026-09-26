@@ -154,6 +154,54 @@ class TechnicalAnalysisTests(unittest.TestCase):
         self.assertEqual(replay[0]["status"], "insufficient")
         self.assertEqual(replay[1], result)
 
+    def test_completion_boundary_not_exchange_event_defines_finality(self):
+        request = self.request()
+        end = request.evaluation_time_ms
+        target = request.candles[-1].open_ms
+        baseline = calculate_technical_analysis(request)
+        # A valid exchange event time that differs from the deterministic completion
+        # boundary must not change the conclusion or fail the request.
+        shifted = calculate_technical_analysis(
+            replace(request, source_event_time_ms=target + 15 * MINUTE - 7)
+        )
+        self.assertEqual(shifted["status"], "ok")
+        self.assertEqual(shifted["score"], baseline["score"])
+        self.assertEqual(shifted["indicators"], baseline["indicators"])
+        self.assertEqual(shifted["source_event_time_ms"], target + 15 * MINUTE - 7)
+        # REST bootstrap/recovery carries no exchange event at all.
+        absent = calculate_technical_analysis(replace(request, source_event_time_ms=None))
+        self.assertEqual(absent["status"], "ok")
+        self.assertIsNone(absent["source_event_time_ms"])
+        # Finality uses the boundary: a target candle whose boundary equals the
+        # evaluation time is complete.
+        boundary = calculate_technical_analysis(
+            replace(
+                request,
+                target_candle_open_time_ms=target,
+                source_event_time_ms=target + 15 * MINUTE,
+                evaluation_time_ms=target + 15 * MINUTE,
+            )
+        )
+        self.assertEqual(boundary["status"], "ok")
+        # A target candle that is not yet complete at evaluation time is rejected even
+        # when its exchange event time is absent or plausible.
+        incomplete = calculate_technical_analysis(
+            replace(
+                request,
+                target_candle_open_time_ms=target,
+                source_event_time_ms=None,
+                evaluation_time_ms=target + 15 * MINUTE - 1,
+                detection_time_ms=target + 15 * MINUTE - 1,
+            )
+        )
+        self.assertEqual(
+            (incomplete["status"], incomplete["reason"]),
+            ("unavailable", "target_candle_not_complete"),
+        )
+        # A future exchange event time is still rejected as invalid provenance.
+        future = calculate_technical_analysis(replace(request, source_event_time_ms=end + 1))
+        self.assertEqual(future["reason"], "future_timestamp")
+
     def test_interpretation_boundaries_and_contract_identity(self):
         base = {"ema20": 100, "ema50": 90, "rsi14": 70,
                 "atr14": 2, "volume_change_pct": 0}

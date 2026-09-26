@@ -184,7 +184,9 @@ test("collector mode reads canonical completed candles instead of a second live 
   // collector recorded, never a reconstructed endpoint or candle-open boundary.
   assert.match(engine, /source_event_time_ms: candle\.sourceEventTime/);
   assert.match(engine, /endpoint: candle\.endpoint/);
-  assert.match(engine, /source_event_at: new Date\(candle\.sourceEventTime\)\.toISOString\(\)/);
+  // Actual exchange event time is optional provenance: absent REST candles persist no
+  // source event rather than a boundary fabricated from the candle open.
+  assert.match(engine, /source_event_at:\n\s+candle\.sourceEventTime === null\n/);
   assert.doesNotMatch(engine, /source_event_time_ms: candle\.time \+ duration/);
   assert.doesNotMatch(engine, /endpoint: generationMarket!\.endpoint/);
   assert.doesNotMatch(engine, /retrievedAt: new Date\(\)\.toISOString\(\)/);
@@ -199,16 +201,15 @@ test("the operational TA read adapter transports provenance and fabricates nothi
   assert.match(repository, /transport/);
   assert.doesNotMatch(repository, /COLLECTOR_TA_ENDPOINT/);
   assert.doesNotMatch(repository, /retrievedAt: new Date\(\)\.toISOString\(\)/);
-  // The collector records the completed-candle source event for both transports.
+  // The collector records the exchange event time for WebSocket candles and records no
+  // event at all for REST bootstrap/recovery. Receive times are preserved exactly,
+  // never clamped or rewritten from the event time.
   const collector = await read("../src/lib/market/collector.ts");
-  assert.match(
-    collector,
-    /sourceEventTime: completed \? completedSourceEventTime : sourceEventTime/,
-  );
-  assert.match(
-    collector,
-    /sourceEventTime,\n\s+receivedAt: Math\.max\(input\.retrievedAt, sourceEventTime\)/,
-  );
+  assert.match(collector, /sourceEventTime: null,/);
+  assert.match(collector, /sourceEventTime,/);
+  assert.doesNotMatch(collector, /completedSourceEventTime/);
+  assert.doesNotMatch(collector, /Math\.max\(input\.retrievedAt, sourceEventTime\)/);
+  assert.doesNotMatch(collector, /receivedAt: Math\.max/);
 });
 
 test("the collector worker validates operational-only runtime configuration", async () => {

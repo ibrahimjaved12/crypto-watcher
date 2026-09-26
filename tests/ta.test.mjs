@@ -133,6 +133,7 @@ test("TA persistence deduplicates futures snapshots and enforces user read isola
       "20260924090000_monitor_efficiency.sql",
       "20260924110000_analysis_conclusions.sql",
       "20260924120000_python_scheduled_ta.sql",
+      "20260926100000_ta_source_event_provenance.sql",
     ]) {
       await db.exec(
         await readFile(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"),
@@ -221,6 +222,34 @@ test("TA persistence deduplicates futures snapshots and enforces user read isola
       ]),
       /permission denied/,
     );
+
+    // A REST-derived conclusion has no exchange event, so `source_event_at` is
+    // nullable; a present exchange event must still precede detection. The insert is
+    // rolled back so it cannot affect the assertions above.
+    const signalRow = (candleAt, sourceEventAt, detectedAt) => `INSERT INTO ta_signals(
+      user_id,symbol,instrument_id,source_instrument_id,source_native_symbol,
+      timeframe,candle_at,source_event_at,evaluated_at,detected_at,source,version,
+      strategy_version,classification,score,atr_pct,factor_breakdown,reasons,
+      price,indicators,patterns
+    ) VALUES (
+      '00000000-0000-0000-0000-000000000001','BTCUSDT','binance-usdm:BTCUSDT',
+      'binance-usdm:BTCUSDT','BTCUSDT',15,'${candleAt}',
+      ${sourceEventAt === null ? "NULL" : `'${sourceEventAt}'`},
+      '2026-01-01T00:00:00Z','${detectedAt}',
+      'binance-usdm','ta-v2','interpretation-v1','neutral',0,1,'{}','{trend_neutral}',
+      100,'{}','{doji}'
+    )`;
+    await db.exec("RESET ROLE; SET ROLE service_role; BEGIN");
+    await db.exec(signalRow("2025-12-31T22:45:00Z", null, "2026-01-01T00:00:00Z"));
+    const rest = await db.query(
+      "SELECT source_event_at FROM ta_signals WHERE candle_at = '2025-12-31T22:45:00Z'",
+    );
+    assert.equal(rest.rows[0].source_event_at, null);
+    await assert.rejects(
+      db.exec(signalRow("2025-12-31T22:30:00Z", "2026-01-01T00:00:00Z", "2025-12-31T23:00:00Z")),
+      /ta_signals_python_timestamps_check/,
+    );
+    await db.exec("ROLLBACK");
   } finally {
     await db.close();
   }
@@ -644,7 +673,7 @@ test("collector mode reads canonical completed candles and never a second live s
     const step = timeframe * 60_000;
     return Array.from({ length: 220 }, (_, index) => {
       const time = end - (219 - index) * step;
-      const transport = index >= 216 ? "websocket" : "rest";
+      const websocket = index >= 216;
       return {
         time,
         open: 100,
@@ -654,11 +683,13 @@ test("collector mode reads canonical completed candles and never a second live s
         volume: 1,
         complete: true,
         closeTime: time + step - 1,
-        sourceEventTime: time + step,
+        // WebSocket candles carry the exchange's actual event time, which deliberately
+        // differs from the deterministic completion boundary (`time + step`). REST
+        // bootstrap/recovery has no exchange event and must stay honestly absent.
+        sourceEventTime: websocket ? time + step + 7 : null,
         receivedAt: time + step + 120,
-        endpoint:
-          transport === "websocket" ? "wss://fstream.binance.com/market/stream" : "/fapi/v1/klines",
-        transport,
+        endpoint: websocket ? "wss://fstream.binance.com/market/stream" : "/fapi/v1/klines",
+        transport: websocket ? "websocket" : "rest",
       };
     });
   };
@@ -747,7 +778,6 @@ test("collector mode reads canonical completed candles and never a second live s
     const restEndpoint = "/fapi/v1/klines";
     for (const timeframe of [15, 60, 240]) {
       const rows = upserts.find((batch) => batch[0].timeframe === timeframe);
-      const step = timeframe * 60_000;
       const expected = collectorSeries(timeframe).slice(-8);
       assert.deepEqual(
         rows.map((row) => row.endpoint),
@@ -759,62 +789,59 @@ test("collector mode reads canonical completed candles and never a second live s
       assert.equal(rows.filter((row) => row.endpoint === restEndpoint).length, 4);
       for (const row of rows) {
         const openTime = Date.parse(row.candle_at);
-        // source_event_at is the persisted completed-candle source event, never a
-        // value recomputed from the candle open.
-        assert.equal(Date.parse(row.source_event_at), openTime + step);
+        const expectedCandle = expected.find((candle) => candle.time === openTime);
+        // The persisted source event is exactly the collector's recorded exchange event
+        // time; a REST candle honestly persists no source event at all.
+        if (expectedCandle.sourceEventTime === null) {
+          assert.equal(row.source_event_at, null);
+        } else {
+          assert.equal(Date.parse(row.source_event_at), expectedCandle.sourceEventTime);
+        }
       }
     }
 
-    // The versioned Python request carries the persisted source event time and the
-    // exact target candle open, not a reconstructed boundary.
+    // The versioned Python request carries the recorded exchange event time exactly
+    // (null for REST) and the exact target candle open, never a reconstructed boundary.
     assert.equal(capturedRequests.length, 24);
     for (const request of capturedRequests) {
       const step = request.timeframe_minutes * 60_000;
-      assert.equal(request.source_event_time_ms, request.target_candle_open_time_ms + step);
+      const expectedCandle = collectorSeries(request.timeframe_minutes).find(
+        (candle) => candle.time === request.target_candle_open_time_ms,
+      );
+      assert.equal(request.source_event_time_ms, expectedCandle.sourceEventTime);
       assert.equal(
         request.candles.find((candle) => candle.open_ms === request.target_candle_open_time_ms)
           .open_ms,
         request.target_candle_open_time_ms,
       );
+      // Finality is the deterministic completion boundary, never the exchange event.
+      assert.ok(request.target_candle_open_time_ms + step <= request.evaluation_time_ms);
     }
-    // A persisted source event time that does not match the completed-candle boundary
-    // must fail visibly rather than being silently corrected.
-    const mismatched = {
-      enabled: true,
-      async readCollectorTACandles(symbol, timeframe) {
-        const candles = collectorSeries(timeframe).map((candle) => ({
-          ...candle,
-          sourceEventTime: candle.sourceEventTime + 1,
-        }));
-        return {
-          source: "binance-usdm",
-          instrument: { id: `binance-usdm:${symbol}` },
-          priceType: "trade",
-          candles,
-        };
-      },
-    };
-    const contractStrict = async (requests) => {
-      const results = await pythonResults(requests);
-      return results.map((result, index) => {
-        const request = requests[index];
-        const step = request.timeframe_minutes * 60_000;
-        return request.source_event_time_ms === request.target_candle_open_time_ms + step
-          ? result
-          : { ...result, status: "unavailable", reason: "mismatched_source_event_time" };
-      });
-    };
-    const mismatchedErrors = await runTA(
-      db,
-      "owner",
-      "BTCUSDT",
-      context,
-      contractStrict,
-      mismatched,
+    // A valid WebSocket exchange event time that differs from the completion boundary
+    // must survive into the request without failing TA.
+    const wsRequests = capturedRequests.filter(
+      (request) =>
+        collectorSeries(request.timeframe_minutes).find(
+          (candle) => candle.time === request.target_candle_open_time_ms,
+        ).transport === "websocket",
     );
-    assert.equal(mismatchedErrors.length, 3);
-    assert.ok(mismatchedErrors.every((error) => /mismatched_source_event_time/.test(error)));
-    assert.equal(restCalls, 0);
+    assert.ok(wsRequests.length > 0);
+    assert.ok(
+      wsRequests.every(
+        (request) =>
+          request.source_event_time_ms !==
+          request.target_candle_open_time_ms + request.timeframe_minutes * 60_000,
+      ),
+    );
+    // REST-sourced requests carry no invented exchange event time.
+    const restRequests = capturedRequests.filter(
+      (request) =>
+        collectorSeries(request.timeframe_minutes).find(
+          (candle) => candle.time === request.target_candle_open_time_ms,
+        ).transport === "rest",
+    );
+    assert.ok(restRequests.length > 0);
+    assert.ok(restRequests.every((request) => request.source_event_time_ms === null));
 
     assert.deepEqual(outcomeBatches, [
       [

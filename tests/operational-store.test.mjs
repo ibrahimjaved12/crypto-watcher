@@ -518,7 +518,9 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
       low: 90,
       close: 100 + index,
       volume: 5,
-      source_event_at: new Date(openTime + duration).toISOString(),
+      // REST bootstrap/recovery has no exchange event; WebSocket candles keep the
+      // exchange's actual event time, which need not equal the completion boundary.
+      source_event_at: index === 0 ? null : new Date(openTime + duration + 7).toISOString(),
       received_at: new Date(openTime + duration + 250).toISOString(),
       transport: index === 0 ? "rest" : "websocket",
     };
@@ -554,7 +556,10 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
   assert.equal(candles[2].native_symbol, "BTCUSDT");
   assert.equal(candles[2].price_type, "trade");
   assert.equal(candles[2].close_time_ms, observed + 2 * duration + duration - 1);
-  assert.equal(candles[2].source_event_at_ms, observed + 2 * duration + duration);
+  // The exchange event time is transported exactly as recorded (never rewritten to the
+  // completion boundary), and a REST candle honestly reports no exchange event.
+  assert.equal(candles[0].source_event_at_ms, null);
+  assert.equal(candles[2].source_event_at_ms, observed + 2 * duration + duration + 7);
   assert.equal(candles[2].received_at_ms, observed + 2 * duration + duration + 250);
 
   // Another timeframe or symbol has no history rather than leaking the wrong series.
@@ -589,7 +594,9 @@ test("repository collector TA read transports recorded provenance without fabric
     transport,
     open_time_ms: base + index * step,
     close_time_ms: base + index * step + step - 1,
-    source_event_at_ms: base + index * step + step,
+    // REST rows have no exchange event; WebSocket rows carry the actual event time,
+    // deliberately offset from the completion boundary to prove it is not rewritten.
+    source_event_at_ms: transport === "rest" ? null : base + index * step + step + 7,
     received_at_ms: base + index * step + step + 120,
     open: 100,
     high: 110,
@@ -631,7 +638,8 @@ test("repository collector TA read transports recorded provenance without fabric
       volume: 3,
       complete: true,
       closeTime: base + step - 1,
-      sourceEventTime: base + step,
+      // REST provenance: no exchange event is invented.
+      sourceEventTime: null,
       receivedAt: base + step + 120,
       endpoint: "/fapi/v1/klines",
       transport: "rest",
@@ -645,7 +653,8 @@ test("repository collector TA read transports recorded provenance without fabric
       volume: 3,
       complete: true,
       closeTime: base + 2 * step - 1,
-      sourceEventTime: base + 2 * step,
+      // WebSocket provenance: the recorded exchange event time survives unchanged.
+      sourceEventTime: base + 2 * step + 7,
       receivedAt: base + 2 * step + 120,
       endpoint: "wss://fstream.binance.com/market/stream",
       transport: "websocket",
