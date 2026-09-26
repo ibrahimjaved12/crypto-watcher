@@ -462,14 +462,12 @@ def _symbol_result(request, symbol, window):
     if included:
         z = normalized_z.value
         raw = current.value
-        if abs(z) < request.config.flat_z:
+        if raw == 0 or abs(z) < request.config.flat_z:
             direction = Metric.present("FLAT")
         elif raw > 0:
             direction = Metric.present("RISING")
-        elif raw < 0:
-            direction = Metric.present("FALLING")
         else:
-            direction = Metric.missing("DIRECTION_UNDEFINED_FOR_ZERO_RETURN")
+            direction = Metric.present("FALLING")
     return SymbolMovementResult(
         symbol=symbol, instrument_id=None if supplied is None else supplied.instrument_id,
         provider=PROVIDER, exchange=EXCHANGE, price_type=PRICE_TYPE,

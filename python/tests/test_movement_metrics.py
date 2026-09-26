@@ -135,11 +135,26 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(by_symbol["NEGATIVE_Z"].direction.value, "RISING")
 
     def test_zero_return_never_becomes_rising_or_falling(self):
-        item = evaluate({"A": symbol_input("A", current="100",
-                                            historical_returns=(0.02, 0.03, 0.04, 0.05))}).symbols[0]
-        self.assertEqual(item.direction.reason, "DIRECTION_UNDEFINED_FOR_ZERO_RETURN")
+        inputs = {"ZERO": symbol_input("ZERO", current="100",
+                                       historical_returns=(0.02, 0.03, 0.04, 0.05))}
+        inputs.update({f"S{i}": symbol_input(f"S{i}", current="101.2") for i in range(4)})
+        result = evaluate(inputs)
+        item = result.symbols[0]
+        self.assertTrue(item.included)
+        self.assertEqual(item.current_return.value, 0)
+        self.assertGreaterEqual(abs(item.normalized_z.value), MarketMovementConfig().flat_z)
+        self.assertEqual(item.direction.value, "FLAT")
         self.assertFalse(item.material_rising)
         self.assertFalse(item.material_falling)
+        self.assertTrue(result.market_wide_eligible)
+        self.assertEqual(result.breadth.flat.value.count, 1)
+        self.assertEqual(result.breadth.rising.value.count, 4)
+        self.assertEqual(result.breadth.falling.value.count, 0)
+        self.assertEqual(result.breadth.flat.value.fraction, 1 / 5)
+        self.assertEqual(result.breadth.rising.value.fraction, 4 / 5)
+        self.assertEqual(result.breadth.falling.value.fraction, 0)
+        self.assertEqual(sum(side.value.fraction for side in
+                             (result.breadth.flat, result.breadth.rising, result.breadth.falling)), 1)
 
     def test_zero_mad_and_insufficient_coverage(self):
         inputs = {
