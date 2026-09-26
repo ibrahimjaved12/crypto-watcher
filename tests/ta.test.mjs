@@ -638,17 +638,29 @@ test("collector mode reads canonical completed candles and never a second live s
     const step = timeframe * 60_000;
     return Math.floor(fixedNow / step) * step - step;
   };
+  // The newest four candles are WebSocket live; the rest are REST
+  // bootstrap/recovery. The adapter must keep each candle's own provenance.
   const collectorSeries = (timeframe, end = latest(timeframe)) => {
     const step = timeframe * 60_000;
-    return Array.from({ length: 220 }, (_, index) => ({
-      time: end - (219 - index) * step,
-      open: 100,
-      high: 101,
-      low: 99,
-      close: 100,
-      volume: 1,
-      complete: true,
-    }));
+    return Array.from({ length: 220 }, (_, index) => {
+      const time = end - (219 - index) * step;
+      const transport = index >= 216 ? "websocket" : "rest";
+      return {
+        time,
+        open: 100,
+        high: 101,
+        low: 99,
+        close: 100,
+        volume: 1,
+        complete: true,
+        closeTime: time + step - 1,
+        sourceEventTime: time + step,
+        receivedAt: time + step + 120,
+        endpoint:
+          transport === "websocket" ? "wss://fstream.binance.com/market/stream" : "/fapi/v1/klines",
+        transport,
+      };
+    });
   };
   const previous = process.env.BINANCE_COLLECTOR_ENABLED;
   process.env.BINANCE_COLLECTOR_ENABLED = "true";
@@ -657,6 +669,7 @@ test("collector mode reads canonical completed candles and never a second live s
     const collectorReads = [];
     const upserts = [];
     const outcomeBatches = [];
+    const capturedRequests = [];
     const store = {
       enabled: true,
       async readCollectorTACandles(symbol, timeframe) {
@@ -664,7 +677,6 @@ test("collector mode reads canonical completed candles and never a second live s
         return {
           source: "binance-usdm",
           instrument: { id: `binance-usdm:${symbol}` },
-          endpoint: "/fapi/v1/klines",
           priceType: "trade",
           candles: collectorSeries(timeframe),
         };
@@ -713,8 +725,12 @@ test("collector mode reads canonical completed candles and never a second live s
         };
       },
     };
+    const calculate = async (requests) => {
+      capturedRequests.push(...requests);
+      return pythonResults(requests);
+    };
 
-    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, pythonResults, store), []);
+    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, calculate, store), []);
     assert.equal(restCalls, 0);
     assert.deepEqual(collectorReads, [
       ["BTCUSDT", 15],
@@ -722,11 +738,84 @@ test("collector mode reads canonical completed candles and never a second live s
       ["BTCUSDT", 240],
     ]);
     assert.equal(upserts.length, 3);
-    assert.ok(
-      upserts.every(
-        (rows) => rows.length === 8 && rows.every((row) => row.endpoint === "/fapi/v1/klines"),
-      ),
+    assert.ok(upserts.every((rows) => rows.length === 8));
+
+    // Every persisted conclusion keeps the exact endpoint of the candle that produced
+    // it: WebSocket live candles stay WebSocket-derived, REST bootstrap/recovery
+    // candles keep REST provenance.
+    const wsEndpoint = "wss://fstream.binance.com/market/stream";
+    const restEndpoint = "/fapi/v1/klines";
+    for (const timeframe of [15, 60, 240]) {
+      const rows = upserts.find((batch) => batch[0].timeframe === timeframe);
+      const step = timeframe * 60_000;
+      const expected = collectorSeries(timeframe).slice(-8);
+      assert.deepEqual(
+        rows.map((row) => row.endpoint),
+        expected.map((candle) => candle.endpoint),
+      );
+      // The four newest candidates are live WebSocket candles, so both provenance
+      // kinds are exercised through the adapter.
+      assert.equal(rows.filter((row) => row.endpoint === wsEndpoint).length, 4);
+      assert.equal(rows.filter((row) => row.endpoint === restEndpoint).length, 4);
+      for (const row of rows) {
+        const openTime = Date.parse(row.candle_at);
+        // source_event_at is the persisted completed-candle source event, never a
+        // value recomputed from the candle open.
+        assert.equal(Date.parse(row.source_event_at), openTime + step);
+      }
+    }
+
+    // The versioned Python request carries the persisted source event time and the
+    // exact target candle open, not a reconstructed boundary.
+    assert.equal(capturedRequests.length, 24);
+    for (const request of capturedRequests) {
+      const step = request.timeframe_minutes * 60_000;
+      assert.equal(request.source_event_time_ms, request.target_candle_open_time_ms + step);
+      assert.equal(
+        request.candles.find((candle) => candle.open_ms === request.target_candle_open_time_ms)
+          .open_ms,
+        request.target_candle_open_time_ms,
+      );
+    }
+    // A persisted source event time that does not match the completed-candle boundary
+    // must fail visibly rather than being silently corrected.
+    const mismatched = {
+      enabled: true,
+      async readCollectorTACandles(symbol, timeframe) {
+        const candles = collectorSeries(timeframe).map((candle) => ({
+          ...candle,
+          sourceEventTime: candle.sourceEventTime + 1,
+        }));
+        return {
+          source: "binance-usdm",
+          instrument: { id: `binance-usdm:${symbol}` },
+          priceType: "trade",
+          candles,
+        };
+      },
+    };
+    const contractStrict = async (requests) => {
+      const results = await pythonResults(requests);
+      return results.map((result, index) => {
+        const request = requests[index];
+        const step = request.timeframe_minutes * 60_000;
+        return request.source_event_time_ms === request.target_candle_open_time_ms + step
+          ? result
+          : { ...result, status: "unavailable", reason: "mismatched_source_event_time" };
+      });
+    };
+    const mismatchedErrors = await runTA(
+      db,
+      "owner",
+      "BTCUSDT",
+      context,
+      contractStrict,
+      mismatched,
     );
+    assert.equal(mismatchedErrors.length, 3);
+    assert.ok(mismatchedErrors.every((error) => /mismatched_source_event_time/.test(error)));
+    assert.equal(restCalls, 0);
+
     assert.deepEqual(outcomeBatches, [
       [
         {
@@ -746,7 +835,6 @@ test("collector mode reads canonical completed candles and never a second live s
         return {
           source: "binance-usdm",
           instrument: { id: `binance-usdm:${symbol}` },
-          endpoint: "/fapi/v1/klines",
           priceType: "trade",
           candles: [],
         };
@@ -764,7 +852,6 @@ test("collector mode reads canonical completed candles and never a second live s
         return {
           source: "binance-usdm",
           instrument: { id: `binance-usdm:${symbol}` },
-          endpoint: "/fapi/v1/klines",
           priceType: "trade",
           candles: collectorSeries(timeframe, latest(timeframe) - 50 * timeframe * 60_000),
         };

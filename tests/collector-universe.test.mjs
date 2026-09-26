@@ -200,7 +200,7 @@ test("a failed watchlist read surfaces instead of silently emptying the universe
   assert.deepEqual(store.assigned, []);
 });
 
-test("startup bootstrap reconciles only in collector mode and only once per process", async () => {
+test("the first-request safety pass reconciles only in collector mode and only once per process", async () => {
   const bootstrapImports = {
     "@/integrations/supabase/client.server": stub(`
       export const supabaseAdmin = {

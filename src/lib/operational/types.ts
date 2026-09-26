@@ -1,4 +1,4 @@
-import type { Candle, TACandleResult } from "../market/providers.server";
+import type { Candle, CollectorTACandleHistory } from "../market/providers.server";
 import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
@@ -220,15 +220,18 @@ export interface OperationalStore {
   readCollectorSubscriptions(): Promise<string[]>;
   /**
    * Canonical completed candles the leased collector already persisted, read back
-   * for the application-owned completed-candle TA path (#20). While collector mode
-   * is active this replaces a second live exchange candle fetch; missing or stale
-   * history must surface as a visible TA failure, never a silent fallback.
+   * for the application-owned completed-candle TA path (#20). Each candle keeps the
+   * provenance the collector recorded (#24/#26) — endpoint, transport, candle close
+   * time, source event time and receive time — so the application never fabricates
+   * it. While collector mode is active this replaces a second live exchange candle
+   * fetch; missing or stale history must surface as a visible TA failure, never a
+   * silent fallback.
    */
   readCollectorTACandles(
     symbol: string,
     timeframeMinutes: number,
     limit?: number,
-  ): Promise<TACandleResult>;
+  ): Promise<CollectorTACandleHistory>;
   /** Canonical completed one-minute candles used to derive #71 normalization history. */
   readMovementCandleHistory(
     symbols: string[],

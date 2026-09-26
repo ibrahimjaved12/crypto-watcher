@@ -10,14 +10,15 @@ type ServerEntry = {
 
 let serverEntryPromise: Promise<ServerEntry> | undefined;
 
-// Once-per-process application-owned reconciliation of the collector's shared
-// subscription universe. It is loaded lazily so the server entry stays light, and it
-// never starts or hosts the collector itself (#82). Ongoing reconciliation is the
-// dedicated scheduled hook's responsibility.
-let collectorUniverseBootstrapped = false;
-function reconcileCollectorUniverseAtStartup(): void {
-  if (collectorUniverseBootstrapped) return;
-  collectorUniverseBootstrapped = true;
+// Best-effort first-request reconciliation of the collector's shared subscription
+// universe. This is only a safety net for a missed scheduled run — the initial and
+// ongoing reconciliation is the dedicated authenticated hook the deployment
+// schedules. It is loaded lazily so the server entry stays light, runs at most once
+// per process, and never starts or hosts the collector itself (#82).
+let collectorUniverseReconciled = false;
+function reconcileCollectorUniverseOnFirstRequest(): void {
+  if (collectorUniverseReconciled) return;
+  collectorUniverseReconciled = true;
   void import("./lib/market/collector-subscriptions.server")
     .then((module) => module.bootstrapCollectorUniverse())
     .catch((error) => {
@@ -68,7 +69,7 @@ export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
       validateServerEnvironment();
-      reconcileCollectorUniverseAtStartup();
+      reconcileCollectorUniverseOnFirstRequest();
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);

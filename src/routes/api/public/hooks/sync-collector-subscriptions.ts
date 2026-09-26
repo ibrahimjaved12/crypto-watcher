@@ -5,9 +5,11 @@ import { syncCollectorUniverse } from "@/lib/market/collector-subscriptions.serv
 
 /**
  * Application-owned reconciliation of the collector's shared subscription universe.
- * It is deliberately independent of `SCHEDULED_MONITOR_ENABLED`: the collector's
- * input must stay current even while scheduled monitoring is paused. The scheduler
- * authenticates the request; the app remains the only privileged Lovable reader.
+ * This authenticated hook is the initial and ongoing reconciliation mechanism the
+ * deployment schedules; the server's first-request pass is only a safety net. It is
+ * deliberately independent of `SCHEDULED_MONITOR_ENABLED`: the collector's input must
+ * stay current even while scheduled monitoring is paused. The scheduler authenticates
+ * the request; the app remains the only privileged Lovable reader.
  */
 async function handle(request: Request) {
   const unauthorized = await authenticateScheduledRequest(request);

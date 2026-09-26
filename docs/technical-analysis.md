@@ -14,15 +14,21 @@ For each enabled account and watched perpetual-futures contract, the monitor:
    the exchange provider normally, or from the operational collector store through
    the read-only adapter while `BINANCE_COLLECTOR_ENABLED=true`;
 3. sends at most eight target candles per frame to the authenticated FastAPI
-   `POST /v1/technical-analysis/batch` endpoint;
+   `POST /v1/technical-analysis/batch` endpoint, using the completed-candle source
+   event time the input recorded rather than a boundary recomputed from the candle
+   open;
 4. validates the complete versioned response and its contract, source, candle,
    evaluation, detection, and calculation-version fields; and
 5. idempotently inserts `ta_signals` using the unique key
-   `(user_id, symbol, timeframe, candle_at, version)`.
+   `(user_id, symbol, timeframe, candle_at, version)`, persisting the exact
+   per-candle endpoint and source event time that produced the conclusion.
 
 While the collector owns market data, the monitor never fetches a second live
 exchange candle series: missing or stale canonical collector history fails the
-affected frame visibly instead of falling back to another source. See
+affected frame visibly instead of falling back to another source. The read adapter
+carries each candle's recorded provenance — endpoint, transport, candle close time,
+source event time and receive time — so WebSocket live candles are never persisted
+with REST provenance. See
 [the collector design](./binance-futures-collector.md).
 
 FastAPI calls `market_analysis.technical.calculate_technical_analysis`, the same

@@ -147,10 +147,20 @@ test("the application owns the collector universe and completed-candle TA", asyn
   const privileged = hook.indexOf("integrations/supabase/client.server");
   assert.ok(skipped !== -1 && privileged !== -1 && skipped < privileged);
 
-  // The dedicated hook is authenticated but independent of scheduled monitoring.
+  // The dedicated hook is authenticated but independent of scheduled monitoring,
+  // and it is the initial/ongoing reconciliation mechanism the deployment schedules.
   const syncRoute = await read("../src/routes/api/public/hooks/sync-collector-subscriptions.ts");
   assert.match(syncRoute, /syncCollectorUniverse/);
   assert.doesNotMatch(syncRoute, /process\.env\["SCHEDULED_MONITOR_ENABLED"\]/);
+  assert.match(syncRoute, /initial and ongoing reconciliation mechanism/);
+
+  // The server's first-request pass is only a safety net: it never claims to be the
+  // primary lifecycle mechanism and never starts or hosts the collector itself.
+  const server = await read("../src/server.ts");
+  assert.match(server, /reconcileCollectorUniverseOnFirstRequest\(\)/);
+  assert.match(server, /bootstrapCollectorUniverse\(\)/);
+  assert.match(server, /only a safety net/);
+  assert.doesNotMatch(server, /reconcileCollectorUniverseAtStartup/);
 
   const engine = await read("../src/lib/monitor/engine.server.ts");
   // TA is no longer gated by collector ownership: TanStack keeps determining due
@@ -169,7 +179,36 @@ test("collector mode reads canonical completed candles instead of a second live 
   assert.match(engine, /BINANCE_COLLECTOR_ENABLED/);
   // The REST provider stays the non-collector path; while collector mode is active
   // the engine must not silently fall back to it.
-  assert.match(engine, /return context\.ta\(symbol, timeframe, validate, requestedSource\)/);
+  assert.match(engine, /await context\.ta\(symbol, timeframe, validate, requestedSource\)/);
+  // The versioned Python request and the persisted conclusion use the provenance the
+  // collector recorded, never a reconstructed endpoint or candle-open boundary.
+  assert.match(engine, /source_event_time_ms: candle\.sourceEventTime/);
+  assert.match(engine, /endpoint: candle\.endpoint/);
+  assert.match(engine, /source_event_at: new Date\(candle\.sourceEventTime\)\.toISOString\(\)/);
+  assert.doesNotMatch(engine, /source_event_time_ms: candle\.time \+ duration/);
+  assert.doesNotMatch(engine, /endpoint: generationMarket!\.endpoint/);
+  assert.doesNotMatch(engine, /retrievedAt: new Date\(\)\.toISOString\(\)/);
+});
+
+test("the operational TA read adapter transports provenance and fabricates nothing", async () => {
+  const repository = await read("../src/lib/operational/repository.server.ts");
+  // The adapter carries the collector's recorded endpoint/transport/source-event and
+  // receive times instead of reconstructing them.
+  assert.match(repository, /source_event_at_ms/);
+  assert.match(repository, /received_at_ms/);
+  assert.match(repository, /transport/);
+  assert.doesNotMatch(repository, /COLLECTOR_TA_ENDPOINT/);
+  assert.doesNotMatch(repository, /retrievedAt: new Date\(\)\.toISOString\(\)/);
+  // The collector records the completed-candle source event for both transports.
+  const collector = await read("../src/lib/market/collector.ts");
+  assert.match(
+    collector,
+    /sourceEventTime: completed \? completedSourceEventTime : sourceEventTime/,
+  );
+  assert.match(
+    collector,
+    /sourceEventTime,\n\s+receivedAt: Math\.max\(input\.retrievedAt, sourceEventTime\)/,
+  );
 });
 
 test("the collector worker validates operational-only runtime configuration", async () => {

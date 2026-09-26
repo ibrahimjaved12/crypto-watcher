@@ -26,9 +26,8 @@ outputText = outputText.replaceAll(
   JSON.stringify("./movement-buckets"),
   JSON.stringify(movementUrl),
 );
-const { BinanceFuturesCollector, candleIdentity } = await import(
-  `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`
-);
+const { BinanceFuturesCollector, candleIdentity, normalizeRestCandles, parseBinanceMarketMessage } =
+  await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 
 const BASE = 1_800_000_000_000;
 const intervals = [1, 15, 60, 240];
@@ -50,8 +49,10 @@ function canonical(symbol, timeframeMinutes, openTime, transport = "rest") {
     low: 99,
     close: 101,
     volume: 12,
-    sourceEventTime: openTime + duration - 1,
-    receivedAt: BASE,
+    // A completed candle's canonical source event is the kline-close boundary for
+    // both transports; the collector receive time stays distinct.
+    sourceEventTime: openTime + duration,
+    receivedAt: Math.max(BASE, openTime + duration),
     transport,
   };
 }
@@ -308,4 +309,51 @@ test("per-symbol source status reflects collector health for the movement gate",
   collector.accept(wsKline(BASE - 60_000));
   await collector.waitForIdle();
   assert.equal(collector.symbolSourceStatus("BTCUSDT"), "LIVE");
+});
+
+test("completed candles record the canonical source event and keep close/receive times", () => {
+  const duration = 60_000;
+  const openTime = BASE - duration;
+
+  // REST bootstrap/recovery: the exchange close time and the collector receive time
+  // are preserved, while the completed-candle source event is the kline-close
+  // boundary so it matches the versioned Python/immutable-conclusion contract.
+  const rest = normalizeRestCandles({
+    symbol: "BTCUSDT",
+    timeframeMinutes: 1,
+    candles: [
+      {
+        time: openTime,
+        open: 100,
+        high: 102,
+        low: 99,
+        close: 101,
+        volume: 12,
+        complete: true,
+      },
+    ],
+    retrievedAt: BASE,
+  })[0];
+  assert.equal(rest.transport, "rest");
+  assert.equal(rest.endpoint, "/fapi/v1/klines");
+  assert.equal(rest.openTime, openTime);
+  assert.equal(rest.closeTime, openTime + duration - 1);
+  assert.equal(rest.sourceEventTime, openTime + duration);
+  assert.equal(rest.receivedAt, Math.max(BASE, openTime + duration));
+
+  // WebSocket live: the raw event time bounds the receive time, the completed
+  // candle's source event is still the boundary, and the transport/endpoint are kept.
+  const completed = parseBinanceMarketMessage(wsKline(openTime, 1, true), BASE);
+  assert.equal(completed.kind, "completed");
+  assert.equal(completed.candle.transport, "websocket");
+  assert.equal(completed.candle.endpoint, "wss://fstream.binance.com/market/stream");
+  assert.equal(completed.candle.closeTime, openTime + duration - 1);
+  assert.equal(completed.candle.sourceEventTime, openTime + duration);
+  assert.equal(completed.candle.receivedAt, Math.max(BASE, openTime + duration));
+
+  // A developing candle keeps the live event time instead of a future boundary.
+  const developing = parseBinanceMarketMessage(wsKline(openTime, 1, false), BASE);
+  assert.equal(developing.kind, "developing");
+  assert.equal(developing.candle.sourceEventTime, openTime + duration);
+  assert.equal(developing.candle.receivedAt, BASE);
 });

@@ -46,9 +46,10 @@ export function collectorUniverse(
 
 /**
  * Application-owned reconciliation of the collector's subscription universe. It is
- * independent of scheduled monitoring: it runs on its own authenticated hook and at
- * application startup, so the collector cannot be left empty or stale by a disabled
- * monitor cron. The worker never reads Lovable itself.
+ * independent of scheduled monitoring: the dedicated authenticated hook
+ * (`/api/public/hooks/sync-collector-subscriptions`) is the initial and ongoing
+ * mechanism the deployment schedules, so the collector cannot be left empty or stale
+ * by a disabled monitor cron. The worker never reads Lovable itself.
  */
 export async function syncCollectorUniverse(
   supabaseAdmin: Client,
@@ -97,10 +98,10 @@ export async function syncCollectorUniverse(
 let bootstrap: Promise<void> | null = null;
 
 /**
- * Best-effort once-per-process reconciliation so an application or worker restart
- * cannot leave the collector's shared universe empty or stale. Ongoing reconciliation
- * stays the dedicated scheduled hook's responsibility; this only covers startup and
- * never starts or hosts the collector itself.
+ * Best-effort first-request reconciliation. This is only a safety net for a missed
+ * scheduled run: the initial and ongoing reconciliation is the dedicated
+ * authenticated hook the deployment schedules. It runs at most once per process and
+ * never starts or hosts the collector itself (#82).
  */
 export function bootstrapCollectorUniverse(
   env: Record<string, string | undefined> = process.env,

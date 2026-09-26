@@ -7,9 +7,10 @@ operational database are enabled. The application owns user watchlists; it deriv
 watched contracts and assigns that set to the operational database as collector input, and the
 worker reads it there rather than querying Lovable user tables. That reconciliation is
 application-owned and independent of scheduled monitoring: the dedicated authenticated
-`/api/public/hooks/sync-collector-subscriptions` hook and a once-per-process application startup
-bootstrap keep the set current, so pausing scheduled monitoring never leaves the collector empty or
-stale. A renewable operational-database
+`/api/public/hooks/sync-collector-subscriptions` hook is the initial and ongoing mechanism the
+deployment schedules, and the server's best-effort first-request pass is only a safety net for a
+missed run, so pausing scheduled monitoring never leaves the collector empty or stale. A renewable
+operational-database
 lease prevents two worker instances from acting as authoritative collectors. The TanStack
 application server does not start the collector: importing or starting the app never opens a market
 stream. Production hosting for the worker remains an open decision in
@@ -28,11 +29,14 @@ trade history is retained for simulated execution. Add either only with its cons
 
 Binance-native klines are canonical. Exchange open and close timestamps identify a candle.
 Developing (`x=false`) updates stay only in bounded process memory. Final (`x=true`) candles are
-normalized and inserted idempotently into the operational database. The worker owns no TA: the
-application's completed-candle orchestration determines due work, reads canonical completed candles
-back from the operational store (`readCollectorTACandles`) rather than fetching a second live
-exchange series, calls the shared Python service, validates the response, and writes conclusions to
-Lovable. The direct 15m/1h/4h streams remain
+normalized and inserted idempotently into the operational database. Each persisted completed candle
+keeps the exchange kline close time, the collector receive time, and the canonical completed-candle
+source event (the kline-close boundary) as distinct fields, together with its exact endpoint and
+transport, so a WebSocket live candle is never recorded with REST provenance and vice versa. The
+worker owns no TA: the application's completed-candle orchestration determines due work, reads
+canonical completed candles back from the operational store (`readCollectorTACandles`) rather than
+fetching a second live exchange series, calls the shared Python service, validates the response, and
+writes conclusions to Lovable. The direct 15m/1h/4h streams remain
 authoritative; they are not assembled from 1m data. Spot or non-USD-M events are rejected.
 
 The endpoint and operating limits were checked against Binance documentation on 2026-09-25:
@@ -49,7 +53,10 @@ The WebSocket implementation answers protocol ping frames automatically.
 ## Bootstrap, recovery, and bounds
 
 For each contract/timeframe, startup loads recent completed `/fapi/v1/klines` history and excludes
-the still-developing REST candle. A skipped final interval changes health to `RECOVERING`, fetches
+the still-developing REST candle. REST bootstrap/recovery has no exchange event, so the recorded
+completed-candle source event is the exchange kline-close boundary; the kline's own close time and
+the collector receive time are stored separately. A skipped final interval changes health to
+`RECOVERING`, fetches
 only the bounded missing range, verifies exact chronological continuity, deduplicates REST/WS
 overlap in the database, and processes the incoming live final last. An unprovable or over-1,000
 candle gap becomes `UNAVAILABLE`.
@@ -84,7 +91,9 @@ With the collector enabled, `collector_recent_candles`, `collector_health`, and 
 in the operational database are the only shared completed-candle/checkpoint working-state path, and
 `collector_subscriptions` holds the application-assigned subscription universe. The old
 request-driven per-user operational candle/checkpoint writes are disabled. The application reads
-canonical completed candles back through `get_collector_ta_candles` for its own TA input; missing or
+canonical completed candles back through `get_collector_ta_candles` for its own TA input; the read
+transports each candle's recorded endpoint, transport, close time, source event time and receive
+time rather than reconstructing them, and missing or
 stale operational history fails the affected TA frame visibly instead of falling back to a live
 exchange series. Lovable remains
 authoritative for watchlists, settings, movement state/alerts, and permanent TA conclusions, and it
@@ -93,8 +102,9 @@ settings or writes TA. No candle is dual-written to Lovable.
 
 Apply `operational-db/supabase/migrations/20260925120000_binance_collector.sql`,
 `operational-db/supabase/migrations/20260926120000_collector_subscriptions.sql`,
-`operational-db/supabase/migrations/20260926130000_collector_ta_candles.sql`, and
-`operational-db/supabase/migrations/20260926140000_collector_candle_retention.sql` only to the
+`operational-db/supabase/migrations/20260926130000_collector_ta_candles.sql`,
+`operational-db/supabase/migrations/20260926140000_collector_candle_retention.sql`, and
+`operational-db/supabase/migrations/20260926150000_collector_ta_candle_provenance.sql` only to the
 external operational database. The retention migration keeps each canonical series' newest 260
 completed candles even when that spans more than the day window, so the longest TA frame always has
 enough canonical history. Set this server-only flag (never a `VITE_*` variable) on both the

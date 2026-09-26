@@ -27,14 +27,20 @@ Lovable. Completed candles have no Lovable copy. The application derives the col
 subscription universe from Lovable watchlists and assigns it as operational input; that set is
 derived collector state, never a second watchlist authority. Reconciliation of that set is
 application-owned and independent of `SCHEDULED_MONITOR_ENABLED`: the dedicated
-`/api/public/hooks/sync-collector-subscriptions` hook and a once-per-process application startup
-bootstrap keep it current, and the scheduled monitor route never reads Lovable while disabled.
+`/api/public/hooks/sync-collector-subscriptions` hook is the initial and ongoing mechanism the
+deployment schedules, and the server's best-effort first-request pass is only a safety net for a
+missed run. The scheduled monitor route never reads Lovable while disabled.
 
 While `BINANCE_COLLECTOR_ENABLED=true`, the application's completed-candle TA reads canonical
 completed candles from this operational store through `readCollectorTACandles` instead of fetching
-a second live exchange candle series. Missing or stale operational history fails the affected TA
-frame visibly; it is never silently substituted with another calculator or live source. TanStack
-still determines due work, calls the shared Python contract, validates responses, and is the sole
+a second live exchange candle series. The read carries the collector's recorded per-candle
+provenance — exact provider/instrument identity, endpoint, transport, candle open/close time,
+source event time, receive time, and OHLCV — and never reconstructs an endpoint or retrieval time.
+A single series can mix WebSocket live candles with REST bootstrap/recovery candles, so the
+endpoint and transport are per candle: `/fapi/v1/klines` is recorded only for actual REST rows.
+Missing or stale operational history fails the affected TA frame visibly; it is never silently
+substituted with another calculator or live source. TanStack still determines due work, builds the
+versioned Python request from that persisted evidence, validates responses, and is the sole
 privileged `ta_signals` writer in Lovable.
 
 ## Configuration and migrations

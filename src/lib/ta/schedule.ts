@@ -11,7 +11,11 @@ export function outcomeDue(detectedAt: string, timeframe: number) {
 }
 
 /** Validates provider data before it crosses the Python service boundary. */
-export function completedCandles(input: Candle[], minutes: number, now = Date.now()) {
+export function completedCandles<T extends Candle>(
+  input: T[],
+  minutes: number,
+  now = Date.now(),
+): T[] {
   const duration = minutes * 60_000;
   const candles = input
     .filter((candle) => candle.complete && candle.time + duration <= now)

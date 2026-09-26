@@ -122,6 +122,11 @@ export function normalizeRestCandles(input: {
         throw new Error("invalid REST candle boundary");
       }
       const closeTime = candle.time + duration - 1;
+      // REST bootstrap/recovery carries no exchange event, so the completed-candle
+      // source event is the exchange kline-close boundary. The kline's own close
+      // time (closeTime) and the collector receive time (receivedAt) stay distinct
+      // so #26 provenance survives into the application-owned TA path.
+      const sourceEventTime = candle.time + duration;
       return {
         ...canonicalBase(input.symbol, input.timeframeMinutes),
         endpoint: BINANCE_USDM_REST_ENDPOINT,
@@ -132,8 +137,8 @@ export function normalizeRestCandles(input: {
         low: finitePositive(candle.low, "low price"),
         close: finitePositive(candle.close, "close price"),
         volume: finiteNonnegative(candle.volume, "volume"),
-        sourceEventTime: closeTime,
-        receivedAt: Math.max(input.retrievedAt, closeTime),
+        sourceEventTime,
+        receivedAt: Math.max(input.retrievedAt, sourceEventTime),
         transport: "rest" as const,
       };
     });
@@ -189,6 +194,11 @@ export function parseBinanceMarketMessage(
     throw new Error("invalid kline boundary");
   }
   const sourceEventTime = safeTimestamp(value["E"], "event time");
+  const completed = kline["x"] === true;
+  // A completed candle's canonical source event is the exchange kline-close
+  // boundary; a developing candle keeps the live event time so lag/health stay
+  // meaningful. The raw exchange event time bounds the collector receive time.
+  const completedSourceEventTime = openTime + duration;
   const candle: CollectorCandle = {
     ...canonicalBase(symbol, timeframeMinutes),
     endpoint: BINANCE_USDM_WS_ENDPOINT,
@@ -199,11 +209,11 @@ export function parseBinanceMarketMessage(
     low: finitePositive(kline["l"], "low price"),
     close: finitePositive(kline["c"], "close price"),
     volume: finiteNonnegative(kline["v"], "volume"),
-    sourceEventTime,
-    receivedAt: Math.max(receivedAt, sourceEventTime),
+    sourceEventTime: completed ? completedSourceEventTime : sourceEventTime,
+    receivedAt: Math.max(receivedAt, sourceEventTime, completedSourceEventTime),
     transport: "websocket",
   };
-  return { kind: kline["x"] === true ? "completed" : "developing", candle };
+  return { kind: completed ? "completed" : "developing", candle };
 }
 
 class TradeBuffer {

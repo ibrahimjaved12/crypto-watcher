@@ -14,7 +14,7 @@ import type {
   StorageDiagnostics,
 } from "./types";
 import type { MovementCandle } from "../market/market-movement-state";
-import type { Candle, FuturesContract, TACandleResult } from "../market/providers.server";
+import type { CollectorTACandle, FuturesContract } from "../market/providers.server";
 import { futuresInstrument, MARKET_PRICE_TYPE, MARKET_SOURCE } from "../market/symbols";
 import type {
   ConfirmedMarketDirection,
@@ -25,8 +25,7 @@ import type { MarketEpisodeTransitionType } from "../market/market-episode-lifec
 
 type RpcClient = Pick<SupabaseClient, "from" | "rpc">;
 
-/** Canonical Binance USD-M klines identity shared by the REST and collector paths. */
-const COLLECTOR_TA_ENDPOINT = "/fapi/v1/klines";
+/** Canonical completed collector-candle read bound shared by the TA adapter. */
 const COLLECTOR_TA_LIMIT = 260;
 
 function createOperationalFetch(serviceRoleKey: string): typeof fetch {
@@ -348,37 +347,63 @@ export function createOperationalStore(
         p_limit: limit,
       });
       rpcError(error, "collector TA candle read");
-      const rows = Array.isArray(data) ? (data as unknown[]) : [];
-      const candles: Candle[] = [];
-      for (const row of rows) {
-        if (!Array.isArray(row) || row.length < 6) {
-          throw new Error("Operational database returned an invalid collector TA candle row");
-        }
-        const [time, open, high, low, close, volume] = row.map(Number);
+      const rows = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [];
+      // The adapter only transports the collector's recorded provenance. It never
+      // reconstructs an endpoint, a retrieval time, or a source event time: a row
+      // that is not exactly what the collector persisted fails visibly.
+      const candles: CollectorTACandle[] = rows.map((row) => {
+        const openTime = Number(row["open_time_ms"]);
+        const closeTime = Number(row["close_time_ms"]);
+        const sourceEventTime = Number(row["source_event_at_ms"]);
+        const receivedAt = Number(row["received_at_ms"]);
+        const [open, high, low, close, volume] = [
+          row["open"],
+          row["high"],
+          row["low"],
+          row["close"],
+          row["volume"],
+        ].map(Number);
+        const nativeSymbol = row["native_symbol"];
+        const endpoint = row["endpoint"];
+        const transport = row["transport"];
         if (
-          !Number.isSafeInteger(time) ||
+          row["provider"] !== MARKET_SOURCE ||
+          row["price_type"] !== MARKET_PRICE_TYPE ||
+          row["instrument_id"] !== `${MARKET_SOURCE}:${String(nativeSymbol)}` ||
+          (transport !== "rest" && transport !== "websocket") ||
+          typeof endpoint !== "string" ||
+          endpoint.length === 0 ||
+          ![openTime, closeTime, sourceEventTime, receivedAt].every(Number.isSafeInteger) ||
           ![open, high, low, close, volume].every(Number.isFinite) ||
           low! <= 0 ||
-          volume! < 0
+          volume! < 0 ||
+          high! < Math.max(open!, close!) ||
+          low! > Math.min(open!, close!) ||
+          closeTime <= openTime ||
+          sourceEventTime < closeTime ||
+          receivedAt < sourceEventTime
         ) {
           throw new Error("Operational database returned an invalid collector TA candle row");
         }
-        candles.push({
-          time: time!,
+        return {
+          time: openTime,
           open: open!,
           high: high!,
           low: low!,
           close: close!,
           volume: volume!,
           complete: true,
-        });
-      }
+          closeTime,
+          sourceEventTime,
+          receivedAt,
+          endpoint,
+          transport,
+        };
+      });
       return {
         source: MARKET_SOURCE,
         instrument: collectorInstrument(symbol),
-        endpoint: COLLECTOR_TA_ENDPOINT,
         priceType: MARKET_PRICE_TYPE,
-        retrievedAt: new Date().toISOString(),
         candles,
       };
     },

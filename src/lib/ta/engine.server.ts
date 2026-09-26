@@ -4,7 +4,8 @@ import type { Database, Json } from "@/integrations/supabase/types";
 import { createMonitorRunContext, type MonitorRunContext } from "../monitor/run-context";
 import { calculateTechnicalBatch } from "./python-client.server";
 import { requestCandles, type TechnicalAnalysisRequest } from "./python-contract";
-import { MARKET_SOURCE } from "../market/symbols";
+import { MARKET_SOURCE, type MarketSource } from "../market/symbols";
+import type { Candle, FuturesContract, TACandleResult } from "../market/providers.server";
 import {
   completedCandles,
   outcomeDue,
@@ -33,6 +34,21 @@ type OutcomePatch = {
   outcome_at: string | null;
   outcome_price: number | null;
   return_pct: number | null;
+};
+
+/**
+ * A completed candle with the provenance needed to build a versioned Python request
+ * and to persist an immutable conclusion (#24). Collector candles carry the
+ * endpoint/source event time the collector recorded; REST provider candles carry the
+ * provider endpoint and the completed-candle close boundary.
+ */
+type MarketCandle = Candle & { endpoint: string; sourceEventTime: number };
+
+type MarketHistory = {
+  source: MarketSource;
+  instrument: FuturesContract;
+  priceType: string;
+  candles: MarketCandle[];
 };
 
 /** At most eight missed candles per frame are recovered in one run. */
@@ -111,28 +127,55 @@ export async function runTA(
           return;
         }
 
-        const validate = (candles: Parameters<typeof completedCandles>[0]) => {
+        const validate = (candles: Candle[]) => {
           completedCandles(candles, timeframe, now);
         };
-        const loadMarket = async (requestedSource?: string) => {
+        // Collector mode transports the collector's recorded provenance (#24/#26);
+        // the REST provider path stays the non-collector source and keeps the
+        // completed-candle close boundary as its source event time.
+        const loadMarket = async (
+          requestedSource?: string,
+        ): Promise<{ market: MarketHistory; provider: TACandleResult | null }> => {
           if (collectorStore) {
             if (requestedSource && requestedSource !== MARKET_SOURCE) {
               throw new Error(
                 `Collector owns ${MARKET_SOURCE} candles; ${requestedSource} history is unavailable`,
               );
             }
-            const market = await collectorStore.readCollectorTACandles(symbol, timeframe);
-            validate(market.candles);
-            return market;
+            const history = await collectorStore.readCollectorTACandles(symbol, timeframe);
+            validate(history.candles);
+            return {
+              market: {
+                source: history.source,
+                instrument: history.instrument,
+                priceType: history.priceType,
+                candles: history.candles,
+              },
+              provider: null,
+            };
           }
-          return context.ta(symbol, timeframe, validate, requestedSource);
+          const provider = await context.ta(symbol, timeframe, validate, requestedSource);
+          return {
+            market: {
+              source: provider.source,
+              instrument: provider.instrument,
+              priceType: provider.priceType,
+              candles: provider.candles.map((value) => ({
+                ...value,
+                endpoint: provider.endpoint,
+                sourceEventTime: value.time + duration,
+              })),
+            },
+            provider,
+          };
         };
-        let generationMarket: Awaited<ReturnType<MonitorRunContext["ta"]>> | undefined;
+        let generationMarket: MarketHistory | undefined;
 
         if (generationDue) {
-          generationMarket = await loadMarket();
+          const loaded = await loadMarket();
+          generationMarket = loaded.market;
           const candles = completedCandles(generationMarket.candles, timeframe, now);
-          if (operationalStore?.enabled && !collectorStore) {
+          if (operationalStore?.enabled && !collectorStore && loaded.provider) {
             context.metrics.databaseWriteAttempts += 1;
             const nativeSymbol = sourceNativeSymbol(generationMarket.source, symbol);
             await operationalStore.recordCandles({
@@ -141,10 +184,10 @@ export async function runTA(
               symbol,
               nativeSymbol,
               source: generationMarket.source,
-              endpoint: generationMarket.endpoint,
+              endpoint: loaded.provider.endpoint,
               priceType: generationMarket.priceType,
               timeframeMinutes: timeframe,
-              retrievedAt: generationMarket.retrievedAt,
+              retrievedAt: loaded.provider.retrievedAt,
               candles,
             });
           }
@@ -179,7 +222,7 @@ export async function runTA(
             warmup_candles: [],
             missing_open_times_ms: [],
             source: generationMarket!.source,
-            source_event_time_ms: candle.time + duration,
+            source_event_time_ms: candle.sourceEventTime,
             evaluation_time_ms: now,
             detection_time_ms: now,
             price_type: "trade",
@@ -203,7 +246,7 @@ export async function runTA(
               result.timeframe_minutes !== timeframe ||
               result.candle_open_time_ms !== candle.time ||
               result.candle_close_time_ms !== candle.time + duration ||
-              result.source_event_time_ms !== candle.time + duration ||
+              result.source_event_time_ms !== candle.sourceEventTime ||
               result.evaluation_time_ms !== now ||
               result.detection_time_ms !== now ||
               result.ta_version !== TA_VERSION ||
@@ -240,12 +283,12 @@ export async function runTA(
               source_native_symbol: result.provenance.native_symbol,
               timeframe,
               source: generationMarket!.source,
-              endpoint: generationMarket!.endpoint,
+              endpoint: candle.endpoint,
               price_type: generationMarket!.priceType,
               version: result.ta_version,
               strategy_version: result.strategy_version,
               candle_at: new Date(result.candle_open_time_ms).toISOString(),
-              source_event_at: new Date(result.source_event_time_ms).toISOString(),
+              source_event_at: new Date(candle.sourceEventTime).toISOString(),
               evaluated_at: new Date(result.evaluation_time_ms).toISOString(),
               detected_at: new Date(result.detection_time_ms).toISOString(),
               price: result.indicators.candle.close,
@@ -290,7 +333,9 @@ export async function runTA(
             continue;
           }
           const market =
-            generationMarket?.source === source ? generationMarket : await loadMarket(source);
+            generationMarket?.source === source
+              ? generationMarket
+              : (await loadMarket(source)).market;
           const history = completedCandles(market.candles, timeframe, now);
           for (const row of relevant) {
             const target = outcomeDue(row.detected_at, timeframe);
