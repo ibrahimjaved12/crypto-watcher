@@ -10,13 +10,20 @@ only database writer.
 For each enabled account and watched perpetual-futures contract, the monitor:
 
 1. asks PostgreSQL which 15m, 1h, and 4h candles and forward outcomes are due;
-2. fetches 250 trade-price candles only for frames with due work;
+2. loads completed trade-price candle history only for frames with due work — from
+   the exchange provider normally, or from the operational collector store through
+   the read-only adapter while `BINANCE_COLLECTOR_ENABLED=true`;
 3. sends at most eight target candles per frame to the authenticated FastAPI
    `POST /v1/technical-analysis/batch` endpoint;
 4. validates the complete versioned response and its contract, source, candle,
    evaluation, detection, and calculation-version fields; and
 5. idempotently inserts `ta_signals` using the unique key
    `(user_id, symbol, timeframe, candle_at, version)`.
+
+While the collector owns market data, the monitor never fetches a second live
+exchange candle series: missing or stale canonical collector history fails the
+affected frame visibly instead of falling back to another source. See
+[the collector design](./binance-futures-collector.md).
 
 FastAPI calls `market_analysis.technical.calculate_technical_analysis`, the same
 pure function used by manual Python analysis and `market_analysis.replay`. It has

@@ -137,18 +137,39 @@ test("the collector runtime has no direct Lovable application dependency", async
   assert.match(source, /readCollectorSubscriptions\(\)/);
 });
 
-test("the application assigns the shared collector universe and keeps TA ownership", async () => {
+test("the application owns the collector universe and completed-candle TA", async () => {
+  // The scheduled monitor hook must not reconcile the collector universe: #22
+  // requires a disabled request to return before loading the privileged client, so
+  // the universe is reconciled by a dedicated hook instead.
   const hook = await read("../src/routes/api/public/hooks/monitor-prices.ts");
-  assert.match(hook, /select\("user_id, symbol"\)/);
-  assert.match(hook, /assignCollectorSubscriptions/);
+  assert.doesNotMatch(hook, /assignCollectorSubscriptions/);
+  const skipped = hook.indexOf("Scheduled monitoring disabled");
+  const privileged = hook.indexOf("integrations/supabase/client.server");
+  assert.ok(skipped !== -1 && privileged !== -1 && skipped < privileged);
+
+  // The dedicated hook is authenticated but independent of scheduled monitoring.
+  const syncRoute = await read("../src/routes/api/public/hooks/sync-collector-subscriptions.ts");
+  assert.match(syncRoute, /syncCollectorUniverse/);
+  assert.doesNotMatch(syncRoute, /process\.env\["SCHEDULED_MONITOR_ENABLED"\]/);
 
   const engine = await read("../src/lib/monitor/engine.server.ts");
   // TA is no longer gated by collector ownership: TanStack keeps determining due
   // completed-candle work and stays the privileged Lovable `ta_signals` writer.
   assert.doesNotMatch(engine, /completed_candle_ta_enabled\s*&&\s*!sharedCollectorOwnsMarketData/);
   assert.match(engine, /if \(settings\.completed_candle_ta_enabled\) \{/);
-  assert.match(engine, /runTA\(/);
-  assert.match(engine, /sharedCollectorOwnsMarketData \? null : operationalStore/);
+  assert.match(
+    engine,
+    /runTA\(supabaseAdmin, userId, symbol, context, undefined, operationalStore\)/,
+  );
+});
+
+test("collector mode reads canonical completed candles instead of a second live series", async () => {
+  const engine = await read("../src/lib/ta/engine.server.ts");
+  assert.match(engine, /readCollectorTACandles\(symbol, timeframe\)/);
+  assert.match(engine, /BINANCE_COLLECTOR_ENABLED/);
+  // The REST provider stays the non-collector path; while collector mode is active
+  // the engine must not silently fall back to it.
+  assert.match(engine, /return context\.ta\(symbol, timeframe, validate, requestedSource\)/);
 });
 
 test("the collector worker validates operational-only runtime configuration", async () => {
@@ -178,6 +199,19 @@ test("the operational store maps the collector subscription RPCs", async () => {
       "./config.server": stub(
         `export function operationalDbConfig() { throw new Error("unused"); }`,
       ),
+      "../market/symbols": stub(`
+        export const MARKET_SOURCE = "binance-usdm";
+        export const MARKET_PRICE_TYPE = "trade";
+        export function futuresInstrument(symbol) {
+          const native = symbol.toUpperCase();
+          return {
+            id: "binance-usdm:" + native, exchange: "binance", nativeSymbol: native,
+            marketType: "futures", contractType: "perpetual",
+            baseAsset: native.replace(/USDT$/, ""), quoteAsset: "USDT", marginAsset: "USDT",
+            settlementAsset: "USDT", linear: true, contractMultiplier: 1,
+          };
+        }
+      `),
     })
   );
   const store = module.createOperationalStore(client, {
@@ -192,4 +226,8 @@ test("the operational store maps the collector subscription RPCs", async () => {
   ]);
   assert.deepEqual(await store.readCollectorSubscriptions(), ["BTCUSDT", "ETHUSDT"]);
   assert.equal(calls[1][0], "get_collector_subscriptions");
+  // The application reads canonical collector candles back through the same adapter.
+  await store.readCollectorTACandles("btcusdt", 15);
+  assert.equal(calls[2][0], "get_collector_ta_candles");
+  assert.deepEqual(calls[2][1], { p_symbol: "BTCUSDT", p_timeframe_minutes: 15, p_limit: 260 });
 });

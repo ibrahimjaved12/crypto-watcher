@@ -203,20 +203,13 @@ export async function runMonitorForUser(
   const taErrors: string[] = [];
   if (settings.completed_candle_ta_enabled) {
     // Completed-candle TA stays application-owned (#20): TanStack determines due
-    // work, calls the shared Python calculation path, validates responses, and is
-    // the privileged Lovable `ta_signals` writer. The collector worker only
-    // ingests market data, so it never owns TA. When the collector owns canonical
-    // candles, the app does not duplicate them in its per-user candle store.
+    // work, reads canonical completed candles (the operational collector store when
+    // the collector owns market data, otherwise the exchange provider), calls the
+    // shared Python calculation path, validates responses, and is the privileged
+    // Lovable `ta_signals` writer. The collector worker never owns TA.
     for (const symbol of symbols) {
       taErrors.push(
-        ...(await runTA(
-          supabaseAdmin,
-          userId,
-          symbol,
-          context,
-          undefined,
-          sharedCollectorOwnsMarketData ? null : operationalStore,
-        )),
+        ...(await runTA(supabaseAdmin, userId, symbol, context, undefined, operationalStore)),
       );
     }
   }

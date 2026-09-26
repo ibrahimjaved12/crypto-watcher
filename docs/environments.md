@@ -125,7 +125,7 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `PYTHON_ANALYSIS_ENABLED`                         | TanStack                            | `false`; explicit `true` enables manual analysis and scheduled TA calculations                          |
 | `PYTHON_ANALYSIS_URL`                             | TanStack                            | `http://127.0.0.1:8000`; required when enabled                                                          |
 | `PYTHON_ANALYSIS_TOKEN`                           | TanStack + FastAPI secret           | Empty/disabled; matching 32–256 URL-safe characters required when enabled                               |
-| `MONITOR_CRON_TOKEN`                              | Scheduler caller + TanStack secret  | Empty; required for the public monitor hook                                                             |
+| `MONITOR_CRON_TOKEN`                              | Scheduler caller + TanStack secret  | Empty; required for the public monitor and collector-universe hooks                                     |
 | `LOVABLE_CRON_SECRET`                             | Lovable scheduler + TanStack secret | Empty; used by Lovable cron authentication                                                              |
 | `LOVABLE_CRON_SECRET_PREVIOUS`                    | TanStack secret                     | Empty; optional rotation overlap                                                                        |
 | `SCHEDULED_MONITOR_ENABLED`                       | TanStack                            | `false`                                                                                                 |
@@ -148,6 +148,11 @@ configuration, so one built artifact stays host-independent. Only the TanStack
 application additionally proves its runtime matches the browser bundle it serves and owns
 the main-database credentials. See
 [the collector design](./binance-futures-collector.md).
+
+The scheduled monitor hook and the collector-universe reconciliation hook authenticate with
+`MONITOR_CRON_TOKEN` or the platform cron secret. Reconciling the collector's shared
+subscription universe does not depend on `SCHEDULED_MONITOR_ENABLED`; disabling scheduled
+monitoring never leaves the collector empty or stale.
 
 ## Actions and services
 

@@ -4,6 +4,7 @@ import type { Database, Json } from "@/integrations/supabase/types";
 import { createMonitorRunContext, type MonitorRunContext } from "../monitor/run-context";
 import { calculateTechnicalBatch } from "./python-client.server";
 import { requestCandles, type TechnicalAnalysisRequest } from "./python-contract";
+import { MARKET_SOURCE } from "../market/symbols";
 import {
   completedCandles,
   outcomeDue,
@@ -80,6 +81,15 @@ export async function runTA(
   const work = (data ?? []) as DueWork[];
   const errors: string[] = [];
 
+  // While the leased collector owns market data, canonical completed candles come
+  // from the operational store it writes. The application reads that history
+  // instead of fetching a second live exchange TA series; missing or stale history
+  // fails visibly rather than falling back to another calculator or data source.
+  const collectorStore =
+    operationalStore?.enabled && process.env["BINANCE_COLLECTOR_ENABLED"] === "true"
+      ? operationalStore
+      : null;
+
   await Promise.all(
     TA_FRAMES.map(async (timeframe) => {
       try {
@@ -104,12 +114,25 @@ export async function runTA(
         const validate = (candles: Parameters<typeof completedCandles>[0]) => {
           completedCandles(candles, timeframe, now);
         };
+        const loadMarket = async (requestedSource?: string) => {
+          if (collectorStore) {
+            if (requestedSource && requestedSource !== MARKET_SOURCE) {
+              throw new Error(
+                `Collector owns ${MARKET_SOURCE} candles; ${requestedSource} history is unavailable`,
+              );
+            }
+            const market = await collectorStore.readCollectorTACandles(symbol, timeframe);
+            validate(market.candles);
+            return market;
+          }
+          return context.ta(symbol, timeframe, validate, requestedSource);
+        };
         let generationMarket: Awaited<ReturnType<MonitorRunContext["ta"]>> | undefined;
 
         if (generationDue) {
-          generationMarket = await context.ta(symbol, timeframe, validate);
+          generationMarket = await loadMarket();
           const candles = completedCandles(generationMarket.candles, timeframe, now);
-          if (operationalStore?.enabled) {
+          if (operationalStore?.enabled && !collectorStore) {
             context.metrics.databaseWriteAttempts += 1;
             const nativeSymbol = sourceNativeSymbol(generationMarket.source, symbol);
             await operationalStore.recordCandles({
@@ -251,10 +274,23 @@ export async function runTA(
         const patches: OutcomePatch[] = [];
         for (const source of new Set(pending.map((row) => row.source))) {
           const relevant = pending.filter((row) => row.source === source);
+          if (collectorStore && source !== MARKET_SOURCE) {
+            // Collector mode holds no canonical history for another provider, so the
+            // outcome is recorded as visibly unavailable rather than measured from a
+            // silently substituted live series.
+            for (const row of relevant) {
+              patches.push({
+                id: row.id,
+                outcome_status: "unavailable",
+                outcome_at: null,
+                outcome_price: null,
+                return_pct: null,
+              });
+            }
+            continue;
+          }
           const market =
-            generationMarket?.source === source
-              ? generationMarket
-              : await context.ta(symbol, timeframe, validate, source);
+            generationMarket?.source === source ? generationMarket : await loadMarket(source);
           const history = completedCandles(market.candles, timeframe, now);
           for (const row of relevant) {
             const target = outcomeDue(row.detected_at, timeframe);

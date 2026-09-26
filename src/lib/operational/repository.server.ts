@@ -14,6 +14,8 @@ import type {
   StorageDiagnostics,
 } from "./types";
 import type { MovementCandle } from "../market/market-movement-state";
+import type { Candle, FuturesContract, TACandleResult } from "../market/providers.server";
+import { futuresInstrument, MARKET_PRICE_TYPE, MARKET_SOURCE } from "../market/symbols";
 import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
@@ -22,6 +24,10 @@ import type {
 import type { MarketEpisodeTransitionType } from "../market/market-episode-lifecycle";
 
 type RpcClient = Pick<SupabaseClient, "from" | "rpc">;
+
+/** Canonical Binance USD-M klines identity shared by the REST and collector paths. */
+const COLLECTOR_TA_ENDPOINT = "/fapi/v1/klines";
+const COLLECTOR_TA_LIMIT = 260;
 
 function createOperationalFetch(serviceRoleKey: string): typeof fetch {
   return (input, init) => {
@@ -85,6 +91,9 @@ const disabledStore: OperationalStore = {
   async readCollectorSubscriptions() {
     return [];
   },
+  async readCollectorTACandles() {
+    throw new Error("Operational collector ownership is disabled");
+  },
   async readMovementCandleHistory() {
     return new Map<string, MovementCandle[]>();
   },
@@ -129,6 +138,20 @@ function nativeSymbol(source: string, symbol: string) {
   if (source === "okx-usdt-swap") return `${base}-USDT-SWAP`;
   if (source === "kraken-futures") return `PF_${base === "BTC" ? "XBT" : base}USD`;
   return symbol;
+}
+
+/** Canonical Binance USD-M perpetual identity for collector-sourced TA candles. */
+function collectorInstrument(symbol: string): FuturesContract {
+  return {
+    ...futuresInstrument(symbol),
+    status: "TRADING",
+    listedAt: 0,
+    expiresAt: null,
+    priceTick: null,
+    quantityStep: null,
+    minQuantity: null,
+    minNotional: null,
+  };
 }
 
 function rpcError(error: { message: string } | null, operation: string): void {
@@ -317,6 +340,47 @@ export function createOperationalStore(
       return Array.isArray(data)
         ? (data as string[]).map((symbol) => String(symbol).toUpperCase())
         : [];
+    },
+    async readCollectorTACandles(symbol, timeframeMinutes, limit = COLLECTOR_TA_LIMIT) {
+      const { data, error } = await client.rpc("get_collector_ta_candles", {
+        p_symbol: symbol.toUpperCase(),
+        p_timeframe_minutes: timeframeMinutes,
+        p_limit: limit,
+      });
+      rpcError(error, "collector TA candle read");
+      const rows = Array.isArray(data) ? (data as unknown[]) : [];
+      const candles: Candle[] = [];
+      for (const row of rows) {
+        if (!Array.isArray(row) || row.length < 6) {
+          throw new Error("Operational database returned an invalid collector TA candle row");
+        }
+        const [time, open, high, low, close, volume] = row.map(Number);
+        if (
+          !Number.isSafeInteger(time) ||
+          ![open, high, low, close, volume].every(Number.isFinite) ||
+          low! <= 0 ||
+          volume! < 0
+        ) {
+          throw new Error("Operational database returned an invalid collector TA candle row");
+        }
+        candles.push({
+          time: time!,
+          open: open!,
+          high: high!,
+          low: low!,
+          close: close!,
+          volume: volume!,
+          complete: true,
+        });
+      }
+      return {
+        source: MARKET_SOURCE,
+        instrument: collectorInstrument(symbol),
+        endpoint: COLLECTOR_TA_ENDPOINT,
+        priceType: MARKET_PRICE_TYPE,
+        retrievedAt: new Date().toISOString(),
+        candles,
+      };
     },
     async readMovementCandleHistory(symbols, sinceMs) {
       if (symbols.length === 0) return new Map<string, MovementCandle[]>();

@@ -10,6 +10,25 @@ type ServerEntry = {
 
 let serverEntryPromise: Promise<ServerEntry> | undefined;
 
+// Once-per-process application-owned reconciliation of the collector's shared
+// subscription universe. It is loaded lazily so the server entry stays light, and it
+// never starts or hosts the collector itself (#82). Ongoing reconciliation is the
+// dedicated scheduled hook's responsibility.
+let collectorUniverseBootstrapped = false;
+function reconcileCollectorUniverseAtStartup(): void {
+  if (collectorUniverseBootstrapped) return;
+  collectorUniverseBootstrapped = true;
+  void import("./lib/market/collector-subscriptions.server")
+    .then((module) => module.bootstrapCollectorUniverse())
+    .catch((error) => {
+      console.error(
+        `[collector-universe] bootstrap unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+}
+
 async function getServerEntry(): Promise<ServerEntry> {
   if (!serverEntryPromise) {
     serverEntryPromise = import("@tanstack/react-start/server-entry").then(
@@ -49,6 +68,7 @@ export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
       validateServerEnvironment();
+      reconcileCollectorUniverseAtStartup();
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);

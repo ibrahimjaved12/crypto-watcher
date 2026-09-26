@@ -5,7 +5,11 @@ USD-M WebSocket connection for the application-assigned shared subscription univ
 an open dashboard, and is enabled only when both `BINANCE_COLLECTOR_ENABLED=true` and the
 operational database are enabled. The application owns user watchlists; it derives the union of
 watched contracts and assigns that set to the operational database as collector input, and the
-worker reads it there rather than querying Lovable user tables. A renewable operational-database
+worker reads it there rather than querying Lovable user tables. That reconciliation is
+application-owned and independent of scheduled monitoring: the dedicated authenticated
+`/api/public/hooks/sync-collector-subscriptions` hook and a once-per-process application startup
+bootstrap keep the set current, so pausing scheduled monitoring never leaves the collector empty or
+stale. A renewable operational-database
 lease prevents two worker instances from acting as authoritative collectors. The TanStack
 application server does not start the collector: importing or starting the app never opens a market
 stream. Production hosting for the worker remains an open decision in
@@ -25,8 +29,10 @@ trade history is retained for simulated execution. Add either only with its cons
 Binance-native klines are canonical. Exchange open and close timestamps identify a candle.
 Developing (`x=false`) updates stay only in bounded process memory. Final (`x=true`) candles are
 normalized and inserted idempotently into the operational database. The worker owns no TA: the
-application's completed-candle orchestration determines due work, calls the shared Python service,
-validates the response, and writes conclusions to Lovable. The direct 15m/1h/4h streams remain
+application's completed-candle orchestration determines due work, reads canonical completed candles
+back from the operational store (`readCollectorTACandles`) rather than fetching a second live
+exchange series, calls the shared Python service, validates the response, and writes conclusions to
+Lovable. The direct 15m/1h/4h streams remain
 authoritative; they are not assembled from 1m data. Spot or non-USD-M events are rejected.
 
 The endpoint and operating limits were checked against Binance documentation on 2026-09-25:
@@ -77,22 +83,30 @@ transaction.
 With the collector enabled, `collector_recent_candles`, `collector_health`, and `collector_leases`
 in the operational database are the only shared completed-candle/checkpoint working-state path, and
 `collector_subscriptions` holds the application-assigned subscription universe. The old
-request-driven per-user operational candle/checkpoint writes are disabled. Lovable remains
+request-driven per-user operational candle/checkpoint writes are disabled. The application reads
+canonical completed candles back through `get_collector_ta_candles` for its own TA input; missing or
+stale operational history fails the affected TA frame visibly instead of falling back to a live
+exchange series. Lovable remains
 authoritative for watchlists, settings, movement state/alerts, and permanent TA conclusions, and it
 is written only by TanStack: the worker holds no Lovable credentials and never reads watchlists or
 settings or writes TA. No candle is dual-written to Lovable.
 
-Apply `operational-db/supabase/migrations/20260925120000_binance_collector.sql` and
-`operational-db/supabase/migrations/20260926120000_collector_subscriptions.sql` only to the external
-operational database. Set this server-only flag (never a `VITE_*` variable) on both the collector
-worker and the application server:
+Apply `operational-db/supabase/migrations/20260925120000_binance_collector.sql`,
+`operational-db/supabase/migrations/20260926120000_collector_subscriptions.sql`,
+`operational-db/supabase/migrations/20260926130000_collector_ta_candles.sql`, and
+`operational-db/supabase/migrations/20260926140000_collector_candle_retention.sql` only to the
+external operational database. The retention migration keeps each canonical series' newest 260
+completed candles even when that spans more than the day window, so the longest TA frame always has
+enough canonical history. Set this server-only flag (never a `VITE_*` variable) on both the
+collector worker and the application server:
 
 ```text
 BINANCE_COLLECTOR_ENABLED=true
 ```
 
 The worker reads it to start the collector; the application reads it to assign the shared
-subscription universe and to know that the collector owns completed-candle/checkpoint state.
+subscription universe, to know that the collector owns completed-candle/checkpoint state, and to
+source completed-candle TA input from the operational store instead of the exchange REST provider.
 Locally, `npm run dev:local:all` starts the
 collector worker as a separate process and enables the flag for both processes, while
 `npm run dev:local` disables it and uses the legacy request-driven path. `npm run collector:worker`
@@ -121,7 +135,9 @@ without doing market, movement, or TA work. Existing database idempotency remain
 `process_cumulative_observation` still owns the atomic baseline/cooldown/alert transition, while TA
 uses the unique `(user_id, symbol, timeframe, candle_at, version)` identity and pending-only outcome
 updates. The application's completed-candle TA orchestration runs in both modes: the collector never
-owns TA, so enabling it does not disable the application path.
+owns TA, so enabling it does not disable the application path. In collector mode the orchestration
+sources its candle history from the operational store; when the collector is disabled it uses the
+exchange REST provider, and the two modes are never mixed for one frame.
 
 Apply `supabase/migrations/20260926090000_monitor_run_leases.sql` through the normal Lovable/main
 database migration chain. It does not belong in the external operational migration chain.

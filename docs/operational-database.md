@@ -8,23 +8,34 @@ credentials; Python remains calculation-only.
 
 ## Ownership
 
-| State domain                                             | Authoritative owner when enabled | Writer                                                          |
-| -------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------- |
-| Shared Binance completed candles (1m, 15m, 1h, 4h)       | Operational DB                   | Leased collector worker                                         |
-| Collector checkpoint/freshness/health                    | Operational DB                   | Leased collector worker                                         |
-| Collector subscription universe (derived input)          | Operational DB                   | TanStack operational repository assigns; collector worker reads |
-| Legacy per-user candles/checkpoints (collector disabled) | Operational DB                   | Request-driven TanStack monitor                                 |
-| Monitor-run diagnostics                                  | Operational DB                   | TanStack operational repository                                 |
-| Outbox/retry/dead-letter state                           | Operational DB                   | TanStack operational repository; currently dormant              |
-| Auth, users, watchlists, settings, notes                 | Lovable                          | Existing Lovable paths (TanStack only)                          |
-| Baseline, directional cooldown and alert insertion       | Lovable                          | `process_cumulative_observation` transaction                    |
-| TA conclusions/outcomes and other permanent user history | Lovable                          | Existing TanStack paths                                         |
+| State domain                                             | Authoritative owner when enabled | Writer                                                                       |
+| -------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------- |
+| Shared Binance completed candles (1m, 15m, 1h, 4h)       | Operational DB                   | Leased collector worker                                                      |
+| Completed-candle TA input (collector mode)               | Operational DB                   | Collector worker writes; TanStack reads, then writes `ta_signals` to Lovable |
+| Collector checkpoint/freshness/health                    | Operational DB                   | Leased collector worker                                                      |
+| Collector subscription universe (derived input)          | Operational DB                   | TanStack operational repository assigns; collector worker reads              |
+| Legacy per-user candles/checkpoints (collector disabled) | Operational DB                   | Request-driven TanStack monitor                                              |
+| Monitor-run diagnostics                                  | Operational DB                   | TanStack operational repository                                              |
+| Outbox/retry/dead-letter state                           | Operational DB                   | TanStack operational repository; currently dormant                           |
+| Auth, users, watchlists, settings, notes                 | Lovable                          | Existing Lovable paths (TanStack only)                                       |
+| Baseline, directional cooldown and alert insertion       | Lovable                          | `process_cumulative_observation` transaction                                 |
+| TA conclusions/outcomes and other permanent user history | Lovable                          | Existing TanStack paths                                                      |
 
 No domain is dual-written. With the flag enabled, checkpoint and monitor-run writes do not
 touch their legacy Lovable tables. Operational-store failure is visible and never falls back to
 Lovable. Completed candles have no Lovable copy. The application derives the collector's shared
 subscription universe from Lovable watchlists and assigns it as operational input; that set is
-derived collector state, never a second watchlist authority.
+derived collector state, never a second watchlist authority. Reconciliation of that set is
+application-owned and independent of `SCHEDULED_MONITOR_ENABLED`: the dedicated
+`/api/public/hooks/sync-collector-subscriptions` hook and a once-per-process application startup
+bootstrap keep it current, and the scheduled monitor route never reads Lovable while disabled.
+
+While `BINANCE_COLLECTOR_ENABLED=true`, the application's completed-candle TA reads canonical
+completed candles from this operational store through `readCollectorTACandles` instead of fetching
+a second live exchange candle series. Missing or stale operational history fails the affected TA
+frame visibly; it is never silently substituted with another calculator or live source. TanStack
+still determines due work, calls the shared Python contract, validates responses, and is the sole
+privileged `ta_signals` writer in Lovable.
 
 ## Configuration and migrations
 
@@ -90,7 +101,9 @@ and never returns the operational service-role credential.
 
 Shared and legacy completed candles default to seven-day retention (allowed range 1–30 days);
 monitor runs default to 30 days (allowed range 1–90 days), and inactive checkpoints expire after
-30 days. Writes perform database-wide bounded cleanup.
+30 days. Writes perform database-wide bounded cleanup. Each canonical collector series always keeps
+its newest 260 completed candles regardless of the day window, so the longest completed-candle TA
+frame still has the minimum history and bounded catch-up it needs.
 The authenticated read reports per-user storage counts; operators can call
 `get_global_storage_diagnostics()` for total row counts, oldest candle time, outbox state counts
 and the oldest undelivered event, and `get_collector_storage_diagnostics()` for shared candle and
@@ -111,7 +124,9 @@ Deploy the operational migration and credentials first, then start the collector
 the application fleet to `OPERATIONAL_DB_ENABLED=true` and `BINANCE_COLLECTOR_ENABLED=true`
 together. Roll the collector back by stopping the worker and switching
 `BINANCE_COLLECTOR_ENABLED=false` across the whole fleet; the legacy request-driven operational
-candle/checkpoint path resumes. Switching `OPERATIONAL_DB_ENABLED=false` as well returns all legacy
-operational ownership to Lovable. Operational data is retained. Never run a mixed fleet with
-different flag values, because that would create two writers for those domains. Do not enable
+candle/checkpoint path resumes, and completed-candle TA returns to reading the exchange REST
+provider rather than the operational store. Switching `OPERATIONAL_DB_ENABLED=false` as well
+returns all legacy operational ownership to Lovable. Operational data is retained. Never run a
+mixed fleet with different flag values, because that would create two writers for those domains,
+and never read collector candles for TA while the worker is stopped. Do not enable
 fallback-on-error.
