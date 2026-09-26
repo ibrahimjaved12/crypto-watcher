@@ -72,7 +72,7 @@ def _finite_or_none(value):
 
 def _base_result(request, status, reason):
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": status,
         "reason": reason,
         "classification": "unavailable",

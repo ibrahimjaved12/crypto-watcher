@@ -26,8 +26,13 @@ outputText = outputText.replaceAll(
   JSON.stringify("./movement-buckets"),
   JSON.stringify(movementUrl),
 );
-const { BinanceFuturesCollector, candleIdentity, normalizeRestCandles, parseBinanceMarketMessage } =
-  await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
+const {
+  BinanceFuturesCollector,
+  candleIdentity,
+  normalizeRestCandles,
+  parseBinanceMarketMessage,
+  COLLECTOR_BOOTSTRAP_LIMIT,
+} = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 
 const BASE = 1_800_000_000_000;
 const intervals = [1, 15, 60, 240];
@@ -363,4 +368,49 @@ test("WebSocket event and receive times are preserved exactly; REST invents no e
   assert.equal(developing.kind, "developing");
   assert.equal(developing.candle.sourceEventTime, developingEvent);
   assert.equal(developing.candle.receivedAt, BASE);
+});
+
+test("REST bootstrap rebuilds enough completed history for every TA frame after a reset", async () => {
+  const requested = [];
+  const { collector, writes } = harness({
+    loadRest: async (request) => {
+      requested.push([request.timeframeMinutes, request.limit]);
+      const duration = request.timeframeMinutes * 60_000;
+      const latestClosed = Math.floor((BASE - duration) / duration) * duration;
+      const rows = [];
+      for (let index = 0; index < request.limit - 1; index++) {
+        rows.push(
+          canonical(
+            request.symbol,
+            request.timeframeMinutes,
+            latestClosed - (request.limit - 2 - index) * duration,
+          ),
+        );
+      }
+      // Binance returns the most recent `limit` klines including the still-developing one,
+      // which the bootstrap must exclude.
+      rows.push(canonical(request.symbol, request.timeframeMinutes, latestClosed + duration));
+      return rows;
+    },
+  });
+  await collector.reconcile(["BTCUSDT"]);
+  assert.deepEqual(
+    requested.map(([timeframe]) => timeframe),
+    intervals,
+  );
+  // The bootstrap must request enough completed candles for the TA minimum history (200)
+  // plus catch-up and the operational retention target (260) once the developing candle is
+  // excluded.
+  for (const [timeframe, limit] of requested) {
+    assert.equal(limit, COLLECTOR_BOOTSTRAP_LIMIT);
+    assert.ok(
+      limit - 1 >= 260,
+      `frame ${timeframe} bootstrap limit ${limit} cannot reach the 260-candle retention target`,
+    );
+  }
+  // Every completed candle returned by bootstrap is persisted; one developing candle per frame
+  // is excluded.
+  const expectedWrites = requested.reduce((total, [, limit]) => total + limit - 1, 0);
+  assert.equal(writes.length, expectedWrites);
+  assert.ok(writes.length >= intervals.length * 200);
 });

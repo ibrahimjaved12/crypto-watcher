@@ -86,25 +86,18 @@ before(async () => {
   await db.exec(
     await readFile(
       new URL(
-        "../operational-db/supabase/migrations/20260926130000_collector_ta_candles.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
         "../operational-db/supabase/migrations/20260926140000_collector_candle_retention.sql",
         import.meta.url,
       ),
       "utf8",
     ),
   );
+  // Destructive pre-release provenance cutover: wipes disposable collector state, replaces the
+  // obsolete provenance constraints, and defines the provenance-preserving read adapter.
   await db.exec(
     await readFile(
       new URL(
-        "../operational-db/supabase/migrations/20260926150000_collector_ta_candle_provenance.sql",
+        "../operational-db/supabase/migrations/20260926150000_collector_candle_provenance_reset.sql",
         import.meta.url,
       ),
       "utf8",
@@ -521,7 +514,10 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
       // REST bootstrap/recovery has no exchange event; WebSocket candles keep the
       // exchange's actual event time, which need not equal the completion boundary.
       source_event_at: index === 0 ? null : new Date(openTime + duration + 7).toISOString(),
-      received_at: new Date(openTime + duration + 250).toISOString(),
+      // Row 2's receive time precedes its exchange event time: the obsolete
+      // `received_at >= source_event_at` constraint is gone, so the raw receive time is
+      // stored and transported unchanged instead of being clamped.
+      received_at: new Date(openTime + duration + (index === 2 ? 3 : 250)).toISOString(),
       transport: index === 0 ? "rest" : "websocket",
     };
   });
@@ -560,7 +556,7 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
   // completion boundary), and a REST candle honestly reports no exchange event.
   assert.equal(candles[0].source_event_at_ms, null);
   assert.equal(candles[2].source_event_at_ms, observed + 2 * duration + duration + 7);
-  assert.equal(candles[2].received_at_ms, observed + 2 * duration + duration + 250);
+  assert.equal(candles[2].received_at_ms, observed + 2 * duration + duration + 3);
 
   // Another timeframe or symbol has no history rather than leaking the wrong series.
   assert.deepEqual(

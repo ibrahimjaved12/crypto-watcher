@@ -32,7 +32,9 @@ def replay_technical_analysis(request, evaluation_times_ms=None):
             request,
             candles=visible,
             warmup_candles=(),
-            source_event_time_ms=evaluation_time_ms,
+            # A replay point is synthetic: it has no exchange event, so the event time is absent
+            # rather than fabricated from the evaluation boundary.
+            source_event_time_ms=None,
             evaluation_time_ms=evaluation_time_ms,
             detection_time_ms=evaluation_time_ms,
         )

@@ -75,7 +75,7 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
     @app.post("/v1/technical-analysis/batch", dependencies=[Depends(authorize)])
     async def technical_analysis_batch(body: TechnicalAnalysisBatchRequest):
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "results": [
                 calculate_technical_analysis(item.calculation_input())
                 for item in body.requests

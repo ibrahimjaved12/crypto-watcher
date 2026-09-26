@@ -5,6 +5,21 @@ scheduled completed-candle TA, and chronological replay. TanStack remains the
 scheduler, authorization boundary, market-data adapter, response validator, and
 only database writer.
 
+## Pre-release provenance cutover (destructive)
+
+The provenance schema — `schema_version: 2` with a nullable `source_event_time_ms` —
+is a **destructive pre-release reset, not a production-compatible migration**. Rows
+written under the old synthetic-boundary semantics are disposable development data:
+
+- the operational database wipes `collector_recent_candles`, `collector_health`, and
+  `collector_leases`; the collector then rebuilds the required completed history
+  through its REST bootstrap;
+- every `ta_signals` row is cleared before the corrected constraint is applied.
+
+No compatibility column, legacy-version marker, or dual timestamp semantics is kept.
+The TA formula (`ta-v2`) and strategy (`interpretation-v1`) versions are unchanged
+because the calculations did not change.
+
 ## Scheduled flow
 
 For each enabled account and watched perpetual-futures contract, the monitor:
@@ -45,11 +60,14 @@ baselines, and movement alerts remain independent.
 
 ## Calculation contract
 
-- Versions: `ta-v2` and `interpretation-v1`, request/response schema version 1.
+- Versions: `ta-v2` and `interpretation-v1`, request/response schema version 2.
 - Instruments: supported linear USDT perpetual futures using trade-price candles.
 - Timeframes: 15m, 1h, and 4h.
 - Data: at least 200 completed, aligned, consecutive, valid OHLCV candles from a
-  250-candle provider request; forming candles are excluded.
+  bounded provider/bootstrap request; forming candles are excluded.
+- Provenance: `source_event_time_ms` is the actual exchange event time (WebSocket
+  `E`) or `null` when the source has none (REST bootstrap/recovery and the manual
+  REST path). It is never synthesized from the completion boundary.
 - Freshness: the latest provider candle may lag by at most one interval plus two
   minutes.
 - Finality: a target candle is complete at evaluation time when

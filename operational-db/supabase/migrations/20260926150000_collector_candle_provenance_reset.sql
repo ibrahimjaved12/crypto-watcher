@@ -1,35 +1,58 @@
--- Provenance-preserving read adapter for the application-owned completed-candle TA
--- path (#20/#24/#26). The leased collector is the canonical writer of completed
--- Binance USD-M trade klines; the application reads that same canonical history here
--- instead of fetching a second live exchange series while collector mode is active.
+-- Pre-release destructive cutover for the completed-candle provenance model (#20/#24/#26).
+-- External operational database only.
 --
--- The adapter must transport the collector's recorded evidence, not a reconstruction:
--- exact provider/instrument identity, endpoint, transport, candle open/close time,
--- source event time, receive time, and full OHLCV. It deliberately exposes no single
--- market-level endpoint or retrieval time, because one series mixes WebSocket live
--- candles with REST bootstrap/recovery candles.
+-- THIS IS A DESTRUCTIVE PRE-RELEASE RESET, NOT A PRODUCTION-COMPATIBLE MIGRATION.
+-- Existing collector working state is disposable development data. It is wiped here and the
+-- corrected schema is defined from scratch; the collector then rebuilds the required history
+-- through its REST bootstrap. No compatibility column and no legacy-version marker is added.
 --
--- `source_event_at` is the actual exchange event time and is nullable: REST
--- bootstrap/recovery has no exchange event, so it is recorded as NULL rather than an
--- invented timestamp. Candle completion is the deterministic boundary
--- `open_time + timeframe_minutes`, never `source_event_at`.
+-- Truthful timestamp semantics (three distinct concepts, never conflated):
+--   * completion boundary = open_time + timeframe_minutes
+--   * source_event_at     = the actual Binance exchange event time (WebSocket `E`), or NULL for
+--                           REST bootstrap/recovery, which has no exchange event
+--   * received_at         = the actual collector receive/retrieval time
 --
--- Replaces the reduced six-column payload from
--- 20260926130000_collector_ta_candles.sql. Read-only, service-role only, external
--- operational database.
+-- Obsolete old-semantics constraints that assumed a source event always exists and always
+-- follows the receive time (`source_event_at >= close_time`, `received_at >= source_event_at`)
+-- are removed by definition, so the cutover does not depend on generated constraint names.
+
+-- Wipe disposable collector working state so the next collector start performs a clean REST
+-- bootstrap (candles, health, and the lease that gates the single authoritative writer).
+TRUNCATE TABLE public.collector_recent_candles;
+TRUNCATE TABLE public.collector_health;
+TRUNCATE TABLE public.collector_leases;
 
 -- The exchange event time is provenance, so REST rows legitimately have none.
 ALTER TABLE public.collector_recent_candles ALTER COLUMN source_event_at DROP NOT NULL;
--- Drop the constraints that assumed a source event always exists and always follows
--- the collector receive time; the raw receive time is preserved as observed.
-ALTER TABLE public.collector_recent_candles
-  DROP CONSTRAINT IF EXISTS collector_recent_candles_check3;
-ALTER TABLE public.collector_recent_candles
-  DROP CONSTRAINT IF EXISTS collector_recent_candles_check4;
+
+DO $$
+DECLARE obsolete_constraint TEXT;
+BEGIN
+  FOR obsolete_constraint IN
+    SELECT conname
+    FROM pg_constraint
+    WHERE conrelid = 'public.collector_recent_candles'::regclass
+      AND contype = 'c'
+      AND pg_get_constraintdef(oid) ~ '(source_event_at|received_at)'
+  LOOP
+    EXECUTE format(
+      'ALTER TABLE public.collector_recent_candles DROP CONSTRAINT %I', obsolete_constraint
+    );
+  END LOOP;
+END;
+$$;
+
 ALTER TABLE public.collector_recent_candles
   ADD CONSTRAINT collector_recent_candles_source_event_check
   CHECK (source_event_at IS NULL OR source_event_at >= close_time);
 
+-- Provenance-preserving read adapter for the application-owned completed-candle TA path. The
+-- leased collector is the canonical writer of completed Binance USD-M trade klines; the
+-- application reads that same canonical history here instead of fetching a second live exchange
+-- series while collector mode is active. It transports the collector's recorded evidence — exact
+-- provider/instrument identity, endpoint, transport, candle open/close time, exchange event time
+-- (NULL for REST), receive time, and full OHLCV — and never reconstructs any of it. Read-only,
+-- service-role only.
 CREATE OR REPLACE FUNCTION public.get_collector_ta_candles(
   p_symbol TEXT, p_timeframe_minutes INTEGER, p_limit INTEGER
 ) RETURNS JSONB

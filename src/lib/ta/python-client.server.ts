@@ -22,7 +22,7 @@ export async function calculateTechnicalBatch(
   } catch {
     throw new Error("Python TA service is not configured");
   }
-  const body = JSON.stringify({ schema_version: 1, requests });
+  const body = JSON.stringify({ schema_version: 2, requests });
   let lastFailure = "unavailable";
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const controller = new AbortController();

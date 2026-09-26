@@ -110,7 +110,7 @@ class TechnicalConfigurationRequest(InputModel):
 
 
 class TechnicalAnalysisRequest(InputModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     instrument: TechnicalInstrumentRequest
     timeframe_minutes: Literal[15, 60, 240]
     candles: Annotated[
@@ -158,7 +158,7 @@ class TechnicalAnalysisRequest(InputModel):
 
 
 class TechnicalAnalysisBatchRequest(InputModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     requests: Annotated[
         tuple[TechnicalAnalysisRequest, ...], Field(min_length=1, max_length=8)
     ]

@@ -134,7 +134,9 @@ class TechnicalAnalysisTests(unittest.TestCase):
         return TechnicalInput(
             instrument=FuturesInstrument("binance-usdm:BTCUSDT", "binance-usdm", "BTCUSDT"),
             timeframe_minutes=15, candles=candles, source="binance-usdm",
-            source_event_time_ms=end, evaluation_time_ms=end, detection_time_ms=end,
+            # A candle-only fixture carries no exchange event; the absence is represented
+            # honestly as None (the dedicated provenance test covers a real event time).
+            source_event_time_ms=None, evaluation_time_ms=end, detection_time_ms=end,
         )
 
     def test_v2_fixture_and_replay_have_no_lookahead(self):

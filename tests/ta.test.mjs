@@ -46,7 +46,7 @@ const pythonResults = async (requests) =>
       ]),
     );
     return {
-      schema_version: 1,
+      schema_version: 2,
       status: "ok",
       reason: null,
       classification: "neutral",

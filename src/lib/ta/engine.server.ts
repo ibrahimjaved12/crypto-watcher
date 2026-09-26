@@ -211,7 +211,7 @@ export async function runTA(
           const nativeSymbol = sourceNativeSymbol(generationMarket.source, symbol);
           const sourceInstrumentId = `${generationMarket.source}:${nativeSymbol}`;
           const requests: TechnicalAnalysisRequest[] = candidates.map((candle) => ({
-            schema_version: 1,
+            schema_version: 2,
             instrument: {
               instrument_id: sourceInstrumentId,
               exchange: generationMarket!.source,

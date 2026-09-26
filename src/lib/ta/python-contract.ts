@@ -64,7 +64,7 @@ const indicators = z
 
 export const technicalAnalysisResult = z
   .object({
-    schema_version: z.literal(1),
+    schema_version: z.literal(2),
     status: z.enum(["ok", "insufficient", "unavailable"]),
     reason: z.string().max(80).nullable(),
     classification: z.enum(["bullish", "bearish", "neutral", "unavailable"]),
@@ -142,7 +142,7 @@ export const technicalAnalysisResult = z
 
 export const technicalAnalysisBatchResponse = z
   .object({
-    schema_version: z.literal(1),
+    schema_version: z.literal(2),
     results: z.array(technicalAnalysisResult).min(1).max(8),
   })
   .strict();
@@ -150,7 +150,7 @@ export const technicalAnalysisBatchResponse = z
 export type TechnicalAnalysisResult = z.infer<typeof technicalAnalysisResult>;
 
 export type TechnicalAnalysisRequest = {
-  schema_version: 1;
+  schema_version: 2;
   instrument: {
     instrument_id: string;
     exchange: MarketSource;

@@ -11,6 +11,13 @@ export const BINANCE_USDM_WS_ENDPOINT = "wss://fstream.binance.com/market/stream
 export const BINANCE_USDM_REST_ENDPOINT = "/fapi/v1/klines";
 export const COLLECTOR_INTERVALS = [1, 15, 60, 240] as const;
 export type CollectorInterval = (typeof COLLECTOR_INTERVALS)[number];
+/**
+ * Completed-candle history the REST bootstrap rebuilds after a reset. The application TA path
+ * needs the 200-candle minimum history plus a bounded catch-up batch, and the operational store
+ * retains the newest 260 candles per series, so fetch one extra kline (the still-developing REST
+ * candle is excluded) with margin.
+ */
+export const COLLECTOR_BOOTSTRAP_LIMIT = 300;
 export type CompletedCandleOrigin = "bootstrap" | "recovery" | "live";
 
 export type AggregateTrade = {
@@ -472,7 +479,7 @@ export class BinanceFuturesCollector {
       await this.dependencies.loadRest({
         symbol,
         timeframeMinutes,
-        limit: 250,
+        limit: COLLECTOR_BOOTSTRAP_LIMIT,
       })
     )
       .filter((candle) => candle.closeTime < this.now())

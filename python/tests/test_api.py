@@ -36,7 +36,7 @@ def technical_payload():
         for index in range(220)
     ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "instrument": {"instrument_id": "binance-usdm:BTCUSDT",
                        "exchange": "binance-usdm", "native_symbol": "BTCUSDT",
                        "market_type": "futures", "contract_type": "perpetual"},
@@ -129,7 +129,7 @@ class ApiTests(unittest.TestCase):
             app,
             "POST",
             "/v1/technical-analysis/batch",
-            json={"schema_version": 1, "requests": [latest, older]},
+            json={"schema_version": 2, "requests": [latest, older]},
             headers=HEADERS,
         )
         self.assertEqual(response.status_code, 200)
@@ -161,7 +161,7 @@ class ApiTests(unittest.TestCase):
             app,
             "POST",
             "/v1/technical-analysis/batch",
-            json={"schema_version": 1, "requests": [absent, shifted, incomplete]},
+            json={"schema_version": 2, "requests": [absent, shifted, incomplete]},
             headers=HEADERS,
         )
         self.assertEqual(response.status_code, 200)
