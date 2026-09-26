@@ -302,6 +302,59 @@ test("canonical missing and unavailable readiness use non-stale exclusion catego
   assert.ok(!reasons.LINKUSDT.includes("STALE_LAST_TRADE"));
 });
 
+test("no-real-trade and unusable-price readiness are movement-history unavailable", () => {
+  const noTrades = symbolInput("EMPTYUSDT");
+  noTrades.snapshot.readiness[15] = {
+    windowMinutes: 15,
+    status: "STALE",
+    state: "unavailable",
+    reason: "no_real_trade_history",
+  };
+  const unusable = symbolInput("GAPPRICEUSDT");
+  unusable.snapshot.readiness[15] = {
+    windowMinutes: 15,
+    status: "STALE",
+    state: "stale",
+    reason: "unusable_price_history",
+  };
+  const recovering = symbolInput("RECOVERINGUSDT");
+  recovering.snapshot.readiness[15] = {
+    windowMinutes: 15,
+    status: "STALE",
+    state: "unavailable",
+    reason: "collector_recovering",
+  };
+  const unavailable = symbolInput("UNAVAILABLEUSDT");
+  unavailable.snapshot.readiness[15] = {
+    windowMinutes: 15,
+    status: "STALE",
+    state: "unavailable",
+    reason: "collector_unavailable",
+  };
+  const expired = symbolInput("EXPIREDUSDT");
+  expired.snapshot.readiness[15] = {
+    windowMinutes: 15,
+    status: "STALE",
+    state: "stale",
+    reason: "last_real_trade_expired",
+  };
+
+  const result = windowResult(
+    evaluate([noTrades, unusable, recovering, unavailable, expired]),
+    15,
+  );
+  const reasons = Object.fromEntries(
+    result.excludedSymbols.map((value) => [value.symbol, value.reasons]),
+  );
+  assert.ok(reasons.EMPTYUSDT.includes("MOVEMENT_HISTORY_UNAVAILABLE"));
+  assert.ok(reasons.GAPPRICEUSDT.includes("MOVEMENT_HISTORY_UNAVAILABLE"));
+  assert.ok(!reasons.EMPTYUSDT.includes("SOURCE_UNAVAILABLE"));
+  assert.ok(!reasons.EMPTYUSDT.includes("STALE_LAST_TRADE"));
+  assert.ok(reasons.RECOVERINGUSDT.includes("SOURCE_RECOVERING"));
+  assert.ok(reasons.UNAVAILABLEUSDT.includes("SOURCE_UNAVAILABLE"));
+  assert.ok(reasons.EXPIREDUSDT.includes("STALE_LAST_TRADE"));
+});
+
 test("fewer than five eligible symbols makes market-wide metrics unavailable", () => {
   const symbols = Array.from({ length: 4 }, (_, index) =>
     symbolInput(`SMALL${index}USDT`, { 1: [0.1 + index / 100, 0] }),

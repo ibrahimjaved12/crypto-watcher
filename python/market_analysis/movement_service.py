@@ -15,15 +15,25 @@ from .movement import (
     MovementBucketEngine,
 )
 
+DEFAULT_RESPONSE_CACHE_CAPACITY = 4
+DEFAULT_SESSION_CAPACITY = 4
+
 
 class MovementBoundaryService:
     """Owns ephemeral per-session engines and idempotent boundary responses."""
 
-    def __init__(self, cache_capacity=DEFAULT_HISTORY_BUCKETS, session_capacity=4):
+    def __init__(
+        self,
+        cache_capacity=DEFAULT_RESPONSE_CACHE_CAPACITY,
+        session_capacity=DEFAULT_SESSION_CAPACITY,
+    ):
+        if type(cache_capacity) is not int or cache_capacity < 1:
+            raise ValueError("cache_capacity must be a positive integer")
+        if type(session_capacity) is not int or session_capacity < 2:
+            raise ValueError("session_capacity must be an integer of at least two")
         self.cache_capacity = cache_capacity
         self.session_capacity = session_capacity
         self.sessions = OrderedDict()
-        self.active_session_id = None
         self.retired_sessions = OrderedDict()
 
     @staticmethod
@@ -36,13 +46,9 @@ class MovementBoundaryService:
 
     def _commit_session(self, session_id, session, is_new):
         if is_new:
-            self.active_session_id = session_id
             self.sessions[session_id] = session
             while len(self.sessions) > self.session_capacity:
-                expired_id = next(
-                    key for key in self.sessions if key != self.active_session_id
-                )
-                self.sessions.pop(expired_id)
+                expired_id, _ = self.sessions.popitem(last=False)
                 self.retired_sessions[expired_id] = None
                 while len(self.retired_sessions) > self.session_capacity * 4:
                     self.retired_sessions.popitem(last=False)

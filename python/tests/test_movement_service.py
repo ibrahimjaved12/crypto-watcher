@@ -3,7 +3,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from market_analysis.api_models import MovementBoundaryRequest
-from market_analysis.movement import MovementBucketEngine
+from market_analysis.movement import DEFAULT_HISTORY_BUCKETS, MovementBucketEngine
 from market_analysis.movement_service import MovementBoundaryService
 
 BASE = 1_800_000_000_000
@@ -138,7 +138,7 @@ class MovementBoundaryServiceTests(unittest.TestCase):
         self.assertEqual(observed.quantity, Decimal("2.000000000000000009"))
 
     def test_interleaved_old_session_request_does_not_replace_new_session_state(self):
-        service = MovementBoundaryService(session_capacity=3)
+        service = MovementBoundaryService(session_capacity=2)
         old_session = "2af3e7c8-b777-4e58-9ad2-18e36daac160"
         new_session = "3bf4e8d9-c888-4f69-8be3-29f47ebbd271"
         old_first = request(
@@ -151,12 +151,12 @@ class MovementBoundaryServiceTests(unittest.TestCase):
             [symbol_input("BTCUSDT", [observation(BASE, 1, "200")])],
             new_session,
         )
-        service.advance(old_first)
         new_result = service.advance(new_first)
 
-        old_retry = service.advance(old_first)
-        self.assertEqual(old_retry["snapshots"][0]["buckets"][-1]["endpointPrice"], 100.0)
-        self.assertEqual(service.active_session_id, new_session)
+        old_result = service.advance(old_first)
+        self.assertEqual(old_result["snapshots"][0]["buckets"][-1]["endpointPrice"], 100.0)
+        self.assertIn(new_session, service.sessions)
+        self.assertIn(old_session, service.sessions)
 
         new_next = request(
             BASE + 5_000,
@@ -169,6 +169,36 @@ class MovementBoundaryServiceTests(unittest.TestCase):
         self.assertEqual(
             new_result["snapshots"][0]["buckets"][0]["endpointPrice"], 200.0
         )
+
+    def test_small_response_cache_does_not_shrink_engine_history(self):
+        service = MovementBoundaryService(cache_capacity=3, session_capacity=2)
+        count = DEFAULT_HISTORY_BUCKETS + 5
+        for index in range(1, count + 1):
+            boundary = BASE + index * 5_000
+            body = request(
+                boundary,
+                [symbol_input("BTCUSDT", [observation(boundary, boundary)])],
+            )
+            service.advance(body)
+
+        session = service.sessions[SESSION]
+        self.assertEqual(len(session["responses"]), 3)
+        self.assertEqual(
+            len(session["engines"]["BTCUSDT"].history),
+            DEFAULT_HISTORY_BUCKETS,
+        )
+
+    def test_session_and_response_cache_capacities_must_be_positive_integers(self):
+        for kwargs in (
+            {"cache_capacity": 0},
+            {"cache_capacity": True},
+            {"session_capacity": 0},
+            {"session_capacity": 1},
+            {"session_capacity": 1.5},
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    MovementBoundaryService(**kwargs)
 
 
 if __name__ == "__main__":

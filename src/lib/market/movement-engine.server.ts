@@ -67,7 +67,7 @@ export type MovementCollectorPort = Pick<
   | "subscribedSymbols"
   | "movementSnapshot"
   | "advanceMovementBuckets"
-  | "symbolSourceStatus"
+  | "movementSourceStatus"
   | "movementLateRejections"
 >;
 
@@ -219,7 +219,7 @@ export class MovementEngineRuntime {
     for (const symbol of universe.symbols) {
       const snapshot = this.deps.collector.movementSnapshot(symbol);
       if (snapshot) snapshots.set(symbol, snapshot);
-      sourceStatus.set(symbol, this.deps.collector.symbolSourceStatus(symbol));
+      sourceStatus.set(symbol, this.deps.collector.movementSourceStatus(symbol));
     }
     const results = this.engine.advance({
       finalizableBoundary: finalizable,

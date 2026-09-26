@@ -288,6 +288,9 @@ export class BinanceFuturesCollector {
   private readonly developing = new Map<string, CollectorCandle>();
   private readonly latestCompleted = new Map<string, CollectorCandle>();
   private readonly latestTrade = new Map<string, AggregateTrade>();
+  private readonly movementLastAcceptedTrade = new Map<string, AggregateTrade>();
+  private readonly movementSeenTrades = new Map<string, Map<number, string>>();
+  private readonly movementSeenTradeOrder = new Map<string, number[]>();
   private readonly trades = new Map<string, TradeBuffer>();
   private readonly movementObservations = new Map<string, AggregateTrade[]>();
   private readonly movementResults = new Map<string, MovementBucketSnapshot>();
@@ -355,6 +358,33 @@ export class BinanceFuturesCollector {
     return this.movementLateRejections;
   }
 
+  movementSourceStatus(symbol: string): MovementSourceState {
+    return this.movementSourceTransitions.get(symbol.toUpperCase())?.at(-1)?.state ?? "UNAVAILABLE";
+  }
+
+  markMovementUnavailable(symbol: string): void {
+    this.recordMovementSourceTransition(symbol, "UNAVAILABLE");
+  }
+
+  private rememberMovementTrade(trade: AggregateTrade): void {
+    const seen = this.movementSeenTrades.get(trade.symbol) ?? new Map<number, string>();
+    const order = this.movementSeenTradeOrder.get(trade.symbol) ?? [];
+    const fingerprint = [
+      trade.tradeTime,
+      trade.eventTime,
+      trade.priceText,
+      trade.quantityText,
+    ].join("|");
+    seen.set(trade.aggregateId, fingerprint);
+    order.push(trade.aggregateId);
+    if (order.length > 4_096) {
+      const expired = order.shift()!;
+      seen.delete(expired);
+    }
+    this.movementSeenTrades.set(trade.symbol, seen);
+    this.movementSeenTradeOrder.set(trade.symbol, order);
+  }
+
   resetMovementTransportState(): void {
     this.movementGeneration += 1;
     this.movementSessionId = crypto.randomUUID();
@@ -362,6 +392,9 @@ export class BinanceFuturesCollector {
     this.movementRetry = null;
     this.movementLateRejections = 0;
     this.movementResults.clear();
+    this.movementLastAcceptedTrade.clear();
+    this.movementSeenTrades.clear();
+    this.movementSeenTradeOrder.clear();
     for (const [symbol, observations] of this.movementObservations) {
       observations.length = 0;
       this.movementSourceTransitions.set(symbol, [
@@ -466,7 +499,7 @@ export class BinanceFuturesCollector {
     errorMessage: string | null,
   ): Promise<void> {
     for (const symbol of this.subscribedSymbols()) {
-      if (status !== "LIVE") this.recordMovementSourceTransition(symbol, status);
+      this.recordMovementSourceTransition(symbol, status);
       for (const timeframe of COLLECTOR_INTERVALS) {
         const candle =
           this.latestCompleted.get(this.key(symbol, timeframe)) ??
@@ -488,6 +521,9 @@ export class BinanceFuturesCollector {
       this.symbols.delete(symbol);
       this.trades.delete(symbol);
       this.latestTrade.delete(symbol);
+      this.movementLastAcceptedTrade.delete(symbol);
+      this.movementSeenTrades.delete(symbol);
+      this.movementSeenTradeOrder.delete(symbol);
       this.movementObservations.delete(symbol);
       this.movementResults.delete(symbol);
       this.movementSourceTransitions.delete(symbol);
@@ -498,6 +534,8 @@ export class BinanceFuturesCollector {
       if (this.symbols.has(symbol)) continue;
       this.symbols.add(symbol);
       this.trades.set(symbol, new TradeBuffer(this.tradeWindowMs, this.tradeMaxCount));
+      this.movementSeenTrades.set(symbol, new Map());
+      this.movementSeenTradeOrder.set(symbol, []);
       this.movementObservations.set(symbol, []);
       this.movementSourceTransitions.set(symbol, [
         { at: this.now(), state: "RECOVERING" },
@@ -511,6 +549,17 @@ export class BinanceFuturesCollector {
     try {
       event = parseBinanceMarketMessage(raw, receivedAt);
     } catch {
+      const envelope = raw as Record<string, unknown> | null;
+      const candidate = envelope && typeof envelope === "object" && envelope["data"]
+        ? envelope["data"] as Record<string, unknown>
+        : envelope;
+      if (candidate && typeof candidate === "object" && candidate["e"] === "aggTrade") {
+        const symbol = String(candidate["s"] ?? "").toUpperCase();
+        if (this.symbols.has(symbol)) {
+          this.markMovementUnavailable(symbol);
+          this.dependencies.onOverload?.();
+        }
+      }
       return false;
     }
     if (event.kind === "control") return true;
@@ -518,20 +567,45 @@ export class BinanceFuturesCollector {
       return false;
     }
     if (event.kind === "trade") {
-      const previous = this.latestTrade.get(event.trade.symbol);
+      const seen = this.movementSeenTrades.get(event.trade.symbol);
+      const seenFingerprint = seen?.get(event.trade.aggregateId);
+      if (seenFingerprint !== undefined) {
+        const incomingFingerprint = [
+          event.trade.tradeTime,
+          event.trade.eventTime,
+          event.trade.priceText,
+          event.trade.quantityText,
+        ].join("|");
+        if (incomingFingerprint === seenFingerprint) {
+          const boundary = Math.ceil(event.trade.tradeTime / 5_000) * 5_000;
+          if (this.movementBoundary !== null && boundary <= this.movementBoundary) {
+            this.movementLateRejections += 1;
+          }
+          return false;
+        }
+        this.markMovementUnavailable(event.trade.symbol);
+        this.dependencies.onOverload?.();
+        return false;
+      }
+      const previous = this.movementLastAcceptedTrade.get(event.trade.symbol);
       if (
         previous &&
-        (event.trade.aggregateId <= previous.aggregateId ||
+        (event.trade.aggregateId < previous.aggregateId ||
           event.trade.tradeTime < previous.tradeTime)
       ) {
+        this.markMovementUnavailable(event.trade.symbol);
+        this.dependencies.onOverload?.();
         return false;
       }
       const movementQueue = this.movementObservations.get(event.trade.symbol)!;
       if (movementQueue.length >= this.movementObservationMaxCount) {
+        this.markMovementUnavailable(event.trade.symbol);
         this.dependencies.onOverload?.();
         return false;
       }
       movementQueue.push(event.trade);
+      this.rememberMovementTrade(event.trade);
+      this.movementLastAcceptedTrade.set(event.trade.symbol, event.trade);
       this.latestTrade.set(event.trade.symbol, event.trade);
       this.trades.get(event.trade.symbol)!.push(event.trade);
       return true;
@@ -792,20 +866,11 @@ export class BinanceFuturesCollector {
     status: CollectorHealthStatus,
     errorMessage: string | null,
   ): Promise<void> {
-    if (status !== "LIVE") this.recordMovementSourceTransition(candle.symbol, status);
     const key = this.key(candle.symbol, candle.timeframeMinutes);
     const state = this.state(key);
     state.status = status;
     state.errorMessage = errorMessage;
     if (candle.openTime > 0) state.lastCompletedOpenTime = candle.openTime;
-    if (
-      status === "LIVE" &&
-      COLLECTOR_INTERVALS.every(
-        (timeframe) => this.health.get(this.key(candle.symbol, timeframe))?.status === "LIVE",
-      )
-    ) {
-      this.recordMovementSourceTransition(candle.symbol, "LIVE");
-    }
     await this.dependencies.store.recordCollectorHealth({
       instrumentId: candle.instrumentId,
       symbol: candle.symbol,

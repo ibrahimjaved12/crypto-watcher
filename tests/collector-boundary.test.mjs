@@ -46,7 +46,7 @@ const collectorReplacements = {
       accept() { return true; }
       movementSnapshot() { return null; }
       advanceMovementBuckets() {}
-      symbolSourceStatus() { return "UNAVAILABLE"; }
+      movementSourceStatus() { return "UNAVAILABLE"; }
       movementLateRejections() { return 0; }
     }
   `),

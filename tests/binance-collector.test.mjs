@@ -130,6 +130,7 @@ function harness(overrides = {}) {
     async onCompleted(event) {
       events.push(event);
     },
+    onOverload: overrides.onOverload,
     async advanceMovementBoundary(sessionId, boundaryTime, symbols) {
       movementCalls.push({ sessionId, boundaryTime, symbols });
       if (overrides.advanceMovementBoundary) {
@@ -404,15 +405,80 @@ test("movement reset fences old in-flight replies and starts a new Python sessio
   assert.equal(collector.movementSnapshot("BTCUSDT"), freshSnapshot);
 });
 
-test("per-symbol source status reflects collector health for the movement gate", async () => {
+test("per-symbol candle health remains a separate collector diagnostic", async () => {
   const { collector } = harness();
   await collector.reconcile(["BTCUSDT"]);
   assert.equal(collector.symbolSourceStatus("BTCUSDT"), "RECOVERING");
   assert.equal(collector.symbolSourceStatus("ETHUSDT"), "UNAVAILABLE");
+  assert.equal(collector.movementSourceStatus("BTCUSDT"), "RECOVERING");
 
   collector.accept(wsKline(BASE - 60_000));
   await collector.waitForIdle();
   assert.equal(collector.symbolSourceStatus("BTCUSDT"), "LIVE");
+  assert.equal(collector.movementSourceStatus("BTCUSDT"), "RECOVERING");
+  await collector.markConnectionStatus("LIVE", null);
+  assert.equal(collector.movementSourceStatus("BTCUSDT"), "LIVE");
+});
+
+test("unrelated 4h candle recovery does not poison movement source state", async () => {
+  const { collector, movementCalls } = harness();
+  await collector.reconcile(["BTCUSDT"]);
+  await collector.markConnectionStatus("LIVE", null);
+
+  await collector.setHealth(canonical("BTCUSDT", 240, BASE), "RECOVERING", "4h gap repair");
+  assert.equal(collector.movementSourceStatus("BTCUSDT"), "LIVE");
+
+  await collector.advanceMovementBuckets(BASE + 5_000);
+  assert.equal(movementCalls.at(-1).symbols[0].sourceState, "LIVE");
+});
+
+test("movement observation backpressure fences source before the lost trade is dropped", async () => {
+  let overloads = 0;
+  const { collector, movementCalls } = harness({
+    onOverload: () => { overloads += 1; },
+  });
+  collector.movementObservationMaxCount = 1;
+  await collector.reconcile(["BTCUSDT"]);
+  await collector.markConnectionStatus("LIVE", null);
+  const trade = (aggregateId, tradeTime) => ({
+    stream: "btcusdt@aggTrade",
+    data: {
+      e: "aggTrade", E: tradeTime + 1, s: "BTCUSDT", st: 1,
+      a: aggregateId, p: "101", q: "2", T: tradeTime,
+    },
+  });
+
+  assert.equal(collector.accept(trade(1, BASE + 100), BASE + 100), true);
+  assert.equal(collector.accept(trade(2, BASE + 200), BASE + 200), false);
+  assert.equal(collector.movementSourceStatus("BTCUSDT"), "UNAVAILABLE");
+  assert.equal(overloads, 1);
+
+  await collector.advanceMovementBuckets(BASE + 5_000);
+  assert.equal(movementCalls.at(-1).symbols[0].sourceState, "UNAVAILABLE");
+  assert.equal(movementCalls.at(-1).symbols[0].observations.length, 1);
+});
+
+test("known duplicate aggTrade is ignored but a unique ordering regression fences continuity", async () => {
+  const { collector, movementCalls } = harness();
+  await collector.reconcile(["BTCUSDT"]);
+  await collector.markConnectionStatus("LIVE", null);
+  const trade = (aggregateId, tradeTime, price = "101") => ({
+    stream: "btcusdt@aggTrade",
+    data: {
+      e: "aggTrade", E: tradeTime + 10, s: "BTCUSDT", st: 1,
+      a: aggregateId, p: price, q: "2", T: tradeTime,
+    },
+  });
+
+  assert.equal(collector.accept(trade(10, BASE + 200), BASE + 220), true);
+  assert.equal(collector.accept(trade(10, BASE + 200), BASE + 230), false);
+  assert.equal(collector.movementSourceStatus("BTCUSDT"), "LIVE");
+  assert.equal(collector.accept(trade(11, BASE + 100), BASE + 240), false);
+  assert.equal(collector.movementSourceStatus("BTCUSDT"), "UNAVAILABLE");
+
+  await collector.advanceMovementBuckets(BASE + 5_000);
+  assert.equal(movementCalls.at(-1).symbols[0].sourceState, "UNAVAILABLE");
+  assert.equal(movementCalls.at(-1).symbols[0].observations.length, 1);
 });
 
 test("WebSocket event and receive times are preserved exactly; REST invents no event", () => {

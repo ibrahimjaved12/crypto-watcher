@@ -82,6 +82,7 @@ function bucket(symbol, boundaryTime, endpointPrice) {
   return {
     boundaryTime,
     sourceState: "LIVE",
+    sourceState: "LIVE",
     endpointPrice,
     baseQuantity: 1,
     quoteVolume: endpointPrice,
@@ -138,7 +139,7 @@ function createHarness() {
   const collector = {
     subscribedSymbols: () => [...control.symbols],
     advanceMovementBuckets: (boundary) => state.advanced.push(boundary),
-    symbolSourceStatus: () => "LIVE",
+    movementSourceStatus: () => "LIVE",
     movementLateRejections: () => 0,
     movementSnapshot: (symbol) => snapshotFor(symbol, state.boundary),
   };
