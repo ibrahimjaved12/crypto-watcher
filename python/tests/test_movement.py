@@ -16,7 +16,7 @@ ENDPOINT = "LIVE"
 
 
 def observation(event_time_ms, price="100", quantity="1", trade_time_ms=None,
-                received_at_ms=None):
+                received_at_ms=None, aggregate_trade_id=None):
     return MarketObservation(
         provider="binance-usdm",
         instrument_id=INSTRUMENT,
@@ -25,6 +25,9 @@ def observation(event_time_ms, price="100", quantity="1", trade_time_ms=None,
         quantity=Decimal(quantity),
         event_time_ms=event_time_ms,
         trade_time_ms=event_time_ms if trade_time_ms is None else trade_time_ms,
+        aggregate_trade_id=(
+            event_time_ms if aggregate_trade_id is None else aggregate_trade_id
+        ),
         received_at_ms=event_time_ms if received_at_ms is None else received_at_ms,
     )
 
@@ -136,6 +139,145 @@ class MovementBucketTests(unittest.TestCase):
         self.assertEqual(following.trade_count, 0)
         self.assertEqual(following.last_real_event_time_ms, boundary)
         self.assertEqual(following.last_received_at_ms, boundary)
+
+    def test_same_trade_time_uses_later_aggregate_id_as_endpoint(self):
+        boundary = BASE + BUCKET_INTERVAL_MS
+        observations = [
+            observation(
+                boundary + 100,
+                "101",
+                "2",
+                trade_time_ms=boundary,
+                received_at_ms=boundary + 500,
+                aggregate_trade_id=700,
+            ),
+            observation(
+                boundary - 100,
+                "102",
+                "3",
+                trade_time_ms=boundary,
+                received_at_ms=boundary + 400,
+                aggregate_trade_id=701,
+            ),
+        ]
+        self.assertEqual(self.engine.observe(observations), 2)
+        bucket = self.engine.advance(boundary, "LIVE")
+
+        self.assertEqual(bucket.price, Decimal("102"))
+        self.assertEqual(bucket.trade_count, 2)
+        self.assertEqual(bucket.base_volume, Decimal("5"))
+        self.assertEqual(bucket.quote_volume, Decimal("508"))
+        self.assertEqual(bucket.last_real_event_time_ms, boundary - 100)
+        self.assertEqual(bucket.last_received_at_ms, boundary + 400)
+
+    def test_canonical_order_is_validated_across_observe_calls(self):
+        boundary = BASE + BUCKET_INTERVAL_MS
+        first = observation(
+            boundary - 2,
+            "100",
+            trade_time_ms=boundary - 1,
+            aggregate_trade_id=20,
+        )
+        second = observation(
+            boundary - 1,
+            "101",
+            trade_time_ms=boundary - 1,
+            aggregate_trade_id=21,
+        )
+        self.assertEqual(self.engine.observe([first]), 1)
+        self.assertEqual(self.engine.observe([second]), 1)
+        bucket = self.engine.advance(boundary, "LIVE")
+
+        self.assertEqual(bucket.price, Decimal("101"))
+        self.assertEqual(bucket.trade_count, 2)
+        self.assertEqual(bucket.base_volume, Decimal("2"))
+
+    def test_cross_call_order_regression_is_rejected_without_mutating_pending_bucket(self):
+        boundary = BASE + BUCKET_INTERVAL_MS
+        accepted = observation(
+            boundary - 1,
+            "100",
+            "2",
+            trade_time_ms=boundary - 1,
+            aggregate_trade_id=30,
+        )
+        regression = observation(
+            boundary,
+            "999",
+            "90",
+            trade_time_ms=boundary - 1,
+            aggregate_trade_id=29,
+        )
+        self.assertEqual(self.engine.observe([accepted]), 1)
+        with self.assertRaises(ValueError):
+            self.engine.observe([regression])
+
+        bucket = self.engine.advance(boundary, "LIVE")
+        self.assertEqual(bucket.price, Decimal("100"))
+        self.assertEqual(bucket.base_volume, Decimal("2"))
+        self.assertEqual(bucket.quote_volume, Decimal("200"))
+        self.assertEqual(bucket.trade_count, 1)
+
+    def test_in_batch_order_regression_is_rejected_atomically(self):
+        boundary = BASE + BUCKET_INTERVAL_MS
+        earlier_key = observation(
+            boundary,
+            "100",
+            trade_time_ms=boundary - 1,
+            aggregate_trade_id=49,
+        )
+        later_key = observation(
+            boundary + 1,
+            "101",
+            trade_time_ms=boundary - 1,
+            aggregate_trade_id=50,
+        )
+        with self.assertRaises(ValueError):
+            self.engine.observe([later_key, earlier_key])
+
+        bucket = self.engine.advance(boundary, "LIVE")
+        self.assertEqual(bucket.trade_count, 0)
+        self.assertIsNone(bucket.price)
+
+    def test_replaying_same_ordered_observations_produces_identical_buckets(self):
+        first_boundary = BASE + BUCKET_INTERVAL_MS
+        batches = [
+            [
+                observation(
+                    first_boundary + 20,
+                    "100",
+                    "2",
+                    trade_time_ms=first_boundary - 1,
+                    aggregate_trade_id=40,
+                ),
+                observation(
+                    first_boundary - 20,
+                    "101",
+                    "3",
+                    trade_time_ms=first_boundary,
+                    aggregate_trade_id=41,
+                ),
+            ],
+            [
+                observation(
+                    first_boundary - 30,
+                    "102",
+                    "4",
+                    trade_time_ms=first_boundary,
+                    aggregate_trade_id=42,
+                )
+            ],
+        ]
+
+        def replay():
+            engine = MovementBucketEngine(INSTRUMENT)
+            for batch in batches:
+                self.assertEqual(engine.observe(batch), len(batch))
+            engine.advance(first_boundary, "LIVE")
+            engine.advance(first_boundary + BUCKET_INTERVAL_MS, "LIVE")
+            return engine.history
+
+        self.assertEqual(replay(), replay())
 
     def test_history_is_bounded_and_supports_two_adjacent_fifteen_minute_windows(self):
         count = DEFAULT_HISTORY_BUCKETS + 10

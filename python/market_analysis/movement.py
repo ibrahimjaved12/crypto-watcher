@@ -23,6 +23,12 @@ def _timestamp(value, name):
     return value
 
 
+def _aggregate_id(value):
+    if type(value) is not int or value < 0:
+        raise ValueError("aggregate_trade_id must be a nonnegative integer")
+    return value
+
+
 def _positive_decimal(value, name):
     try:
         number = Decimal(str(value))
@@ -44,6 +50,7 @@ class MarketObservation:
     quantity: Decimal
     event_time_ms: int
     trade_time_ms: int
+    aggregate_trade_id: int
     received_at_ms: int
 
     def __post_init__(self):
@@ -57,6 +64,7 @@ class MarketObservation:
         object.__setattr__(self, "quantity", _positive_decimal(self.quantity, "quantity"))
         _timestamp(self.event_time_ms, "event_time_ms")
         _timestamp(self.trade_time_ms, "trade_time_ms")
+        _aggregate_id(self.aggregate_trade_id)
         _timestamp(self.received_at_ms, "received_at_ms")
 
 
@@ -102,7 +110,9 @@ class _PendingBucket:
         self.base_volume += observation.quantity
         self.quote_volume += observation.price * observation.quantity
         self.trade_count += 1
-        if self.latest is None or observation.trade_time_ms >= self.latest.trade_time_ms:
+        if (self.latest is None or
+            (observation.trade_time_ms, observation.aggregate_trade_id) >
+            (self.latest.trade_time_ms, self.latest.aggregate_trade_id)):
             self.latest = observation
 
 
@@ -134,6 +144,7 @@ class MovementBucketEngine:
         self._pending = {}
         self._last_finalized_boundary_ms = None
         self._last_real_observation = None
+        self._last_accepted_order_key = None
         self._rejected_late_observations = 0
 
     @property
@@ -155,7 +166,7 @@ class MovementBucketEngine:
     def observe(self, observations: Iterable[MarketObservation]):
         """Aggregate an ordered batch without retaining raw observations."""
         batch = tuple(observations)
-        previous_trade_time = None
+        previous_order_key = self._last_accepted_order_key
         for observation in batch:
             if not isinstance(observation, MarketObservation):
                 raise ValueError("observations must be MarketObservation values")
@@ -163,10 +174,17 @@ class MovementBucketEngine:
                     or observation.instrument_id != self.instrument_id
                     or observation.price_type != self.price_type):
                 raise ValueError("observation provenance does not match this instrument")
-            if (previous_trade_time is not None
-                    and observation.trade_time_ms < previous_trade_time):
-                raise ValueError("observations must be ordered by trade time")
-            previous_trade_time = observation.trade_time_ms
+            order_key = (observation.trade_time_ms, observation.aggregate_trade_id)
+            finalized_late = (
+                self._last_finalized_boundary_ms is not None
+                and self._bucket_boundary(observation.trade_time_ms)
+                <= self._last_finalized_boundary_ms
+            )
+            if finalized_late:
+                continue
+            if previous_order_key is not None and order_key <= previous_order_key:
+                raise ValueError("observations must be strictly ordered by trade time and aggregate ID")
+            previous_order_key = order_key
 
         pending_boundaries = {
             self._bucket_boundary(observation.trade_time_ms)
@@ -186,6 +204,10 @@ class MovementBucketEngine:
                 self._rejected_late_observations += 1
                 continue
             self._pending.setdefault(boundary, _PendingBucket()).add(observation)
+            self._last_accepted_order_key = (
+                observation.trade_time_ms,
+                observation.aggregate_trade_id,
+            )
             accepted += 1
         return accepted
 
