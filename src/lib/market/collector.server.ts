@@ -237,9 +237,20 @@ export class CollectorRuntime {
     });
     socket.addEventListener("message", (event) => {
       this.lastMessageAt = Date.now();
-      if (typeof event.data !== "string") return;
+      if (typeof event.data !== "string") {
+        this.collector.markAllMovementUnavailable();
+        socket.close(1013, "non-text Binance movement frame");
+        return;
+      }
+      let payload: Record<string, unknown>;
       try {
-        const payload = JSON.parse(event.data) as Record<string, unknown>;
+        payload = JSON.parse(event.data) as Record<string, unknown>;
+      } catch {
+        this.collector.markAllMovementUnavailable();
+        socket.close(1013, "malformed Binance movement frame");
+        return;
+      }
+      try {
         const requestId = typeof payload["id"] === "number" ? payload["id"] : null;
         if (requestId !== null) {
           const pending = this.pendingRequests.get(requestId);
@@ -253,7 +264,8 @@ export class CollectorRuntime {
         }
         this.collector.accept(payload, this.lastMessageAt);
       } catch {
-        // Malformed messages are rejected; the stream remains available for recovery.
+        this.collector.markAllMovementUnavailable();
+        socket.close(1013, "invalid Binance movement frame");
       }
     });
     socket.addEventListener("close", () => {

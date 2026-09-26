@@ -156,6 +156,12 @@ test("movement transport resets on collector lease acquisition and loss", async 
   }
 });
 
+test("malformed WebSocket JSON fences movement continuity and closes for recovery", async () => {
+  const source = await read("../src/lib/market/collector.server.ts");
+  assert.match(source, /markAllMovementUnavailable\(\);\s*socket\.close\(1013, "malformed Binance movement frame"\)/);
+  assert.match(source, /markAllMovementUnavailable\(\);\s*socket\.close\(1013, "non-text Binance movement frame"\)/);
+});
+
 test("the collector runtime has no direct Lovable application dependency", async () => {
   const source = await read("../src/lib/market/collector.server.ts");
   for (const forbidden of [

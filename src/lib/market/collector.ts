@@ -290,7 +290,6 @@ export class BinanceFuturesCollector {
   private readonly latestTrade = new Map<string, AggregateTrade>();
   private readonly movementLastAcceptedTrade = new Map<string, AggregateTrade>();
   private readonly movementSeenTrades = new Map<string, Map<number, string>>();
-  private readonly movementSeenTradeOrder = new Map<string, number[]>();
   private readonly trades = new Map<string, TradeBuffer>();
   private readonly movementObservations = new Map<string, AggregateTrade[]>();
   private readonly movementResults = new Map<string, MovementBucketSnapshot>();
@@ -367,9 +366,14 @@ export class BinanceFuturesCollector {
     this.recordMovementSourceTransition(symbol, "UNAVAILABLE");
   }
 
+  markAllMovementUnavailable(): void {
+    for (const symbol of this.subscribedSymbols()) {
+      this.markMovementUnavailable(symbol);
+    }
+  }
+
   private rememberMovementTrade(trade: AggregateTrade): void {
     const seen = this.movementSeenTrades.get(trade.symbol) ?? new Map<number, string>();
-    const order = this.movementSeenTradeOrder.get(trade.symbol) ?? [];
     const fingerprint = [
       trade.tradeTime,
       trade.eventTime,
@@ -377,13 +381,12 @@ export class BinanceFuturesCollector {
       trade.quantityText,
     ].join("|");
     seen.set(trade.aggregateId, fingerprint);
-    order.push(trade.aggregateId);
-    if (order.length > 4_096) {
-      const expired = order.shift()!;
-      seen.delete(expired);
+    while (seen.size > 4_096) {
+      const oldest = seen.keys().next().value;
+      if (oldest === undefined) break;
+      seen.delete(oldest);
     }
     this.movementSeenTrades.set(trade.symbol, seen);
-    this.movementSeenTradeOrder.set(trade.symbol, order);
   }
 
   resetMovementTransportState(): void {
@@ -396,7 +399,6 @@ export class BinanceFuturesCollector {
     this.movementResults.clear();
     this.movementLastAcceptedTrade.clear();
     this.movementSeenTrades.clear();
-    this.movementSeenTradeOrder.clear();
     for (const [symbol, observations] of this.movementObservations) {
       observations.length = 0;
       this.movementSourceTransitions.set(symbol, [
@@ -443,6 +445,21 @@ export class BinanceFuturesCollector {
     );
 
     while (nextBoundary <= boundaryTime) {
+      const isExactRetry = this.movementRetry?.boundaryTime === nextBoundary;
+      if (!isExactRetry && this.movementBoundary !== null) {
+        for (const [symbol, pending] of this.movementObservations) {
+          const retained: AggregateTrade[] = [];
+          for (const trade of pending) {
+            const assignedBoundary = Math.ceil(trade.tradeTime / 5_000) * 5_000;
+            if (assignedBoundary <= this.movementBoundary) {
+              this.movementLateRejections += 1;
+            } else {
+              retained.push(trade);
+            }
+          }
+          this.movementObservations.set(symbol, retained);
+        }
+      }
       const retry = this.movementRetry?.boundaryTime === nextBoundary
         ? this.movementRetry.symbols
         : this.subscribedSymbols().map((symbol) => {
@@ -473,15 +490,13 @@ export class BinanceFuturesCollector {
       for (const snapshot of result.snapshots) {
         this.movementResults.set(snapshot.symbol, snapshot);
       }
-      const pythonLateDelta = Math.max(
-        0,
-        result.lateAfterFinalizationCount - this.movementPythonLateRejections,
-      );
-      this.movementLateRejections += pythonLateDelta;
-      this.movementPythonLateRejections = Math.max(
-        this.movementPythonLateRejections,
-        result.lateAfterFinalizationCount,
-      );
+      if (result.lateAfterFinalizationCount < this.movementPythonLateRejections) {
+        this.movementPythonLateRejections = result.lateAfterFinalizationCount;
+      } else {
+        this.movementLateRejections +=
+          result.lateAfterFinalizationCount - this.movementPythonLateRejections;
+        this.movementPythonLateRejections = result.lateAfterFinalizationCount;
+      }
       for (const item of input) {
         const consumedIds = new Set(item.observations.map((trade) => trade.aggregateId));
         const pending = this.movementObservations.get(item.symbol) ?? [];
@@ -533,7 +548,6 @@ export class BinanceFuturesCollector {
       this.latestTrade.delete(symbol);
       this.movementLastAcceptedTrade.delete(symbol);
       this.movementSeenTrades.delete(symbol);
-      this.movementSeenTradeOrder.delete(symbol);
       this.movementObservations.delete(symbol);
       this.movementResults.delete(symbol);
       this.movementSourceTransitions.delete(symbol);
@@ -545,7 +559,6 @@ export class BinanceFuturesCollector {
       this.symbols.add(symbol);
       this.trades.set(symbol, new TradeBuffer(this.tradeWindowMs, this.tradeMaxCount));
       this.movementSeenTrades.set(symbol, new Map());
-      this.movementSeenTradeOrder.set(symbol, []);
       this.movementObservations.set(symbol, []);
       this.movementSourceTransitions.set(symbol, [
         { at: this.now(), state: "RECOVERING" },
@@ -563,12 +576,20 @@ export class BinanceFuturesCollector {
       const candidate = envelope && typeof envelope === "object" && envelope["data"]
         ? envelope["data"] as Record<string, unknown>
         : envelope;
-      if (candidate && typeof candidate === "object" && candidate["e"] === "aggTrade") {
-        const symbol = String(candidate["s"] ?? "").toUpperCase();
-        if (this.symbols.has(symbol)) {
-          this.markMovementUnavailable(symbol);
-          this.dependencies.onOverload?.();
-        }
+      const stream = envelope && typeof envelope === "object" ? envelope["stream"] : null;
+      const match = typeof stream === "string"
+        ? /^([a-z0-9]+)@aggTrade$/.exec(stream)
+        : null;
+      const streamSymbol = match?.[1]?.toUpperCase();
+      const dataSymbol = candidate && typeof candidate === "object" && candidate["e"] === "aggTrade"
+        ? String(candidate["s"] ?? "").toUpperCase()
+        : "";
+      const attributable = [streamSymbol, dataSymbol].find(
+        (symbol) => symbol && this.symbols.has(symbol),
+      );
+      if (attributable) {
+        this.markMovementUnavailable(attributable);
+        this.dependencies.onOverload?.();
       }
       return false;
     }

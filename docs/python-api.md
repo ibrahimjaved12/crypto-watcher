@@ -26,6 +26,17 @@ the existing `cumulative.observe` function but **discards its proposed state**.
 Running analysis repeatedly cannot initialize or reset a baseline or save an alert.
 The service does not add a scheduler, login mechanism, or browser-accessible token.
 
+### Movement service deployment invariant
+
+The `/v1/movement/boundary` adapter keeps bounded session engines and retry
+responses in process-local memory. V1 therefore requires exactly one Python service
+replica running exactly one Uvicorn worker. Do not use `--workers` greater than one
+or load-balance movement requests across replicas: sequential boundaries could land
+on different independent engines and produce false warm-up or split history. Keep
+the existing single-worker local and Docker commands. Distributed Python session
+state is not implemented; a future architecture change is required before scaling
+this endpoint horizontally.
+
 ## Configuration
 
 | Where                            | Variable                  | Value                                                                                                |

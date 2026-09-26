@@ -122,7 +122,7 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `OPERATIONAL_MONITOR_RUN_RETENTION_DAYS`          | TanStack + collector worker         | `30`; allowed range 1–90                                                                                |
 | `OPERATIONAL_OUTBOX_MAX_ATTEMPTS`                 | TanStack + collector worker         | `10`; allowed range 1–100 before dead-letter                                                            |
 | `BINANCE_COLLECTOR_ENABLED`                       | Collector worker + app server       | Server-only cutover; requires operational DB and the separate collector worker process                  |
-| `PYTHON_ANALYSIS_ENABLED`                         | TanStack + collector worker         | `false`; explicit `true` enables manual/scheduled TA and canonical Python movement buckets             |
+| `PYTHON_ANALYSIS_ENABLED`                         | TanStack + collector worker         | `false`; explicit `true` enables manual/scheduled TA and canonical Python movement buckets; movement service must be one replica/one Uvicorn worker |
 | `PYTHON_ANALYSIS_URL`                             | TanStack + collector worker         | `http://127.0.0.1:8000`; required when enabled                                                          |
 | `PYTHON_ANALYSIS_TOKEN`                           | TanStack + collector worker + FastAPI secret | Empty/disabled; matching 32–256 URL-safe characters required when enabled                     |
 | `MONITOR_CRON_TOKEN`                              | Scheduler caller + TanStack secret  | Empty; required for the public monitor and collector-universe hooks                                     |

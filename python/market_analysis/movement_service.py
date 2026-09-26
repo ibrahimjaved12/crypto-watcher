@@ -29,8 +29,8 @@ class MovementBoundaryService:
     ):
         if type(cache_capacity) is not int or cache_capacity < 1:
             raise ValueError("cache_capacity must be a positive integer")
-        if type(session_capacity) is not int or session_capacity < 1:
-            raise ValueError("session_capacity must be a positive integer")
+        if type(session_capacity) is not int or session_capacity < 2:
+            raise ValueError("session_capacity must be an integer of at least two")
         self.cache_capacity = cache_capacity
         self.session_capacity = session_capacity
         self.sessions = OrderedDict()
