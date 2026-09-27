@@ -429,6 +429,21 @@ test("a changed universe forces an immediate normalization-history refresh", asy
   assert.equal(harness.calls.history, 2, "a universe change forces an immediate refresh");
 });
 
+test("completed collector backfill can force normalization history to refresh immediately", async () => {
+  const harness = createHarness();
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.history, 1);
+
+  harness.runtime.requestNormalizationHistoryRefresh();
+  harness.state.now = BASE + 5_000;
+  harness.state.boundary = BASE + 5_000;
+  await harness.runtime.runOnce();
+
+  assert.equal(harness.calls.history, 2);
+  assert.equal(harness.calls.register.length, 2);
+  assert.equal(harness.calls.historyReads[1].beforeBoundaryMs, BASE + 5_000);
+});
+
 test("reacquiring the lease reloads durable state and discards the previous tenure's batch", async () => {
   const harness = createHarness();
   try {

@@ -9,6 +9,7 @@ const movementStub = `
   export class MovementEngineRuntime {
     constructor() {}
     async start() {}
+    requestNormalizationHistoryRefresh() {}
     async stop() {
       globalThis.__collectorStopOrder.push("movement:start");
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -34,7 +35,15 @@ const replacements = {
     export function normalizeRestCandles() { return []; }
   `,
   "./movement-engine.server": movementStub,
+  "./movement-python-client.server": `
+    export async function advancePythonMovementBoundary() {}
+    export async function registerPythonMovementHistory() {}
+    export async function calculatePythonMarketMovement() {}
+  `,
   "./movement-finalization": `export function movementFinalizationConfig() { return {}; }`,
+  "./movement-metrics-contract": `
+    export const DEFAULT_MARKET_MOVEMENT_CONFIG = { historicalLookbackMs: 604800000 };
+  `,
   "./collector-worker-env.server": `export function validateCollectorWorkerEnvironment() {}`,
 };
 

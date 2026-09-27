@@ -40,6 +40,13 @@ const collectorReplacements = {
       async reconcile(symbols) { globalThis.__collectorBoundary.reconciled.push([...symbols]); }
       streamNames() { return []; }
       subscribedSymbols() { return []; }
+      async backfillMovementHistory() {
+        globalThis.__collectorBoundary.historyBackfills += 1;
+        if (globalThis.__collectorBoundary.historyBackfillError) {
+          throw globalThis.__collectorBoundary.historyBackfillError;
+        }
+        return true;
+      }
       async markConnectionStatus() {}
       async markCandleConnectionStatus() {}
       markMovementConnectionStatus() {}
@@ -57,8 +64,11 @@ const collectorReplacements = {
   "./movement-engine.server": stub(`
     export class MovementEngineRuntime {
       constructor() {}
-      async start() {}
+      async start() { globalThis.__collectorBoundary.movementStarts += 1; }
       async stop() {}
+      requestNormalizationHistoryRefresh() {
+        globalThis.__collectorBoundary.historyRefreshes += 1;
+      }
     }
   `),
   "./movement-python-client.server": stub(`
@@ -69,6 +79,9 @@ const collectorReplacements = {
     export async function calculatePythonMarketMovement() {}
   `),
   "./movement-finalization": stub(`export function movementFinalizationConfig() { return {}; }`),
+  "./movement-metrics-contract": stub(`
+    export const DEFAULT_MARKET_MOVEMENT_CONFIG = { historicalLookbackMs: 604800000 };
+  `),
   "./collector-worker-env.server": stub(`export function validateCollectorWorkerEnvironment() {}`),
 };
 
@@ -251,6 +264,10 @@ test("the collector worker reads one shared subscription universe from the opera
     leaseReleases: 0,
     universeReads: 0,
     movementResets: 0,
+    movementStarts: 0,
+    historyBackfills: 0,
+    historyRefreshes: 0,
+    historyBackfillError: null,
   };
   const previousWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = FakeWebSocket;
@@ -265,8 +282,45 @@ test("the collector worker reads one shared subscription universe from the opera
     assert.deepEqual(globalThis.__collectorBoundary.reconciled, [["ETHUSDT", "BTCUSDT"]]);
     assert.equal(globalThis.__collectorBoundary.leaseClaims, 1);
     assert.equal(globalThis.__collectorBoundary.universeReads, 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(globalThis.__collectorBoundary.historyBackfills, 1);
+    assert.equal(globalThis.__collectorBoundary.historyRefreshes, 1);
     await runtime.stop();
     assert.equal(globalThis.__collectorBoundary.leaseReleases, 1);
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("movement history backfill failure leaves the live collector and #70 runtime active", async () => {
+  globalThis.__collectorBoundary = {
+    reconciled: [],
+    leaseClaims: 0,
+    leaseReleases: 0,
+    universeReads: 0,
+    movementResets: 0,
+    movementStarts: 0,
+    historyBackfills: 0,
+    historyRefreshes: 0,
+    historyBackfillError: new Error("historical REST unavailable"),
+  };
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  try {
+    const module = await import(
+      transpile(await read("../src/lib/market/collector.server.ts"), collectorReplacements)
+    );
+    const runtime = new module.CollectorRuntime(boundaryStore(["BTCUSDT"]));
+    await runtime.tryBecomeActive();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(runtime.active, true);
+    assert.equal(globalThis.__collectorBoundary.movementStarts, 1);
+    assert.equal(globalThis.__collectorBoundary.historyBackfills, 1);
+    assert.equal(globalThis.__collectorBoundary.historyRefreshes, 0);
+    assert.deepEqual(globalThis.__collectorBoundary.reconciled, [["BTCUSDT"]]);
+
+    await runtime.stop();
   } finally {
     globalThis.WebSocket = previousWebSocket;
   }
@@ -279,6 +333,10 @@ test("movement transport resets on collector lease acquisition and loss", async 
     leaseReleases: 0,
     universeReads: 0,
     movementResets: 0,
+    movementStarts: 0,
+    historyBackfills: 0,
+    historyRefreshes: 0,
+    historyBackfillError: null,
   };
   const previousWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = FakeWebSocket;

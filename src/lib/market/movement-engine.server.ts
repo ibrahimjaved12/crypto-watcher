@@ -130,6 +130,8 @@ export class MovementEngineRuntime {
   private registeredSessionId: string | null = null;
   private registeredUniverseVersion: string | null = null;
   private historicalLoading: Promise<void> | null = null;
+  private historicalRefreshGeneration = 0;
+  private appliedHistoricalRefreshGeneration = 0;
   private lastTransition: PersistedMovementTransition | null = null;
   private pendingPersistence: PendingMovementPersistence | null = null;
 
@@ -162,6 +164,12 @@ export class MovementEngineRuntime {
     await this.historicalLoading?.catch(() => undefined);
   }
 
+  /** Forces the next evaluation cycle to reload normalization input from storage. */
+  requestNormalizationHistoryRefresh(): void {
+    this.historicalRefreshGeneration += 1;
+    this.historicalRetryAt = 0;
+  }
+
   /**
    * Drops every piece of in-memory lifecycle ownership so a reacquisition cannot
    * continue from stale counters or blindly write an old tenure's pending batch.
@@ -180,6 +188,8 @@ export class MovementEngineRuntime {
     this.historicalAsOfBoundary = null;
     this.registeredSessionId = null;
     this.registeredUniverseVersion = null;
+    this.historicalRefreshGeneration = 0;
+    this.appliedHistoricalRefreshGeneration = 0;
     this.lastTransition = null;
     this.pendingPersistence = null;
     this.engine = new MarketMovementEngine();
@@ -309,7 +319,9 @@ export class MovementEngineRuntime {
     // A changed universe (e.g. a newly watched symbol) needs history immediately
     // rather than waiting out the normal refresh cadence.
     const universeChanged = this.historicalUniverseVersion !== universe.version;
+    const refreshGeneration = this.historicalRefreshGeneration;
     const needsRefresh = universeChanged || this.historicalLoadedAt === 0 ||
+      this.appliedHistoricalRefreshGeneration !== refreshGeneration ||
       now - this.historicalLoadedAt >= MOVEMENT_HISTORICAL_REFRESH_MS;
     const needsRegistration = this.registeredSessionId !== sessionId ||
       this.registeredUniverseVersion !== universe.version;
@@ -333,6 +345,7 @@ export class MovementEngineRuntime {
           this.historicalAsOfBoundary = firstBoundary;
           this.historicalLoadedAt = now;
           this.historicalUniverseVersion = universe.version;
+          this.appliedHistoricalRefreshGeneration = refreshGeneration;
           this.registeredSessionId = null;
           this.registeredUniverseVersion = null;
         }
