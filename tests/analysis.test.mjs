@@ -31,6 +31,17 @@ const env = {
   PYTHON_ANALYSIS_TOKEN: "test-service-" + "x".repeat(32),
 };
 
+async function captureDiagnostics(action) {
+  const logs = [];
+  const originalError = console.error;
+  console.error = (...args) => logs.push(args);
+  try {
+    return { value: await action(), logs };
+  } finally {
+    console.error = originalError;
+  }
+}
+
 function db(rows = {}, failTable = "") {
   const queries = [];
   return {
@@ -298,7 +309,7 @@ test("redirects are never followed and unused error bodies are canceled", async 
   }
 });
 
-test("outbound diagnostics identify every stage without logging private data", async () => {
+test("outbound failures return safe categories without logging private data", async () => {
   const privateResponse = "private-response-body";
   const cases = [
     {
@@ -357,31 +368,16 @@ test("outbound diagnostics identify every stage without logging private data", a
       analyzeForUser(db({ watchlist_items: {} }), "private-user-id", "BTCUSDT", env, entry.send),
     );
     assert.equal(reply.ok, false);
-    assert.equal(logs.length, 1);
-    assert.equal(logs[0].length, 2);
-    assert.equal(logs[0][0], "[python-analysis]");
-    assert.equal(logs[0][1].stage, entry.stage);
-    assert.equal(logs[0][1].httpStatus, entry.status);
-    assert.equal(typeof logs[0][1].errorName, "string");
-    assert.equal(typeof logs[0][1].errorMessage, "string");
-    assert.deepEqual(Object.keys(logs[0][1]).sort(), [
-      "aborted",
-      "causeCode",
-      "causeMessage",
-      "causeName",
-      "errorMessage",
-      "errorName",
-      "httpStatus",
-      "stage",
-    ]);
-    const logged = JSON.stringify(logs);
-    assert.equal(logged.includes(env.PYTHON_ANALYSIS_TOKEN), false);
-    assert.equal(logged.includes(env.PYTHON_ANALYSIS_URL), false);
-    assert.equal(logged.includes("Bearer"), false);
-    assert.equal(logged.includes("private-user-id"), false);
-    assert.equal(logged.includes("schema_version"), false);
-    assert.equal(logged.includes("baseline"), false);
-    assert.equal(logged.includes(privateResponse), false);
+    assert.equal(
+      reply.category,
+      entry.stage === "schema-validation" ? "invalid_response" : "network_or_response",
+    );
+    assert.equal(logs.length, 0);
+    const surfaced = JSON.stringify(reply);
+    assert.equal(surfaced.includes(env.PYTHON_ANALYSIS_TOKEN), false);
+    assert.equal(surfaced.includes(env.PYTHON_ANALYSIS_URL), false);
+    assert.equal(surfaced.includes("private-user-id"), false);
+    assert.equal(surfaced.includes(privateResponse), false);
   }
 });
 
