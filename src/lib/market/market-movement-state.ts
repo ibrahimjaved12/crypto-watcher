@@ -148,6 +148,10 @@ export type MovementEngineDiagnostics = {
   finalizationGraceMs: number | null;
   movementAlgorithmVersion: string;
   movementConfigVersion: string;
+  classifierAlgorithmVersion: string;
+  classifierConfigVersion: string;
+  episodeAlgorithmVersion: string;
+  lifecycleConfigVersion: string;
   universeVersion: string;
   mostRecentTransition: PersistedMovementTransition | null;
   lateAfterFinalizationCount: number;
@@ -227,6 +231,10 @@ export function toMovementEngineDiagnostics(
     finalizationGraceMs: evidence.finalizationGraceMs ?? null,
     movementAlgorithmVersion: current.movementAlgorithmVersion,
     movementConfigVersion: current.movementConfigVersion,
+    classifierAlgorithmVersion: current.classifierAlgorithmVersion,
+    classifierConfigVersion: current.classifierConfigVersion,
+    episodeAlgorithmVersion: current.episodeAlgorithmVersion,
+    lifecycleConfigVersion: current.lifecycleConfigVersion,
     universeVersion: current.universeVersion,
     mostRecentTransition: evidence.mostRecentTransition ?? null,
     lateAfterFinalizationCount: evidence.engine?.lateAfterFinalizationCount ?? 0,
