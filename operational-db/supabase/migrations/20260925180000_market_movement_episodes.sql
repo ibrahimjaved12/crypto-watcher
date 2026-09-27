@@ -29,6 +29,7 @@ CREATE TABLE public.market_state_current (
 CREATE TABLE public.market_movement_events (
   event_id TEXT PRIMARY KEY,
   episode_id TEXT NOT NULL,
+  previous_episode_id TEXT,
   episode_algorithm_version TEXT NOT NULL,
   lifecycle_config_version TEXT NOT NULL,
   transition TEXT NOT NULL CHECK (transition IN ('STARTED', 'STRENGTHENED', 'WEAKENED', 'REVERSED', 'ENDED')),
@@ -45,8 +46,8 @@ CREATE TABLE public.market_movement_events (
   price_type TEXT NOT NULL CHECK (price_type = 'trade'),
   direction TEXT NOT NULL CHECK (direction IN ('BROAD_RISE', 'BROAD_DROP')),
   pace TEXT NOT NULL CHECK (pace IN ('ACCELERATING', 'DECELERATING', 'MIXED', 'NOT_APPLICABLE')),
-  directional_breadth DOUBLE PRECISION NOT NULL,
-  material_breadth DOUBLE PRECISION NOT NULL,
+  directional_breadth DOUBLE PRECISION,
+  material_breadth DOUBLE PRECISION,
   median_raw_return DOUBLE PRECISION,
   median_normalized_movement DOUBLE PRECISION,
   median_acceleration DOUBLE PRECISION,
@@ -64,6 +65,7 @@ CREATE TABLE public.market_movement_events (
   classifier_config_version TEXT NOT NULL,
   movement_algorithm_version TEXT NOT NULL,
   movement_config_version TEXT NOT NULL,
+  canonical_event JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
@@ -148,52 +150,14 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION public.append_market_movement_event(
-  p_event_id TEXT,
-  p_episode_id TEXT,
-  p_episode_algorithm_version TEXT,
-  p_lifecycle_config_version TEXT,
-  p_transition TEXT,
-  p_transition_reason TEXT,
-  p_from_direction TEXT,
-  p_to_direction TEXT,
-  p_episode_start_boundary_time TIMESTAMPTZ,
-  p_evaluation_boundary_time TIMESTAMPTZ,
-  p_universe_id TEXT,
-  p_universe_version TEXT,
-  p_primary_window_minutes INTEGER,
-  p_provider TEXT,
-  p_exchange TEXT,
-  p_price_type TEXT,
-  p_direction TEXT,
-  p_pace TEXT,
-  p_directional_breadth DOUBLE PRECISION,
-  p_material_breadth DOUBLE PRECISION,
-  p_median_raw_return DOUBLE PRECISION,
-  p_median_normalized_movement DOUBLE PRECISION,
-  p_median_acceleration DOUBLE PRECISION,
-  p_acceleration_breadth DOUBLE PRECISION,
-  p_dispersion DOUBLE PRECISION,
-  p_rvol_summary JSONB,
-  p_outliers JSONB,
-  p_supporting_contracts JSONB,
-  p_conflicting_contracts JSONB,
-  p_configured_universe JSONB,
-  p_included_symbols JSONB,
-  p_excluded_symbols JSONB,
-  p_windows_context JSONB,
-  p_classifier_algorithm_version TEXT,
-  p_classifier_config_version TEXT,
-  p_movement_algorithm_version TEXT,
-  p_movement_config_version TEXT
-) RETURNS TEXT
+CREATE FUNCTION public.append_market_movement_event(p_canonical_event JSONB) RETURNS TEXT
 LANGUAGE plpgsql SECURITY INVOKER SET search_path = public
 AS $$
 DECLARE
   v_inserted TEXT;
 BEGIN
   INSERT INTO public.market_movement_events (
-    event_id, episode_id, transition, transition_reason,
+    event_id, episode_id, previous_episode_id, transition, transition_reason,
     episode_algorithm_version, lifecycle_config_version,
     from_direction, to_direction, episode_start_boundary_time, evaluation_boundary_time,
     universe_id, universe_version, primary_window_minutes, provider, exchange,
@@ -203,21 +167,52 @@ BEGIN
     supporting_contracts, conflicting_contracts, configured_universe,
     included_symbols, excluded_symbols, windows_context,
     classifier_algorithm_version, classifier_config_version,
-    movement_algorithm_version, movement_config_version, created_at
+    movement_algorithm_version, movement_config_version, canonical_event, created_at
   ) VALUES (
-    p_event_id, p_episode_id, p_transition, p_transition_reason,
-    p_episode_algorithm_version, p_lifecycle_config_version,
-    p_from_direction, p_to_direction, p_episode_start_boundary_time, p_evaluation_boundary_time,
-    p_universe_id, p_universe_version, p_primary_window_minutes, p_provider, p_exchange,
-    p_price_type, p_direction, p_pace, p_directional_breadth, p_material_breadth,
-    p_median_raw_return, p_median_normalized_movement, p_median_acceleration,
-    p_acceleration_breadth, p_dispersion, coalesce(p_rvol_summary, '{}'::jsonb),
-    coalesce(p_outliers, '[]'::jsonb), coalesce(p_supporting_contracts, '[]'::jsonb),
-    coalesce(p_conflicting_contracts, '[]'::jsonb), coalesce(p_configured_universe, '[]'::jsonb),
-    coalesce(p_included_symbols, '[]'::jsonb), coalesce(p_excluded_symbols, '[]'::jsonb),
-    coalesce(p_windows_context, '[]'::jsonb),
-    p_classifier_algorithm_version, p_classifier_config_version,
-    p_movement_algorithm_version, p_movement_config_version, clock_timestamp()
+    p_canonical_event->>'event_id', p_canonical_event->>'episode_id',
+    p_canonical_event->>'previous_episode_id', p_canonical_event->>'transition',
+    p_canonical_event->>'transition_reason',
+    p_canonical_event->'episode_scope'->>'lifecycle_algorithm_version',
+    p_canonical_event->'episode_scope'->>'lifecycle_config_version',
+    p_canonical_event->>'from_direction', p_canonical_event->>'to_direction',
+    to_timestamp((p_canonical_event->>'episode_start_boundary_time_ms')::double precision / 1000.0),
+    to_timestamp((p_canonical_event->>'evaluation_boundary_time_ms')::double precision / 1000.0),
+    p_canonical_event->'episode_scope'->>'universe_id',
+    p_canonical_event->'episode_scope'->>'universe_version',
+    (p_canonical_event->'episode_scope'->>'primary_window_minutes')::integer,
+    p_canonical_event->'episode_scope'->>'provider',
+    p_canonical_event->'episode_scope'->>'exchange',
+    p_canonical_event->'episode_scope'->>'price_type',
+    p_canonical_event->>'episode_direction',
+    CASE WHEN p_canonical_event->'pace'->>'available' = 'true'
+      THEN p_canonical_event->'pace'->>'value' ELSE 'NOT_APPLICABLE' END,
+    CASE WHEN p_canonical_event->'directional_breadth'->>'available' = 'true'
+      THEN (p_canonical_event->'directional_breadth'->'value'->>'fraction')::double precision END,
+    CASE WHEN p_canonical_event->'material_breadth'->>'available' = 'true'
+      THEN (p_canonical_event->'material_breadth'->'value'->>'fraction')::double precision END,
+    CASE WHEN p_canonical_event->'median_raw_return'->>'available' = 'true'
+      THEN (p_canonical_event->'median_raw_return'->>'value')::double precision END,
+    CASE WHEN p_canonical_event->'median_normalized_movement'->>'available' = 'true'
+      THEN (p_canonical_event->'median_normalized_movement'->>'value')::double precision END,
+    CASE WHEN p_canonical_event->'median_acceleration'->>'available' = 'true'
+      THEN (p_canonical_event->'median_acceleration'->>'value')::double precision END,
+    CASE WHEN p_canonical_event->'acceleration_breadth'->>'available' = 'true'
+      THEN (p_canonical_event->'acceleration_breadth'->'value'->>'fraction')::double precision END,
+    CASE WHEN p_canonical_event->'dispersion_mad_normalized_movement'->>'available' = 'true'
+      THEN (p_canonical_event->'dispersion_mad_normalized_movement'->>'value')::double precision END,
+    coalesce(p_canonical_event->'volume_context', '[]'::jsonb),
+    coalesce(p_canonical_event->'isolated_outliers', '[]'::jsonb),
+    coalesce(p_canonical_event->'supporting_contracts', '[]'::jsonb),
+    coalesce(p_canonical_event->'conflicting_contracts', '[]'::jsonb),
+    coalesce(p_canonical_event->'configured_universe', '[]'::jsonb),
+    coalesce(p_canonical_event->'included_symbols', '[]'::jsonb),
+    coalesce(p_canonical_event->'excluded_symbols', '[]'::jsonb),
+    coalesce(p_canonical_event->'windows_context', '[]'::jsonb),
+    p_canonical_event->'episode_scope'->>'classifier_algorithm_version',
+    p_canonical_event->'episode_scope'->>'classifier_config_version',
+    p_canonical_event->'episode_scope'->>'movement_algorithm_version',
+    p_canonical_event->'episode_scope'->>'movement_config_version',
+    p_canonical_event, clock_timestamp()
   )
   ON CONFLICT (event_id) DO NOTHING
   RETURNING event_id INTO v_inserted;
@@ -244,47 +239,9 @@ BEGIN
   FOR v_event IN
     SELECT value FROM jsonb_array_elements(coalesce(p_events, '[]'::jsonb))
   LOOP
-    v_status := public.append_market_movement_event(
-      v_event->>'eventId',
-      v_event->>'episodeId',
-      v_event->>'episodeAlgorithmVersion',
-      v_event->>'lifecycleConfigVersion',
-      v_event->>'transition',
-      v_event->>'transitionReason',
-      v_event->>'fromDirection',
-      v_event->>'toDirection',
-      to_timestamp(((v_event->>'episodeStartBoundaryTime')::double precision) / 1000.0),
-      to_timestamp(((v_event->>'evaluationBoundaryTime')::double precision) / 1000.0),
-      v_event->>'universeId',
-      v_event->>'universeVersion',
-      (v_event->>'primaryWindowMinutes')::integer,
-      v_event->>'provider',
-      v_event->>'exchange',
-      v_event->>'priceType',
-      v_event->>'direction',
-      v_event->>'pace',
-      (v_event->>'directionalBreadth')::double precision,
-      (v_event->>'materialBreadth')::double precision,
-      (v_event->>'medianRawReturn')::double precision,
-      (v_event->>'medianNormalizedMovement')::double precision,
-      (v_event->>'medianAcceleration')::double precision,
-      (v_event->>'accelerationBreadth')::double precision,
-      (v_event->>'dispersion')::double precision,
-      v_event->'rvolSummary',
-      v_event->'outliers',
-      v_event->'supportingContracts',
-      v_event->'conflictingContracts',
-      v_event->'configuredUniverse',
-      v_event->'includedSymbols',
-      v_event->'excludedSymbols',
-      v_event->'windowsContext',
-      v_event->>'classifierAlgorithmVersion',
-      v_event->>'classifierConfigVersion',
-      v_event->>'movementAlgorithmVersion',
-      v_event->>'movementConfigVersion'
-    );
+    v_status := public.append_market_movement_event(v_event);
     v_statuses := v_statuses || jsonb_build_array(
-      jsonb_build_object('eventId', v_event->>'eventId', 'status', v_status)
+      jsonb_build_object('eventId', v_event->>'event_id', 'status', v_status)
     );
   END LOOP;
 

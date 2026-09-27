@@ -1,6 +1,6 @@
 """Versioned server-to-server input. Never accepts DB credentials or a user JWT."""
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -298,3 +298,8 @@ class PreviousConfirmedPrimaryEpisode(InputModel):
 
 class MovementClassificationRequest(MovementMetricsRequest):
     previous_confirmed_primary_episode: PreviousConfirmedPrimaryEpisode | None = None
+
+
+class MovementLifecycleRequest(MovementMetricsRequest):
+    previous_lifecycle_state: dict[str, Any] | None
+    interrupt_previous_state: bool = Field(strict=True)

@@ -6,8 +6,8 @@
  *
  *   #70 buckets -> #71 metrics -> #72 classification -> #73 lifecycle
  *
- * The runtime supplies canonical Python #71/#72 for each boundary.
- * This engine owns only sequencing and the temporary #73 lifecycle state.
+ * The runtime supplies canonical Python #71/#72/#73 for each boundary.
+ * This engine owns only ordered boundary sequencing and the opaque state handoff.
  */
 import {
   MOVEMENT_BUCKET_MS,
@@ -18,19 +18,11 @@ import {
   MARKET_MOVEMENT_ALGORITHM_VERSION,
   type MarketMovementEvaluation,
 } from "./movement-metrics-contract";
-import { projectClassificationForLifecycle,
-  type MarketStateEvidence } from "./market-episode-classification";
-import type { ConfirmedPrimaryEpisodeScope, MarketClassification } from "./market-state-contract";
 import {
-  DEFAULT_MARKET_EPISODE_LIFECYCLE_CONFIG,
-  MARKET_EPISODE_ALGORITHM_VERSION,
-  markMarketEpisodeStatePersisted,
-  processMarketEpisodeLifecycle,
-  type MarketEpisodeLifecycleConfig,
-  type MarketEpisodeLifecycleState,
-  type MarketMovementEvent,
-  type ProcessMarketEpisodeLifecycleResult,
-} from "./market-episode-lifecycle";
+  type CanonicalMarketEpisodeTransition, type MarketEpisodeLifecycleTransport,
+  type SerializedMarketEpisodeLifecycleState,
+} from "./market-episode-contract";
+import type { MarketClassification } from "./market-state-contract";
 import type { MarketUniverse } from "./market-universe";
 import type {
   PersistedMarketMovementCurrentEvidence,
@@ -44,22 +36,22 @@ export type MovementBoundaryEvaluation = {
   boundaryTime: number;
   movement: MarketMovementEvaluation;
   classification: MarketClassification;
-  lifecycle: ProcessMarketEpisodeLifecycleResult;
+  lifecycle: MarketEpisodeLifecycleTransport;
 };
 
 export type MovementEngineAdvanceInput = {
   finalizableBoundary: number;
   universe: MarketUniverse;
-  assessmentForBoundary: (boundaryTime: number,
-    previousConfirmedPrimaryEpisode: ConfirmedPrimaryEpisodeScope | null) => Promise<{
+  lifecycleForBoundary: (boundaryTime: number,
+    previousLifecycleState: SerializedMarketEpisodeLifecycleState | null,
+    interruptPreviousState: boolean) => Promise<{
       movement: MarketMovementEvaluation;
       classification: MarketClassification;
+      lifecycle: MarketEpisodeLifecycleTransport;
     }>;
-  lifecycleConfig?: MarketEpisodeLifecycleConfig;
 };
 
 export type MovementCurrentEvidenceInput = {
-  evidence: MarketStateEvidence;
   classification: MarketClassification;
   universe: MarketUniverse;
   status: PersistedMarketMovementCurrentEvidence["engine"]["status"];
@@ -70,6 +62,8 @@ export type MovementCurrentEvidenceInput = {
   lastReceivedAt: number | null;
   finalizationConfigVersion: string;
   finalizationGraceMs: number;
+  persistenceConfigVersion: string;
+  currentSnapshotCadenceMs: number;
   mostRecentTransition: PersistedMovementTransition | null;
 };
 
@@ -80,17 +74,17 @@ function finiteNonnegative(value: unknown): number | null {
 }
 
 /** Converts a #73 movement event into the compact transition consumers inspect. */
-export function transitionToPersisted(event: MarketMovementEvent): PersistedMovementTransition {
+export function transitionToPersisted(event: CanonicalMarketEpisodeTransition): PersistedMovementTransition {
   return {
     transition: event.transition,
-    transitionReason: event.transitionReason,
-    episodeId: event.episodeId,
-    direction: event.direction,
-    fromDirection: event.fromDirection,
-    toDirection: event.toDirection,
-    pace: event.pace,
-    episodeStartBoundaryTime: event.episodeStartBoundaryTime,
-    evaluationBoundaryTime: event.evaluationBoundaryTime,
+    transitionReason: event.transition_reason,
+    episodeId: event.episode_id,
+    direction: event.episode_direction,
+    fromDirection: event.from_direction,
+    toDirection: event.to_direction,
+    pace: event.pace.available ? event.pace.value : "NOT_APPLICABLE",
+    episodeStartBoundaryTime: event.episode_start_boundary_time_ms,
+    evaluationBoundaryTime: event.evaluation_boundary_time_ms,
   };
 }
 
@@ -105,7 +99,7 @@ export function buildMovementCurrentEvidence(
   const primary = input.classification.windows.find((window) => window.windowMinutes === 5);
   if (!primary) throw new Error("movement classification is missing the 5m primary window");
   return {
-    ...input.evidence,
+    primaryWindow: primary,
     windowsContext: input.classification.windows,
     universe: {
       id: input.universe.id,
@@ -130,6 +124,8 @@ export function buildMovementCurrentEvidence(
     },
     finalizationConfigVersion: input.finalizationConfigVersion,
     finalizationGraceMs: input.finalizationGraceMs,
+    persistenceConfigVersion: input.persistenceConfigVersion,
+    currentSnapshotCadenceMs: input.currentSnapshotCadenceMs,
     mostRecentTransition: input.mostRecentTransition,
   };
 }
@@ -137,7 +133,9 @@ export function buildMovementCurrentEvidence(
 export class MarketMovementEngine {
   private lastEvaluated: number | null = null;
   private lastUniverseVersion: string | null = null;
-  private lifecycleState: MarketEpisodeLifecycleState | null = null;
+  private lifecycleState: SerializedMarketEpisodeLifecycleState | null = null;
+  private interruptPreviousState = false;
+  private restoredBoundaryTime: number | null = null;
 
   constructor(private readonly options: { maxCatchUpBoundaries?: number } = {}) {}
 
@@ -154,8 +152,8 @@ export class MarketMovementEngine {
     ) {
       throw new Error("movement finalizable boundary must be an aligned exchange boundary");
     }
-    if (this.lastEvaluated === null && this.lifecycleState !== null &&
-        finalizableBoundary < this.lifecycleState.evaluationBoundaryTime) return null;
+    if (this.lastEvaluated === null && this.restoredBoundaryTime !== null &&
+        finalizableBoundary <= this.restoredBoundaryTime) return null;
     if (this.lastEvaluated !== null && finalizableBoundary <= this.lastEvaluated) return null;
     let next = this.lastEvaluated === null
       ? finalizableBoundary
@@ -171,16 +169,12 @@ export class MarketMovementEngine {
     return next;
   }
 
-  /** Seeds #73 state loaded from the bounded operational current state after restart. */
-  restoreLifecycleState(state: MarketEpisodeLifecycleState | null): void {
+  /** Seeds opaque #73 state; Python applies the one-time restart interruption. */
+  restoreLifecycleState(state: SerializedMarketEpisodeLifecycleState | null,
+    persistedBoundaryTime: number | null = null): void {
     this.lifecycleState = state;
-  }
-
-  /** Marks the last evaluation as durably persisted so cadence accounting advances. */
-  acknowledgePersisted(): void {
-    if (this.lifecycleState) {
-      this.lifecycleState = markMarketEpisodeStatePersisted(this.lifecycleState);
-    }
+    this.restoredBoundaryTime = persistedBoundaryTime;
+    this.interruptPreviousState = state !== null;
   }
 
   /**
@@ -199,6 +193,7 @@ export class MarketMovementEngine {
     if (next === null) return [];
     const results: MovementBoundaryEvaluation[] = [];
     let stagedLifecycleState = this.lifecycleState;
+    let stagedInterrupt = this.interruptPreviousState;
     let stagedLastEvaluated = this.lastEvaluated;
     let stagedUniverseVersion = this.lastUniverseVersion;
     for (
@@ -206,13 +201,16 @@ export class MarketMovementEngine {
       boundary <= input.finalizableBoundary;
       boundary += MOVEMENT_BUCKET_MS
     ) {
-      const result = await this.evaluateBoundary(boundary, input, stagedLifecycleState);
+      const result = await this.evaluateBoundary(boundary, input, stagedLifecycleState,
+        stagedInterrupt);
       results.push(result);
-      stagedLifecycleState = result.lifecycle.nextState;
+      stagedLifecycleState = result.lifecycle.serializedState;
+      stagedInterrupt = false;
       stagedLastEvaluated = boundary;
       stagedUniverseVersion = input.universe.version;
     }
     this.lifecycleState = stagedLifecycleState;
+    this.interruptPreviousState = stagedInterrupt;
     this.lastEvaluated = stagedLastEvaluated;
     this.lastUniverseVersion = stagedUniverseVersion;
     return results;
@@ -221,24 +219,11 @@ export class MarketMovementEngine {
   private async evaluateBoundary(
     boundaryTime: number,
     input: MovementEngineAdvanceInput,
-    previousState: MarketEpisodeLifecycleState | null,
+    previousState: SerializedMarketEpisodeLifecycleState | null,
+    interruptPreviousState: boolean,
   ): Promise<MovementBoundaryEvaluation> {
-    const activeEpisode = previousState?.activeEpisode;
-    const previousConfirmedPrimaryEpisode: ConfirmedPrimaryEpisodeScope | null = activeEpisode &&
-      activeEpisode.episodeAlgorithmVersion === MARKET_EPISODE_ALGORITHM_VERSION &&
-      activeEpisode.lifecycleConfigVersion ===
-        (input.lifecycleConfig ?? DEFAULT_MARKET_EPISODE_LIFECYCLE_CONFIG).version
-      ? {
-        direction: activeEpisode.direction,
-        universeId: activeEpisode.universeId,
-        universeVersion: activeEpisode.universeVersion,
-        movementAlgorithmVersion: activeEpisode.movementAlgorithmVersion,
-        movementConfigVersion: activeEpisode.movementConfigVersion,
-        classifierAlgorithmVersion: activeEpisode.classifierAlgorithmVersion,
-        classifierConfigVersion: activeEpisode.classifierConfigVersion,
-      } : null;
-    const { movement, classification } = await input.assessmentForBoundary(
-      boundaryTime, previousConfirmedPrimaryEpisode,
+    const { movement, classification, lifecycle } = await input.lifecycleForBoundary(
+      boundaryTime, previousState, interruptPreviousState,
     );
     if (
       movement.evaluationBoundaryTime !== boundaryTime ||
@@ -287,12 +272,15 @@ export class MarketMovementEngine {
           ).length !== 1)) {
       throw new Error("canonical classification response has mismatched boundary or provenance");
     }
-    const lifecycle = processMarketEpisodeLifecycle({
-      classification: projectClassificationForLifecycle(classification),
-      movement,
-      previousState,
-      ...(input.lifecycleConfig ? { config: input.lifecycleConfig } : {}),
-    });
+    if (lifecycle.stateSummary.evaluationBoundaryTime !== boundaryTime ||
+        lifecycle.stateSummary.universeId !== input.universe.id ||
+        lifecycle.stateSummary.universeVersion !== input.universe.version ||
+        lifecycle.stateSummary.classifierAlgorithmVersion !== classification.classifierAlgorithmVersion ||
+        lifecycle.stateSummary.classifierConfigVersion !== classification.classifierConfigVersion ||
+        lifecycle.stateSummary.movementAlgorithmVersion !== movement.algorithmVersion ||
+        lifecycle.stateSummary.movementConfigVersion !== movement.configVersion) {
+      throw new Error("canonical lifecycle response has mismatched boundary or provenance");
+    }
     return { boundaryTime, movement, classification, lifecycle };
   }
 }

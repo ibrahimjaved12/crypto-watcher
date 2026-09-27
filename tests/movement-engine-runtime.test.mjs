@@ -25,8 +25,6 @@ const normalizationUrl = await transpile("../src/lib/market/movement-normalizati
   "./movement-contract": movementBucketsUrl,
   "./movement-metrics-contract": metricsUrl,
 });
-const episodeClassificationUrl = await transpile("../src/lib/market/market-episode-classification.ts");
-const lifecycleUrl = await transpile("../src/lib/market/market-episode-lifecycle.ts");
 const universeUrl = await transpile("../src/lib/market/market-universe.ts", {
   "./market-movement-state": stateUrl,
 });
@@ -36,14 +34,11 @@ const finalizationUrl = await transpile("../src/lib/market/movement-finalization
 const engineUrl = await transpile("../src/lib/market/market-movement-engine.ts", {
   "./movement-contract": movementBucketsUrl,
   "./movement-metrics-contract": metricsUrl,
-  "./market-episode-classification": episodeClassificationUrl,
-  "./market-episode-lifecycle": lifecycleUrl,
   "./market-universe": universeUrl,
 });
 const runtimeUrl = await transpile("../src/lib/market/movement-engine.server.ts", {
   "./market-movement-engine": engineUrl,
   "./market-universe": universeUrl,
-  "./market-episode-lifecycle": lifecycleUrl,
   "./movement-finalization": finalizationUrl,
   "./movement-metrics-contract": metricsUrl,
   "./movement-normalization-input": normalizationUrl,
@@ -51,6 +46,7 @@ const runtimeUrl = await transpile("../src/lib/market/movement-engine.server.ts"
 });
 
 const { MovementEngineRuntime, MOVEMENT_RETRY_BASE_MS } = await import(runtimeUrl);
+const { buildMarketUniverse } = await import(universeUrl);
 
 const BASE = 1_800_000_000_000; // 15m-aligned epoch boundary
 const MINUTE = 60_000;
@@ -218,12 +214,92 @@ function canonicalAssessment(universe, boundary) {
   };
 }
 
-function createHarness() {
+function canonicalLifecycle(universe, boundary, transitions = []) {
+  const assessment = canonicalAssessment(universe, boundary);
+  return {
+    ...assessment,
+    lifecycle: {
+      serializedState: { serialization_version: "market-episode-state-v1",
+        opaque_marker: boundary },
+      stateSummary: {
+        evaluationBoundaryTime: boundary, currentDirectionState: "BROAD_RISE",
+        currentPace: { available: true, value: "ACCELERATING", reason: null },
+        activeEpisodeId: transitions.length ? "episode-fixture" : null,
+        activeEpisodeDirection: transitions.length ? "BROAD_RISE" : null,
+        interrupted: false,
+        lifecycleAlgorithmVersion: "market-episode-lifecycle-v1",
+        lifecycleConfigVersion: "market-episode-lifecycle-config-v1",
+        universeId: universe.id, universeVersion: universe.version,
+        primaryWindowMinutes: 5,
+        classifierAlgorithmVersion: "market-state-classifier-v1",
+        classifierConfigVersion: "market-state-classifier-config-v1",
+        movementAlgorithmVersion: "market-movement-v1",
+        movementConfigVersion: "market-movement-config-v1",
+        provider: "binance-usdm", exchange: "binance", priceType: "trade",
+      },
+      transitions,
+    },
+  };
+}
+
+function canonicalTransition(boundary) {
+  const universe = buildMarketUniverse(SYMBOLS);
+  const scope = {
+    lifecycle_algorithm_version: "market-episode-lifecycle-v1",
+    lifecycle_config_version: "market-episode-lifecycle-config-v1",
+    universe_id: universe.id, universe_version: universe.version,
+    primary_window_minutes: 5,
+    classifier_algorithm_version: "market-state-classifier-v1",
+    classifier_config_version: "market-state-classifier-config-v1",
+    movement_algorithm_version: "market-movement-v1",
+    movement_config_version: "market-movement-config-v1",
+    provider: "binance-usdm", exchange: "binance", price_type: "trade",
+  };
+  const lifecycleConfig = {
+    version: "market-episode-lifecycle-config-v1", evaluation_cadence_ms: 5_000,
+    start_confirmation_count: 2, end_confirmation_count: 3,
+    reversal_confirmation_count: 2, strengthen_confirmation_count: 2,
+    weaken_confirmation_count: 2, resume_confirmation_count: 2,
+    continuation_breadth: 0.55, material_strengthen_breadth: 0.7,
+    material_weaken_breadth: 0.5,
+  };
+  const metric = (value) => ({ available: true, value, reason: null });
+  return {
+    event_id: `event-${boundary}`, episode_id: "episode-fixture",
+    previous_episode_id: null, transition: "STARTED",
+    transition_reason: "confirmed_broad_entry", from_direction: null,
+    to_direction: "BROAD_RISE", event_family: "BROAD_MOVE",
+    episode_direction: "BROAD_RISE",
+    episode_start_boundary_time_ms: boundary - 5_000,
+    evaluation_boundary_time_ms: boundary,
+    episode_scope: scope, evaluation_scope: scope,
+    episode_lifecycle_config: lifecycleConfig, evaluation_lifecycle_config: lifecycleConfig,
+    windows_context: [1, 5, 15].map((window_minutes) => ({ window_minutes })),
+    source_time_evidence: SYMBOLS.map((symbol) => ({
+      symbol, last_real_trade_time_ms: boundary,
+      last_real_event_time_ms: boundary, last_received_at_ms: boundary + 123,
+    })),
+    directional_breadth: metric({ count: 5, fraction: 1 }),
+    material_breadth: metric({ count: 5, fraction: 1 }),
+    median_raw_return: metric(0.01), median_normalized_movement: metric(1),
+    median_acceleration: metric(0.0001),
+    acceleration_breadth: metric({ count: 5, fraction: 1 }),
+    pace: metric("ACCELERATING"), dispersion_mad_normalized_movement: metric(0.1),
+    volume_context: [], isolated_outliers: [], supporting_contracts: [],
+    conflicting_contracts: [],
+    configured_universe: SYMBOLS, included_symbols: SYMBOLS,
+    excluded_symbols: [],
+    classification: { evaluation_boundary_time_ms: boundary },
+  };
+}
+
+function createHarness(persistenceConfig) {
   const state = { now: BASE, boundary: BASE, advanced: [], sessionId: crypto.randomUUID() };
   const control = { failRestore: 0, failHistory: 0, failPersist: false,
-    failMetrics: false, rotateDuringMetrics: false, changeUniverseDuringMetrics: false,
+    failLifecycle: false, rotateDuringLifecycle: false, changeUniverseDuringLifecycle: false,
+    transitionBoundaries: new Set([BASE + 5_000]),
     symbols: [...SYMBOLS] };
-  const calls = { restore: 0, history: 0, historyReads: [], register: [], metrics: [], persist: [] };
+  const calls = { restore: 0, history: 0, historyReads: [], register: [], lifecycle: [], persist: [] };
   const persistedEvents = new Map();
   const candles = new Map(SYMBOLS.map((symbol) => [symbol, historicalCandles()]));
   let durableCurrent = null;
@@ -255,9 +331,9 @@ function createHarness() {
         throw new Error("persist write failed");
       }
       return events.map((event) => {
-        const exists = persistedEvents.has(event.eventId);
-        if (!exists) persistedEvents.set(event.eventId, event);
-        return { eventId: event.eventId, status: exists ? "already_exists" : "appended" };
+        const exists = persistedEvents.has(event.event_id);
+        if (!exists) persistedEvents.set(event.event_id, event);
+        return { eventId: event.event_id, status: exists ? "already_exists" : "appended" };
       });
     },
   };
@@ -273,16 +349,18 @@ function createHarness() {
       calls.register.push({sessionId, historyVersion, universe, config, historical,
         compatibility, asOfBoundary});
     },
-    async calculateAssessment(sessionId, boundary, historyVersion, universe,
-      configVersion, previousConfirmedPrimaryEpisode) {
-      calls.metrics.push({sessionId, boundary, historyVersion, universe,
-        configVersion, previousConfirmedPrimaryEpisode});
-      if (control.failMetrics) throw new Error("Python #71/#72 assessment unavailable");
-      if (control.rotateDuringMetrics) state.sessionId = crypto.randomUUID();
-      if (control.changeUniverseDuringMetrics) control.symbols = [...SYMBOLS, "XRPUSDT"];
-      return canonicalAssessment(universe, boundary);
+    async calculateLifecycle(sessionId, boundary, historyVersion, universe,
+      configVersion, previousLifecycleState, interruptPreviousState) {
+      calls.lifecycle.push({sessionId, boundary, historyVersion, universe,
+        configVersion, previousLifecycleState, interruptPreviousState});
+      if (control.failLifecycle) throw new Error("Python #71/#72/#73 lifecycle unavailable");
+      if (control.rotateDuringLifecycle) state.sessionId = crypto.randomUUID();
+      if (control.changeUniverseDuringLifecycle) control.symbols = [...SYMBOLS, "XRPUSDT"];
+      return canonicalLifecycle(universe, boundary,
+        control.transitionBoundaries.has(boundary) ? [canonicalTransition(boundary)] : []);
     },
     finalization: { version: "movement-finalization-config-v1:grace-0", graceMs: 0 },
+    persistenceConfig,
     now: () => state.now,
   });
   return { runtime, state, control, calls, persistedEvents, setDurableCurrent };
@@ -293,11 +371,8 @@ function advancedCurrent(current, boundary) {
   return {
     ...current,
     evaluationBoundaryTime: boundary,
-    lifecycleState: {
-      ...current.lifecycleState,
-      evaluationBoundaryTime: boundary,
-      lastPersistedTime: boundary,
-    },
+    lifecycleState: { serialization_version: "market-episode-state-v1",
+      opaque_marker: boundary },
   };
 }
 
@@ -308,27 +383,85 @@ test("runtime persists the effective finalization config and receive-time proven
   const evidence = harness.calls.persist[0].current.currentEvidence;
   assert.equal(evidence.finalizationConfigVersion, "movement-finalization-config-v1:grace-0");
   assert.equal(evidence.finalizationGraceMs, 0);
+  assert.equal(evidence.persistenceConfigVersion, "market-episode-persistence-v1");
+  assert.equal(evidence.currentSnapshotCadenceMs, 30_000);
   assert.equal(evidence.timestamps.lastReceivedAt, BASE + 123);
+  assert.deepEqual(harness.calls.persist[0].current.lifecycleState,
+    { serialization_version: "market-episode-state-v1", opaque_marker: BASE });
+  assert.equal("lastPersistedTime" in harness.calls.persist[0].current.lifecycleState, false);
+});
+
+test("transition-free current state follows the application 30-second persistence cadence", async () => {
+  const harness = createHarness();
+  harness.control.transitionBoundaries.clear();
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.persist.length, 1);
+  harness.state.now = BASE + 25_000;
+  harness.state.boundary = harness.state.now;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.persist.length, 1);
+  harness.state.now = BASE + 30_000;
+  harness.state.boundary = harness.state.now;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.persist.length, 2);
+  assert.equal(harness.calls.persist[1].current.evaluationBoundaryTime, BASE + 30_000);
+  assert.deepEqual(harness.calls.persist[1].events, []);
+});
+
+test("alternate application persistence cadence is auditable without changing Python state", async () => {
+  const harness = createHarness({
+    version: "market-episode-persistence-test-v2", currentSnapshotCadenceMs: 10_000,
+  });
+  harness.control.transitionBoundaries.clear();
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.persist.length, 1);
+  harness.state.now = BASE + 5_000;
+  harness.state.boundary = harness.state.now;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.persist.length, 1);
+  harness.state.now = BASE + 10_000;
+  harness.state.boundary = harness.state.now;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.persist.length, 2);
+  const current = harness.calls.persist[1].current;
+  assert.equal(current.evaluationBoundaryTime, BASE + 10_000);
+  assert.equal(current.currentEvidence.persistenceConfigVersion,
+    "market-episode-persistence-test-v2");
+  assert.equal(current.currentEvidence.currentSnapshotCadenceMs, 10_000);
+  assert.deepEqual(current.lifecycleState,
+    { serialization_version: "market-episode-state-v1", opaque_marker: BASE + 10_000 });
+  assert.equal("persistenceConfigVersion" in current.lifecycleState, false);
+  assert.equal("currentSnapshotCadenceMs" in current.lifecycleState, false);
+  assert.deepEqual(harness.calls.persist[1].events, []);
+});
+
+test("application persistence config rejects missing versions and invalid cadences", () => {
+  assert.throws(() => createHarness({ version: " ", currentSnapshotCadenceMs: 10_000 }));
+  for (const cadence of [0, -5_000, 1.5, Infinity]) {
+    assert.throws(() => createHarness({
+      version: "market-episode-persistence-test-v2", currentSnapshotCadenceMs: cadence,
+    }));
+  }
 });
 
 test("raw history registers for each completed-minute cutoff and the canonical session", async () => {
   const harness = createHarness();
   await harness.runtime.runOnce();
   assert.equal(harness.calls.register.length, 1);
-  assert.equal(harness.calls.metrics.length, 1);
+  assert.equal(harness.calls.lifecycle.length, 1);
   assert.equal(harness.calls.register[0].asOfBoundary, BASE);
   assert.equal(harness.calls.historyReads[0].sinceMs,
     BASE - harness.calls.register[0].config.historicalLookbackMs - 16 * MINUTE);
   assert.equal(harness.calls.historyReads[0].beforeBoundaryMs, BASE);
-  assert.equal(harness.calls.metrics[0].sessionId, harness.calls.register[0].sessionId);
-  assert.equal(harness.calls.metrics[0].historyVersion, harness.calls.register[0].historyVersion);
+  assert.equal(harness.calls.lifecycle[0].sessionId, harness.calls.register[0].sessionId);
+  assert.equal(harness.calls.lifecycle[0].historyVersion, harness.calls.register[0].historyVersion);
   assert.deepEqual(harness.calls.register[0].historical.get("BTCUSDT"), historicalCandles());
   assert.equal(harness.calls.register[0].compatibility.get("BTCUSDT"), true);
   harness.state.now = BASE + 5_000;
   harness.state.boundary = BASE + 5_000;
   await harness.runtime.runOnce();
   assert.equal(harness.calls.register.length, 2);
-  assert.equal(harness.calls.metrics.length, 2);
+  assert.equal(harness.calls.lifecycle.length, 2);
   harness.state.sessionId = crypto.randomUUID();
   harness.state.now = BASE + 10_000;
   harness.state.boundary = BASE + 10_000;
@@ -357,13 +490,13 @@ test("raw candles are reused within a completed-minute cutoff while each boundar
   await harness.runtime.runOnce();
   assert.equal(harness.calls.history, 2);
   assert.equal(harness.calls.register.length, 2);
-  assert.deepEqual(harness.calls.metrics.map((call) => call.boundary),
+  assert.deepEqual(harness.calls.lifecycle.map((call) => call.boundary),
     [BASE, BASE + 5_000, BASE + 10_000]);
 });
 
-test("Python #71/#72 assessment failure does not stop #70 finalization or advance #73", async () => {
+test("Python lifecycle failure does not stop #70 finalization or advance #73", async () => {
   const harness = createHarness();
-  harness.control.failMetrics = true;
+  harness.control.failLifecycle = true;
   await harness.runtime.runOnce();
   assert.equal(harness.runtime.engine.lastEvaluatedBoundary, null);
   harness.state.now = BASE + 5_000;
@@ -372,13 +505,13 @@ test("Python #71/#72 assessment failure does not stop #70 finalization or advanc
   assert.equal(harness.state.advanced.at(-1), BASE + 5_000);
   assert.equal(harness.runtime.engine.lastEvaluatedBoundary, null);
   assert.equal(harness.calls.persist.length, 0);
-  harness.control.failMetrics = false;
+  harness.control.failLifecycle = false;
   await harness.runtime.runOnce();
   assert.equal(harness.runtime.engine.lastEvaluatedBoundary, BASE + 5_000);
 });
 
 test("old session and changed universe responses are discarded before #72/#73", async () => {
-  for (const change of ["rotateDuringMetrics", "changeUniverseDuringMetrics"]) {
+  for (const change of ["rotateDuringLifecycle", "changeUniverseDuringLifecycle"]) {
     const harness = createHarness();
     harness.control[change] = true;
     await harness.runtime.runOnce();
@@ -404,6 +537,7 @@ test("pending lifecycle persistence does not block newer bucket finalization", a
   const attempted = harness.calls.persist[1].events;
   assert.equal(attempted.length, 1);
   assert.equal(attempted[0].transition, "STARTED");
+  assert.deepEqual(attempted[0], canonicalTransition(BASE + 5_000));
   assert.equal(harness.persistedEvents.size, 0, "a failed write must not record the event");
 
   // A newer safe #70 boundary is finalized even when the required #73 retry
@@ -414,9 +548,11 @@ test("pending lifecycle persistence does not block newer bucket finalization", a
   await harness.runtime.runOnce();
   assert.equal(harness.calls.persist.length, 3, "the pending batch is retried");
   assert.equal(harness.calls.persist[2].events.length, 1);
+  assert.strictEqual(harness.calls.persist[2].events, attempted);
+  assert.strictEqual(harness.calls.persist[2].current, harness.calls.persist[1].current);
   assert.equal(
-    harness.calls.persist[2].events[0].eventId,
-    attempted[0].eventId,
+    harness.calls.persist[2].events[0].event_id,
+    attempted[0].event_id,
     "the retried batch reuses the deterministic event ID",
   );
   assert.equal(harness.state.advanced.at(-1), BASE + 10_000);
@@ -534,7 +670,7 @@ test("reacquiring the lease reloads durable state and discards the previous tenu
     await harness.runtime.runOnce();
     assert.equal(harness.calls.persist.length, 2);
     assert.equal(harness.persistedEvents.size, 0);
-    const staleEventId = harness.calls.persist[1].events[0].eventId;
+    const staleEventId = harness.calls.persist[1].events[0].event_id;
 
     // Lease lost: A discards its in-memory ownership, including the pending batch.
     await harness.runtime.stop();
@@ -562,18 +698,28 @@ test("reacquiring the lease reloads durable state and discards the previous tenu
       "the previous tenure's pending batch is not written after reacquisition",
     );
 
-    // Evaluation resumes from the reloaded boundary: candidate at T+N+5s, STARTED at T+N+10s.
+    // Evaluation resumes with the exact restored Python state and one restart flag.
+    const restoredCurrent = advancedCurrent(firstCurrent, advancedAt);
     harness.state.now = advancedAt + 5_000;
     harness.state.boundary = advancedAt + 5_000;
     await harness.runtime.runOnce();
-    assert.equal(harness.calls.persist.length, 2, "candidate accumulation alone does not persist");
+    assert.deepEqual(harness.calls.lifecycle.at(-1).previousLifecycleState,
+      restoredCurrent.lifecycleState);
+    assert.equal(harness.calls.lifecycle.at(-1).interruptPreviousState, true);
+    assert.equal(harness.calls.persist.length, 2, "cadence is based on the restored boundary");
 
     harness.state.now = advancedAt + 10_000;
     harness.state.boundary = advancedAt + 10_000;
     await harness.runtime.runOnce();
+    assert.equal(harness.calls.lifecycle.at(-1).interruptPreviousState, false);
+    assert.equal(harness.calls.persist.length, 2);
+
+    harness.state.now = advancedAt + 30_000;
+    harness.state.boundary = advancedAt + 30_000;
+    await harness.runtime.runOnce();
     assert.equal(harness.calls.persist.length, 3);
-    assert.equal(harness.calls.persist[2].current.evaluationBoundaryTime, advancedAt + 10_000);
-    assert.equal(harness.calls.persist[2].events[0].transition, "STARTED");
+    assert.equal(harness.calls.persist[2].current.evaluationBoundaryTime, advancedAt + 30_000);
+    assert.deepEqual(harness.calls.persist[2].events, []);
   } finally {
     await harness.runtime.stop();
   }

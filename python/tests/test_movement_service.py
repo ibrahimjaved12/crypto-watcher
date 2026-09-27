@@ -6,7 +6,10 @@ from types import SimpleNamespace
 from market_analysis.api_models import (MovementBoundaryRequest,
                                         MovementClassificationRequest,
                                         MovementHistoryRegistrationRequest,
-                                        MovementMetricsRequest)
+                                        MovementLifecycleRequest, MovementMetricsRequest)
+from market_analysis.market_episode_lifecycle import (
+    deserialize_market_episode_lifecycle_state, serialize_market_episode_lifecycle_state,
+)
 from market_analysis.movement import (DEFAULT_HISTORY_BUCKETS, MarketObservation,
                                       MovementBucketEngine)
 from market_analysis.movement_metrics import MarketMovementConfig
@@ -318,16 +321,16 @@ class MovementMetricsAdapterTests(unittest.TestCase):
         }
 
     @classmethod
-    def populated_service(cls, session_capacity=None):
+    def populated_service(cls, session_capacity=None, steps=360, rise_from_step=360):
         service = (MovementBoundaryService() if session_capacity is None else
                    MovementBoundaryService(session_capacity=session_capacity))
         service.advance(request(BASE, [symbol_input(symbol, [observation(BASE, index + 1)])
                                        for index, symbol in enumerate(cls.SYMBOLS)]))
         engines = service.sessions[SESSION]["engines"]
-        for step in range(1, 361):
+        for step in range(1, steps + 1):
             boundary = BASE + step * 5_000
             for index, symbol in enumerate(cls.SYMBOLS):
-                price = Decimal("101") if step == 360 else Decimal("100")
+                price = Decimal("101") if step >= rise_from_step else Decimal("100")
                 engine = engines[symbol]
                 engine.observe((MarketObservation(
                     provider="binance-usdm", instrument_id=f"binance-usdm:{symbol}",
@@ -372,6 +375,16 @@ class MovementMetricsAdapterTests(unittest.TestCase):
             "evaluation_boundary_time_ms": boundary,
             "history_version": version, "universe_id": "watched",
             "universe_version": "watched-v1",
+        })
+
+    @classmethod
+    def lifecycle_request(cls, boundary=BASE + 360 * 5_000, previous=None,
+                          interrupt=False, version="history-v1", universe_version="watched-v1"):
+        return MovementLifecycleRequest.model_validate({
+            **cls.metrics_request(boundary, version).model_dump(mode="json"),
+            "universe_version": universe_version,
+            "previous_lifecycle_state": previous,
+            "interrupt_previous_state": interrupt,
         })
 
     def test_canonical_engines_supply_metrics_without_mutating_history(self):
@@ -506,6 +519,60 @@ class MovementMetricsAdapterTests(unittest.TestCase):
                                             "last_real_trade_time_ms": None,
                                             "last_real_event_time_ms": None,
                                             "last_received_at_ms": None})
+
+    def test_lifecycle_reuses_metrics_classification_and_canonical_state(self):
+        service = self.populated_service(steps=361, rise_from_step=359)
+        service.register_history(self.history_request())
+        first_boundary = BASE + 359 * 5_000
+        first = service.calculate_lifecycle(self.lifecycle_request(first_boundary))
+        self.assertEqual(first["evaluation"], service.calculate_metrics(
+            self.metrics_request(first_boundary))["evaluation"])
+        self.assertEqual(first["classification"], service.calculate_assessment(
+            MovementClassificationRequest.model_validate({
+                **self.metrics_request(first_boundary).model_dump(mode="json"),
+                "previous_confirmed_primary_episode": None,
+            }))["classification"])
+        self.assertEqual(first["lifecycle"]["transitions"], [])
+        second = service.calculate_lifecycle(self.lifecycle_request(
+            previous=first["lifecycle"]["serialized_state"]))
+        self.assertEqual([event["transition"] for event in second["lifecycle"]["transitions"]],
+                         ["STARTED"])
+        serialized = second["lifecycle"]["serialized_state"]
+        self.assertEqual(serialized, serialize_market_episode_lifecycle_state(
+            deserialize_market_episode_lifecycle_state(serialized)))
+        self.assertEqual(second["lifecycle"]["state_summary"]["active_episode_id"],
+                         second["lifecycle"]["transitions"][0]["episode_id"])
+        third = service.calculate_lifecycle(self.lifecycle_request(
+            BASE + 361 * 5_000, previous=serialized))
+        self.assertEqual(third["classification"]["windows"]["5"]
+                         ["prior_confirmed_episode_direction"], "BROAD_RISE")
+        self.assertEqual(third["lifecycle"]["transitions"], [])
+
+    def test_lifecycle_restart_and_prior_scope_are_owned_by_python(self):
+        service = self.populated_service(steps=361, rise_from_step=359)
+        service.register_history(self.history_request())
+        first = service.calculate_lifecycle(self.lifecycle_request(BASE + 359 * 5_000))
+        active = service.calculate_lifecycle(self.lifecycle_request(
+            previous=first["lifecycle"]["serialized_state"]))
+        serialized = active["lifecycle"]["serialized_state"]
+        restarted = service.calculate_lifecycle(self.lifecycle_request(
+            BASE + 361 * 5_000, previous=serialized, interrupt=True))
+        self.assertTrue(restarted["lifecycle"]["state_summary"]["interrupted"])
+        self.assertEqual(restarted["lifecycle"]["serialized_state"]["pending_resume"]["count"], 1)
+        self.assertEqual(restarted["lifecycle"]["transitions"], [])
+
+        changed_history = self.history_request(version="history-v2").model_dump(mode="json")
+        changed_history["universe_version"] = "watched-v2"
+        service.register_history(MovementHistoryRegistrationRequest.model_validate(changed_history))
+        changed = service.calculate_lifecycle(self.lifecycle_request(
+            BASE + 361 * 5_000, previous=serialized, version="history-v2",
+            universe_version="watched-v2"))
+        self.assertIsNone(changed["classification"]["windows"]["5"]
+                          ["prior_confirmed_episode_direction"])
+        self.assertEqual(changed["lifecycle"]["transitions"][0]["transition"], "ENDED")
+        with self.assertRaises(ValueError):
+            service.calculate_lifecycle(self.lifecycle_request(
+                BASE + 361 * 5_000, previous={"serialization_version": "market-episode-state-v1"}))
 
     def test_factual_instrument_compatibility_and_unknown_metadata(self):
         service = self.populated_service()

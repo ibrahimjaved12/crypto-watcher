@@ -77,6 +77,15 @@ before(async () => {
   await db.exec(
     await readFile(
       new URL(
+        "../operational-db/supabase/migrations/20260925180000_market_movement_episodes.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  await db.exec(
+    await readFile(
+      new URL(
         "../operational-db/supabase/migrations/20260925200000_movement_normalization_history.sql",
         import.meta.url,
       ),
@@ -385,7 +394,7 @@ test("market movement append rejects null and unexpected RPC statuses", async ()
     { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
   );
 
-  const event = { episodeStartBoundaryTime: 0, evaluationBoundaryTime: 0 };
+  const event = { event_id: "example-event" };
   await assert.rejects(store.appendMarketMovementEvent(event), /returned null/);
   status = "unexpected";
   await assert.rejects(store.appendMarketMovementEvent(event), /returned unexpected/);
@@ -393,19 +402,21 @@ test("market movement append rejects null and unexpected RPC statuses", async ()
   assert.equal(await store.appendMarketMovementEvent(event), "appended");
 });
 
-test("market movement event writes and reads preserve unavailable acceleration as null", async () => {
+test("market movement repository preserves canonical lifecycle JSON and event evidence", async () => {
   const repositoryUrl = await moduleUrl(
     "../src/lib/operational/repository.server.ts", repositoryStubs,
   );
   const { createOperationalStore } = await import(repositoryUrl);
   const calls = [];
   const boundary = 1_800_000_000_000;
-  const row = {
+  const event = {
     event_id: "event-null-acceleration", episode_id: "episode-null-acceleration",
-    episode_start_boundary_time: new Date(boundary).toISOString(),
-    evaluation_boundary_time: new Date(boundary + 5_000).toISOString(),
-    acceleration_breadth: null, median_acceleration: null,
+    evaluation_boundary_time_ms: boundary + 5_000,
+    median_acceleration: { available: false, value: null, reason: "ACCELERATION_UNAVAILABLE" },
+    acceleration_breadth: { available: false, value: null, reason: "ACCELERATION_UNAVAILABLE" },
+    source_time_evidence: [{ symbol: "BTCUSDT", last_real_trade_time_ms: null }],
   };
+  const row = { event_id: event.event_id, canonical_event: event };
   const client = {
     async rpc(name, args) {
       calls.push({ name, args });
@@ -422,22 +433,100 @@ test("market movement event writes and reads preserve unavailable acceleration a
   const store = createOperationalStore(client, {
     candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10,
   });
-  const event = {
-    eventId: row.event_id, episodeId: row.episode_id,
-    episodeStartBoundaryTime: boundary, evaluationBoundaryTime: boundary + 5_000,
-    medianAcceleration: null, accelerationBreadth: null,
-  };
   assert.equal(await store.appendMarketMovementEvent(event), "appended");
-  assert.equal(calls[0].args.p_acceleration_breadth, null);
-  assert.equal(calls[0].args.p_median_acceleration, null);
+  assert.deepEqual(calls[0].args.p_canonical_event, event);
+  const lifecycleState = { serialization_version: "market-episode-state-v1",
+    opaque: { pending_reversal: [1, 2] } };
   await store.persistMarketEpisodeLifecycleStep(
-    { evaluationBoundaryTime: boundary + 5_000, lifecycleState: {} }, [event],
+    { evaluationBoundaryTime: boundary + 5_000, lifecycleState }, [event],
   );
-  assert.equal(calls[1].args.p_events[0].accelerationBreadth, null);
-  assert.equal(calls[1].args.p_events[0].medianAcceleration, null);
-  const [read] = await store.listMarketMovementEvents(row.episode_id);
-  assert.equal(read.accelerationBreadth, null);
-  assert.equal(read.medianAcceleration, null);
+  assert.deepEqual(calls[1].args.p_current_state.lifecycleState, lifecycleState);
+  assert.deepEqual(calls[1].args.p_events[0], event);
+  const [read] = await store.listMarketMovementEvents(event.episode_id);
+  assert.deepEqual(read, event);
+});
+
+test("atomic lifecycle SQL keeps canonical JSON and nullable flattened evidence", async () => {
+  const boundary = 1_800_000_000_000;
+  const oldUniverse = `old-${crypto.randomUUID()}`;
+  const newUniverse = `new-${crypto.randomUUID()}`;
+  const scope = {
+    lifecycle_algorithm_version: "market-episode-lifecycle-v1",
+    lifecycle_config_version: "market-episode-lifecycle-config-v1",
+    universe_id: oldUniverse, universe_version: "v1", primary_window_minutes: 5,
+    classifier_algorithm_version: "market-state-classifier-v1",
+    classifier_config_version: "market-state-classifier-config-v1",
+    movement_algorithm_version: "market-movement-v1",
+    movement_config_version: "market-movement-config-v1",
+    provider: "binance-usdm", exchange: "binance", price_type: "trade",
+  };
+  const missing = (reason) => ({ available: false, value: null, reason });
+  const event = {
+    event_id: `event-${crypto.randomUUID()}`, episode_id: `episode-${crypto.randomUUID()}`,
+    previous_episode_id: null, transition: "ENDED", transition_reason: "universe_changed",
+    from_direction: "BROAD_RISE", to_direction: null, event_family: "BROAD_MOVE",
+    episode_direction: "BROAD_RISE", episode_start_boundary_time_ms: boundary - 5_000,
+    evaluation_boundary_time_ms: boundary, episode_scope: scope,
+    evaluation_scope: { ...scope, universe_id: newUniverse, universe_version: "v2" },
+    pace: missing("NO_BROAD_DIRECTION"),
+    directional_breadth: missing("MARKET_UNIVERSE_INELIGIBLE"),
+    material_breadth: missing("MARKET_UNIVERSE_INELIGIBLE"),
+    median_raw_return: missing("MARKET_UNIVERSE_INELIGIBLE"),
+    median_normalized_movement: missing("MARKET_UNIVERSE_INELIGIBLE"),
+    median_acceleration: missing("ACCELERATION_UNAVAILABLE"),
+    acceleration_breadth: missing("ACCELERATION_UNAVAILABLE"),
+    dispersion_mad_normalized_movement: missing("MARKET_UNIVERSE_INELIGIBLE"),
+    volume_context: [], isolated_outliers: [], supporting_contracts: [],
+    conflicting_contracts: [], configured_universe: ["BTCUSDT"], included_symbols: [],
+    excluded_symbols: [{ symbol: "BTCUSDT", reasons: ["WARMING_INSUFFICIENT_LIVE_HISTORY"] }],
+    windows_context: [{ window_minutes: 1 }, { window_minutes: 5 }, { window_minutes: 15 }],
+    source_time_evidence: [{ symbol: "BTCUSDT", last_real_trade_time_ms: null,
+      last_real_event_time_ms: null, last_received_at_ms: null }],
+    classification: { evaluation_boundary_time_ms: boundary },
+  };
+  const lifecycleState = { serialization_version: "market-episode-state-v1",
+    opaque: { pending_start: ["BTCUSDT", 1] } };
+  const current = {
+    universeId: newUniverse, primaryWindowMinutes: 5, universeVersion: "v2",
+    provider: "binance-usdm", exchange: "binance", priceType: "trade",
+    evaluationBoundaryTime: boundary, directionState: "WARMING", pace: "NOT_APPLICABLE",
+    activeEpisodeId: null, activeDirection: null, interrupted: false,
+    episodeAlgorithmVersion: scope.lifecycle_algorithm_version,
+    lifecycleConfigVersion: scope.lifecycle_config_version,
+    classifierAlgorithmVersion: scope.classifier_algorithm_version,
+    classifierConfigVersion: scope.classifier_config_version,
+    movementAlgorithmVersion: scope.movement_algorithm_version,
+    movementConfigVersion: scope.movement_config_version,
+    lifecycleState, currentEvidence: { primaryWindow: { directionState: "WARMING" } },
+  };
+  const persisted = await db.query(
+    "SELECT public.persist_market_episode_lifecycle_step($1::jsonb, $2::jsonb) AS statuses",
+    [JSON.stringify(current), JSON.stringify([event])],
+  );
+  assert.deepEqual(persisted.rows[0].statuses,
+    [{ eventId: event.event_id, status: "appended" }]);
+  const savedCurrent = await db.query(
+    "SELECT lifecycle_state FROM public.market_state_current WHERE universe_id = $1",
+    [newUniverse],
+  );
+  assert.deepEqual(savedCurrent.rows[0].lifecycle_state, lifecycleState);
+  const savedEvent = await db.query(
+    "SELECT canonical_event, previous_episode_id, directional_breadth, material_breadth, " +
+      "median_acceleration, acceleration_breadth, pace FROM public.market_movement_events " +
+      "WHERE event_id = $1",
+    [event.event_id],
+  );
+  assert.deepEqual(savedEvent.rows[0].canonical_event, event);
+  assert.equal(savedEvent.rows[0].previous_episode_id, null);
+  assert.equal(savedEvent.rows[0].directional_breadth, null);
+  assert.equal(savedEvent.rows[0].material_breadth, null);
+  assert.equal(savedEvent.rows[0].median_acceleration, null);
+  assert.equal(savedEvent.rows[0].acceleration_breadth, null);
+  assert.equal(savedEvent.rows[0].pace, "NOT_APPLICABLE");
+  const replay = await db.query(
+    "SELECT public.append_market_movement_event($1::jsonb) AS status", [JSON.stringify(event)],
+  );
+  assert.equal(replay.rows[0].status, "already_exists");
 });
 
 test("outbox delivery confirms only after sink success", async () => {

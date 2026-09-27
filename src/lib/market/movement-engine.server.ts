@@ -9,7 +9,7 @@
  * There is no browser timer and no per-user engine: the shared universe is
  * evaluated once for identical market data.
  */
-import type { OperationalStore, PersistedMarketStateCurrent } from "../operational/types";
+import type { OperationalStore, PersistedMarketStateCurrent, PersistedMarketMovementEvent } from "../operational/types";
 import type { MovementBucketSnapshot } from "./movement-contract";
 import type { BinanceFuturesCollector } from "./collector";
 import {
@@ -21,13 +21,8 @@ import {
 import type { MovementInstrumentCompatibility, MovementRawHistory } from "./movement-normalization-input";
 import { buildMarketUniverse, type MarketUniverse } from "./market-universe";
 import {
-  DEFAULT_MARKET_EPISODE_LIFECYCLE_CONFIG,
-  deserializeMarketEpisodeLifecycleState,
-  restoreLifecycleStateOnRestart,
-  serializeMarketEpisodeLifecycleState,
-  type MarketEpisodeLifecycleConfig,
-  type MarketMovementEvent,
-} from "./market-episode-lifecycle";
+  type MarketEpisodeLifecycleTransport, type SerializedMarketEpisodeLifecycleState,
+} from "./market-episode-contract";
 import {
   DEFAULT_MOVEMENT_FINALIZATION_CONFIG,
   finalizableMovementBoundary,
@@ -35,7 +30,7 @@ import {
 } from "./movement-finalization";
 import { DEFAULT_MARKET_MOVEMENT_CONFIG, type MarketMovementConfig,
   type MarketMovementEvaluation } from "./movement-metrics-contract";
-import type { ConfirmedPrimaryEpisodeScope, MarketClassification } from "./market-state-contract";
+import type { MarketClassification } from "./market-state-contract";
 import {
   deriveMovementEngineStatus,
   MARKET_UNIVERSE_ID,
@@ -43,6 +38,14 @@ import {
 } from "./market-movement-state";
 
 export const MOVEMENT_ENGINE_TICK_MS = 1_000;
+export type MarketEpisodePersistenceConfig = {
+  version: string;
+  currentSnapshotCadenceMs: number;
+};
+export const DEFAULT_MARKET_EPISODE_PERSISTENCE_CONFIG: Readonly<MarketEpisodePersistenceConfig> = {
+  version: "market-episode-persistence-v1",
+  currentSnapshotCadenceMs: 30_000,
+} as const;
 const MINUTE_MS = 60_000;
 const LONGEST_MOVEMENT_WINDOW_MS = 15 * MINUTE_MS;
 const RAW_HISTORY_WARMUP_MS = LONGEST_MOVEMENT_WINDOW_MS + MINUTE_MS;
@@ -77,15 +80,17 @@ export type MovementEngineRuntimeDependencies = {
     compatibility: MovementInstrumentCompatibility,
     asOfBoundaryTime: number) => Promise<void>;
   instrumentCompatibility: (symbol: string) => Promise<boolean | null>;
-  calculateAssessment: (sessionId: string, boundaryTime: number, historyVersion: string,
+  calculateLifecycle: (sessionId: string, boundaryTime: number, historyVersion: string,
     universe: MarketUniverse, configVersion: string,
-    previousConfirmedPrimaryEpisode: ConfirmedPrimaryEpisodeScope | null) => Promise<{
+    previousLifecycleState: SerializedMarketEpisodeLifecycleState | null,
+    interruptPreviousState: boolean) => Promise<{
       movement: MarketMovementEvaluation;
       classification: MarketClassification;
+      lifecycle: MarketEpisodeLifecycleTransport;
     }>;
   finalization?: MovementFinalizationConfig;
   movementConfig?: MarketMovementConfig;
-  lifecycleConfig?: MarketEpisodeLifecycleConfig;
+  persistenceConfig?: MarketEpisodePersistenceConfig;
   now?: () => number;
 };
 
@@ -100,7 +105,7 @@ function message(error: unknown): string {
  */
 type PendingMovementPersistence = {
   current: PersistedMarketStateCurrent;
-  events: MarketMovementEvent[];
+  events: PersistedMarketMovementEvent[];
   mostRecentTransition: PersistedMovementTransition | null;
 };
 
@@ -108,8 +113,9 @@ export class MovementEngineRuntime {
   private engine = new MarketMovementEngine();
   private readonly now: () => number;
   private readonly movementConfig: MarketMovementConfig;
-  private readonly lifecycleConfig: MarketEpisodeLifecycleConfig;
   private readonly finalization: MovementFinalizationConfig;
+  private readonly persistenceConfig: Readonly<MarketEpisodePersistenceConfig>;
+  private lastPersistedBoundary: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private active = false;
   private running = false;
@@ -141,8 +147,15 @@ export class MovementEngineRuntime {
   constructor(private readonly deps: MovementEngineRuntimeDependencies) {
     this.now = deps.now ?? Date.now;
     this.movementConfig = deps.movementConfig ?? DEFAULT_MARKET_MOVEMENT_CONFIG;
-    this.lifecycleConfig = deps.lifecycleConfig ?? DEFAULT_MARKET_EPISODE_LIFECYCLE_CONFIG;
     this.finalization = deps.finalization ?? DEFAULT_MOVEMENT_FINALIZATION_CONFIG;
+    const persistenceConfig = deps.persistenceConfig ?? DEFAULT_MARKET_EPISODE_PERSISTENCE_CONFIG;
+    if (typeof persistenceConfig.version !== "string" ||
+        persistenceConfig.version.trim().length === 0 ||
+        !Number.isSafeInteger(persistenceConfig.currentSnapshotCadenceMs) ||
+        persistenceConfig.currentSnapshotCadenceMs <= 0) {
+      throw new Error("market episode persistence config must have a version and positive cadence");
+    }
+    this.persistenceConfig = Object.freeze({ ...persistenceConfig });
   }
 
   /** Starts (or resumes) periodic evaluation. Safe to call after a lease reacquire. */
@@ -194,6 +207,7 @@ export class MovementEngineRuntime {
     this.historicalRefreshGeneration = 0;
     this.appliedHistoricalRefreshGeneration = 0;
     this.lastTransition = null;
+    this.lastPersistedBoundary = null;
     this.pendingPersistence = null;
     this.engine = new MarketMovementEngine();
   }
@@ -261,18 +275,17 @@ export class MovementEngineRuntime {
       results = await this.engine.advance({
         finalizableBoundary: finalizable,
         universe,
-        assessmentForBoundary: async (boundary, previousConfirmedPrimaryEpisode) => {
-          const assessment = await this.deps.calculateAssessment(
+        lifecycleForBoundary: async (boundary, previousLifecycleState, interruptPreviousState) => {
+          const assessment = await this.deps.calculateLifecycle(
             movementSessionId, boundary, this.historicalVersion!, universe,
-            this.movementConfig.version, previousConfirmedPrimaryEpisode,
+            this.movementConfig.version, previousLifecycleState, interruptPreviousState,
           );
           if (!stillCurrent()) throw new Error("stale movement session or universe response");
           return assessment;
         },
-        lifecycleConfig: this.lifecycleConfig,
       });
     } catch (error) {
-      console.error(`[movement-engine] canonical #71/#72 assessment unavailable: ${message(error)}`);
+      console.error(`[movement-engine] canonical #71/#72/#73 lifecycle unavailable: ${message(error)}`);
       return;
     }
     if (!stillCurrent()) return;
@@ -282,7 +295,7 @@ export class MovementEngineRuntime {
 
   /**
    * Establishes the #73 lifecycle state from the operational store exactly once.
-   * A transient read/deserialize/restore failure is retried with bounded backoff;
+   * A transient read/restore failure is retried with bounded backoff;
    * evaluation does not start until this succeeds.
    */
   private async attemptLifecycleRestore(now: number): Promise<boolean> {
@@ -297,8 +310,8 @@ export class MovementEngineRuntime {
         this.lifecycleRestored = true;
         return true;
       }
-      const restored = deserializeMarketEpisodeLifecycleState(current.lifecycleState);
-      this.engine.restoreLifecycleState(restoreLifecycleStateOnRestart(restored));
+      this.engine.restoreLifecycleState(current.lifecycleState, current.evaluationBoundaryTime);
+      this.lastPersistedBoundary = current.evaluationBoundaryTime;
       this.lastTransition = current.currentEvidence?.mostRecentTransition ?? null;
       this.lifecycleRestored = true;
       return true;
@@ -388,14 +401,14 @@ export class MovementEngineRuntime {
     snapshots: ReadonlyMap<string, MovementBucketSnapshot>,
     now: number,
   ): Promise<void> {
-    const shouldPersist = results.some(
-      (result) => result.lifecycle.shouldPersistCurrentImmediately,
-    );
-    if (!shouldPersist) return;
-
     const final = results.at(-1)!;
     const events = results.flatMap((result) => result.lifecycle.transitions);
-    const state = final.lifecycle.nextState;
+    const shouldPersist = events.length > 0 || this.lastPersistedBoundary === null ||
+      final.boundaryTime - this.lastPersistedBoundary >=
+        this.persistenceConfig.currentSnapshotCadenceMs;
+    if (!shouldPersist) return;
+
+    const state = final.lifecycle.stateSummary;
     const { lastSourceEventTime, lastTradeTime, lastReceivedAt } = snapshotEventTimes(snapshots);
     const status = deriveMovementEngineStatus({
       directionState: state.currentDirectionState,
@@ -406,7 +419,6 @@ export class MovementEngineRuntime {
     const mostRecentTransition =
       events.length > 0 ? transitionToPersisted(events.at(-1)!) : this.lastTransition;
     const currentEvidence = buildMovementCurrentEvidence({
-      evidence: final.lifecycle.currentEvidence,
       classification: final.classification,
       universe,
       status,
@@ -417,28 +429,30 @@ export class MovementEngineRuntime {
       lastReceivedAt,
       finalizationConfigVersion: this.finalization.version,
       finalizationGraceMs: this.finalization.graceMs,
+      persistenceConfigVersion: this.persistenceConfig.version,
+      currentSnapshotCadenceMs: this.persistenceConfig.currentSnapshotCadenceMs,
       mostRecentTransition,
     });
     const current: PersistedMarketStateCurrent = {
-      universeId: universe.id,
-      primaryWindowMinutes: 5,
-      universeVersion: universe.version,
-      provider: "binance-usdm",
-      exchange: "binance",
-      priceType: "trade",
-      evaluationBoundaryTime: final.boundaryTime,
+      universeId: state.universeId,
+      primaryWindowMinutes: state.primaryWindowMinutes,
+      universeVersion: state.universeVersion,
+      provider: state.provider,
+      exchange: state.exchange,
+      priceType: state.priceType,
+      evaluationBoundaryTime: state.evaluationBoundaryTime,
       directionState: state.currentDirectionState,
-      pace: state.currentPace,
-      activeEpisodeId: state.activeEpisode?.episodeId ?? null,
-      activeDirection: state.activeEpisode?.direction ?? null,
+      pace: state.currentPace.available ? state.currentPace.value : "NOT_APPLICABLE",
+      activeEpisodeId: state.activeEpisodeId,
+      activeDirection: state.activeEpisodeDirection,
       interrupted: state.interrupted,
-      episodeAlgorithmVersion: state.episodeAlgorithmVersion,
+      episodeAlgorithmVersion: state.lifecycleAlgorithmVersion,
       lifecycleConfigVersion: state.lifecycleConfigVersion,
       classifierAlgorithmVersion: state.classifierAlgorithmVersion,
       classifierConfigVersion: state.classifierConfigVersion,
       movementAlgorithmVersion: state.movementAlgorithmVersion,
       movementConfigVersion: state.movementConfigVersion,
-      lifecycleState: serializeMarketEpisodeLifecycleState(state),
+      lifecycleState: final.lifecycle.serializedState,
       currentEvidence,
     };
     await this.flushPersistence({ current, events, mostRecentTransition });
@@ -453,7 +467,7 @@ export class MovementEngineRuntime {
   /**
    * Atomically persists one batch. On failure the exact same batch (deterministic
    * event IDs and current snapshot) is retained as pending and retried before any
-   * later boundary is evaluated; lifecycle cadence is acknowledged only after the
+   * later boundary is evaluated; persistence cadence advances only after the
    * database write succeeds.
    */
   private async flushPersistence(batch: PendingMovementPersistence): Promise<boolean> {
@@ -471,7 +485,7 @@ export class MovementEngineRuntime {
     }
     if (tenure !== this.tenure) return false;
     this.pendingPersistence = null;
-    this.engine.acknowledgePersisted();
+    this.lastPersistedBoundary = batch.current.evaluationBoundaryTime;
     this.lastTransition = batch.mostRecentTransition;
     return true;
   }
