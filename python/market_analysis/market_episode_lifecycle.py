@@ -23,6 +23,18 @@ DEFAULT_CONFIG_VERSION = "market-episode-lifecycle-config-v1"
 STATE_SERIALIZATION_VERSION = "market-episode-state-v1"
 EVENT_FAMILY = "BROAD_MOVE"
 EVALUATION_CADENCE_MS = 5_000
+_V1_RULE_VALUES = {
+    "evaluation_cadence_ms": 5_000,
+    "start_confirmation_count": 2,
+    "end_confirmation_count": 3,
+    "reversal_confirmation_count": 2,
+    "strengthen_confirmation_count": 2,
+    "weaken_confirmation_count": 2,
+    "resume_confirmation_count": 2,
+    "continuation_breadth": 0.55,
+    "material_strengthen_breadth": 0.70,
+    "material_weaken_breadth": 0.50,
+}
 _BROAD = frozenset(("BROAD_RISE", "BROAD_DROP"))
 _DIRECTIONS = _BROAD | frozenset(("NEUTRAL", "WARMING", "UNAVAILABLE"))
 _PACES = frozenset(("ACCELERATING", "DECELERATING", "MIXED"))
@@ -80,8 +92,6 @@ class MarketEpisodeLifecycleConfig:
 
     def __post_init__(self):
         _nonempty(self.version, "lifecycle config version")
-        if self.evaluation_cadence_ms != EVALUATION_CADENCE_MS:
-            raise ValueError("lifecycle evaluation cadence must be 5,000 ms")
         for name in ("start_confirmation_count", "end_confirmation_count",
                      "reversal_confirmation_count", "strengthen_confirmation_count",
                      "weaken_confirmation_count", "resume_confirmation_count"):
@@ -96,11 +106,9 @@ class MarketEpisodeLifecycleConfig:
                 raise ValueError(f"{name} must be finite and in (0, 1]")
         if self.material_weaken_breadth >= self.material_strengthen_breadth:
             raise ValueError("material weakening must be below strengthening")
-        if self.version == DEFAULT_CONFIG_VERSION:
-            canonical = type(self)(version="_comparison_only_")
-            for field in fields(self):
-                if field.name != "version" and getattr(self, field.name) != getattr(canonical, field.name):
-                    raise ValueError(f"{field.name} requires a distinct lifecycle config version")
+        for name, expected in _V1_RULE_VALUES.items():
+            if getattr(self, name) != expected:
+                raise ValueError(f"{name} is fixed by {ALGORITHM_VERSION} at {expected}")
 
 
 @dataclass(frozen=True)

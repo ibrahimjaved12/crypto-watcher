@@ -214,6 +214,7 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
                           config.material_weaken_breadth),
                          (DEFAULT_CONFIG_VERSION, 5_000, 2, 3, 2, 2, 2, 2, 0.55, 0.70, 0.50))
         changed = {
+            "evaluation_cadence_ms": 10_000,
             "start_confirmation_count": 3, "end_confirmation_count": 4,
             "reversal_confirmation_count": 3, "strengthen_confirmation_count": 3,
             "weaken_confirmation_count": 3, "resume_confirmation_count": 3,
@@ -223,9 +224,10 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
         for name, value in changed.items():
             with self.subTest(name=name):
                 with self.assertRaises(ValueError):
-                    MarketEpisodeLifecycleConfig(**{name: value})
-        self.assertEqual(MarketEpisodeLifecycleConfig(version="custom-v2",
-                         continuation_breadth=0.60).continuation_breadth, 0.60)
+                    MarketEpisodeLifecycleConfig(version="custom-v2", **{name: value})
+        alternate_version = MarketEpisodeLifecycleConfig(version="custom-v2")
+        self.assertEqual(alternate_version.version, "custom-v2")
+        self.assertEqual(alternate_version.continuation_breadth, 0.55)
         with self.assertRaises(FrozenInstanceError):
             config.start_confirmation_count = 3
 
