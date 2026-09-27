@@ -312,7 +312,7 @@ test("server config is opt-in, bounded and requires a separate secure target", a
     OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY: "service-only",
   });
   assert.equal(configured.enabled, true);
-  assert.equal(configured.candleRetentionDays, 7);
+  assert.equal(configured.candleRetentionDays, 8);
   assert.throws(
     () =>
       operationalDbConfig({
