@@ -305,6 +305,17 @@ function assessmentFor(movement, directionState) {
   return { movement, classification: classificationFor(movement, directionState) };
 }
 
+function broadRiseWithoutAcceleration(universe, boundary) {
+  const assessment = assessmentFor(broadRiseMovement(universe, boundary), "BROAD_RISE");
+  for (const window of assessment.classification.windows) {
+    window.pace = unavailable("ACCELERATION_UNAVAILABLE");
+    window.medianAcceleration = unavailable("ACCELERATION_UNAVAILABLE");
+    window.positiveAccelerationBreadth = unavailable("ACCELERATION_UNAVAILABLE");
+    window.negativeAccelerationBreadth = unavailable("ACCELERATION_UNAVAILABLE");
+  }
+  return assessment;
+}
+
 test("one shared finalized boundary produces exactly one canonical supplier call", async () => {
   const engine = new MarketMovementEngine();
   const universe = buildMarketUniverse(SYMBOLS);
@@ -396,6 +407,26 @@ test("each catch-up assessment receives the staged prior confirmed direction", a
   assert.deepEqual(supplied, [
     [BASE, null], [BASE + 5_000, null], [BASE + 10_000, "BROAD_RISE"],
   ]);
+});
+
+test("unavailable canonical acceleration stays null through a confirmed broad transition", async () => {
+  const engine = new MarketMovementEngine();
+  const universe = buildMarketUniverse(SYMBOLS);
+  const first = await engine.advance({ finalizableBoundary: BASE, universe,
+    assessmentForBoundary: async (boundary) => broadRiseWithoutAcceleration(universe, boundary) });
+  assert.equal(first[0].classification.windows[1].directionState, "BROAD_RISE");
+  assert.deepEqual(first[0].classification.windows[1].pace,
+    unavailable("ACCELERATION_UNAVAILABLE"));
+  assert.equal(first[0].lifecycle.nextState.currentPace, "NOT_APPLICABLE");
+  assert.equal(first[0].lifecycle.transitions.length, 0);
+
+  const second = await engine.advance({ finalizableBoundary: BASE + 5_000, universe,
+    assessmentForBoundary: async (boundary) => broadRiseWithoutAcceleration(universe, boundary) });
+  assert.equal(second[0].lifecycle.transitions.length, 1);
+  assert.equal(second[0].lifecycle.transitions[0].transition, "STARTED");
+  assert.equal(second[0].lifecycle.transitions[0].pace, "NOT_APPLICABLE");
+  assert.equal(second[0].lifecycle.transitions[0].medianAcceleration, null);
+  assert.equal(second[0].lifecycle.transitions[0].accelerationBreadth, null);
 });
 
 test("catch-up commits lifecycle and boundary only after every canonical result succeeds", async () => {

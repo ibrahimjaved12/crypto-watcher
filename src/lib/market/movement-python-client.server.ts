@@ -9,7 +9,7 @@ import type {
 } from "./movement-contract";
 import type { MarketUniverse } from "./market-universe";
 import type { MarketMovementConfig, MarketMovementEvaluation } from "./movement-metrics-contract";
-import { MARKET_STATE_CLASSIFIER_CONFIG_VERSION, MARKET_STATE_CLASSIFIER_VERSION,
+import { MARKET_STATE_CLASSIFIER_VERSION,
   type ConfirmedMarketDirection, type MarketClassification } from "./market-state-contract";
 import type { MovementInstrumentCompatibility, MovementRawHistory } from "./movement-normalization-input";
 
@@ -261,10 +261,10 @@ const accelerationBreadthMetric = classifierMetric(
   z.literal("ACCELERATION_UNAVAILABLE"),
 );
 const classifierConfigSchema = z.object({
-  version: z.literal(MARKET_STATE_CLASSIFIER_CONFIG_VERSION),
-  directional_breadth: z.literal(0.70), material_breadth: z.literal(0.50),
-  normalized_movement: z.literal(0.50), acceleration_breadth: z.literal(0.60),
-  isolated_outlier_breadth_disagreement: z.literal(0.50),
+  version: z.string().min(1),
+  directional_breadth: number, material_breadth: number,
+  normalized_movement: number, acceleration_breadth: number,
+  isolated_outlier_breadth_disagreement: number,
 }).strict();
 const classificationWindowSchema = z.object({
   window_minutes: windowMinutes,
@@ -306,7 +306,7 @@ const classificationWindowSchema = z.object({
   excluded_symbols: windowMetrics.shape.excluded_symbols,
   availability_reasons: z.array(z.string().min(1)),
   classifier_algorithm_version: z.literal(MARKET_STATE_CLASSIFIER_VERSION),
-  classifier_config_version: z.literal(MARKET_STATE_CLASSIFIER_CONFIG_VERSION),
+  classifier_config_version: z.string().min(1),
   movement_algorithm_version: z.literal("market-movement-v1"),
   movement_config_version: z.string().min(1),
   universe_id: z.string().min(1), universe_version: z.string().min(1),
@@ -320,7 +320,7 @@ const classificationWindowSchema = z.object({
 }).strict();
 const classificationSchema = z.object({
   classifier_algorithm_version: z.literal(MARKET_STATE_CLASSIFIER_VERSION),
-  classifier_config_version: z.literal(MARKET_STATE_CLASSIFIER_CONFIG_VERSION),
+  classifier_config_version: z.string().min(1),
   classifier_config: classifierConfigSchema,
   movement_algorithm_version: z.literal("market-movement-v1"),
   movement_config_version: z.string().min(1),

@@ -393,6 +393,53 @@ test("market movement append rejects null and unexpected RPC statuses", async ()
   assert.equal(await store.appendMarketMovementEvent(event), "appended");
 });
 
+test("market movement event writes and reads preserve unavailable acceleration as null", async () => {
+  const repositoryUrl = await moduleUrl(
+    "../src/lib/operational/repository.server.ts", repositoryStubs,
+  );
+  const { createOperationalStore } = await import(repositoryUrl);
+  const calls = [];
+  const boundary = 1_800_000_000_000;
+  const row = {
+    event_id: "event-null-acceleration", episode_id: "episode-null-acceleration",
+    episode_start_boundary_time: new Date(boundary).toISOString(),
+    evaluation_boundary_time: new Date(boundary + 5_000).toISOString(),
+    acceleration_breadth: null, median_acceleration: null,
+  };
+  const client = {
+    async rpc(name, args) {
+      calls.push({ name, args });
+      return { data: name === "persist_market_episode_lifecycle_step"
+        ? [{ eventId: row.event_id, status: "appended" }] : "appended", error: null };
+    },
+    from(name) {
+      assert.equal(name, "market_movement_events");
+      return { select: () => ({ eq: () => ({ order: async () => ({
+        data: [row], error: null,
+      }) }) }) };
+    },
+  };
+  const store = createOperationalStore(client, {
+    candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10,
+  });
+  const event = {
+    eventId: row.event_id, episodeId: row.episode_id,
+    episodeStartBoundaryTime: boundary, evaluationBoundaryTime: boundary + 5_000,
+    medianAcceleration: null, accelerationBreadth: null,
+  };
+  assert.equal(await store.appendMarketMovementEvent(event), "appended");
+  assert.equal(calls[0].args.p_acceleration_breadth, null);
+  assert.equal(calls[0].args.p_median_acceleration, null);
+  await store.persistMarketEpisodeLifecycleStep(
+    { evaluationBoundaryTime: boundary + 5_000, lifecycleState: {} }, [event],
+  );
+  assert.equal(calls[1].args.p_events[0].accelerationBreadth, null);
+  assert.equal(calls[1].args.p_events[0].medianAcceleration, null);
+  const [read] = await store.listMarketMovementEvents(row.episode_id);
+  assert.equal(read.accelerationBreadth, null);
+  assert.equal(read.medianAcceleration, null);
+});
+
 test("outbox delivery confirms only after sink success", async () => {
   const outboxUrl = await moduleUrl("../src/lib/operational/outbox.server.ts");
   const { deliverOutboxBatch } = await import(outboxUrl);

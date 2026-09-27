@@ -164,7 +164,7 @@ export type MarketMovementEvent = {
   medianRawReturn: number | null;
   medianNormalizedMovement: number | null;
   medianAcceleration: number | null;
-  accelerationBreadth: number;
+  accelerationBreadth: number | null;
   dispersion: number | null;
   rvolSummary: MarketStateEvidence["rvolSummary"];
   outliers: IsolatedMarketOutlier[];
@@ -430,7 +430,7 @@ function buildEvent(input: {
     medianAcceleration: primaryWindow.evidence.medianAcceleration.available
       ? primaryWindow.evidence.medianAcceleration.value
       : null,
-    accelerationBreadth: accelerationBreadth!,
+    accelerationBreadth,
     dispersion: primaryWindow.evidence.dispersion.available
       ? primaryWindow.evidence.dispersion.value
       : null,

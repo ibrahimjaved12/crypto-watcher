@@ -50,7 +50,7 @@ CREATE TABLE public.market_movement_events (
   median_raw_return DOUBLE PRECISION,
   median_normalized_movement DOUBLE PRECISION,
   median_acceleration DOUBLE PRECISION,
-  acceleration_breadth DOUBLE PRECISION NOT NULL,
+  acceleration_breadth DOUBLE PRECISION,
   dispersion DOUBLE PRECISION,
   rvol_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
   outliers JSONB NOT NULL DEFAULT '[]'::jsonb,

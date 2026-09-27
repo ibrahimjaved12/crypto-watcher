@@ -1510,6 +1510,29 @@ test("17. operational event insertion is idempotent in database", async () => {
   assert.equal(Number(countRes.rows[0].count), 1);
 });
 
+test("base event schema stores unavailable acceleration breadth as NULL", async () => {
+  const result = await db.query(
+    `INSERT INTO public.market_movement_events (
+      event_id, episode_id, episode_algorithm_version, lifecycle_config_version,
+      transition, transition_reason, episode_start_boundary_time, evaluation_boundary_time,
+      universe_id, universe_version, primary_window_minutes, provider, exchange, price_type,
+      direction, pace, directional_breadth, material_breadth, acceleration_breadth,
+      classifier_algorithm_version, classifier_config_version,
+      movement_algorithm_version, movement_config_version
+    ) VALUES (
+      'event-null-acceleration', 'episode-null-acceleration',
+      'market-episode-v1', 'market-episode-config-v1', 'STARTED',
+      'confirmed_broad_entry', $1, $2, 'top-usdm', 'fixture', 5,
+      'binance-usdm', 'binance', 'trade', 'BROAD_RISE', 'NOT_APPLICABLE',
+      0.8, 0.6, NULL, 'market-state-classifier-v1',
+      'market-state-classifier-config-v1', 'market-movement-v1',
+      'market-movement-config-v1'
+    ) RETURNING acceleration_breadth`,
+    [new Date(BASE_TIME).toISOString(), new Date(BASE_TIME + 5_000).toISOString()],
+  );
+  assert.equal(result.rows[0].acceleration_breadth, null);
+});
+
 test("18. WARMING/UNAVAILABLE interrupts rather than pretending continuity", () => {
   // Start active episode
   const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });

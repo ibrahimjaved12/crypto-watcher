@@ -687,7 +687,9 @@ export function createOperationalStore(
             : Number(row["median_normalized_movement"]),
         medianAcceleration:
           row["median_acceleration"] === null ? null : Number(row["median_acceleration"]),
-        accelerationBreadth: Number(row["acceleration_breadth"]),
+        accelerationBreadth: row["acceleration_breadth"] === null
+          ? null
+          : Number(row["acceleration_breadth"]),
         dispersion: row["dispersion"] === null ? null : Number(row["dispersion"]),
         rvolSummary: row["rvol_summary"],
         outliers: row["outliers"],

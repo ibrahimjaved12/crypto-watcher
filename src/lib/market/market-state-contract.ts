@@ -4,7 +4,6 @@ import type { MarketMovementWindowResult, Metric, BreadthSide,
   SymbolExclusionReason } from "./movement-metrics-contract";
 
 export const MARKET_STATE_CLASSIFIER_VERSION = "market-state-classifier-v1";
-export const MARKET_STATE_CLASSIFIER_CONFIG_VERSION = "market-state-classifier-config-v1";
 
 export type MarketDirectionState =
   "BROAD_RISE" | "BROAD_DROP" | "NEUTRAL" | "WARMING" | "UNAVAILABLE";

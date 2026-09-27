@@ -151,13 +151,45 @@ test("canonical Python assessment transports pace and per-symbol provenance unch
       lastRealEventTimeMs: BOUNDARY - 10, lastReceivedAtMs: BOUNDARY + 7 }]);
 });
 
+test("distinct Python classifier config versions and finite values survive transport", async () => {
+  const supplied = structuredClone(assessment);
+  const config = supplied.classification.classifier_config;
+  config.version = "market-state-classifier-config-custom-v2";
+  config.directional_breadth = 0.9;
+  config.material_breadth = 0.45;
+  config.normalized_movement = 0.65;
+  config.acceleration_breadth = 0.55;
+  config.isolated_outlier_breadth_disagreement = 0.4;
+  supplied.classification.classifier_config_version = config.version;
+  for (const minute of [1, 5, 15]) {
+    supplied.classification.windows[minute].classifier_config_version = config.version;
+  }
+  const result = await calculatePythonMarketAssessment(
+    SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1", "BROAD_DROP", {},
+    response(supplied),
+  );
+  assert.equal(result.classification.classifierConfigVersion, config.version);
+  assert.deepEqual(result.classification.classifierConfig, {
+    version: config.version,
+    directionalBreadth: config.directional_breadth,
+    materialBreadth: config.material_breadth,
+    normalizedMovement: config.normalized_movement,
+    accelerationBreadth: config.acceleration_breadth,
+    isolatedOutlierBreadthDisagreement: config.isolated_outlier_breadth_disagreement,
+  });
+  assert.ok(result.classification.windows.every(
+    (window) => window.classifierConfigVersion === config.version,
+  ));
+});
+
 test("canonical assessment rejects mismatched identity, provenance and snapshots", async () => {
   const mutations = [
     (item) => { item.history_version = "wrong"; },
     (item) => { item.classification.classifier_algorithm_version = "wrong"; },
     (item) => { item.classification.classifier_config_version = "wrong"; },
     (item) => { item.classification.classifier_config.version = "wrong"; },
-    (item) => { item.classification.classifier_config.directional_breadth = 0.9; },
+    (item) => { item.classification.windows[5].classifier_config_version = "wrong"; },
+    (item) => { item.classification.classifier_config.directional_breadth = null; },
     (item) => { item.classification.evaluation_boundary_time_ms += 5_000; },
     (item) => { item.classification.universe_id = "wrong"; },
     (item) => { item.classification.movement_config_version = "wrong"; },
