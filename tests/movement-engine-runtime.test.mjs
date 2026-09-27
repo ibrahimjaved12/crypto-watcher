@@ -340,6 +340,9 @@ function createHarness(persistenceConfig) {
   const setDurableCurrent = (current) => {
     durableCurrent = current;
   };
+  const finalization = {
+    version: "movement-finalization-config-v1:grace-2000", graceMs: 2_000,
+  };
   const runtime = new MovementEngineRuntime({
     store,
     collector,
@@ -359,9 +362,9 @@ function createHarness(persistenceConfig) {
       return canonicalLifecycle(universe, boundary,
         control.transitionBoundaries.has(boundary) ? [canonicalTransition(boundary)] : []);
     },
-    finalization: { version: "movement-finalization-config-v1:grace-2000", graceMs: 2_000 },
+    finalization,
     persistenceConfig,
-    now: () => state.now,
+    now: () => state.now + finalization.graceMs,
   });
   return { runtime, state, control, calls, persistedEvents, setDurableCurrent };
 }
