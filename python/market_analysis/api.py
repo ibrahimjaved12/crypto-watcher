@@ -15,6 +15,7 @@ from .api_models import (
     MovementBoundaryRequest,
     MovementClassificationRequest,
     MovementHistoryRegistrationRequest,
+    MovementLifecycleRequest,
     MovementMetricsRequest,
     TechnicalAnalysisBatchRequest,
     TechnicalAnalysisRequest,
@@ -115,6 +116,13 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
             return request.app.state.movement_boundary_service.calculate_assessment(body)
         except ValueError:
             raise HTTPException(409, "Movement assessment could not be calculated") from None
+
+    @app.post("/v1/movement/lifecycle", dependencies=[Depends(authorize)])
+    async def movement_lifecycle(body: MovementLifecycleRequest, request: Request):
+        try:
+            return request.app.state.movement_boundary_service.calculate_lifecycle(body)
+        except ValueError:
+            raise HTTPException(409, "Movement lifecycle could not be calculated") from None
 
     return app
 

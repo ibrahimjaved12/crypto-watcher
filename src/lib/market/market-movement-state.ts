@@ -9,11 +9,9 @@ import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
   MarketHorizonRole,
-  MarketPace,
-  MarketStateEvidence,
-} from "./market-episode-classification";
-import type { MarketClassificationWindow } from "./market-state-contract";
-import type { MarketEpisodeTransitionType } from "./market-episode-lifecycle";
+  MarketClassificationWindow,
+} from "./market-state-contract";
+import type { MarketEpisodeTransitionType, MarketPace } from "./market-episode-contract";
 
 /** Stable identity for the shared, market-wide Binance USDⓈ-M universe. */
 export const MARKET_UNIVERSE_ID = "binance-usdm-public-market";
@@ -78,10 +76,11 @@ export type PersistedMovementTimestamps = {
 
 /**
  * Enriched bounded current evidence persisted with #73's `market_state_current`.
- * It extends the primary 5m `MarketStateEvidence` with the 1m/15m context and the
- * exact universe/timestamps/engine status #74 requires consumers to inspect.
+ * It retains the canonical primary #72 window, 1m/15m context and the exact
+ * universe/timestamps/engine status #74 requires consumers to inspect.
  */
-export type PersistedMarketMovementCurrentEvidence = MarketStateEvidence & {
+export type PersistedMarketMovementCurrentEvidence = {
+  primaryWindow: MarketClassificationWindow;
   windowsContext: MarketClassificationWindow[];
   universe: PersistedMovementUniverse;
   engine: {
@@ -108,7 +107,7 @@ export type MarketMovementCurrentState = {
     pace: MarketPace;
     reversalCandidate: boolean;
     horizonRole: MarketHorizonRole;
-    evidence: MarketStateEvidence;
+    evidence: MarketClassificationWindow;
   } | null;
   /** 1m, 5m and 15m structured classifications, primary included. */
   context: MarketClassificationWindow[];
@@ -216,7 +215,7 @@ export function toMovementEngineDiagnostics(
       ...(options.staleAfterMs === undefined ? {} : { staleAfterMs: options.staleAfterMs }),
     }),
     configuredSymbolCount: configuredCount(evidence),
-    eligibleSymbolCount: primary?.eligibleCount ?? evidence.eligibleCount,
+    eligibleSymbolCount: primary?.eligibleCount ?? evidence.primaryWindow.eligibleCount,
     primaryDirectionState: current.directionState,
     primaryPace: current.pace,
     lastEvaluationBoundaryTime: current.evaluationBoundaryTime,
@@ -268,11 +267,11 @@ export function toMarketMovementCurrentState(
     primary: primary
       ? {
           windowMinutes: 5,
-          directionState: primary.directionState,
-          pace: primary.pace.available ? primary.pace.value : "NOT_APPLICABLE",
+          directionState: current.directionState,
+          pace: current.pace,
           reversalCandidate: primary.reversalCandidate !== null,
           horizonRole: primary.horizonRole,
-          evidence,
+          evidence: primary,
         }
       : null,
     context: windowsContext,

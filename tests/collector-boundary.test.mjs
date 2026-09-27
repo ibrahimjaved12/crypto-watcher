@@ -81,7 +81,7 @@ const collectorReplacements = {
       return { snapshots: [], lateAfterFinalizationCount: 0 };
     }
     export async function registerPythonMovementHistory() {}
-    export async function calculatePythonMarketAssessment() {}
+    export async function calculatePythonMarketLifecycle() {}
   `),
   "./movement-finalization": stub(`export function movementFinalizationConfig() { return {}; }`),
   "./movement-metrics-contract": stub(`

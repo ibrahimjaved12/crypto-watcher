@@ -13,6 +13,11 @@ const contractOutput = ts.transpileModule(contractSource, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 outputText = outputText.replaceAll('"./market-state-contract"', JSON.stringify(stub(contractOutput)));
+const episodeSource = await readFile(new URL("../src/lib/market/market-episode-contract.ts", import.meta.url), "utf8");
+const episodeOutput = ts.transpileModule(episodeSource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+outputText = outputText.replaceAll('"./market-episode-contract"', JSON.stringify(stub(episodeOutput)));
 outputText = outputText.replaceAll('"zod"', JSON.stringify(import.meta.resolve("zod")));
 outputText = outputText.replaceAll('"../python-service.server"', JSON.stringify(stub(`
   export function pythonServiceConfig(path) {
@@ -20,6 +25,7 @@ outputText = outputText.replaceAll('"../python-service.server"', JSON.stringify(
   }
 `)));
 const { calculatePythonMarketMovement, calculatePythonMarketAssessment,
+  calculatePythonMarketLifecycle,
   registerPythonMovementHistory } = await import(stub(outputText));
 
 const SESSION = "2af3e7c8-b777-4e58-9ad2-18e36daac160";
@@ -131,6 +137,68 @@ const assessment = {
       15: classificationWindow(15) },
   },
 };
+
+function lifecycleFixture() {
+  const value = structuredClone(assessment);
+  value.effective_previous_confirmed_primary_direction = null;
+  value.classification.windows[5].prior_confirmed_episode_direction = null;
+  const scope = {
+    lifecycle_algorithm_version: "market-episode-lifecycle-v1",
+    lifecycle_config_version: "market-episode-lifecycle-config-v1",
+    universe_id: universe.id, universe_version: universe.version,
+    primary_window_minutes: 5,
+    classifier_algorithm_version: "market-state-classifier-v1",
+    classifier_config_version: "market-state-classifier-config-v1",
+    movement_algorithm_version: "market-movement-v1",
+    movement_config_version: "market-movement-config-v1",
+    provider: "binance-usdm", exchange: "binance", price_type: "trade",
+  };
+  const config = {
+    version: "market-episode-lifecycle-config-v1", evaluation_cadence_ms: 5_000,
+    start_confirmation_count: 2, end_confirmation_count: 3,
+    reversal_confirmation_count: 2, strengthen_confirmation_count: 2,
+    weaken_confirmation_count: 2, resume_confirmation_count: 2,
+    continuation_breadth: 0.55, material_strengthen_breadth: 0.7,
+    material_weaken_breadth: 0.5,
+  };
+  const serialized_state = { serialization_version: "market-episode-state-v1",
+    lifecycle_algorithm_version: scope.lifecycle_algorithm_version,
+    marker: { opaque_counter: 1 } };
+  value.lifecycle = {
+    schema_version: 1,
+    serialized_state,
+    state_summary: {
+      evaluation_boundary_time_ms: BOUNDARY,
+      current_direction_state: "WARMING", current_pace: missing("NO_BROAD_DIRECTION"),
+      active_episode_id: null, active_episode_direction: null, interrupted: false,
+      ...scope,
+    },
+    transitions: [{
+      event_id: "event-one", episode_id: "episode-one", previous_episode_id: null,
+      transition: "ENDED", transition_reason: "lifecycle_config_changed",
+      from_direction: "BROAD_RISE", to_direction: null, event_family: "BROAD_MOVE",
+      episode_direction: "BROAD_RISE", episode_start_boundary_time_ms: BOUNDARY - 5_000,
+      evaluation_boundary_time_ms: BOUNDARY,
+      episode_scope: scope, evaluation_scope: scope,
+      episode_lifecycle_config: config, evaluation_lifecycle_config: config,
+      windows_context: [1, 5, 15].map((minute) => value.classification.windows[minute]),
+      source_time_evidence: value.classification.windows[5].source_time_evidence,
+      directional_breadth: missing("MARKET_UNIVERSE_INELIGIBLE"),
+      material_breadth: missing("MARKET_UNIVERSE_INELIGIBLE"),
+      median_raw_return: missing("MARKET_UNIVERSE_INELIGIBLE"),
+      median_normalized_movement: missing("MARKET_UNIVERSE_INELIGIBLE"),
+      median_acceleration: missing("ACCELERATION_UNAVAILABLE"),
+      acceleration_breadth: missing("ACCELERATION_UNAVAILABLE"),
+      pace: missing("NO_BROAD_DIRECTION"),
+      dispersion_mad_normalized_movement: missing("MARKET_UNIVERSE_INELIGIBLE"),
+      volume_context: [], isolated_outliers: [], supporting_contracts: [],
+      conflicting_contracts: [], configured_universe: universe.symbols,
+      included_symbols: [], excluded_symbols: value.classification.windows[5].excluded_symbols,
+      classification: value.classification,
+    }],
+  };
+  return value;
+}
 
 test("canonical Python assessment transports pace and per-symbol provenance unchanged", async () => {
   const supplied = structuredClone(assessment);
@@ -283,6 +351,50 @@ test("canonical assessment rejects per-symbol provenance in the wrong order", as
     SESSION, BOUNDARY, "history-v1", twoSymbols, "market-movement-config-v1", priorEpisode, {},
     response(swapped),
   ));
+});
+
+test("combined Python lifecycle transports opaque state and complete canonical event", async () => {
+  const supplied = lifecycleFixture();
+  const priorState = { serialization_version: "market-episode-state-v1",
+    marker: { previous: [1, 2, 3] } };
+  let sent;
+  const send = async (url, init) => {
+    sent = { url, body: JSON.parse(init.body) };
+    return response(supplied)();
+  };
+  const result = await calculatePythonMarketLifecycle(
+    SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1",
+    priorState, true, {}, send,
+  );
+  assert.equal(sent.url, "http://python.local/v1/movement/lifecycle");
+  assert.deepEqual(sent.body.previous_lifecycle_state, priorState);
+  assert.equal(sent.body.interrupt_previous_state, true);
+  assert.equal("previous_confirmed_primary_episode" in sent.body, false);
+  assert.deepEqual(result.lifecycle.serializedState, supplied.lifecycle.serialized_state);
+  assert.deepEqual(result.lifecycle.transitions[0], supplied.lifecycle.transitions[0]);
+  assert.equal(result.lifecycle.stateSummary.currentDirectionState, "WARMING");
+  assert.equal(result.classification.windows.length, 3);
+});
+
+test("combined lifecycle rejects identity, serialization and event transport mismatches", async () => {
+  const mutations = [
+    (item) => { item.history_version = "wrong"; },
+    (item) => { item.lifecycle.serialized_state.serialization_version = "wrong"; },
+    (item) => { item.lifecycle.state_summary.evaluation_boundary_time_ms += 5_000; },
+    (item) => { item.lifecycle.state_summary.universe_version = "wrong"; },
+    (item) => { item.lifecycle.transitions[0].evaluation_scope.universe_id = "wrong"; },
+    (item) => { item.lifecycle.transitions[0].source_time_evidence[0].symbol = "OTHER"; },
+    (item) => { item.lifecycle.transitions[0].windows_context[1].window_minutes = 1; },
+    (item) => { delete item.lifecycle.transitions[0].supporting_contracts; },
+  ];
+  for (const mutate of mutations) {
+    const invalid = lifecycleFixture();
+    mutate(invalid);
+    await assert.rejects(calculatePythonMarketLifecycle(
+      SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1",
+      null, false, {}, response(invalid),
+    ));
+  }
 });
 
 test("strict Python DTO mapper preserves unavailable reasons and all three windows", async () => {

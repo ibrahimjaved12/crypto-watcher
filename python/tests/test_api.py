@@ -235,6 +235,29 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(assessment.json()["classification"]["windows"]["5"]
                          ["source_time_evidence"][0]["symbol"], "BTCUSDT")
 
+        lifecycle_request = {**metrics, "previous_lifecycle_state": None,
+                             "interrupt_previous_state": False}
+        self.assertEqual(self.request(app, "POST", "/v1/movement/lifecycle",
+                                      json=lifecycle_request).status_code, 401)
+        lifecycle = self.request(app, "POST", "/v1/movement/lifecycle",
+                                 json=lifecycle_request, headers=HEADERS)
+        self.assertEqual(lifecycle.status_code, 200)
+        payload = lifecycle.json()
+        self.assertEqual(payload["evaluation"], response.json()["evaluation"])
+        self.assertEqual(payload["classification"], assessment.json()["classification"])
+        self.assertEqual(payload["lifecycle"]["serialized_state"]["serialization_version"],
+                         "market-episode-state-v1")
+        self.assertEqual(payload["lifecycle"]["state_summary"]["current_direction_state"],
+                         "UNAVAILABLE")
+        self.assertEqual(payload["lifecycle"]["transitions"], [])
+        self.assertEqual(self.request(app, "POST", "/v1/movement/lifecycle",
+                                      json={**lifecycle_request, "snapshots": []},
+                                      headers=HEADERS).status_code, 422)
+        self.assertEqual(self.request(app, "POST", "/v1/movement/lifecycle",
+                                      json={**lifecycle_request, "previous_lifecycle_state":
+                                            {"serialization_version": "market-episode-state-v1"}},
+                                      headers=HEADERS).status_code, 409)
+
     def test_batch_provenance_and_completion_boundary(self):
         app = create_app(TOKEN, analyzer_for())
         duration = 15 * MINUTE

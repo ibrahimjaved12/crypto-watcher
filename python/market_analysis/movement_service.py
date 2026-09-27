@@ -8,7 +8,13 @@ from hashlib import sha256
 import json
 
 from .api_models import (MovementBoundaryRequest, MovementHistoryRegistrationRequest,
-                         MovementMetricsRequest, MovementClassificationRequest)
+                         MovementMetricsRequest, MovementClassificationRequest,
+                         MovementLifecycleRequest)
+from .market_episode_lifecycle import (
+    _canonical, deserialize_market_episode_lifecycle_state,
+    interrupt_market_episode_state_on_restart, process_market_episode_lifecycle,
+    serialize_market_episode_lifecycle_state,
+)
 from .movement_classifier import (
     ALGORITHM_VERSION as CLASSIFIER_ALGORITHM_VERSION,
     MarketClassifierConfig, MarketClassificationContext, MarketWindowClassificationContext,
@@ -201,19 +207,81 @@ class MovementBoundaryService:
 
     def calculate_assessment(self, request: MovementClassificationRequest):
         session_id, history_version, result, endpoints = self._evaluate_movement(request)
-        classifier_config = MarketClassifierConfig()
         previous = request.previous_confirmed_primary_episode
-        effective_prior_direction = (
-            previous.direction
-            if previous is not None
-            and previous.universe_id == result.universe_id
-            and previous.universe_version == result.universe_version
-            and previous.movement_algorithm_version == result.algorithm_version
-            and previous.movement_config_version == result.config_version
-            and previous.classifier_algorithm_version == CLASSIFIER_ALGORITHM_VERSION
-            and previous.classifier_config_version == classifier_config.version
-            else None
+        classifier_config = MarketClassifierConfig()
+        effective_prior_direction = self._prior_direction(
+            result, classifier_config, previous.direction if previous else None, previous,
         )
+        classification = self._classify(result, endpoints, classifier_config,
+                                         effective_prior_direction)
+        return {"schema_version": 1, "session_id": session_id,
+                "history_version": history_version,
+                "effective_previous_confirmed_primary_direction": effective_prior_direction,
+                "evaluation": self._transport(result),
+                "classification": self._transport(classification)}
+
+    def calculate_lifecycle(self, request: MovementLifecycleRequest):
+        previous = (deserialize_market_episode_lifecycle_state(request.previous_lifecycle_state)
+                    if request.previous_lifecycle_state is not None else None)
+        if request.interrupt_previous_state and previous is not None:
+            previous = interrupt_market_episode_state_on_restart(previous)
+        session_id, history_version, result, endpoints = self._evaluate_movement(request)
+        classifier_config = MarketClassifierConfig()
+        active = previous.active_episode if previous is not None else None
+        effective_prior_direction = self._prior_direction(
+            result, classifier_config, active.direction if active else None,
+            active.scope if active else None,
+        )
+        classification = self._classify(result, endpoints, classifier_config,
+                                         effective_prior_direction)
+        lifecycle = process_market_episode_lifecycle(classification, previous)
+        state = lifecycle.next_state
+        scope = state.scope
+        return {"schema_version": 1, "session_id": session_id,
+                "history_version": history_version,
+                "effective_previous_confirmed_primary_direction": effective_prior_direction,
+                "evaluation": self._transport(result),
+                "classification": self._transport(classification),
+                "lifecycle": {
+                    "schema_version": 1,
+                    "serialized_state": serialize_market_episode_lifecycle_state(state),
+                    "state_summary": {
+                        "evaluation_boundary_time_ms": state.last_evaluation_boundary_time_ms,
+                        "current_direction_state": state.current_direction_state,
+                        "current_pace": self._transport(state.current_pace),
+                        "active_episode_id": (state.active_episode.episode_id
+                                              if state.active_episode else None),
+                        "active_episode_direction": (state.active_episode.direction
+                                                     if state.active_episode else None),
+                        "interrupted": state.interrupted,
+                        "lifecycle_algorithm_version": state.lifecycle_algorithm_version,
+                        "lifecycle_config_version": state.lifecycle_config_version,
+                        "universe_id": scope.universe_id,
+                        "universe_version": scope.universe_version,
+                        "primary_window_minutes": scope.primary_window_minutes,
+                        "classifier_algorithm_version": scope.classifier_algorithm_version,
+                        "classifier_config_version": scope.classifier_config_version,
+                        "movement_algorithm_version": scope.movement_algorithm_version,
+                        "movement_config_version": scope.movement_config_version,
+                        "provider": scope.provider, "exchange": scope.exchange,
+                        "price_type": scope.price_type,
+                    },
+                    "transitions": [_canonical(event) for event in lifecycle.transitions],
+                }}
+
+    @staticmethod
+    def _prior_direction(result, classifier_config, direction, scope):
+        return (direction if scope is not None
+                and scope.universe_id == result.universe_id
+                and scope.universe_version == result.universe_version
+                and scope.movement_algorithm_version == result.algorithm_version
+                and scope.movement_config_version == result.config_version
+                and scope.classifier_algorithm_version == CLASSIFIER_ALGORITHM_VERSION
+                and scope.classifier_config_version == classifier_config.version
+                else None)
+
+    @staticmethod
+    def _classify(result, endpoints, classifier_config, effective_prior_direction):
         provenance = tuple(SymbolSourceTimeEvidence(
             symbol=symbol,
             last_real_trade_time_ms=(endpoints[symbol].last_real_trade_time_ms
@@ -231,12 +299,7 @@ class MovementBoundaryService:
                 ),
             ) for window in (1, 5, 15)
         })
-        classification = classify_market_movement(result, context, classifier_config)
-        return {"schema_version": 1, "session_id": session_id,
-                "history_version": history_version,
-                "effective_previous_confirmed_primary_direction": effective_prior_direction,
-                "evaluation": self._transport(result),
-                "classification": self._transport(classification)}
+        return classify_market_movement(result, context, classifier_config)
 
     def _evaluate_movement(self, request: MovementMetricsRequest):
         session_id = str(request.session_id)

@@ -11,6 +11,10 @@ import type { MarketUniverse } from "./market-universe";
 import type { MarketMovementConfig, MarketMovementEvaluation } from "./movement-metrics-contract";
 import { MARKET_STATE_CLASSIFIER_VERSION,
   type ConfirmedPrimaryEpisodeScope, type MarketClassification } from "./market-state-contract";
+import {
+  MARKET_EPISODE_ALGORITHM_VERSION, MARKET_EPISODE_STATE_SERIALIZATION_VERSION,
+  type MarketEpisodeLifecycleTransport, type SerializedMarketEpisodeLifecycleState,
+} from "./market-episode-contract";
 import type { MovementInstrumentCompatibility, MovementRawHistory } from "./movement-normalization-input";
 
 const TIMEOUT_MS = 6_000;
@@ -337,6 +341,98 @@ const assessmentResponse = z.object({
     z.enum(["BROAD_RISE", "BROAD_DROP"]).nullable(),
   classification: classificationSchema,
 }).strict();
+const lifecycleScopeSchema = z.object({
+  lifecycle_algorithm_version: z.string().min(1), lifecycle_config_version: z.string().min(1),
+  universe_id: z.string().min(1), universe_version: z.string().min(1),
+  primary_window_minutes: z.literal(5),
+  classifier_algorithm_version: z.string().min(1), classifier_config_version: z.string().min(1),
+  movement_algorithm_version: z.string().min(1), movement_config_version: z.string().min(1),
+  provider: z.literal("binance-usdm"), exchange: z.literal("binance"),
+  price_type: z.literal("trade"),
+}).strict();
+const lifecycleConfigEvidenceSchema = z.object({
+  version: z.string().min(1), evaluation_cadence_ms: nonnegativeInteger,
+  start_confirmation_count: nonnegativeInteger, end_confirmation_count: nonnegativeInteger,
+  reversal_confirmation_count: nonnegativeInteger, strengthen_confirmation_count: nonnegativeInteger,
+  weaken_confirmation_count: nonnegativeInteger, resume_confirmation_count: nonnegativeInteger,
+  continuation_breadth: number, material_strengthen_breadth: number,
+  material_weaken_breadth: number,
+}).strict();
+const canonicalEventMetric = <T extends z.ZodTypeAny>(value: T) =>
+  classifierMetric(value, z.string().min(1));
+const canonicalTransitionSchema = z.object({
+  event_id: z.string().min(1), episode_id: z.string().min(1),
+  previous_episode_id: z.string().min(1).nullable(),
+  transition: z.enum(["STARTED", "STRENGTHENED", "WEAKENED", "REVERSED", "ENDED"]),
+  transition_reason: z.string().min(1),
+  from_direction: z.enum(["BROAD_RISE", "BROAD_DROP"]).nullable(),
+  to_direction: z.enum(["BROAD_RISE", "BROAD_DROP"]).nullable(),
+  event_family: z.literal("BROAD_MOVE"),
+  episode_direction: z.enum(["BROAD_RISE", "BROAD_DROP"]),
+  episode_start_boundary_time_ms: nonnegativeInteger,
+  evaluation_boundary_time_ms: nonnegativeInteger,
+  episode_scope: lifecycleScopeSchema, evaluation_scope: lifecycleScopeSchema,
+  episode_lifecycle_config: lifecycleConfigEvidenceSchema,
+  evaluation_lifecycle_config: lifecycleConfigEvidenceSchema,
+  windows_context: z.array(z.object({
+    window_minutes: windowMinutes, horizon_role: z.enum(["RAPID", "PRIMARY", "PERSISTENCE"]),
+    evaluation_boundary_time_ms: nonnegativeInteger,
+    classifier_algorithm_version: z.string().min(1), classifier_config_version: z.string().min(1),
+    movement_algorithm_version: z.string().min(1), movement_config_version: z.string().min(1),
+    universe_id: z.string().min(1), universe_version: z.string().min(1),
+  }).passthrough()).length(3),
+  source_time_evidence: z.array(z.object({
+    symbol: z.string().min(1), last_real_trade_time_ms: timestamp,
+    last_real_event_time_ms: timestamp, last_received_at_ms: timestamp,
+  }).strict()),
+  directional_breadth: canonicalEventMetric(z.object({count: nonnegativeInteger, fraction: number}).strict()),
+  material_breadth: canonicalEventMetric(z.object({count: nonnegativeInteger, fraction: number}).strict()),
+  median_raw_return: canonicalEventMetric(number),
+  median_normalized_movement: canonicalEventMetric(number),
+  median_acceleration: canonicalEventMetric(number),
+  acceleration_breadth: canonicalEventMetric(z.object({count: nonnegativeInteger, fraction: number}).strict()),
+  pace: canonicalEventMetric(z.enum(["ACCELERATING", "DECELERATING", "MIXED"])),
+  dispersion_mad_normalized_movement: canonicalEventMetric(number),
+  volume_context: z.array(z.object({symbol: z.string().min(1)}).passthrough()),
+  isolated_outliers: z.array(z.object({symbol: z.string().min(1)}).passthrough()),
+  supporting_contracts: z.array(z.object({symbol: z.string().min(1)}).passthrough()),
+  conflicting_contracts: z.array(z.object({symbol: z.string().min(1)}).passthrough()),
+  configured_universe: z.array(z.string().min(1)),
+  included_symbols: z.array(z.string().min(1)),
+  excluded_symbols: z.array(z.object({symbol: z.string().min(1), reasons: z.array(exclusionReason)}).strict()),
+  classification: z.object({
+    classifier_algorithm_version: z.string().min(1), classifier_config_version: z.string().min(1),
+    movement_algorithm_version: z.string().min(1), movement_config_version: z.string().min(1),
+    universe_id: z.string().min(1), universe_version: z.string().min(1),
+    evaluation_boundary_time_ms: nonnegativeInteger,
+  }).passthrough(),
+}).strict();
+const lifecycleResponse = assessmentResponse.extend({
+  lifecycle: z.object({
+    schema_version: z.literal(1),
+    serialized_state: z.object({
+      serialization_version: z.literal(MARKET_EPISODE_STATE_SERIALIZATION_VERSION),
+    }).passthrough(),
+    state_summary: z.object({
+      evaluation_boundary_time_ms: nonnegativeInteger,
+      current_direction_state: z.enum(["BROAD_RISE", "BROAD_DROP", "NEUTRAL", "WARMING", "UNAVAILABLE"]),
+      current_pace: classifierMetric(z.enum(["ACCELERATING", "DECELERATING", "MIXED"]),
+        z.enum(["NO_BROAD_DIRECTION", "ACCELERATION_UNAVAILABLE"])),
+      active_episode_id: z.string().min(1).nullable(),
+      active_episode_direction: z.enum(["BROAD_RISE", "BROAD_DROP"]).nullable(),
+      interrupted: z.boolean(),
+      lifecycle_algorithm_version: z.literal(MARKET_EPISODE_ALGORITHM_VERSION),
+      lifecycle_config_version: z.string().min(1),
+      universe_id: z.string().min(1), universe_version: z.string().min(1),
+      primary_window_minutes: z.literal(5),
+      classifier_algorithm_version: z.string().min(1), classifier_config_version: z.string().min(1),
+      movement_algorithm_version: z.string().min(1), movement_config_version: z.string().min(1),
+      provider: z.literal("binance-usdm"), exchange: z.literal("binance"),
+      price_type: z.literal("trade"),
+    }).strict(),
+    transitions: z.array(canonicalTransitionSchema),
+  }).strict(),
+}).strict();
 const confirmedPrimaryEpisodeScopeSchema = z.object({
   direction: z.enum(["BROAD_RISE", "BROAD_DROP"]),
   universeId: z.string().min(1), universeVersion: z.string().min(1),
@@ -542,6 +638,15 @@ export async function calculatePythonMarketAssessment(
       classifier_config_version: prior.classifierConfigVersion,
     },
   }, env, send);
+  return transportCanonicalAssessment(response, sessionId, boundaryTime, historyVersion,
+    universe, movementConfigVersion, prior?.direction ?? null);
+}
+
+function transportCanonicalAssessment(
+  response: unknown, sessionId: string, boundaryTime: number, historyVersion: string,
+  universe: MarketUniverse, movementConfigVersion: string,
+  expectedPriorDirection?: "BROAD_RISE" | "BROAD_DROP" | null,
+): { movement: MarketMovementEvaluation; classification: MarketClassification } {
   const parsed = assessmentResponse.safeParse(response);
   if (!parsed.success) throw new Error("Python movement assessment response is invalid");
   const { evaluation: rawMovement, classification: rawClassification } = parsed.data;
@@ -550,9 +655,9 @@ export async function calculatePythonMarketAssessment(
     symbols.every((symbol, index) => symbol === universe.symbols[index]);
   const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
   if (parsed.data.session_id !== sessionId || parsed.data.history_version !== historyVersion ||
-      (parsed.data.effective_previous_confirmed_primary_direction !== null &&
-        parsed.data.effective_previous_confirmed_primary_direction !==
-          prior?.direction) ||
+      (expectedPriorDirection !== undefined &&
+        parsed.data.effective_previous_confirmed_primary_direction !== null &&
+        parsed.data.effective_previous_confirmed_primary_direction !== expectedPriorDirection) ||
       rawMovement.evaluation_boundary_time_ms !== boundaryTime ||
       rawMovement.universe_id !== universe.id || rawMovement.universe_version !== universe.version ||
       rawMovement.config_version !== movementConfigVersion || !ordered(rawMovement.configured_universe) ||
@@ -688,4 +793,86 @@ export async function calculatePythonMarketAssessment(
     }),
   };
   return { movement, classification };
+}
+
+export async function calculatePythonMarketLifecycle(
+  sessionId: string, boundaryTime: number, historyVersion: string,
+  universe: MarketUniverse, movementConfigVersion: string,
+  previousLifecycleState: SerializedMarketEpisodeLifecycleState | null,
+  interruptPreviousState: boolean,
+  env: Record<string, string | undefined> = process.env, send: typeof fetch = fetch,
+): Promise<{ movement: MarketMovementEvaluation; classification: MarketClassification;
+  lifecycle: MarketEpisodeLifecycleTransport }> {
+  const response = await postCanonicalMovement("/v1/movement/lifecycle", {
+    schema_version: 1, session_id: sessionId,
+    evaluation_boundary_time_ms: boundaryTime, history_version: historyVersion,
+    universe_id: universe.id, universe_version: universe.version,
+    previous_lifecycle_state: previousLifecycleState,
+    interrupt_previous_state: interruptPreviousState,
+  }, env, send);
+  const parsed = lifecycleResponse.safeParse(response);
+  if (!parsed.success) throw new Error("Python movement lifecycle response is invalid");
+  const { lifecycle, ...assessment } = parsed.data;
+  const core = transportCanonicalAssessment(assessment, sessionId, boundaryTime,
+    historyVersion, universe, movementConfigVersion);
+  const { state_summary: summary, serialized_state: serialized, transitions } = lifecycle;
+  const classification = assessment.classification;
+  if (summary.evaluation_boundary_time_ms !== boundaryTime ||
+      summary.universe_id !== universe.id || summary.universe_version !== universe.version ||
+      summary.classifier_algorithm_version !== classification.classifier_algorithm_version ||
+      summary.classifier_config_version !== classification.classifier_config_version ||
+      summary.movement_algorithm_version !== assessment.evaluation.algorithm_version ||
+      summary.movement_config_version !== movementConfigVersion ||
+      summary.provider !== classification.provider ||
+      summary.exchange !== classification.exchange || summary.price_type !== classification.price_type ||
+      (summary.active_episode_id === null) !== (summary.active_episode_direction === null)) {
+    throw new Error("Python movement lifecycle summary has mismatched identity");
+  }
+  for (const event of transitions) {
+    if (event.evaluation_boundary_time_ms !== boundaryTime ||
+        event.evaluation_scope.universe_id !== universe.id ||
+        event.evaluation_scope.universe_version !== universe.version ||
+        event.evaluation_scope.classifier_algorithm_version !== classification.classifier_algorithm_version ||
+        event.evaluation_scope.classifier_config_version !== classification.classifier_config_version ||
+        event.evaluation_scope.movement_algorithm_version !== assessment.evaluation.algorithm_version ||
+        event.evaluation_scope.movement_config_version !== movementConfigVersion ||
+        event.evaluation_scope.lifecycle_algorithm_version !== summary.lifecycle_algorithm_version ||
+        event.evaluation_scope.lifecycle_config_version !== summary.lifecycle_config_version ||
+        event.classification.evaluation_boundary_time_ms !== boundaryTime ||
+        event.classification.universe_id !== universe.id ||
+        event.classification.universe_version !== universe.version ||
+        event.configured_universe.length !== universe.symbols.length ||
+        event.configured_universe.some((symbol, index) => symbol !== universe.symbols[index]) ||
+        event.source_time_evidence.length !== universe.symbols.length ||
+        event.source_time_evidence.some((item, index) => item.symbol !== universe.symbols[index]) ||
+        [1, 5, 15].some((minute, index) =>
+          event.windows_context[index]?.window_minutes !== minute ||
+          event.windows_context[index]?.evaluation_boundary_time_ms !== boundaryTime)) {
+      throw new Error("Python movement lifecycle transition has mismatched provenance");
+    }
+  }
+  return {
+    ...core,
+    lifecycle: {
+      serializedState: serialized as SerializedMarketEpisodeLifecycleState,
+      stateSummary: {
+        evaluationBoundaryTime: summary.evaluation_boundary_time_ms,
+        currentDirectionState: summary.current_direction_state,
+        currentPace: summary.current_pace,
+        activeEpisodeId: summary.active_episode_id,
+        activeEpisodeDirection: summary.active_episode_direction,
+        interrupted: summary.interrupted,
+        lifecycleAlgorithmVersion: summary.lifecycle_algorithm_version,
+        lifecycleConfigVersion: summary.lifecycle_config_version,
+        universeId: summary.universe_id, universeVersion: summary.universe_version,
+        primaryWindowMinutes: 5,
+        classifierAlgorithmVersion: summary.classifier_algorithm_version,
+        classifierConfigVersion: summary.classifier_config_version,
+        movementAlgorithmVersion: summary.movement_algorithm_version,
+        movementConfigVersion: summary.movement_config_version,
+        provider: summary.provider, exchange: summary.exchange, priceType: summary.price_type,
+      },
+      transitions: transitions as MarketEpisodeLifecycleTransport["transitions"],
+    },
+  };
 }

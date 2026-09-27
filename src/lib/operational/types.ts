@@ -2,12 +2,11 @@ import type { Candle, CollectorTACandleHistory } from "../market/providers.serve
 import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
-  MarketPace,
-} from "../market/market-episode-classification";
+} from "../market/market-state-contract";
 import type {
-  MarketEpisodeTransitionType,
+  CanonicalMarketEpisodeTransition, MarketPace,
   SerializedMarketEpisodeLifecycleState,
-} from "../market/market-episode-lifecycle";
+} from "../market/market-episode-contract";
 import type {
   MovementCandle,
   PersistedMarketMovementCurrentEvidence,
@@ -146,46 +145,7 @@ export type PersistedMarketStateCurrent = {
   updatedAt?: string;
 };
 
-export type PersistedMarketMovementEvent = {
-  eventId: string;
-  episodeId: string;
-  episodeAlgorithmVersion: string;
-  lifecycleConfigVersion: string;
-  transition: MarketEpisodeTransitionType;
-  transitionReason: string;
-  fromDirection: ConfirmedMarketDirection | null;
-  toDirection: ConfirmedMarketDirection | null;
-  episodeStartBoundaryTime: number;
-  evaluationBoundaryTime: number;
-  universeId: string;
-  universeVersion: string;
-  primaryWindowMinutes: 5;
-  provider: "binance-usdm";
-  exchange: "binance";
-  priceType: "trade";
-  direction: ConfirmedMarketDirection;
-  pace: MarketPace;
-  directionalBreadth: number;
-  materialBreadth: number;
-  medianRawReturn: number | null;
-  medianNormalizedMovement: number | null;
-  medianAcceleration: number | null;
-  accelerationBreadth: number | null;
-  dispersion: number | null;
-  rvolSummary: unknown;
-  outliers: unknown;
-  supportingContracts: string[];
-  conflictingContracts: string[];
-  configuredUniverse: string[];
-  includedSymbols: string[];
-  excludedSymbols: unknown;
-  windowsContext: unknown;
-  classifierAlgorithmVersion: string;
-  classifierConfigVersion: string;
-  movementAlgorithmVersion: string;
-  movementConfigVersion: string;
-  createdAt?: string;
-};
+export type PersistedMarketMovementEvent = CanonicalMarketEpisodeTransition;
 
 export type MarketEpisodePersistenceStatus = {
   eventId: string;
