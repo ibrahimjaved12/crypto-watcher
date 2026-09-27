@@ -120,6 +120,7 @@ test("finalization watermark never finalizes the current wall-clock boundary ear
   assert.equal(finalizableMovementBoundary(BASE + 2_000, config), BASE);
   assert.equal(finalizableMovementBoundary(BASE + 4_999, config), BASE);
   assert.equal(finalizableMovementBoundary(BASE + 5_000, config), BASE);
+  assert.throws(() => finalizableMovementBoundary(BASE, { version: "v", graceMs: 0 }));
   assert.throws(() => finalizableMovementBoundary(BASE, { version: "v", graceMs: -1 }));
 });
 
@@ -134,6 +135,8 @@ test("grace is explicit, server-side and versioned", () => {
   assert.ok(tuned.version.includes("5000"));
   assert.notEqual(tuned.version, defaultConfig.version);
   assert.throws(() => movementFinalizationConfig({ MOVEMENT_FINALIZATION_GRACE_MS: "-1" }));
+  assert.throws(() => movementFinalizationConfig({ MOVEMENT_FINALIZATION_GRACE_MS: "0" }));
+  assert.throws(() => movementFinalizationConfig({ MOVEMENT_FINALIZATION_GRACE_MS: "1.5" }));
   assert.throws(() => movementFinalizationConfig({ MOVEMENT_FINALIZATION_GRACE_MS: "nope" }));
 });
 
@@ -609,6 +612,10 @@ test("diagnostics reflect engine status, counts, timestamps and transition", () 
   assert.equal(diagnostics.lastEvaluationBoundaryTime, BASE);
   assert.equal(diagnostics.lastSourceEventTime, BASE + 900);
   assert.equal(diagnostics.lateAfterFinalizationCount, 5);
+  assert.equal(diagnostics.classifierAlgorithmVersion, "market-state-v1");
+  assert.equal(diagnostics.classifierConfigVersion, "market-state-config-v1");
+  assert.equal(diagnostics.episodeAlgorithmVersion, "market-episode-v1");
+  assert.equal(diagnostics.lifecycleConfigVersion, "market-episode-config-v1");
   assert.equal(diagnostics.movementConfigVersion, "market-movement-config-v1");
   assert.equal(toMovementEngineDiagnostics(null, { now: BASE }), null);
 });

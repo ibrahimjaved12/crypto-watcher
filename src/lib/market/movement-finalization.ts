@@ -11,7 +11,7 @@ export const MOVEMENT_FINALIZATION_CONFIG_FAMILY = "movement-finalization-config
 
 /** V1 operating default. This is a lateness watermark, not a trading threshold. */
 export const MOVEMENT_FINALIZATION_GRACE_MS_DEFAULT = 2_000;
-export const MOVEMENT_FINALIZATION_GRACE_MS_MIN = 0;
+export const MOVEMENT_FINALIZATION_GRACE_MS_MIN = 1;
 export const MOVEMENT_FINALIZATION_GRACE_MS_MAX = 60_000;
 
 /**
@@ -66,7 +66,11 @@ export function finalizableMovementBoundary(
   if (!Number.isSafeInteger(wallClockNowMs) || wallClockNowMs < 0) {
     throw new Error("invalid movement finalization wall clock");
   }
-  if (!Number.isInteger(config.graceMs) || config.graceMs < 0) {
+  if (
+    !Number.isInteger(config.graceMs) ||
+    config.graceMs < MOVEMENT_FINALIZATION_GRACE_MS_MIN ||
+    config.graceMs > MOVEMENT_FINALIZATION_GRACE_MS_MAX
+  ) {
     throw new Error("invalid movement finalization grace");
   }
   const shifted = wallClockNowMs - config.graceMs;
