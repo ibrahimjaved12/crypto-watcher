@@ -201,7 +201,10 @@ test("canonical assessment rejects mismatched identity, provenance and snapshots
     (item) => { item.classification.windows[1].source_time_evidence.push({
       symbol: "OTHER", last_real_trade_time_ms: null,
       last_real_event_time_ms: null, last_received_at_ms: null }); },
-    (item) => { item.classification.windows[5].breadth.denominator = 1; },
+    (item) => { item.classification.windows[5].breadth = {
+      ...item.classification.windows[5].breadth,
+      denominator: item.classification.windows[5].breadth.denominator + 1,
+    }; },
     (item) => { item.classification.windows[15].window_minutes = 5; },
     (item) => { item.classification.windows[5].movement_snapshot.window_minutes = 1; },
   ];

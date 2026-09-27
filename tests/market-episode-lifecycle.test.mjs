@@ -47,6 +47,22 @@ const unavailable = (reason = "MARKET_UNIVERSE_INELIGIBLE") => ({
   reason,
 });
 
+// Explicit #72 acceleration evidence supplied to #73 fixtures; no classification runs here.
+const ACCELERATION_EVIDENCE = {
+  RISE_ACCELERATING: { medianAcceleration: available(1),
+    positiveAccelerationFraction: 1, negativeAccelerationFraction: 0 },
+  RISE_DECELERATING: { medianAcceleration: available(-1),
+    positiveAccelerationFraction: 0, negativeAccelerationFraction: 1 },
+  DROP_ACCELERATING: { medianAcceleration: available(-1),
+    positiveAccelerationFraction: 0, negativeAccelerationFraction: 1 },
+  DROP_DECELERATING: { medianAcceleration: available(1),
+    positiveAccelerationFraction: 1, negativeAccelerationFraction: 0 },
+  MIXED: { medianAcceleration: available(0),
+    positiveAccelerationFraction: 0.5, negativeAccelerationFraction: 0.5 },
+  UNAVAILABLE: { medianAcceleration: unavailable("ACCELERATION_UNAVAILABLE"),
+    positiveAccelerationFraction: null, negativeAccelerationFraction: null },
+};
+
 function makeSymbol(index, overrides = {}) {
   const isRising = overrides.direction === "RISING";
   const isFalling = overrides.direction === "FALLING";
@@ -98,6 +114,7 @@ function windowFixture({
   universeVersion = "2026-09-25",
   classificationDirection = "NEUTRAL",
   classificationPace = "NOT_APPLICABLE",
+  classificationAccelerationEvidence = ACCELERATION_EVIDENCE.RISE_ACCELERATING,
 } = {}) {
   const configuredUniverse = Array.from({ length: configuredCount }, (_, index) => `S${index}USDT`);
   const included =
@@ -117,6 +134,7 @@ function windowFixture({
     universeVersion,
     classificationDirection,
     classificationPace,
+    classificationAccelerationEvidence,
     configuredUniverse,
     includedSymbols: included.filter((s) => s.included).map((s) => s.symbol),
     excludedSymbols,
@@ -162,6 +180,7 @@ function broadRiseWindow(options = {}) {
   return windowFixture({
     classificationDirection: "BROAD_RISE",
     classificationPace: "ACCELERATING",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.RISE_ACCELERATING,
     breadth: {
       flatFraction: 0.1,
       risingFraction: 0.8,
@@ -180,6 +199,7 @@ function broadDropWindow(options = {}) {
   return windowFixture({
     classificationDirection: "BROAD_DROP",
     classificationPace: "ACCELERATING",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.DROP_ACCELERATING,
     breadth: {
       flatFraction: 0.1,
       risingFraction: 0.1,
@@ -196,6 +216,7 @@ function broadDropWindow(options = {}) {
 
 function neutralWindow(options = {}) {
   return windowFixture({
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.MIXED,
     breadth: {
       flatFraction: 0.4,
       risingFraction: 0.3,
@@ -275,9 +296,11 @@ function makePair({
         materialFallingFraction: snapshot.breadth.materialFallingFraction,
         medianRawReturn: snapshot.aggregates.medianRawReturn,
         medianNormalizedMovement: snapshot.aggregates.medianNormalizedMovement,
-        medianAcceleration: available(1),
-        positiveAccelerationFraction: snapshot.classificationPace === "DECELERATING" ? 0 : 1,
-        negativeAccelerationFraction: snapshot.classificationPace === "DECELERATING" ? 1 : 0,
+        medianAcceleration: snapshot.classificationAccelerationEvidence.medianAcceleration,
+        positiveAccelerationFraction:
+          snapshot.classificationAccelerationEvidence.positiveAccelerationFraction,
+        negativeAccelerationFraction:
+          snapshot.classificationAccelerationEvidence.negativeAccelerationFraction,
         dispersion: snapshot.aggregates.dispersionMadNormalizedMovement,
         rvolSummary: [], isolatedOutliers: [],
       },
@@ -377,6 +400,19 @@ test("1. one broad evaluation => no STARTED", () => {
   assert.equal(result.nextState.pendingCandidate.direction, "BROAD_RISE");
   assert.equal(result.nextState.pendingCandidate.count, 1);
   assert.equal(result.nextState.pendingCandidate.startBoundaryTime, BASE_TIME);
+});
+
+test("explicit decelerating broad-drop evidence stays directionally coherent", () => {
+  const drop = broadDropWindow({
+    classificationPace: "DECELERATING",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.DROP_DECELERATING,
+    accelerations: Array(10).fill(1),
+  });
+  const pair = makePair({ primaryWindow: drop });
+  const evidence = pair.classification.windows[1].evidence;
+  assert.deepEqual(evidence.medianAcceleration, available(1));
+  assert.equal(evidence.positiveAccelerationFraction, 1);
+  assert.equal(evidence.negativeAccelerationFraction, 0);
 });
 
 test("duplicate and backward boundaries never advance start confirmation", () => {
@@ -724,6 +760,7 @@ test("7, 8, 9. 2 consecutive full opposite broad states => one REVERSED, new epi
   assert.equal(rev.pace, "ACCELERATING");
   assert.equal(rev.directionalBreadth, 0.8);
   assert.equal(rev.materialBreadth, 0.6);
+  assert.equal(rev.medianAcceleration, -1);
   assert.equal(rev.accelerationBreadth, 1);
   assert.deepEqual(
     rev.supportingContracts,
@@ -842,6 +879,7 @@ test("10. strengthened via pace crossing after 2 confirmations", () => {
   // Start BROAD_RISE with MIXED pace (5 symbols positive, 5 negative)
   const mixedRise = broadRiseWindow({
     classificationPace: "MIXED",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.MIXED,
     accelerations: [-1, -1, -1, -1, -1, 1, 1, 1, 1, 1],
   });
   const eval1 = makePair({ primaryWindow: mixedRise, boundaryTime: BASE_TIME });
@@ -948,7 +986,9 @@ test("12. weakened via pace crossing after 2 confirmations", () => {
 
   // Tick 1 with DECELERATING pace
   const decelRise = broadRiseWindow({
-    classificationPace: "DECELERATING", accelerations: Array(10).fill(-1),
+    classificationPace: "DECELERATING",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.RISE_DECELERATING,
+    accelerations: Array(10).fill(-1),
   });
   const eval3 = makePair({ primaryWindow: decelRise, boundaryTime: BASE_TIME + 10_000 });
   const step3 = processMarketEpisodeLifecycle({
@@ -1552,6 +1592,7 @@ test("18. WARMING/UNAVAILABLE interrupts rather than pretending continuity", () 
   // WARMING evaluation arrives
   const warmingWindow = windowFixture({
     classificationDirection: "WARMING",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.UNAVAILABLE,
     marketWideEligible: false,
     excludedSymbols: Array.from({ length: 10 }, (_, i) => ({
       symbol: `S${i}USDT`,
@@ -1573,6 +1614,7 @@ test("18. WARMING/UNAVAILABLE interrupts rather than pretending continuity", () 
   // UNAVAILABLE arrives next
   const unavailWindow = windowFixture({
     classificationDirection: "UNAVAILABLE",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.UNAVAILABLE,
     marketWideEligible: false,
     excludedSymbols: [{ symbol: "S0USDT", reasons: ["SOURCE_UNAVAILABLE"] }],
   });
