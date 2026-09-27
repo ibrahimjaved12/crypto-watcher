@@ -18,6 +18,12 @@ from .movement_metrics import (
 
 ALGORITHM_VERSION = "market-state-classifier-v1"
 DEFAULT_CONFIG_VERSION = "market-state-classifier-config-v1"
+# Fixed #71 evidence requirements of the #72 V1 algorithm. A relaxed upstream
+# config cannot weaken these requirements while retaining this algorithm version.
+V1_MINIMUM_ELIGIBLE_FRACTION = 0.60
+V1_MINIMUM_ELIGIBLE_COUNT = 5
+V1_OUTLIER_CROSS_Z = 3.5
+V1_OUTLIER_HISTORICAL_Z = 1.5
 HORIZON_ROLES = MappingProxyType({1: "RAPID", 5: "PRIMARY", 15: "PERSISTENCE"})
 _BROAD_DIRECTIONS = frozenset(("BROAD_RISE", "BROAD_DROP"))
 _WARMING_REASONS = frozenset(("WARMING_INSUFFICIENT_LIVE_HISTORY",))
@@ -48,17 +54,33 @@ class MarketClassifierConfig:
 
 
 @dataclass(frozen=True)
-class MarketWindowClassificationContext:
-    # None means the caller has no trustworthy source/event timestamp.
-    source_timestamp_ms: int | None = None
-    event_timestamp_ms: int | None = None
-    prior_confirmed_episode_direction: str | None = None
+class SymbolSourceTimeEvidence:
+    symbol: str
+    trade_time_ms: int | None
+    event_time_ms: int | None
+    received_at_ms: int | None
 
     def __post_init__(self):
-        for name in ("source_timestamp_ms", "event_timestamp_ms"):
+        if not isinstance(self.symbol, str) or not self.symbol:
+            raise ValueError("source time evidence requires a symbol")
+        for name in ("trade_time_ms", "event_time_ms", "received_at_ms"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a nonnegative integer or None")
+
+
+@dataclass(frozen=True)
+class MarketWindowClassificationContext:
+    source_time_evidence: tuple[SymbolSourceTimeEvidence, ...] = ()
+    prior_confirmed_episode_direction: str | None = None
+
+    def __post_init__(self):
+        evidence = tuple(self.source_time_evidence)
+        if any(not isinstance(item, SymbolSourceTimeEvidence) for item in evidence):
+            raise ValueError("source time evidence must contain SymbolSourceTimeEvidence values")
+        if len({item.symbol for item in evidence}) != len(evidence):
+            raise ValueError("source time evidence symbols must be unique")
+        object.__setattr__(self, "source_time_evidence", evidence)
         if (self.prior_confirmed_episode_direction is not None
                 and self.prior_confirmed_episode_direction not in _BROAD_DIRECTIONS):
             raise ValueError("prior episode direction must be BROAD_RISE, BROAD_DROP, or None")
@@ -112,7 +134,7 @@ class MarketWindowClassification:
     horizon_role: str
     is_primary: bool
     direction_state: str
-    pace: str
+    pace: Metric[str]
     prior_confirmed_episode_direction: str | None
     reversal_candidate: ReversalCandidate | None
     isolated_outliers: tuple[IsolatedOutlier, ...]
@@ -144,8 +166,7 @@ class MarketWindowClassification:
     exchange: str
     price_type: str
     evaluation_boundary_time_ms: int
-    source_timestamp_ms: int | None
-    event_timestamp_ms: int | None
+    source_time_evidence: tuple[SymbolSourceTimeEvidence, ...]
     movement_snapshot: MarketMovementWindowResult
 
 
@@ -171,24 +192,34 @@ class MarketClassificationEvaluation:
 def _availability_reasons(window):
     reasons = tuple(dict.fromkeys(reason for excluded in window.excluded_symbols
                                   for reason in excluded.reasons))
+    if window.market_wide_eligible and not _v1_eligible(window):
+        return (*reasons, "CLASSIFIER_V1_UNIVERSE_INELIGIBLE")
     if not reasons and not window.market_wide_eligible:
         return (window.breadth.reason or "MARKET_UNIVERSE_INELIGIBLE",)
     return reasons
 
 
 def _ineligible_state(window):
-    # If there are fewer than five configured symbols, warm-up alone cannot
+    # Below the V1 minimum universe size, warm-up alone cannot
     # satisfy the issue's minimum universe size.
-    if (len(window.configured_universe) >= 5 and window.excluded_symbols
+    if (len(window.configured_universe) >= V1_MINIMUM_ELIGIBLE_COUNT and window.excluded_symbols
             and all(excluded.reasons and set(excluded.reasons) <= _WARMING_REASONS
                     for excluded in window.excluded_symbols)):
         return "WARMING"
     return "UNAVAILABLE"
 
 
+def _v1_eligible(window):
+    return (window.market_wide_eligible
+            and window.eligible_count >= V1_MINIMUM_ELIGIBLE_COUNT
+            and window.eligible_fraction >= V1_MINIMUM_ELIGIBLE_FRACTION)
+
+
 def _direction(window, config):
     if not window.market_wide_eligible:
         return _ineligible_state(window)
+    if not _v1_eligible(window):
+        return "UNAVAILABLE"
     breadth = window.breadth
     aggregates = window.aggregates
     needed = (breadth.rising, breadth.falling, breadth.material_rising,
@@ -226,23 +257,23 @@ def _acceleration_evidence(window):
 
 def _pace(direction, median_acceleration, positive, negative, config):
     if direction not in _BROAD_DIRECTIONS:
-        return "NOT_APPLICABLE"
+        return Metric.missing("NO_BROAD_DIRECTION")
     if not all(metric.available for metric in (median_acceleration, positive, negative)):
-        return "UNAVAILABLE"
+        return Metric.missing("ACCELERATION_UNAVAILABLE")
     accelerating = positive if direction == "BROAD_RISE" else negative
     decelerating = negative if direction == "BROAD_RISE" else positive
     sign = 1 if direction == "BROAD_RISE" else -1
     if (accelerating.value.fraction >= config.acceleration_breadth
             and sign * median_acceleration.value > 0):
-        return "ACCELERATING"
+        return Metric.present("ACCELERATING")
     if (decelerating.value.fraction >= config.acceleration_breadth
             and sign * median_acceleration.value < 0):
-        return "DECELERATING"
-    return "MIXED"
+        return Metric.present("DECELERATING")
+    return Metric.present("MIXED")
 
 
 def _isolated_outliers(window, config):
-    if not window.breadth.available:
+    if not _v1_eligible(window) or not window.breadth.available:
         return ()
     found = []
     for item in window.symbols:
@@ -258,6 +289,9 @@ def _isolated_outliers(window, config):
             continue
         if not all(metric.available for metric in
                    (item.current_return, item.normalized_z, item.cross_sectional_z)):
+            continue
+        if (abs(item.cross_sectional_z.value) < V1_OUTLIER_CROSS_Z
+                or abs(item.normalized_z.value) < V1_OUTLIER_HISTORICAL_Z):
             continue
         found.append(IsolatedOutlier(
             item.symbol, item.direction.value, item.current_return.value,
@@ -338,8 +372,7 @@ def classify_market_movement(
             universe_id=snapshot.universe_id, universe_version=snapshot.universe_version,
             provider=snapshot.provider, exchange=snapshot.exchange, price_type=snapshot.price_type,
             evaluation_boundary_time_ms=snapshot.evaluation_boundary_time_ms,
-            source_timestamp_ms=supplied.source_timestamp_ms,
-            event_timestamp_ms=supplied.event_timestamp_ms,
+            source_time_evidence=supplied.source_time_evidence,
             movement_snapshot=snapshot,
         )
     return MarketClassificationEvaluation(

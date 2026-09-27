@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from market_analysis.movement_classifier import (
     MarketClassificationContext, MarketWindowClassificationContext,
-    classify_market_movement,
+    SymbolSourceTimeEvidence, classify_market_movement,
 )
 from market_analysis.movement_metrics import (
     BreadthSide, ExcludedSymbol, MarketMovementEvaluation,
@@ -136,9 +136,9 @@ def evaluation(primary):
     )
 
 
-def classify(primary, *, prior=None, source=None, event=None):
+def classify(primary, *, prior=None, provenance=()):
     context = MarketClassificationContext({
-        minutes: MarketWindowClassificationContext(source, event, prior)
+        minutes: MarketWindowClassificationContext(provenance, prior)
         for minutes in (1, 5, 15)
     })
     return classify_market_movement(evaluation(primary), context)
@@ -187,7 +187,9 @@ class PaceTests(unittest.TestCase):
         for values, expected in cases:
             with self.subTest(expected=expected):
                 result = classify(window_result(accelerations=values)).windows[5]
-                self.assertEqual(result.pace, expected)
+                self.assertTrue(result.pace.available)
+                self.assertEqual(result.pace.value, expected)
+                self.assertIsNone(result.pace.reason)
                 self.assertEqual(result.positive_acceleration_breadth.value.count,
                                  sum(value > 0 for value in values))
                 self.assertEqual(result.negative_acceleration_breadth.value.count,
@@ -205,12 +207,28 @@ class PaceTests(unittest.TestCase):
         )
         for values, expected in cases:
             with self.subTest(expected=expected):
-                self.assertEqual(classify(window_result(**drop, accelerations=values))
-                                 .windows[5].pace, expected)
+                pace = classify(window_result(**drop, accelerations=values)).windows[5].pace
+                self.assertTrue(pace.available)
+                self.assertEqual(pace.value, expected)
+                self.assertIsNone(pace.reason)
 
-    def test_non_broad_pace_is_not_applicable(self):
-        self.assertEqual(classify(window_result(material_count=4)).windows[5].pace,
-                         "NOT_APPLICABLE")
+    def test_non_broad_pace_has_no_broad_direction(self):
+        pace = classify(window_result(material_count=4)).windows[5].pace
+        self.assertFalse(pace.available)
+        self.assertIsNone(pace.value)
+        self.assertEqual(pace.reason, "NO_BROAD_DIRECTION")
+
+    def test_broad_direction_with_missing_acceleration_has_unavailable_pace(self):
+        primary = window_result()
+        primary = replace(primary, symbols=(
+            replace(primary.symbols[0], acceleration=Metric.missing("ACCELERATION_UNAVAILABLE")),
+            *primary.symbols[1:],
+        ))
+        result = classify(primary).windows[5]
+        self.assertEqual(result.direction_state, "BROAD_RISE")
+        self.assertFalse(result.pace.available)
+        self.assertIsNone(result.pace.value)
+        self.assertEqual(result.pace.reason, "ACCELERATION_UNAVAILABLE")
 
 
 class OutlierAndReversalTests(unittest.TestCase):
@@ -237,6 +255,22 @@ class OutlierAndReversalTests(unittest.TestCase):
                     outlier_index=0,
                 )).windows[5]
                 self.assertEqual(result.isolated_outliers, ())
+
+    def test_relaxed_upstream_outlier_candidate_cannot_bypass_v1_z_thresholds(self):
+        primary = window_result(
+            directions=("RISING",) * 4 + ("FALLING",) * 6,
+            outlier_index=0,
+        )
+        for historical_z, cross_z, expected_count in (
+            (1.49, 3.5, 0), (1.5, 3.49, 0), (1.5, 3.5, 1),
+        ):
+            with self.subTest(historical_z=historical_z, cross_z=cross_z):
+                candidate = replace(primary.symbols[0],
+                                    normalized_z=Metric.present(historical_z),
+                                    cross_sectional_z=Metric.present(cross_z))
+                snapshot = replace(primary, symbols=(candidate, *primary.symbols[1:]))
+                self.assertEqual(len(classify(snapshot).windows[5].isolated_outliers),
+                                 expected_count)
 
     def test_only_opposite_confirmed_broad_episode_is_a_reversal_candidate(self):
         primary = window_result()
@@ -265,7 +299,8 @@ class AvailabilityAndOutputTests(unittest.TestCase):
         )
         result = classify(primary).windows[5]
         self.assertEqual(result.direction_state, "WARMING")
-        self.assertEqual(result.pace, "NOT_APPLICABLE")
+        self.assertFalse(result.pace.available)
+        self.assertEqual(result.pace.reason, "NO_BROAD_DIRECTION")
         self.assertEqual(result.availability_reasons, ("WARMING_INSUFFICIENT_LIVE_HISTORY",))
 
     def test_unavailable_and_mixed_warming_unavailable_preempt(self):
@@ -277,18 +312,39 @@ class AvailabilityAndOutputTests(unittest.TestCase):
                                         eligible=False, exclusion_reasons=reasons)
                 result = classify(primary).windows[5]
                 self.assertEqual(result.direction_state, "UNAVAILABLE")
-                self.assertEqual(result.pace, "NOT_APPLICABLE")
+                self.assertFalse(result.pace.available)
+                self.assertEqual(result.pace.reason, "NO_BROAD_DIRECTION")
                 self.assertEqual(result.excluded_symbols[0].reasons, reasons)
         small = window_result(directions=(), eligible=False, configured_count=4,
                               exclusion_reasons=("WARMING_INSUFFICIENT_LIVE_HISTORY",))
         self.assertEqual(classify(small).windows[5].direction_state, "UNAVAILABLE")
 
+    def test_relaxed_upstream_eligibility_cannot_bypass_v1_minimums(self):
+        cases = (("RISING",) * 4, ("RISING",) * 5)
+        for directions in cases:
+            with self.subTest(eligible_count=len(directions)):
+                primary = window_result(
+                    directions=directions, material_count=len(directions),
+                    eligible=True, outlier_index=0,
+                )
+                result = classify(primary).windows[5]
+                self.assertEqual(result.direction_state, "UNAVAILABLE")
+                self.assertFalse(result.pace.available)
+                self.assertEqual(result.pace.reason, "NO_BROAD_DIRECTION")
+                self.assertEqual(result.isolated_outliers, ())
+                self.assertIn("CLASSIFIER_V1_UNIVERSE_INELIGIBLE",
+                              result.availability_reasons)
+
     def test_horizons_metadata_provenance_snapshot_and_determinism(self):
         primary = window_result()
+        provenance = (
+            SymbolSourceTimeEvidence("S0", 1_799_000, 1_798_000, 1_799_500),
+            SymbolSourceTimeEvidence("S1", 1_797_000, None, 1_799_100),
+        )
         context = MarketClassificationContext({
-            1: MarketWindowClassificationContext(None, None, None),
-            5: MarketWindowClassificationContext(1_799_000, 1_798_000, "BROAD_DROP"),
-            15: MarketWindowClassificationContext(None, None, None),
+            1: MarketWindowClassificationContext(),
+            5: MarketWindowClassificationContext(provenance, "BROAD_DROP"),
+            15: MarketWindowClassificationContext(),
         })
         input_evaluation = evaluation(primary)
         first = classify_market_movement(input_evaluation, context)
@@ -314,14 +370,25 @@ class AvailabilityAndOutputTests(unittest.TestCase):
             self.assertEqual(result.volume_context[0].current_notional_volume.value,
                              Decimal("100"))
             self.assertEqual(result.volume_context[0].rvol.value, 1.25)
-        self.assertEqual((first.windows[5].source_timestamp_ms,
-                          first.windows[5].event_timestamp_ms), (1_799_000, 1_798_000))
-        self.assertIsNone(first.windows[1].source_timestamp_ms)
-        self.assertIsNone(first.windows[1].event_timestamp_ms)
+        self.assertEqual(first.windows[5].source_time_evidence, provenance)
+        self.assertEqual(first.windows[1].source_time_evidence, ())
+        self.assertEqual(first.windows[15].source_time_evidence, ())
+        self.assertEqual(first.windows[5].source_time_evidence[1].event_time_ms, None)
+        with self.assertRaises(FrozenInstanceError):
+            provenance[0].trade_time_ms = 0
         with self.assertRaises(FrozenInstanceError):
             first.windows[5].direction_state = "NEUTRAL"
         with self.assertRaises(TypeError):
             first.windows[5] = first.windows[1]
+
+    def test_source_time_evidence_validates_types_and_unique_symbols(self):
+        with self.assertRaises(ValueError):
+            SymbolSourceTimeEvidence("S0", True, None, None)
+        with self.assertRaises(ValueError):
+            SymbolSourceTimeEvidence("S0", None, -1, None)
+        record = SymbolSourceTimeEvidence("S0", None, None, None)
+        with self.assertRaises(ValueError):
+            MarketWindowClassificationContext((record, record))
 
     def test_excluded_reasons_are_preserved_without_reconstruction(self):
         primary = window_result(directions=("RISING",) * 6, material_count=5,
