@@ -11,8 +11,8 @@ import type {
   MarketHorizonRole,
   MarketPace,
   MarketStateEvidence,
-  MarketStateWindowClassification,
-} from "./market-state-classifier";
+} from "./market-episode-classification";
+import type { MarketClassificationWindow } from "./market-state-contract";
 import type { MarketEpisodeTransitionType } from "./market-episode-lifecycle";
 
 /** Stable identity for the shared, market-wide Binance USDⓈ-M universe. */
@@ -82,7 +82,7 @@ export type PersistedMovementTimestamps = {
  * exact universe/timestamps/engine status #74 requires consumers to inspect.
  */
 export type PersistedMarketMovementCurrentEvidence = MarketStateEvidence & {
-  windowsContext: MarketStateWindowClassification[];
+  windowsContext: MarketClassificationWindow[];
   universe: PersistedMovementUniverse;
   engine: {
     status: MovementEngineStatus;
@@ -111,7 +111,7 @@ export type MarketMovementCurrentState = {
     evidence: MarketStateEvidence;
   } | null;
   /** 1m, 5m and 15m structured classifications, primary included. */
-  context: MarketStateWindowClassification[];
+  context: MarketClassificationWindow[];
   timestamps: PersistedMovementTimestamps | null;
   /** Effective finalization grace/config the persisted evidence was produced under. */
   finalizationConfigVersion: string | null;
@@ -216,7 +216,7 @@ export function toMovementEngineDiagnostics(
       ...(options.staleAfterMs === undefined ? {} : { staleAfterMs: options.staleAfterMs }),
     }),
     configuredSymbolCount: configuredCount(evidence),
-    eligibleSymbolCount: primary?.evidence.eligibleCount ?? evidence.eligibleCount,
+    eligibleSymbolCount: primary?.eligibleCount ?? evidence.eligibleCount,
     primaryDirectionState: current.directionState,
     primaryPace: current.pace,
     lastEvaluationBoundaryTime: current.evaluationBoundaryTime,
@@ -269,10 +269,10 @@ export function toMarketMovementCurrentState(
       ? {
           windowMinutes: 5,
           directionState: primary.directionState,
-          pace: primary.pace,
-          reversalCandidate: primary.reversalCandidate,
+          pace: primary.pace.available ? primary.pace.value : "NOT_APPLICABLE",
+          reversalCandidate: primary.reversalCandidate !== null,
           horizonRole: primary.horizonRole,
-          evidence: primary.evidence,
+          evidence,
         }
       : null,
     context: windowsContext,

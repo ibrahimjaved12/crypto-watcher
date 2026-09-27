@@ -35,10 +35,7 @@ import {
 } from "./movement-finalization";
 import { DEFAULT_MARKET_MOVEMENT_CONFIG, type MarketMovementConfig,
   type MarketMovementEvaluation } from "./movement-metrics-contract";
-import {
-  DEFAULT_MARKET_STATE_CLASSIFIER_CONFIG,
-  type MarketStateClassifierConfig,
-} from "./market-state-classifier";
+import type { ConfirmedMarketDirection, MarketClassification } from "./market-state-contract";
 import {
   deriveMovementEngineStatus,
   MARKET_UNIVERSE_ID,
@@ -80,11 +77,14 @@ export type MovementEngineRuntimeDependencies = {
     compatibility: MovementInstrumentCompatibility,
     asOfBoundaryTime: number) => Promise<void>;
   instrumentCompatibility: (symbol: string) => Promise<boolean | null>;
-  calculateMovement: (sessionId: string, boundaryTime: number, historyVersion: string,
-    universe: MarketUniverse, configVersion: string) => Promise<MarketMovementEvaluation>;
+  calculateAssessment: (sessionId: string, boundaryTime: number, historyVersion: string,
+    universe: MarketUniverse, configVersion: string,
+    previousConfirmedPrimaryDirection: ConfirmedMarketDirection | null) => Promise<{
+      movement: MarketMovementEvaluation;
+      classification: MarketClassification;
+    }>;
   finalization?: MovementFinalizationConfig;
   movementConfig?: MarketMovementConfig;
-  classifierConfig?: MarketStateClassifierConfig;
   lifecycleConfig?: MarketEpisodeLifecycleConfig;
   now?: () => number;
 };
@@ -108,7 +108,6 @@ export class MovementEngineRuntime {
   private engine = new MarketMovementEngine();
   private readonly now: () => number;
   private readonly movementConfig: MarketMovementConfig;
-  private readonly classifierConfig: MarketStateClassifierConfig;
   private readonly lifecycleConfig: MarketEpisodeLifecycleConfig;
   private readonly finalization: MovementFinalizationConfig;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -142,7 +141,6 @@ export class MovementEngineRuntime {
   constructor(private readonly deps: MovementEngineRuntimeDependencies) {
     this.now = deps.now ?? Date.now;
     this.movementConfig = deps.movementConfig ?? DEFAULT_MARKET_MOVEMENT_CONFIG;
-    this.classifierConfig = deps.classifierConfig ?? DEFAULT_MARKET_STATE_CLASSIFIER_CONFIG;
     this.lifecycleConfig = deps.lifecycleConfig ?? DEFAULT_MARKET_EPISODE_LIFECYCLE_CONFIG;
     this.finalization = deps.finalization ?? DEFAULT_MOVEMENT_FINALIZATION_CONFIG;
   }
@@ -263,19 +261,18 @@ export class MovementEngineRuntime {
       results = await this.engine.advance({
         finalizableBoundary: finalizable,
         universe,
-        movementForBoundary: async (boundary) => {
-          const movement = await this.deps.calculateMovement(
+        assessmentForBoundary: async (boundary, previousConfirmedPrimaryDirection) => {
+          const assessment = await this.deps.calculateAssessment(
             movementSessionId, boundary, this.historicalVersion!, universe,
-            this.movementConfig.version,
+            this.movementConfig.version, previousConfirmedPrimaryDirection,
           );
           if (!stillCurrent()) throw new Error("stale movement session or universe response");
-          return movement;
+          return assessment;
         },
-        classifierConfig: this.classifierConfig,
         lifecycleConfig: this.lifecycleConfig,
       });
     } catch (error) {
-      console.error(`[movement-engine] canonical #71 unavailable: ${message(error)}`);
+      console.error(`[movement-engine] canonical #71/#72 assessment unavailable: ${message(error)}`);
       return;
     }
     if (!stillCurrent()) return;

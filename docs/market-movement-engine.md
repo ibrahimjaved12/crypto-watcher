@@ -18,7 +18,9 @@ depends on a browser timer or a per-user engine.
 Accepted, validated `aggTrade` observations remain in a bounded collector transport buffer and are
 sent with each explicit finalization boundary to the authenticated Python movement endpoint. The
 Python service invokes the shared pure `market_analysis.movement` engine and retains its buckets
-for canonical Python #71 evaluation. TypeScript transports the resulting metrics to #72 and #73.
+for canonical Python #71 evaluation and Python #72 classification. TypeScript transports both
+results to the existing #73 lifecycle, which remains a temporary TypeScript consumer pending
+its own correction ticket.
 TypeScript owns WebSocket ingestion, boundary scheduling, transport, and persistence. No additional
 WebSocket, raw tick persistence, or per-five-second append-only stream
 is created. #26 completed-candle bootstrap/recovery is unchanged.

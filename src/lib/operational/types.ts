@@ -3,7 +3,7 @@ import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
   MarketPace,
-} from "../market/market-state-classifier";
+} from "../market/market-episode-classification";
 import type {
   MarketEpisodeTransitionType,
   SerializedMarketEpisodeLifecycleState,

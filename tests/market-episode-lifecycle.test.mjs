@@ -4,18 +4,6 @@ import { after, before, test } from "node:test";
 import ts from "../node_modules/typescript/lib/typescript.js";
 import { PGlite } from "./node_modules/@electric-sql/pglite/dist/index.js";
 
-// Transpile and load market-state-classifier
-const classifierSource = await readFile(
-  new URL("../src/lib/market/market-state-classifier.ts", import.meta.url),
-  "utf8",
-);
-const classifierOutput = ts.transpileModule(classifierSource, {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const { classifyMarketState } = await import(
-  `data:text/javascript;base64,${Buffer.from(classifierOutput).toString("base64")}`
-);
-
 // Transpile and load market-episode-lifecycle
 const lifecycleSource = await readFile(
   new URL("../src/lib/market/market-episode-lifecycle.ts", import.meta.url),
@@ -108,6 +96,8 @@ function windowFixture({
   boundaryTime = BASE_TIME,
   universeId = "top-usdm",
   universeVersion = "2026-09-25",
+  classificationDirection = "NEUTRAL",
+  classificationPace = "NOT_APPLICABLE",
 } = {}) {
   const configuredUniverse = Array.from({ length: configuredCount }, (_, index) => `S${index}USDT`);
   const included =
@@ -125,6 +115,8 @@ function windowFixture({
     configVersion: "market-movement-config-v1",
     universeId,
     universeVersion,
+    classificationDirection,
+    classificationPace,
     configuredUniverse,
     includedSymbols: included.filter((s) => s.included).map((s) => s.symbol),
     excludedSymbols,
@@ -168,6 +160,8 @@ function windowFixture({
 
 function broadRiseWindow(options = {}) {
   return windowFixture({
+    classificationDirection: "BROAD_RISE",
+    classificationPace: "ACCELERATING",
     breadth: {
       flatFraction: 0.1,
       risingFraction: 0.8,
@@ -184,6 +178,8 @@ function broadRiseWindow(options = {}) {
 
 function broadDropWindow(options = {}) {
   return windowFixture({
+    classificationDirection: "BROAD_DROP",
+    classificationPace: "ACCELERATING",
     breadth: {
       flatFraction: 0.1,
       risingFraction: 0.1,
@@ -242,7 +238,51 @@ function makePair({
       windowFixture({ windowMinutes: 15, boundaryTime, universeId, universeVersion }),
     ],
   };
-  const classification = classifyMarketState({ movement });
+  // #73 fixtures carry explicit canonical #72 labels. No classifier runs in TS.
+  const classification = {
+    algorithmVersion: "market-state-classifier-v1",
+    configVersion: "market-state-classifier-config-v1",
+    movementAlgorithmVersion: movement.algorithmVersion,
+    movementConfigVersion: movement.configVersion,
+    universeId, universeVersion,
+    evaluationBoundaryTime: boundaryTime,
+    provider: movement.provider, exchange: movement.exchange, priceType: movement.priceType,
+    primaryWindowMinutes: 5,
+    canonicalWindows: movement.windows,
+    windows: movement.windows.map((snapshot) => ({
+      windowMinutes: snapshot.windowMinutes,
+      horizonRole: snapshot.windowMinutes === 1 ? "RAPID" :
+        snapshot.windowMinutes === 5 ? "PRIMARY" : "PERSISTENCE",
+      directionState: snapshot.classificationDirection,
+      pace: snapshot.classificationPace,
+      reversalCandidate: false,
+      algorithmVersion: "market-state-classifier-v1",
+      configVersion: "market-state-classifier-config-v1",
+      movementAlgorithmVersion: movement.algorithmVersion,
+      movementConfigVersion: movement.configVersion,
+      universeId, universeVersion,
+      evaluationBoundaryTime: boundaryTime,
+      provider: movement.provider, exchange: movement.exchange, priceType: movement.priceType,
+      evidence: {
+        eligibleCount: snapshot.eligibleCount,
+        eligibleFraction: snapshot.eligibleFraction,
+        includedSymbols: snapshot.includedSymbols,
+        excludedSymbols: snapshot.excludedSymbols,
+        flatFraction: snapshot.breadth.flatFraction,
+        risingFraction: snapshot.breadth.risingFraction,
+        fallingFraction: snapshot.breadth.fallingFraction,
+        materialRisingFraction: snapshot.breadth.materialRisingFraction,
+        materialFallingFraction: snapshot.breadth.materialFallingFraction,
+        medianRawReturn: snapshot.aggregates.medianRawReturn,
+        medianNormalizedMovement: snapshot.aggregates.medianNormalizedMovement,
+        medianAcceleration: available(1),
+        positiveAccelerationFraction: snapshot.classificationPace === "DECELERATING" ? 0 : 1,
+        negativeAccelerationFraction: snapshot.classificationPace === "DECELERATING" ? 1 : 0,
+        dispersion: snapshot.aggregates.dispersionMadNormalizedMovement,
+        rvolSummary: [], isolatedOutliers: [],
+      },
+    })),
+  };
   return { movement, classification };
 }
 
@@ -801,6 +841,7 @@ test("an active episode becomes interrupted after a gap and requires fresh resum
 test("10. strengthened via pace crossing after 2 confirmations", () => {
   // Start BROAD_RISE with MIXED pace (5 symbols positive, 5 negative)
   const mixedRise = broadRiseWindow({
+    classificationPace: "MIXED",
     accelerations: [-1, -1, -1, -1, -1, 1, 1, 1, 1, 1],
   });
   const eval1 = makePair({ primaryWindow: mixedRise, boundaryTime: BASE_TIME });
@@ -906,7 +947,9 @@ test("12. weakened via pace crossing after 2 confirmations", () => {
   assert.equal(step2.nextState.activeEpisode?.confirmedPace, "ACCELERATING");
 
   // Tick 1 with DECELERATING pace
-  const decelRise = broadRiseWindow({ accelerations: Array(10).fill(-1) });
+  const decelRise = broadRiseWindow({
+    classificationPace: "DECELERATING", accelerations: Array(10).fill(-1),
+  });
   const eval3 = makePair({ primaryWindow: decelRise, boundaryTime: BASE_TIME + 10_000 });
   const step3 = processMarketEpisodeLifecycle({
     classification: eval3.classification,
@@ -1485,6 +1528,7 @@ test("18. WARMING/UNAVAILABLE interrupts rather than pretending continuity", () 
 
   // WARMING evaluation arrives
   const warmingWindow = windowFixture({
+    classificationDirection: "WARMING",
     marketWideEligible: false,
     excludedSymbols: Array.from({ length: 10 }, (_, i) => ({
       symbol: `S${i}USDT`,
@@ -1505,6 +1549,7 @@ test("18. WARMING/UNAVAILABLE interrupts rather than pretending continuity", () 
 
   // UNAVAILABLE arrives next
   const unavailWindow = windowFixture({
+    classificationDirection: "UNAVAILABLE",
     marketWideEligible: false,
     excludedSymbols: [{ symbol: "S0USDT", reasons: ["SOURCE_UNAVAILABLE"] }],
   });

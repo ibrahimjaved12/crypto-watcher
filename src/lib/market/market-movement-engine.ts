@@ -6,8 +6,8 @@
  *
  *   #70 buckets -> #71 metrics -> #72 classification -> #73 lifecycle
  *
- * The runtime supplies the canonical Python #71 result for each boundary.
- * This engine owns only sequencing and the temporary #72/#73 state.
+ * The runtime supplies canonical Python #71/#72 for each boundary.
+ * This engine owns only sequencing and the temporary #73 lifecycle state.
  */
 import {
   MOVEMENT_BUCKET_MS,
@@ -18,13 +18,9 @@ import {
   MARKET_MOVEMENT_ALGORITHM_VERSION,
   type MarketMovementEvaluation,
 } from "./movement-metrics-contract";
-import {
-  classifyMarketState,
-  DEFAULT_MARKET_STATE_CLASSIFIER_CONFIG,
-  type MarketStateClassification,
-  type MarketStateClassifierConfig,
-  type MarketStateEvidence,
-} from "./market-state-classifier";
+import { projectClassificationForLifecycle,
+  type MarketStateEvidence } from "./market-episode-classification";
+import type { ConfirmedMarketDirection, MarketClassification } from "./market-state-contract";
 import {
   markMarketEpisodeStatePersisted,
   processMarketEpisodeLifecycle,
@@ -45,21 +41,24 @@ export const MOVEMENT_ENGINE_MAX_CATCHUP_BOUNDARIES = 60;
 export type MovementBoundaryEvaluation = {
   boundaryTime: number;
   movement: MarketMovementEvaluation;
-  classification: MarketStateClassification;
+  classification: MarketClassification;
   lifecycle: ProcessMarketEpisodeLifecycleResult;
 };
 
 export type MovementEngineAdvanceInput = {
   finalizableBoundary: number;
   universe: MarketUniverse;
-  movementForBoundary: (boundaryTime: number) => Promise<MarketMovementEvaluation>;
-  classifierConfig?: MarketStateClassifierConfig;
+  assessmentForBoundary: (boundaryTime: number,
+    previousConfirmedPrimaryDirection: ConfirmedMarketDirection | null) => Promise<{
+      movement: MarketMovementEvaluation;
+      classification: MarketClassification;
+    }>;
   lifecycleConfig?: MarketEpisodeLifecycleConfig;
 };
 
 export type MovementCurrentEvidenceInput = {
   evidence: MarketStateEvidence;
-  classification: MarketStateClassification;
+  classification: MarketClassification;
   universe: MarketUniverse;
   status: PersistedMarketMovementCurrentEvidence["engine"]["status"];
   lateAfterFinalizationCount: number;
@@ -110,8 +109,8 @@ export function buildMovementCurrentEvidence(
       id: input.universe.id,
       version: input.universe.version,
       configuredSymbols: [...input.universe.symbols],
-      includedSymbols: [...primary.evidence.includedSymbols],
-      excludedSymbols: primary.evidence.excludedSymbols.map(({ symbol, reasons }) => ({
+      includedSymbols: [...primary.includedSymbols],
+      excludedSymbols: primary.excludedSymbols.map(({ symbol, reasons }) => ({
         symbol,
         reasons: [...reasons],
       })),
@@ -222,7 +221,9 @@ export class MarketMovementEngine {
     input: MovementEngineAdvanceInput,
     previousState: MarketEpisodeLifecycleState | null,
   ): Promise<MovementBoundaryEvaluation> {
-    const movement = await input.movementForBoundary(boundaryTime);
+    const { movement, classification } = await input.assessmentForBoundary(
+      boundaryTime, previousState?.activeEpisode?.direction ?? null,
+    );
     if (
       movement.evaluationBoundaryTime !== boundaryTime ||
       movement.algorithmVersion !== MARKET_MOVEMENT_ALGORITHM_VERSION ||
@@ -249,12 +250,29 @@ export class MarketMovementEngine {
     ) {
       throw new Error("canonical movement response has mismatched boundary or provenance");
     }
-    const classification = classifyMarketState({
-      movement,
-      config: input.classifierConfig ?? DEFAULT_MARKET_STATE_CLASSIFIER_CONFIG,
-    });
+    if (classification.evaluationBoundaryTime !== boundaryTime ||
+        classification.universeId !== movement.universeId ||
+        classification.universeVersion !== movement.universeVersion ||
+        classification.movementAlgorithmVersion !== movement.algorithmVersion ||
+        classification.movementConfigVersion !== movement.configVersion ||
+        classification.provider !== movement.provider ||
+        classification.exchange !== movement.exchange ||
+        classification.priceType !== movement.priceType ||
+        classification.primaryWindowMinutes !== 5 ||
+        classification.windows.length !== MOVEMENT_WINDOWS_MINUTES.length ||
+        MOVEMENT_WINDOWS_MINUTES.some((minute) =>
+          classification.windows.filter((window) =>
+            window.windowMinutes === minute &&
+            window.evaluationBoundaryTime === boundaryTime &&
+            window.universeId === movement.universeId &&
+            window.universeVersion === movement.universeVersion &&
+            window.configuredUniverse.length === input.universe.symbols.length &&
+            window.configuredUniverse.every((symbol, index) => symbol === input.universe.symbols[index]),
+          ).length !== 1)) {
+      throw new Error("canonical classification response has mismatched boundary or provenance");
+    }
     const lifecycle = processMarketEpisodeLifecycle({
-      classification,
+      classification: projectClassificationForLifecycle(classification),
       movement,
       previousState,
       ...(input.lifecycleConfig ? { config: input.lifecycleConfig } : {}),

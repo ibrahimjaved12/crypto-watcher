@@ -8,7 +8,11 @@ from hashlib import sha256
 import json
 
 from .api_models import (MovementBoundaryRequest, MovementHistoryRegistrationRequest,
-                         MovementMetricsRequest)
+                         MovementMetricsRequest, MovementClassificationRequest)
+from .movement_classifier import (
+    MarketClassificationContext, MarketWindowClassificationContext,
+    SymbolSourceTimeEvidence, classify_market_movement,
+)
 from .movement import (
     BINANCE_USDM,
     BUCKET_INTERVAL_MS,
@@ -189,6 +193,37 @@ class MovementBoundaryService:
                 "as_of_boundary_time_ms": request.as_of_boundary_time_ms}
 
     def calculate_metrics(self, request: MovementMetricsRequest):
+        session_id, history_version, result, _ = self._evaluate_movement(request)
+        return {"schema_version": 1, "session_id": session_id,
+                "history_version": history_version,
+                "evaluation": self._transport(result)}
+
+    def calculate_assessment(self, request: MovementClassificationRequest):
+        session_id, history_version, result, endpoints = self._evaluate_movement(request)
+        provenance = tuple(SymbolSourceTimeEvidence(
+            symbol=symbol,
+            last_real_trade_time_ms=(endpoints[symbol].last_real_trade_time_ms
+                                     if endpoints[symbol] else None),
+            last_real_event_time_ms=(endpoints[symbol].last_real_event_time_ms
+                                     if endpoints[symbol] else None),
+            last_received_at_ms=(endpoints[symbol].last_received_at_ms
+                                 if endpoints[symbol] else None),
+        ) for symbol in result.configured_universe)
+        context = MarketClassificationContext({
+            window: MarketWindowClassificationContext(
+                source_time_evidence=provenance,
+                prior_confirmed_episode_direction=(
+                    request.previous_confirmed_primary_direction if window == 5 else None
+                ),
+            ) for window in (1, 5, 15)
+        })
+        classification = classify_market_movement(result, context)
+        return {"schema_version": 1, "session_id": session_id,
+                "history_version": history_version,
+                "evaluation": self._transport(result),
+                "classification": self._transport(classification)}
+
+    def _evaluate_movement(self, request: MovementMetricsRequest):
         session_id = str(request.session_id)
         session = self.sessions.get(session_id)
         if session is None or session["history"] is None:
@@ -204,13 +239,16 @@ class MovementBoundaryService:
             raise ValueError("movement boundary predates registered history cutoff")
         engines = session["engines"]
         symbol_inputs = {}
+        endpoints = {}
         found_boundary = False
         for symbol in universe.symbols:
             engine = engines.get(symbol)
             if engine is None:
+                endpoints[symbol] = None
                 continue
             endpoint = next((bucket for bucket in engine.history
                              if bucket.boundary_time_ms == boundary), None)
+            endpoints[symbol] = endpoint
             if endpoint is None:
                 # A newly joined membership may have no engine history for an
                 # older catch-up boundary. #71 represents that symbol as missing.
@@ -232,9 +270,7 @@ class MovementBoundaryService:
             boundary, universe, symbol_inputs, registration["config"]
         ))
         self.sessions.move_to_end(session_id)
-        return {"schema_version": 1, "session_id": session_id,
-                "history_version": registration["version"],
-                "evaluation": self._transport(result)}
+        return session_id, registration["version"], result, endpoints
 
     @staticmethod
     def _transport(value):

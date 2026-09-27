@@ -20,7 +20,7 @@ import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
   MarketPace,
-} from "../market/market-state-classifier";
+} from "../market/market-episode-classification";
 import type { MarketEpisodeTransitionType } from "../market/market-episode-lifecycle";
 
 type RpcClient = Pick<SupabaseClient, "from" | "rpc">;

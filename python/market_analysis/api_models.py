@@ -284,3 +284,7 @@ class MovementMetricsRequest(InputModel):
         if self.evaluation_boundary_time_ms % 5_000:
             raise ValueError("movement metrics boundary must align to five seconds")
         return self
+
+
+class MovementClassificationRequest(MovementMetricsRequest):
+    previous_confirmed_primary_direction: Literal["BROAD_RISE", "BROAD_DROP"] | None = None

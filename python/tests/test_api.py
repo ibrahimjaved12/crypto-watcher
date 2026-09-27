@@ -224,6 +224,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.request(app, "POST", "/v1/movement/metrics",
                                       json={**metrics, "snapshots": []},
                                       headers=HEADERS).status_code, 422)
+        classification_request = {**metrics, "previous_confirmed_primary_direction": None}
+        self.assertEqual(self.request(app, "POST", "/v1/movement/classification",
+                                      json=classification_request).status_code, 401)
+        assessment = self.request(app, "POST", "/v1/movement/classification",
+                                  json=classification_request, headers=HEADERS)
+        self.assertEqual(assessment.status_code, 200)
+        self.assertEqual(assessment.json()["evaluation"], response.json()["evaluation"])
+        self.assertEqual(assessment.json()["classification"]["windows"]["5"]
+                         ["source_time_evidence"][0]["symbol"], "BTCUSDT")
 
     def test_batch_provenance_and_completion_boundary(self):
         app = create_app(TOKEN, analyzer_for())
