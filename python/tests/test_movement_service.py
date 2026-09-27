@@ -303,8 +303,9 @@ class MovementMetricsAdapterTests(unittest.TestCase):
     SYMBOLS = ("BTCUSDT", "ETHUSDT", "ADAUSDT", "BNBUSDT", "SOLUSDT")
 
     @classmethod
-    def populated_service(cls):
-        service = MovementBoundaryService()
+    def populated_service(cls, session_capacity=None):
+        service = (MovementBoundaryService() if session_capacity is None else
+                   MovementBoundaryService(session_capacity=session_capacity))
         service.advance(request(BASE, [symbol_input(symbol, [observation(BASE, index + 1)])
                                        for index, symbol in enumerate(cls.SYMBOLS)]))
         engines = service.sessions[SESSION]["engines"]
@@ -374,7 +375,7 @@ class MovementMetricsAdapterTests(unittest.TestCase):
             service.calculate_metrics(self.metrics_request(BASE + 349 * 5_000))
 
     def test_version_retries_identity_and_evicted_session_fail_closed(self):
-        service = self.populated_service()
+        service = self.populated_service(session_capacity=2)
         self.assertEqual(service.register_history(self.history_request()),
                          service.register_history(self.history_request()))
         with self.assertRaises(ValueError):
