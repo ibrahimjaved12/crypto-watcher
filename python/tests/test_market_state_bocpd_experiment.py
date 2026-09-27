@@ -293,6 +293,10 @@ class MarketStateBOCPDExperimentTests(unittest.TestCase):
         self.assertEqual(second.observations_since_reset, 2)
         self.assertEqual(second.hypothesis_count, 3)
         self.assertEqual(second.detector_state, BOCPD_WARMING)
+        self.assertGreaterEqual(second.recent_change_probability, 0.0)
+        self.assertLessEqual(second.recent_change_probability, 1.0)
+        self.assertAlmostEqual(second.recent_change_probability, 1.0,
+                               delta=NUMERICAL_TOL)
 
     def test_map_tie_and_alarm_threshold_use_fixed_deterministic_tolerance(self):
         equal_log_probability = math.log(1 / 3)
@@ -600,6 +604,33 @@ class MarketStateBOCPDExperimentTests(unittest.TestCase):
         self.assertEqual(dev_region.observed_through_boundary_time_ms, 5_000)
         self.assertEqual(_summary(split_points, "development")
                          .bocpd_short_lived_closed_region_count, 0)
+
+    def test_validation_onset_can_match_visible_development_region(self):
+        development_region = _fake_detector_point(55_000, BOCPD_CHANGE)
+        validation_onset = _fake_detector_point(
+            60_000, BOCPD_CHANGE, "validation",
+            transitions=(_started(60_000, "episode-validation"),),
+        )
+        visible = (development_region, validation_onset)
+        validation = _summary(visible, "validation")
+        self.assertEqual(validation.matched_baseline_onset_count, 1)
+        self.assertEqual(validation.unmatched_baseline_onset_count, 0)
+        self.assertEqual(validation.median_signed_bocpd_minus_v1_onset_ms, -5_000.0)
+        self.assertEqual(validation.median_absolute_bocpd_v1_offset_ms, 5_000.0)
+        self.assertEqual(validation.bocpd_detection_region_count, 0)
+        self.assertEqual(validation.unmatched_bocpd_detection_region_count, 0)
+
+        validation_owned_region = (
+            *visible,
+            _fake_detector_point(65_000, BOCPD_NONE, "validation"),
+            _fake_detector_point(70_000, BOCPD_CHANGE, "validation"),
+        )
+        with_new_region = _summary(validation_owned_region, "validation")
+        self.assertEqual(with_new_region.matched_baseline_onset_count, 1)
+        self.assertEqual(with_new_region.median_signed_bocpd_minus_v1_onset_ms,
+                         -5_000.0)
+        self.assertEqual(with_new_region.bocpd_detection_region_count, 1)
+        self.assertEqual(with_new_region.unmatched_bocpd_detection_region_count, 1)
 
     def test_closed_short_region_count_excludes_open_regions(self):
         points = tuple(

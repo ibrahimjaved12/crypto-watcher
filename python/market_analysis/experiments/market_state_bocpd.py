@@ -419,7 +419,13 @@ def _state_matches(state: BOCPDCandidateState | None,
 def _posterior_diagnostics(
     hypotheses: tuple[BOCPDRunLengthHypothesis, ...],
 ) -> tuple[float, float, int, float]:
-    probabilities = tuple(math.exp(item.log_probability) for item in hypotheses)
+    raw_probabilities = tuple(math.exp(item.log_probability) for item in hypotheses)
+    total_probability = sum(raw_probabilities)
+    if not math.isfinite(total_probability) or total_probability <= 0:
+        raise ValueError("BOCPD linear diagnostic probabilities must have finite positive mass")
+    probabilities = tuple(
+        probability / total_probability for probability in raw_probabilities
+    )
     zero_probability = probabilities[0]
     recent_probability = sum(
         probability for item, probability in zip(hypotheses, probabilities)
@@ -643,13 +649,14 @@ def _summary(points: tuple[BOCPDExperimentPoint, ...], partition: str) -> BOCPDC
     selected = selected_points_for_partition(points, partition)
     observed = observed_points_for_partition(points, partition)
     observed_regions = detection_regions(observed)
-    attributable_regions = tuple(
-        region for region in observed_regions
+    attributable_indices = tuple(
+        index for index, region in enumerate(observed_regions)
         if _region_is_attributable(region, selected, partition)
     )
+    attributable_regions = tuple(observed_regions[index] for index in attributable_indices)
     spans = episode_spans(observed, "baseline")
     matched, unmatched_baseline, median_signed, median_absolute, used = _match_v1_onsets(
-        selected, attributable_regions,
+        selected, observed_regions,
     )
     eligible = tuple(
         point.bocpd_observation for point in selected
@@ -684,7 +691,8 @@ def _summary(points: tuple[BOCPDExperimentPoint, ...], partition: str) -> BOCPDC
             spans, selected, partition),
         matched_baseline_onset_count=matched,
         unmatched_baseline_onset_count=unmatched_baseline,
-        unmatched_bocpd_detection_region_count=len(attributable_regions) - len(used),
+        unmatched_bocpd_detection_region_count=sum(
+            index not in used for index in attributable_indices),
         median_signed_bocpd_minus_v1_onset_ms=median_signed,
         median_absolute_bocpd_v1_offset_ms=median_absolute,
         median_recent_change_probability=(
