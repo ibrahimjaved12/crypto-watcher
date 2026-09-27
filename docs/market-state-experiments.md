@@ -2,9 +2,10 @@
 
 This registry preregisters the deferred Issue #75 candidates. Each candidate is
 evaluated independently against the unchanged canonical #28 V1 event stream.
-The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**, and
-**EXP-75-03 Kalman/state-space**; EXP-75-04 through EXP-75-12 remain
-unimplemented.
+The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
+**EXP-75-03 Kalman/state-space**, and **EXP-75-04A offline PELT**.
+EXP-75-04B online Bayesian change-point detection and EXP-75-05 through
+EXP-75-12 remain unimplemented.
 
 ## EXP-75-01 — EWMA aggregate smoothing
 
@@ -83,23 +84,50 @@ unimplemented.
   fixed configuration is an independent research run evaluated across development,
   validation, and untouched test data.
 
-## EXP-75-04 — Change-point detection
+## EXP-75-04A — Offline PELT mean-shift segmentation
+
+- **Status:** `IMPLEMENTED_EXPERIMENT`
+- **Hypothesis:** Offline exact segmentation of the canonical #71 primary 5m
+  median normalized market movement may identify structural mean-shift boundaries
+  that provide useful independent historical context for evaluating V1 lifecycle
+  transitions. Usefulness requires reasonably stable boundaries across
+  preregistered penalties and meaningful temporal proximity to V1 events; these
+  hindsight labels must never be treated as causal detections or live features.
+- **Input/data prerequisite:** The raw canonical #71 5m
+  `median_normalized_movement`, split into contiguous compatible scope blocks;
+  unavailable values and scope changes end a block.
+- **Causal/live suitability:** Offline hindsight segmentation only. Later
+  observations may revise historical boundaries; PELT labels are never live
+  features or causal detection times. V1 is the comparator, not ground truth.
+- **What changes relative to V1:** Nothing in V1. PELT independently segments
+  the scalar aggregate under a piecewise-constant mean SSE cost with a fixed
+  six-point minimum segment length.
+- **What remains unchanged:** Canonical #71 values, #72 classification, and #73
+  lifecycle processing.
+- **Evaluation measurements:** Segment and change-point counts, structural mean
+  deltas, onset proximity within a fixed ±60-second matching window, unmatched
+  historical labels, and V1 episode diagnostics across separate partition views.
+- **Promotion constraint:** No automatic penalty selection or live promotion.
+  PELT labels are model-dependent historical context, not ground truth.
+- **Preregistered penalties:** `beta=1.0` (more sensitive), `beta=2.0`
+  (middle), and `beta=4.0` (more conservative), each with six observations per
+  segment. No winner is selected in code.
+
+## EXP-75-04B — Online Bayesian change-point detection
 
 - **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** Independently detected structural change points may provide
-  useful historical labels for assessing whether V1 transitions occur near real
-  distributional changes.
-- **Input/data prerequisite:** A defined aggregate series and a fixed detector.
-  Online causal methods and offline PELT-style historical segmentation must be
-  evaluated separately.
-- **Causal/live suitability:** Online methods may be causal; offline results are
-  historical labels only and can never become live features.
-- **What changes relative to V1:** Future change-point labels or a separately
-  versioned causal transform.
-- **What remains unchanged:** Canonical V1 calculations and lifecycle rules.
-- **Evaluation measurements:** Transition proximity, onset timing, and stability
-  across untouched periods.
-- **Promotion constraint:** Offline labels cannot justify live promotion.
+- **Hypothesis:** A separately preregistered causal Bayesian online change-point
+  model may provide point-in-time structural-change evidence, but its hazard,
+  predictive distribution, priors, and reset semantics must be fixed before
+  implementation.
+- **Input/data prerequisite:** A fixed online probabilistic model and explicit
+  point-in-time input contract.
+- **Causal/live suitability:** Potentially causal; not implemented here.
+- **What changes relative to V1:** No current change to V1.
+- **What remains unchanged:** Canonical calculations and lifecycle rules.
+- **Evaluation measurements:** To be preregistered in a separate experiment.
+- **Promotion constraint:** Evaluate separately from offline PELT; no automatic
+  promotion.
 
 ## EXP-75-05 — Regression-slope acceleration
 
