@@ -213,6 +213,16 @@ async function acknowledge(socket) {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+async function settleScheduledHistoryBackfill(runtime) {
+  if (runtime.historyBackfillTimer) {
+    clearTimeout(runtime.historyBackfillTimer);
+    runtime.historyBackfillTimer = null;
+    await runtime.runHistoryBackfill();
+    return;
+  }
+  if (runtime.historyBackfill) await runtime.historyBackfill;
+}
+
 async function exerciseStaleRecoveryHandoff(settleOldRecovery) {
   const previousWebSocket = globalThis.WebSocket;
   ValidatingFakeWebSocket.instances.length = 0;
@@ -276,25 +286,26 @@ test("the collector worker reads one shared subscription universe from the opera
   };
   const previousWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = FakeWebSocket;
+  let runtime;
   try {
     const module = await import(
       transpile(await read("../src/lib/market/collector.server.ts"), collectorReplacements)
     );
-    const runtime = new module.CollectorRuntime(boundaryStore(["ETHUSDT", "BTCUSDT"]));
+    runtime = new module.CollectorRuntime(boundaryStore(["ETHUSDT", "BTCUSDT"]));
     await runtime.tryBecomeActive();
     // One assigned set is reconciled as-is: the collector consumes the application's
     // shared operational representation rather than querying Lovable user tables.
     assert.deepEqual(globalThis.__collectorBoundary.reconciled, [["ETHUSDT", "BTCUSDT"]]);
     assert.equal(globalThis.__collectorBoundary.leaseClaims, 1);
     assert.equal(globalThis.__collectorBoundary.universeReads, 1);
-    await new Promise((resolve) => setImmediate(resolve));
+    await settleScheduledHistoryBackfill(runtime);
     assert.equal(globalThis.__collectorBoundary.historyBackfills, 1);
     assert.equal(globalThis.__collectorBoundary.historyRefreshes, 1);
-    await runtime.stop();
-    assert.equal(globalThis.__collectorBoundary.leaseReleases, 1);
   } finally {
+    if (runtime) await runtime.stop();
     globalThis.WebSocket = previousWebSocket;
   }
+  assert.equal(globalThis.__collectorBoundary.leaseReleases, 1);
 });
 
 test("movement history backfill failure leaves the live collector and #70 runtime active", async () => {
@@ -312,22 +323,22 @@ test("movement history backfill failure leaves the live collector and #70 runtim
   };
   const previousWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = FakeWebSocket;
+  let runtime;
   try {
     const module = await import(
       transpile(await read("../src/lib/market/collector.server.ts"), collectorReplacements)
     );
-    const runtime = new module.CollectorRuntime(boundaryStore(["BTCUSDT"]));
+    runtime = new module.CollectorRuntime(boundaryStore(["BTCUSDT"]));
     await runtime.tryBecomeActive();
-    await new Promise((resolve) => setImmediate(resolve));
+    await settleScheduledHistoryBackfill(runtime);
 
     assert.equal(runtime.active, true);
     assert.equal(globalThis.__collectorBoundary.movementStarts, 1);
     assert.equal(globalThis.__collectorBoundary.historyBackfills, 1);
     assert.equal(globalThis.__collectorBoundary.historyRefreshes, 0);
     assert.deepEqual(globalThis.__collectorBoundary.reconciled, [["BTCUSDT"]]);
-
-    await runtime.stop();
   } finally {
+    if (runtime) await runtime.stop();
     globalThis.WebSocket = previousWebSocket;
   }
 });
@@ -347,21 +358,21 @@ test("partial multi-symbol backfill refreshes normalization history while schedu
   };
   const previousWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = FakeWebSocket;
+  let runtime;
   try {
     const module = await import(
       transpile(await read("../src/lib/market/collector.server.ts"), collectorReplacements)
     );
-    const runtime = new module.CollectorRuntime(boundaryStore(["BTCUSDT", "ETHUSDT"]));
+    runtime = new module.CollectorRuntime(boundaryStore(["BTCUSDT", "ETHUSDT"]));
     await runtime.tryBecomeActive();
-    await new Promise((resolve) => setImmediate(resolve));
+    await settleScheduledHistoryBackfill(runtime);
 
     assert.equal(globalThis.__collectorBoundary.historyBackfills, 1);
     assert.equal(globalThis.__collectorBoundary.historyRefreshes, 1);
     assert.equal(runtime.historyBackfillAttempts, 1);
     assert.notEqual(runtime.historyBackfillTimer, null);
-
-    await runtime.stop();
   } finally {
+    if (runtime) await runtime.stop();
     globalThis.WebSocket = previousWebSocket;
   }
 });
