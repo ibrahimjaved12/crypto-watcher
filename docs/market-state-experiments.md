@@ -5,8 +5,9 @@ evaluated independently against the unchanged canonical #28 V1 event stream.
 The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
 **EXP-75-03 Kalman/state-space**, **EXP-75-04A offline PELT**,
 **EXP-75-04B online Bayesian change-point detection**, and
-**EXP-75-05 regression-slope acceleration**, and **EXP-75-06A realized-volatility
-normalization**. EXP-75-06B and EXP-75-07 through EXP-75-12 remain unimplemented.
+**EXP-75-05 regression-slope acceleration**, **EXP-75-06A realized-volatility
+normalization**, and **EXP-75-07 PCA/common-factor diagnostics**. EXP-75-06B
+and EXP-75-08 through EXP-75-12 remain unimplemented.
 
 ## EXP-75-01 — EWMA aggregate smoothing
 
@@ -233,20 +234,37 @@ normalization**. EXP-75-06B and EXP-75-07 through EXP-75-12 remain unimplemented
 
 ## EXP-75-07 — PCA/common factor
 
-- **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** With a sufficiently large aligned universe, first-factor
-  strength may distinguish genuinely coordinated moves from coincidental breadth
-  more effectively than breadth and dispersion alone.
-- **Input/data prerequisite:** Aligned completed >=1m returns, sufficient history,
-  an explicit covariance estimator, and a minimum universe size.
-- **Causal/live suitability:** Potentially causal only with point-in-time aligned
-  inputs and a fixed estimator.
-- **What changes relative to V1:** Future common-factor supporting evidence.
-- **What remains unchanged:** Canonical V1 metrics and #72/#73 decisions.
-- **Evaluation measurements:** Coordination discrimination, disagreement, and
-  universe-size sensitivity.
-- **Promotion constraint:** Covariance and universe requirements must be fixed
-  before evaluation.
+- **Status:** `IMPLEMENTED_EXPERIMENT`
+- **Hypothesis:** A causal PCA of synchronized, standardized, non-overlapping 1m
+  returns may provide a useful measure of common market coordination beyond V1
+  directional breadth. Benefit requires stable enough leading-factor structure,
+  interpretable explained-variance behavior, and measurable information that is
+  not merely a restatement of breadth. PCA is evaluated as supporting diagnostic
+  evidence only and must not alter V1 market-state classification or lifecycle
+  behavior.
+- **Input/data prerequisite:** Complete configured-universe vectors of canonical
+  #71 1m `current_return` at boundaries divisible by 60,000 ms. The 60, 120,
+  and 240-row configurations use only prior synchronized minute rows. An
+  incomplete aligned row clears the entire matrix history after current
+  evidence is calculated.
+- **Estimator:** Prior-window population mean and standard deviation for each
+  symbol, followed by a symmetric correlation matrix and a deterministic
+  standard-library Jacobi eigensolver. Explained variance is the largest
+  eigenvalue divided by the eigenvalue sum. Identified PC1 loadings use a
+  deterministic sign orientation; score sign is not a market direction.
+- **Causal/live suitability:** The current row cannot change its own model. PCA
+  is calculated and projected only at synchronized minute boundaries; the V1
+  #72/#73 branch still advances every five seconds.
+- **What changes relative to V1:** Nothing in the canonical #71/#72/#73 event
+  stream. EXP-75-07 produces diagnostic evidence only, with no candidate
+  classifier or lifecycle branch.
+- **Evaluation measurements:** Explained variance, eigengap, loading coherence
+  and stability, current PC1 energy, associations with V1 directional breadth,
+  and descriptive groups by V1 state and active episode. No coordination
+  threshold, trading signal, window ranking, or automatic promotion is defined.
+- **Promotion constraint:** Compare the fixed correlation model against V1 on
+  development, validation, and untouched test data before considering any
+  future versioned use in production.
 
 ## EXP-75-08 — Correlation/clustering
 
