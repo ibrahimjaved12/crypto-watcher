@@ -316,6 +316,7 @@ export async function registerPythonMovementHistory(
 function transportEvaluation(raw: z.infer<typeof evaluationSchema>): MarketMovementEvaluation {
   const windows = ([1, 5, 15] as const).map((minute) => {
     const item = raw.windows[String(minute) as "1" | "5" | "15"];
+    if (!item) throw new Error(`Python movement metrics response is missing ${minute}m window`);
     const side = item.breadth;
     const weightMetric = item.aggregates.liquidity_weights;
     const liquidityWeights = weightMetric.available
@@ -409,7 +410,8 @@ export async function calculatePythonMarketMovement(
       evaluation.configured_universe.some((symbol, index) => symbol !== universe.symbols[index]) ||
       ([1, 5, 15] as const).some((window) => {
         const item = evaluation.windows[String(window) as "1" | "5" | "15"];
-        return item.window_minutes !== window || item.evaluation_boundary_time_ms !== boundaryTime ||
+        return !item || item.window_minutes !== window ||
+          item.evaluation_boundary_time_ms !== boundaryTime ||
           item.universe_id !== universe.id || item.universe_version !== universe.version ||
           item.config_version !== configVersion ||
           item.configured_universe.length !== universe.symbols.length ||
