@@ -46,6 +46,7 @@ const runtimeUrl = await transpile("../src/lib/market/movement-engine.server.ts"
 });
 
 const { MovementEngineRuntime, MOVEMENT_RETRY_BASE_MS } = await import(runtimeUrl);
+const { buildMarketUniverse } = await import(universeUrl);
 
 const BASE = 1_800_000_000_000; // 15m-aligned epoch boundary
 const MINUTE = 60_000;
