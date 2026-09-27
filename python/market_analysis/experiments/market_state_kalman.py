@@ -303,16 +303,17 @@ def _seed_state(evaluation, config, value):
 
 def _unavailable_observation(evaluation, config, raw):
     return KalmanObservation(
-        evaluation.evaluation_boundary_time_ms,
-        raw,
-        Metric.missing("KALMAN_INPUT_UNAVAILABLE"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        KALMAN_ALGORITHM_VERSION,
-        config.version,
+        evaluation_boundary_time_ms=evaluation.evaluation_boundary_time_ms,
+        raw_primary_median_normalized_movement=raw,
+        filtered_level=Metric.missing("KALMAN_INPUT_UNAVAILABLE"),
+        level=None,
+        trend=None,
+        innovation=None,
+        innovation_variance=None,
+        level_gain=None,
+        trend_gain=None,
+        candidate_algorithm_version=KALMAN_ALGORITHM_VERSION,
+        candidate_config_version=config.version,
     )
 
 
