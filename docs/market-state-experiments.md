@@ -2,8 +2,9 @@
 
 This registry preregisters the deferred Issue #75 candidates. Each candidate is
 evaluated independently against the unchanged canonical #28 V1 event stream.
-The current experiments implement **EXP-75-01 EWMA** and **EXP-75-02 CUSUM**;
-EXP-75-03 through EXP-75-12 remain unimplemented.
+The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**, and
+**EXP-75-03 Kalman/state-space**; EXP-75-04 through EXP-75-12 remain
+unimplemented.
 
 ## EXP-75-01 — EWMA aggregate smoothing
 
@@ -57,21 +58,30 @@ EXP-75-03 through EXP-75-12 remain unimplemented.
 
 ## EXP-75-03 — Kalman/state-space
 
-- **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** A preregistered causal state-space estimate of market level and
-  trend may produce a more stable current-state estimate than raw adjacent-window
-  evidence, only if robust across reasonable fixed covariance assumptions.
-- **Input/data prerequisite:** Exact state vector, observation model, process
-  covariance, measurement covariance, and initial state/covariance.
-- **Causal/live suitability:** Causal in principle; no implementation here.
-- **What changes relative to V1:** A future versioned state estimate could replace
-  one explicitly selected aggregate.
-- **What remains unchanged:** Per-symbol evidence, classifier thresholds, and
+- **Status:** `IMPLEMENTED_EXPERIMENT`
+- **Hypothesis:** A causal two-state local-linear-trend Kalman filter of the
+  canonical #71 primary 5m median normalized market movement may reduce
+  short-lived state changes while estimating a useful latent trend. Any benefit
+  must remain observable across preregistered process-noise assumptions and must
+  not come at excessive episode-onset delay relative to unchanged V1.
+- **Input/data prerequisite:** Consecutive canonical #71 evaluations with the raw
+  5m `median_normalized_movement`, point-in-time source evidence, and explicit
+  development/validation/test partitions.
+- **Causal/live suitability:** Causal and replayable as a research transform; it
+  is not wired into live behavior. V1 is the comparator, not ground truth.
+- **What changes relative to V1:** Only the candidate 5m median normalized
+  movement is replaced by the filtered Kalman latent level. The level/trend state
+  uses the fixed two-state transition and observation models with one of three
+  preregistered process-noise variances.
+- **What remains unchanged:** Canonical #71 metrics and all per-symbol evidence;
+  breadth, acceleration, pace, raw return, RVOL, outliers, #72 rules, and #73
   lifecycle behavior.
-- **Evaluation measurements:** Disagreement, latency, transition stability, and
-  covariance sensitivity.
-- **Promotion constraint:** All model assumptions must be fixed and versioned
-  before evaluation.
+- **Evaluation measurements:** Direction-state disagreement, transition and
+  episode counts, short-lived episodes, candidate onset lead/lag, same-direction
+  overlap, covariance sensitivity, and innovation/filter-gap/trend diagnostics.
+- **Promotion constraint:** No automatic promotion or covariance selection. Each
+  fixed configuration is an independent research run evaluated across development,
+  validation, and untouched test data.
 
 ## EXP-75-04 — Change-point detection
 
