@@ -249,22 +249,27 @@ class MarketStateEWMAExperimentTests(unittest.TestCase):
 
     def test_runner_reuses_canonical_branches_and_keeps_lifecycle_states_isolated(self):
         points = (
-            _point(0, normalized=0.6),
-            _point(5_000, normalized=0.0),
+            _point(0, normalized=0.0),
+            _point(5_000, normalized=0.6),
+            _point(10_000, normalized=0.6),
         )
         result = run_market_state_ewma_experiment(points, EWMA_CONFIG_10S)
-        first, second = result.points
+        initial, first_rise, confirmed_rise = result.points
         self.assertIs(
-            first.baseline_classification.windows[5].movement_snapshot,
+            initial.baseline_classification.windows[5].movement_snapshot,
             points[0].movement_evaluation.windows[5],
         )
-        self.assertEqual(first.baseline_primary_direction_state, "BROAD_RISE")
-        self.assertEqual(second.baseline_primary_direction_state, "BROAD_RISE")
-        self.assertEqual(second.candidate_primary_direction_state, "NEUTRAL")
-        self.assertIsNotNone(second.baseline_lifecycle_state.active_episode)
-        self.assertIsNone(second.candidate_lifecycle_state.active_episode)
+        self.assertEqual(initial.baseline_primary_direction_state, "NEUTRAL")
+        self.assertEqual(initial.candidate_primary_direction_state, "NEUTRAL")
+        self.assertEqual(first_rise.baseline_primary_direction_state, "BROAD_RISE")
+        self.assertEqual(first_rise.candidate_primary_direction_state, "NEUTRAL")
+        self.assertIsNone(first_rise.baseline_lifecycle_state.active_episode)
+        self.assertEqual(confirmed_rise.baseline_primary_direction_state, "BROAD_RISE")
+        self.assertEqual(confirmed_rise.candidate_primary_direction_state, "NEUTRAL")
+        self.assertIsNotNone(confirmed_rise.baseline_lifecycle_state.active_episode)
+        self.assertIsNone(confirmed_rise.candidate_lifecycle_state.active_episode)
         self.assertNotEqual(
-            first.candidate_classification.windows[5].movement_algorithm_version,
+            initial.candidate_classification.windows[5].movement_algorithm_version,
             "market-movement-v1",
         )
 
