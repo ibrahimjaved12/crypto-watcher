@@ -349,7 +349,7 @@ export class BinanceFuturesCollector {
   private movementMembershipEpoch = 0;
   private readonly movementMembershipEpochs = new Map<string, number>();
   private movementSessionId = crypto.randomUUID();
-  private movementLateRejections = 0;
+  private movementLateRejectionCount = 0;
   private movementPythonLateRejections = 0;
 
   constructor(private readonly dependencies: CollectorDependencies) {
@@ -397,7 +397,7 @@ export class BinanceFuturesCollector {
 
   /** Trades rejected because their exchange-time bucket had already been finalized. */
   movementLateRejections(): number {
-    return this.movementLateRejections;
+    return this.movementLateRejectionCount;
   }
 
   movementSourceStatus(symbol: string): MovementSourceState {
@@ -436,7 +436,7 @@ export class BinanceFuturesCollector {
     this.movementSessionId = crypto.randomUUID();
     this.movementBoundary = null;
     this.movementRetry = null;
-    this.movementLateRejections = 0;
+    this.movementLateRejectionCount = 0;
     this.movementPythonLateRejections = 0;
     this.movementResults.clear();
     this.movementLastAcceptedTrade.clear();
@@ -494,7 +494,7 @@ export class BinanceFuturesCollector {
           for (const trade of pending) {
             const assignedBoundary = Math.ceil(trade.tradeTime / 5_000) * 5_000;
             if (assignedBoundary <= this.movementBoundary) {
-              this.movementLateRejections += 1;
+              this.movementLateRejectionCount += 1;
             } else {
               retained.push(trade);
             }
@@ -549,7 +549,7 @@ export class BinanceFuturesCollector {
       if (result.lateAfterFinalizationCount < this.movementPythonLateRejections) {
         this.movementPythonLateRejections = result.lateAfterFinalizationCount;
       } else {
-        this.movementLateRejections +=
+        this.movementLateRejectionCount +=
           result.lateAfterFinalizationCount - this.movementPythonLateRejections;
         this.movementPythonLateRejections = result.lateAfterFinalizationCount;
       }
@@ -709,7 +709,7 @@ export class BinanceFuturesCollector {
       }
       const tradeBoundary = Math.ceil(event.trade.tradeTime / 5_000) * 5_000;
       if (this.movementBoundary !== null && tradeBoundary <= this.movementBoundary) {
-        this.movementLateRejections += 1;
+        this.movementLateRejectionCount += 1;
         this.rememberMovementTrade(event.trade);
         return false;
       }

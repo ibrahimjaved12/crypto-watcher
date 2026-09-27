@@ -34,6 +34,7 @@ const replacements = {
     export function normalizeRestCandles() { return []; }
   `,
   "./movement-engine.server": movementStub,
+  "./movement-python-client.server": `export async function advancePythonMovementBoundary() { return {}; }`,
   "./movement-finalization": `export function movementFinalizationConfig() { return {}; }`,
   "./collector-worker-env.server": `export function validateCollectorWorkerEnvironment() {}`,
 };
