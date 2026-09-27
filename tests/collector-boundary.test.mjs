@@ -30,7 +30,9 @@ const collectorReplacements = {
   "./providers.server": stub(
     `export async function loadBinanceFuturesKlines() {
        return { candles: [], retrievedAt: new Date().toISOString() };
-     }`,
+     }
+     export async function loadBinanceFuturesListingTime() { return 0; }
+     export async function loadBinanceFuturesCompatibility() { return true; }`,
   ),
   "./collector": stub(`
     export const BINANCE_USDM_WS_ENDPOINT = "wss://example.invalid/stream";
@@ -40,6 +42,16 @@ const collectorReplacements = {
       async reconcile(symbols) { globalThis.__collectorBoundary.reconciled.push([...symbols]); }
       streamNames() { return []; }
       subscribedSymbols() { return []; }
+      async backfillMovementHistory() {
+        globalThis.__collectorBoundary.historyBackfills += 1;
+        if (globalThis.__collectorBoundary.historyBackfillError) {
+          throw globalThis.__collectorBoundary.historyBackfillError;
+        }
+        return globalThis.__collectorBoundary.historyBackfillResult ?? {
+          historyChanged: true,
+          retryNeeded: false,
+        };
+      }
       async markConnectionStatus() {}
       async markCandleConnectionStatus() {}
       markMovementConnectionStatus() {}
@@ -57,16 +69,24 @@ const collectorReplacements = {
   "./movement-engine.server": stub(`
     export class MovementEngineRuntime {
       constructor() {}
-      async start() {}
+      async start() { globalThis.__collectorBoundary.movementStarts += 1; }
       async stop() {}
+      requestNormalizationHistoryRefresh() {
+        globalThis.__collectorBoundary.historyRefreshes += 1;
+      }
     }
   `),
   "./movement-python-client.server": stub(`
     export async function advancePythonMovementBoundary() {
       return { snapshots: [], lateAfterFinalizationCount: 0 };
     }
+    export async function registerPythonMovementHistory() {}
+    export async function calculatePythonMarketMovement() {}
   `),
   "./movement-finalization": stub(`export function movementFinalizationConfig() { return {}; }`),
+  "./movement-metrics-contract": stub(`
+    export const DEFAULT_MARKET_MOVEMENT_CONFIG = { historicalLookbackMs: 604800000 };
+  `),
   "./collector-worker-env.server": stub(`export function validateCollectorWorkerEnvironment() {}`),
 };
 
@@ -194,6 +214,16 @@ async function acknowledge(socket) {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+async function settleScheduledHistoryBackfill(runtime) {
+  if (runtime.historyBackfillTimer) {
+    clearTimeout(runtime.historyBackfillTimer);
+    runtime.historyBackfillTimer = null;
+    await runtime.runHistoryBackfill();
+    return;
+  }
+  if (runtime.historyBackfill) await runtime.historyBackfill;
+}
+
 async function exerciseStaleRecoveryHandoff(settleOldRecovery) {
   const previousWebSocket = globalThis.WebSocket;
   ValidatingFakeWebSocket.instances.length = 0;
@@ -249,23 +279,101 @@ test("the collector worker reads one shared subscription universe from the opera
     leaseReleases: 0,
     universeReads: 0,
     movementResets: 0,
+    movementStarts: 0,
+    historyBackfills: 0,
+    historyRefreshes: 0,
+    historyBackfillResult: null,
+    historyBackfillError: null,
   };
   const previousWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = FakeWebSocket;
+  let runtime;
   try {
     const module = await import(
       transpile(await read("../src/lib/market/collector.server.ts"), collectorReplacements)
     );
-    const runtime = new module.CollectorRuntime(boundaryStore(["ETHUSDT", "BTCUSDT"]));
+    runtime = new module.CollectorRuntime(boundaryStore(["ETHUSDT", "BTCUSDT"]));
     await runtime.tryBecomeActive();
     // One assigned set is reconciled as-is: the collector consumes the application's
     // shared operational representation rather than querying Lovable user tables.
     assert.deepEqual(globalThis.__collectorBoundary.reconciled, [["ETHUSDT", "BTCUSDT"]]);
     assert.equal(globalThis.__collectorBoundary.leaseClaims, 1);
     assert.equal(globalThis.__collectorBoundary.universeReads, 1);
-    await runtime.stop();
-    assert.equal(globalThis.__collectorBoundary.leaseReleases, 1);
+    await settleScheduledHistoryBackfill(runtime);
+    assert.equal(globalThis.__collectorBoundary.historyBackfills, 1);
+    assert.equal(globalThis.__collectorBoundary.historyRefreshes, 1);
   } finally {
+    if (runtime) await runtime.stop();
+    globalThis.WebSocket = previousWebSocket;
+  }
+  assert.equal(globalThis.__collectorBoundary.leaseReleases, 1);
+});
+
+test("movement history backfill failure leaves the live collector and #70 runtime active", async () => {
+  globalThis.__collectorBoundary = {
+    reconciled: [],
+    leaseClaims: 0,
+    leaseReleases: 0,
+    universeReads: 0,
+    movementResets: 0,
+    movementStarts: 0,
+    historyBackfills: 0,
+    historyRefreshes: 0,
+    historyBackfillResult: null,
+    historyBackfillError: new Error("historical REST unavailable"),
+  };
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  let runtime;
+  try {
+    const module = await import(
+      transpile(await read("../src/lib/market/collector.server.ts"), collectorReplacements)
+    );
+    runtime = new module.CollectorRuntime(boundaryStore(["BTCUSDT"]));
+    await runtime.tryBecomeActive();
+    await settleScheduledHistoryBackfill(runtime);
+
+    assert.equal(runtime.active, true);
+    assert.equal(globalThis.__collectorBoundary.movementStarts, 1);
+    assert.equal(globalThis.__collectorBoundary.historyBackfills, 1);
+    assert.equal(globalThis.__collectorBoundary.historyRefreshes, 0);
+    assert.deepEqual(globalThis.__collectorBoundary.reconciled, [["BTCUSDT"]]);
+  } finally {
+    if (runtime) await runtime.stop();
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("partial multi-symbol backfill refreshes normalization history while scheduling retry", async () => {
+  globalThis.__collectorBoundary = {
+    reconciled: [],
+    leaseClaims: 0,
+    leaseReleases: 0,
+    universeReads: 0,
+    movementResets: 0,
+    movementStarts: 0,
+    historyBackfills: 0,
+    historyRefreshes: 0,
+    historyBackfillResult: { historyChanged: true, retryNeeded: true },
+    historyBackfillError: null,
+  };
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  let runtime;
+  try {
+    const module = await import(
+      transpile(await read("../src/lib/market/collector.server.ts"), collectorReplacements)
+    );
+    runtime = new module.CollectorRuntime(boundaryStore(["BTCUSDT", "ETHUSDT"]));
+    await runtime.tryBecomeActive();
+    await settleScheduledHistoryBackfill(runtime);
+
+    assert.equal(globalThis.__collectorBoundary.historyBackfills, 1);
+    assert.equal(globalThis.__collectorBoundary.historyRefreshes, 1);
+    assert.equal(runtime.historyBackfillAttempts, 1);
+    assert.notEqual(runtime.historyBackfillTimer, null);
+  } finally {
+    if (runtime) await runtime.stop();
     globalThis.WebSocket = previousWebSocket;
   }
 });
@@ -277,6 +385,11 @@ test("movement transport resets on collector lease acquisition and loss", async 
     leaseReleases: 0,
     universeReads: 0,
     movementResets: 0,
+    movementStarts: 0,
+    historyBackfills: 0,
+    historyRefreshes: 0,
+    historyBackfillResult: null,
+    historyBackfillError: null,
   };
   const previousWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = FakeWebSocket;
@@ -398,6 +511,25 @@ test("an aggTrade stream rejects an otherwise valid kline event", async () => {
     assert.deepEqual(runtime.collector.movementObservations.get("BTCUSDT"), []);
     assert.equal(socket.closeCalls.length, 1);
     assert.ok(socket.closeCalls[0].code >= 3000 && socket.closeCalls[0].code <= 4999);
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("WebSocket Binance kline preserves exact quote asset volume", async () => {
+  const previousWebSocket = globalThis.WebSocket;
+  ValidatingFakeWebSocket.instances.length = 0;
+  globalThis.WebSocket = ValidatingFakeWebSocket;
+  try {
+    const module = await loadBehavioralCollectorRuntime();
+    const { runtime, socket } = await openBehavioralRuntime(module, ["BTCUSDT"]);
+    const openTime = 1_800_000_000_000;
+    socket.emit("message", { data: JSON.stringify({
+      e: "kline", E: openTime + 1_000, s: "BTCUSDT", st: 1,
+      k: { t: openTime, T: openTime + 59_999, s: "BTCUSDT", i: "1m",
+        o: "100", h: "102", l: "99", c: "101", v: "2", q: "345.67", x: false },
+    }) });
+    assert.equal(runtime.collector.developingCandle("BTCUSDT", 1).quoteVolume, 345.67);
   } finally {
     globalThis.WebSocket = previousWebSocket;
   }
@@ -610,6 +742,38 @@ test("the collector worker validates operational-only runtime configuration", as
   assert.doesNotMatch(env, /SUPABASE_URL|SUPABASE_SERVICE_ROLE_KEY|APP_PROFILE/);
   assert.match(env, /operationalDbConfig/);
   assert.match(env, /movementFinalizationConfig/);
+  assert.match(env, /DEFAULT_MARKET_MOVEMENT_CONFIG\.historicalLookbackMs/);
+});
+
+test("collector worker rejects retention shorter than the active movement lookback", async () => {
+  const operationalConfig = transpile(
+    await read("../src/lib/operational/config.server.ts"),
+  );
+  const workerEnvironment = await import(
+    transpile(await read("../src/lib/market/collector-worker-env.server.ts"), {
+      "../environment": stub(`export function validatePublicSecrets() {}`),
+      "../operational/config.server": operationalConfig,
+      "../python-service.server": stub(`export function pythonServiceConfig() { return {}; }`),
+      "./movement-finalization": stub(`export function movementFinalizationConfig() {}`),
+      "./movement-metrics-contract": stub(`
+        export const DEFAULT_MARKET_MOVEMENT_CONFIG = { historicalLookbackMs: 604800000 };
+      `),
+    })
+  );
+  const base = {
+    OPERATIONAL_DB_ENABLED: "true",
+    OPERATIONAL_SUPABASE_URL: "https://operational.example",
+    OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY: "secret-test",
+  };
+
+  assert.doesNotThrow(() => workerEnvironment.validateCollectorWorkerEnvironment(base));
+  assert.throws(
+    () => workerEnvironment.validateCollectorWorkerEnvironment({
+      ...base,
+      OPERATIONAL_CANDLE_RETENTION_DAYS: "7",
+    }),
+    /OPERATIONAL_CANDLE_RETENTION_DAYS>=8/,
+  );
 });
 
 test("the operational store maps the collector subscription RPCs", async () => {

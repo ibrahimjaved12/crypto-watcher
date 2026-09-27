@@ -92,17 +92,6 @@ before(async () => {
       "utf8",
     ),
   );
-  // Destructive pre-release provenance cutover: wipes disposable collector state, replaces the
-  // obsolete provenance constraints, and defines the provenance-preserving read adapter.
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260926150000_collector_candle_provenance_reset.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
 });
 beforeEach(async () => {
   await db.exec(`RESET ROLE;
@@ -312,7 +301,7 @@ test("server config is opt-in, bounded and requires a separate secure target", a
     OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY: "service-only",
   });
   assert.equal(configured.enabled, true);
-  assert.equal(configured.candleRetentionDays, 7);
+  assert.equal(configured.candleRetentionDays, 8);
   assert.throws(
     () =>
       operationalDbConfig({
@@ -463,6 +452,7 @@ test("movement normalization history RPC returns compact one-minute candles per 
       low: 90,
       close: 100 + index,
       volume: 5,
+      quote_volume: 551 + index,
       source_event_at: new Date(openTime + 60_000).toISOString(),
       received_at: new Date(openTime + 60_000).toISOString(),
       transport: "rest",
@@ -471,9 +461,10 @@ test("movement normalization history RPC returns compact one-minute candles per 
   await db.query("SELECT record_collector_candles($1,$2)", [JSON.stringify(rows), 7]);
 
   const history = (
-    await db.query("SELECT get_collector_movement_candles($1,$2) AS history", [
+    await db.query("SELECT get_collector_movement_candles($1,$2,$3) AS history", [
       ["BTCUSDT"],
       new Date(observed - 60_000).toISOString(),
+      new Date(observed + 10 * 60_000).toISOString(),
     ])
   ).rows[0].history;
   assert.equal(history.BTCUSDT.length, 3);
@@ -481,11 +472,13 @@ test("movement normalization history RPC returns compact one-minute candles per 
   assert.equal(history.BTCUSDT[0][1], 100);
   assert.equal(history.BTCUSDT[2][1], 102);
   assert.equal(history.BTCUSDT[0][2], 5);
+  assert.equal(history.BTCUSDT[0][3], 551);
 
   const empty = (
-    await db.query("SELECT get_collector_movement_candles($1,$2) AS history", [
+    await db.query("SELECT get_collector_movement_candles($1,$2,$3) AS history", [
       [],
       new Date(observed).toISOString(),
+      new Date(observed + 10 * 60_000).toISOString(),
     ])
   ).rows[0].history;
   assert.deepEqual(empty, {});
@@ -511,6 +504,7 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
       low: 90,
       close: 100 + index,
       volume: 5,
+      quote_volume: 505 + index,
       // REST bootstrap/recovery has no exchange event; WebSocket candles keep the
       // exchange's actual event time, which need not equal the completion boundary.
       source_event_at:
@@ -713,6 +707,7 @@ test("collector retention keeps enough canonical history for the longest TA fram
         low: 90,
         close: 101,
         volume: 5,
+        quote_volume: 505,
         source_event_at: new Date(openTime + step).toISOString(),
         received_at: new Date(openTime + step).toISOString(),
         transport: "websocket",
@@ -766,17 +761,16 @@ test("repository movement history read maps compact rows and skips malformed ent
       async rpc(name) {
         assert.equal(name, "get_collector_movement_candles");
         return {
-          data: { BTCUSDT: [[1000, 101.5, 2], [2000, 102, 3], ["bad"]], ETHUSDT: "nope" },
+          data: { BTCUSDT: [[1000, 101.5, 2, 400], [2000, 102, 3, null], ["bad"]], ETHUSDT: "nope" },
           error: null,
         };
       },
     },
     { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
   );
-  const history = await store.readMovementCandleHistory(["btcusdt", "ethusdt"], 0);
+  const history = await store.readMovementCandleHistory(["btcusdt", "ethusdt"], 0, 5000);
   assert.deepEqual(history.get("BTCUSDT"), [
-    { openTime: 1000, close: 101.5, volume: 2 },
-    { openTime: 2000, close: 102, volume: 3 },
+    { openTime: 1000, close: 101.5, volume: 2, quoteVolume: 400 },
   ]);
   assert.equal(history.has("ETHUSDT"), false);
 });

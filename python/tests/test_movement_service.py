@@ -1,9 +1,14 @@
 import unittest
+from dataclasses import asdict
 from decimal import Decimal
 from types import SimpleNamespace
 
-from market_analysis.api_models import MovementBoundaryRequest
-from market_analysis.movement import DEFAULT_HISTORY_BUCKETS, MovementBucketEngine
+from market_analysis.api_models import (MovementBoundaryRequest,
+                                        MovementHistoryRegistrationRequest,
+                                        MovementMetricsRequest)
+from market_analysis.movement import (DEFAULT_HISTORY_BUCKETS, MarketObservation,
+                                      MovementBucketEngine)
+from market_analysis.movement_metrics import MarketMovementConfig
 from market_analysis.movement_service import MovementBoundaryService
 
 BASE = 1_800_000_000_000
@@ -292,6 +297,141 @@ class MovementBoundaryServiceTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ValueError):
                     MovementBoundaryService(**kwargs)
+
+
+class MovementMetricsAdapterTests(unittest.TestCase):
+    SYMBOLS = ("BTCUSDT", "ETHUSDT", "ADAUSDT", "BNBUSDT", "SOLUSDT")
+
+    @classmethod
+    def populated_service(cls, session_capacity=None):
+        service = (MovementBoundaryService() if session_capacity is None else
+                   MovementBoundaryService(session_capacity=session_capacity))
+        service.advance(request(BASE, [symbol_input(symbol, [observation(BASE, index + 1)])
+                                       for index, symbol in enumerate(cls.SYMBOLS)]))
+        engines = service.sessions[SESSION]["engines"]
+        for step in range(1, 361):
+            boundary = BASE + step * 5_000
+            for index, symbol in enumerate(cls.SYMBOLS):
+                price = Decimal("101") if step == 360 else Decimal("100")
+                engine = engines[symbol]
+                engine.observe((MarketObservation(
+                    provider="binance-usdm", instrument_id=f"binance-usdm:{symbol}",
+                    price_type="trade", price=price, quantity=Decimal("1"),
+                    event_time_ms=boundary, trade_time_ms=boundary,
+                    aggregate_trade_id=step * 10 + index,
+                    received_at_ms=boundary,
+                ),))
+                engine.advance(boundary, "LIVE")
+        return service
+
+    @classmethod
+    def history_request(cls, version="history-v1", close_delta=Decimal("0"),
+                        compatible=True):
+        candles = [{
+            "open_time_ms": BASE - (65 - index) * 60_000,
+            "close": str(Decimal("100") + Decimal(index % 7) / 100 +
+                         Decimal(index) / 10000 +
+                         (close_delta if index == 0 else Decimal("0"))),
+            "volume": "1",
+            "quote_volume": str(100 + index % 3),
+        } for index in range(64)]
+        return MovementHistoryRegistrationRequest.model_validate({
+            "schema_version": 1, "session_id": SESSION,
+            "history_version": version, "as_of_boundary_time_ms": BASE + 350 * 5_000,
+            "universe_id": "watched",
+            "universe_version": "watched-v1", "symbols": cls.SYMBOLS,
+            "config": {**asdict(MarketMovementConfig()),
+                       "historical_lookback_ms": 2 * 60 * 60_000,
+                       "minimum_historical_coverage_ms": 30 * 60_000},
+            "historical": [{
+                "symbol": symbol,
+                "instrument_compatible": compatible,
+                "candles": candles,
+            } for symbol in cls.SYMBOLS],
+        })
+
+    @staticmethod
+    def metrics_request(boundary=BASE + 360 * 5_000, version="history-v1"):
+        return MovementMetricsRequest.model_validate({
+            "schema_version": 1, "session_id": SESSION,
+            "evaluation_boundary_time_ms": boundary,
+            "history_version": version, "universe_id": "watched",
+            "universe_version": "watched-v1",
+        })
+
+    def test_canonical_engines_supply_metrics_without_mutating_history(self):
+        service = self.populated_service()
+        service.register_history(self.history_request())
+        before = {symbol: engine.history for symbol, engine in
+                  service.sessions[SESSION]["engines"].items()}
+        result = service.calculate_metrics(self.metrics_request())
+        evaluation = result["evaluation"]
+        self.assertEqual(result["history_version"], "history-v1")
+        self.assertEqual(evaluation["evaluation_boundary_time_ms"], BASE + 360 * 5_000)
+        self.assertEqual(set(evaluation["windows"]), {"1", "5", "15"})
+        self.assertEqual(evaluation["windows"]["1"]["eligible_count"], 5)
+        self.assertTrue(evaluation["windows"]["1"]["market_wide_eligible"])
+        self.assertGreater(evaluation["windows"]["1"]["symbols"][0]["current_return"]["value"], 0)
+        self.assertEqual(before, {symbol: engine.history for symbol, engine in
+                                  service.sessions[SESSION]["engines"].items()})
+        # The service accepts no caller bucket/readiness input: only its engines
+        # can produce the earlier finalized boundary's evidence.
+        earlier = service.calculate_metrics(self.metrics_request(BASE + 355 * 5_000))
+        self.assertEqual(earlier["evaluation"]["evaluation_boundary_time_ms"], BASE + 355 * 5_000)
+        self.assertEqual(earlier["evaluation"]["windows"]["1"]["symbols"][0]["current_return"]["value"], 0)
+        with self.assertRaisesRegex(ValueError, "predates registered history cutoff"):
+            service.calculate_metrics(self.metrics_request(BASE + 349 * 5_000))
+
+    def test_version_retries_identity_and_evicted_session_fail_closed(self):
+        service = self.populated_service(session_capacity=2)
+        self.assertEqual(service.register_history(self.history_request()),
+                         service.register_history(self.history_request()))
+        with self.assertRaises(ValueError):
+            service.register_history(self.history_request(close_delta=Decimal("1")))
+        with self.assertRaises(ValueError):
+            service.calculate_metrics(self.metrics_request(version="wrong-version"))
+        with self.assertRaises(ValueError):
+            service.calculate_metrics(self.metrics_request(boundary=BASE + 365 * 5_000))
+        unknown = MovementMetricsRequest.model_validate({
+            **self.metrics_request().model_dump(mode="json"),
+            "session_id": "4c05f9ea-d999-407a-9c04-30f58fccd382",
+        })
+        with self.assertRaises(ValueError):
+            service.calculate_metrics(unknown)
+        for session_id in ("4c05f9ea-d999-407a-9c04-30f58fccd382",
+                           "5d160afb-eaaa-418b-ad15-41a690dde493"):
+            service.advance(request(BASE, [symbol_input("BTCUSDT")], session_id))
+        with self.assertRaises(ValueError):
+            service.calculate_metrics(self.metrics_request())
+
+    def test_new_membership_without_older_bucket_is_missing_symbol_input(self):
+        service = self.populated_service()
+        service.register_history(self.history_request())
+        # This engine still exists, but joined after the requested old boundary.
+        replacement = MovementBucketEngine("binance-usdm:SOLUSDT")
+        replacement.advance(BASE + 360 * 5_000, "LIVE")
+        service.sessions[SESSION]["engines"]["SOLUSDT"] = replacement
+        result = service.calculate_metrics(self.metrics_request(BASE + 355 * 5_000))
+        excluded = result["evaluation"]["windows"]["1"]["excluded_symbols"]
+        self.assertIn({"symbol": "SOLUSDT", "reasons": ["MISSING_SYMBOL_INPUT"]}, excluded)
+
+    def test_factual_instrument_compatibility_and_unknown_metadata(self):
+        service = self.populated_service()
+        service.register_history(self.history_request(compatible=False))
+        excluded = service.calculate_metrics(self.metrics_request())["evaluation"]["windows"]["1"]["excluded_symbols"]
+        self.assertIn("UNSUPPORTED_INSTRUMENT", excluded[0]["reasons"])
+        service.register_history(self.history_request(version="history-v2", compatible=None))
+        excluded = service.calculate_metrics(self.metrics_request(version="history-v2"))["evaluation"]["windows"]["1"]["excluded_symbols"]
+        self.assertIn("SOURCE_UNAVAILABLE", excluded[0]["reasons"])
+        self.assertNotIn("UNSUPPORTED_INSTRUMENT", excluded[0]["reasons"])
+
+    def test_replacing_raw_history_version_preserves_same_boundary_result(self):
+        service = self.populated_service()
+        service.register_history(self.history_request())
+        first = service.calculate_metrics(self.metrics_request())["evaluation"]
+        service.register_history(self.history_request(version="history-v2"))
+        second = service.calculate_metrics(self.metrics_request(version="history-v2"))["evaluation"]
+        self.assertEqual(first, second)
 
 
 if __name__ == "__main__":

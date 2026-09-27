@@ -1,14 +1,20 @@
 import { getOperationalStore } from "../operational/repository.server";
 import type { OperationalStore } from "../operational/types";
-import { loadBinanceFuturesKlines } from "./providers.server";
+import {
+  loadBinanceFuturesKlines,
+  loadBinanceFuturesListingTime,
+  loadBinanceFuturesCompatibility,
+} from "./providers.server";
 import {
   BINANCE_USDM_WS_ENDPOINT,
   BinanceFuturesCollector,
   normalizeRestCandles,
 } from "./collector";
 import { MovementEngineRuntime } from "./movement-engine.server";
-import { advancePythonMovementBoundary } from "./movement-python-client.server";
+import { advancePythonMovementBoundary, calculatePythonMarketMovement,
+  registerPythonMovementHistory } from "./movement-python-client.server";
 import { movementFinalizationConfig } from "./movement-finalization";
+import { DEFAULT_MARKET_MOVEMENT_CONFIG } from "./movement-metrics-contract";
 import { validateCollectorWorkerEnvironment } from "./collector-worker-env.server";
 
 const SUBSCRIPTION_REFRESH_MS = 30_000;
@@ -19,6 +25,8 @@ const CONNECTION_MAX_AGE_MS = 23 * 60 * 60_000 + 50 * 60_000;
 const MAX_BACKOFF_MS = 30_000;
 const CANDLE_RECOVERY_RETRY_BASE_MS = 1_000;
 const CANDLE_RECOVERY_MAX_BACKOFF_MS = 30_000;
+const HISTORY_BACKFILL_RETRY_BASE_MS = 5_000;
+const HISTORY_BACKFILL_MAX_BACKOFF_MS = 60_000;
 const RECOVERY_CLOSE_CODE = 4000;
 
 function enabled(env: Record<string, string | undefined> = process.env): boolean {
@@ -52,6 +60,10 @@ export class CollectorRuntime {
   private candleRecoveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private candleRecoveryAttempts = 0;
   private candleRecoveryGeneration: number | null = null;
+  private historyBackfillTimer: ReturnType<typeof setTimeout> | null = null;
+  private historyBackfill: Promise<void> | null = null;
+  private historyBackfillAttempts = 0;
+  private historyBackfillGeneration = 0;
 
   constructor(private readonly store: OperationalStore) {
     this.collector = new BinanceFuturesCollector({
@@ -69,6 +81,7 @@ export class CollectorRuntime {
           retrievedAt: Date.parse(result.retrievedAt),
         });
       },
+      loadHistoryListingTime: loadBinanceFuturesListingTime,
       onOverload: () =>
         this.socket?.close(RECOVERY_CLOSE_CODE, "bounded processing capacity exceeded"),
       advanceMovementBoundary: (sessionId, boundaryTime, symbols) =>
@@ -78,6 +91,9 @@ export class CollectorRuntime {
       store,
       collector: this.collector,
       finalization: movementFinalizationConfig(process.env),
+      registerHistory: registerPythonMovementHistory,
+      calculateMovement: calculatePythonMarketMovement,
+      instrumentCompatibility: loadBinanceFuturesCompatibility,
     });
   }
 
@@ -89,6 +105,7 @@ export class CollectorRuntime {
     this.stopped = true;
     this.streamReady = false;
     this.invalidateCandleRecoveryTenure();
+    this.historyBackfillGeneration += 1;
     this.clearTimers();
     this.collector.resetMovementTransportState();
     this.rejectPendingRequests("collector stopping");
@@ -97,6 +114,7 @@ export class CollectorRuntime {
     // An explicit shutdown must be a complete barrier for collector-owned runtime
     // work: await the movement engine's teardown before releasing ownership.
     await this.movement.stop();
+    await this.historyBackfill?.catch(() => undefined);
     if (this.active) await this.store.releaseCollectorLease(this.instanceId);
     this.active = false;
     this.streamReady = false;
@@ -107,10 +125,12 @@ export class CollectorRuntime {
     try {
       this.active = await this.store.claimCollectorLease(this.instanceId, LEASE_SECONDS);
       if (!this.active) return this.retryStandby();
+      this.historyBackfillAttempts = 0;
       this.collector.resetMovementTransportState();
       await this.collector.reconcile(await this.store.readCollectorSubscriptions());
       this.startTimers();
       this.connect();
+      this.scheduleHistoryBackfill(0);
       console.info("[binance-collector] active lease acquired");
     } catch (error) {
       console.error(
@@ -119,6 +139,7 @@ export class CollectorRuntime {
       const heldLease = this.active;
       this.active = false;
       this.invalidateCandleRecoveryTenure();
+      this.historyBackfillGeneration += 1;
       this.clearTimers();
       this.collector.resetMovementTransportState();
       void this.movement.stop();
@@ -174,6 +195,7 @@ export class CollectorRuntime {
     this.active = false;
     this.streamReady = false;
     this.invalidateCandleRecoveryTenure();
+    this.historyBackfillGeneration += 1;
     this.clearTimers();
     this.collector.resetMovementTransportState();
     void this.movement.stop();
@@ -192,6 +214,7 @@ export class CollectorRuntime {
   private async reconcileSubscriptions(): Promise<void> {
     if (!this.active) return;
     try {
+      const previousSymbols = this.collector.subscribedSymbols().join(",");
       const before = new Set(this.collector.streamNames());
       await this.collector.reconcile(await this.store.readCollectorSubscriptions());
       const after = new Set(this.collector.streamNames());
@@ -207,6 +230,9 @@ export class CollectorRuntime {
       ]);
       if (this.streamReady && this.socket?.readyState === WebSocket.OPEN) {
         this.collector.markMovementConnectionStatus("LIVE");
+      }
+      if (previousSymbols !== this.collector.subscribedSymbols().join(",")) {
+        this.scheduleHistoryBackfill(0);
       }
     } catch (error) {
       console.error(
@@ -294,6 +320,64 @@ export class CollectorRuntime {
     socket.addEventListener("error", () =>
       socket.close(RECOVERY_CLOSE_CODE, "Binance transport error"),
     );
+  }
+
+  private scheduleHistoryBackfill(delayMs: number): void {
+    if (this.stopped || !this.active || this.historyBackfillTimer || this.historyBackfill) return;
+    this.historyBackfillTimer = setTimeout(() => {
+      this.historyBackfillTimer = null;
+      void this.runHistoryBackfill();
+    }, delayMs);
+  }
+
+  private async runHistoryBackfill(): Promise<void> {
+    if (this.stopped || !this.active || this.historyBackfill) return;
+    const generation = this.historyBackfillGeneration;
+    const symbols = this.collector.subscribedSymbols().join(",");
+    let retryDelay: number | null = null;
+    const isCurrent = () =>
+      !this.stopped && this.active && generation === this.historyBackfillGeneration;
+    const task = this.collector.backfillMovementHistory(
+      DEFAULT_MARKET_MOVEMENT_CONFIG.historicalLookbackMs + 16 * 60_000,
+      Date.now(),
+      isCurrent,
+    ).then((result) => {
+      if (!isCurrent()) return;
+      if (result.historyChanged) this.movement.requestNormalizationHistoryRefresh();
+      if (!result.retryNeeded) {
+        this.historyBackfillAttempts = 0;
+        return;
+      }
+      retryDelay = Math.min(
+        HISTORY_BACKFILL_MAX_BACKOFF_MS,
+        HISTORY_BACKFILL_RETRY_BASE_MS * 2 ** Math.min(this.historyBackfillAttempts, 5),
+      );
+      this.historyBackfillAttempts += 1;
+      console.error(
+        `[binance-collector] movement history backfill incomplete; retrying in ${retryDelay}ms`,
+      );
+    }).catch((error) => {
+      if (!isCurrent()) return;
+      retryDelay = Math.min(
+        HISTORY_BACKFILL_MAX_BACKOFF_MS,
+        HISTORY_BACKFILL_RETRY_BASE_MS * 2 ** Math.min(this.historyBackfillAttempts, 5),
+      );
+      this.historyBackfillAttempts += 1;
+      console.error(
+        `[binance-collector] movement history backfill failed; retrying in ${retryDelay}ms: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }).finally(() => {
+      this.historyBackfill = null;
+      if (!this.stopped && this.active && generation !== this.historyBackfillGeneration) {
+        this.scheduleHistoryBackfill(0);
+      } else if (isCurrent() && symbols !== this.collector.subscribedSymbols().join(",")) {
+        this.scheduleHistoryBackfill(0);
+      } else if (isCurrent() && retryDelay !== null) {
+        this.scheduleHistoryBackfill(retryDelay);
+      }
+    });
+    this.historyBackfill = task;
+    await task;
   }
 
   private scheduleReconnect(): void {
@@ -450,12 +534,14 @@ export class CollectorRuntime {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
     if (this.candleRecoveryRetryTimer) clearTimeout(this.candleRecoveryRetryTimer);
+    if (this.historyBackfillTimer) clearTimeout(this.historyBackfillTimer);
     this.subscriptionTimer = null;
     this.leaseTimer = null;
     this.staleTimer = null;
     this.retryTimer = null;
     this.lifetimeTimer = null;
     this.candleRecoveryRetryTimer = null;
+    this.historyBackfillTimer = null;
   }
 }
 

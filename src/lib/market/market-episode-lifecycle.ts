@@ -12,7 +12,7 @@ import type {
   MarketMovementEvaluation,
   MarketMovementWindowResult,
   SymbolExclusionReason,
-} from "./movement-metrics";
+} from "./movement-metrics-contract";
 
 export const MARKET_EPISODE_ALGORITHM_VERSION = "market-episode-v1";
 export const DEFAULT_MARKET_EPISODE_CONFIG_VERSION = "market-episode-config-v1";
@@ -378,13 +378,13 @@ function buildEvent(input: {
 
   const directionalBreadth =
     direction === "BROAD_RISE"
-      ? primaryWindow.evidence.risingFraction
-      : primaryWindow.evidence.fallingFraction;
+      ? primaryWindow.evidence.risingFraction!
+      : primaryWindow.evidence.fallingFraction!;
 
   const materialBreadth =
     direction === "BROAD_RISE"
-      ? primaryWindow.evidence.materialRisingFraction
-      : primaryWindow.evidence.materialFallingFraction;
+      ? primaryWindow.evidence.materialRisingFraction!
+      : primaryWindow.evidence.materialFallingFraction!;
 
   const accelerationBreadth =
     direction === "BROAD_RISE"
@@ -461,13 +461,13 @@ function checkContinuation(
 ): boolean {
   if (direction === "BROAD_RISE") {
     return (
-      evidence.risingFraction >= config.continuationRisingBreadth &&
+      evidence.risingFraction! >= config.continuationRisingBreadth &&
       evidence.medianRawReturn.available &&
       evidence.medianRawReturn.value > 0
     );
   }
   return (
-    evidence.fallingFraction >= config.continuationFallingBreadth &&
+    evidence.fallingFraction! >= config.continuationFallingBreadth &&
     evidence.medianRawReturn.available &&
     evidence.medianRawReturn.value < 0
   );
@@ -695,8 +695,8 @@ export function processMarketEpisodeLifecycle(
 
           const currentMaterial =
             direction === "BROAD_RISE"
-              ? primaryWindow.evidence.materialRisingFraction
-              : primaryWindow.evidence.materialFallingFraction;
+              ? primaryWindow.evidence.materialRisingFraction!
+              : primaryWindow.evidence.materialFallingFraction!;
 
           activeEpisode = {
             episodeId,
@@ -797,8 +797,8 @@ export function processMarketEpisodeLifecycle(
 
           const currentMaterial =
             toDirection === "BROAD_RISE"
-              ? primaryWindow.evidence.materialRisingFraction
-              : primaryWindow.evidence.materialFallingFraction;
+              ? primaryWindow.evidence.materialRisingFraction!
+              : primaryWindow.evidence.materialFallingFraction!;
 
           activeEpisode = {
             episodeId: newEpisodeId,
@@ -933,8 +933,8 @@ export function processMarketEpisodeLifecycle(
 
           const currentMaterial =
             toDirection === "BROAD_RISE"
-              ? primaryWindow.evidence.materialRisingFraction
-              : primaryWindow.evidence.materialFallingFraction;
+              ? primaryWindow.evidence.materialRisingFraction!
+              : primaryWindow.evidence.materialFallingFraction!;
 
           activeEpisode = {
             episodeId: newEpisodeId,
@@ -1006,8 +1006,8 @@ export function processMarketEpisodeLifecycle(
         // Check Strength crossings (STRENGTHENED / WEAKENED)
         const currentMaterial =
           activeEpisode.direction === "BROAD_RISE"
-            ? primaryWindow.evidence.materialRisingFraction
-            : primaryWindow.evidence.materialFallingFraction;
+            ? primaryWindow.evidence.materialRisingFraction!
+            : primaryWindow.evidence.materialFallingFraction!;
 
         const strengthenPace =
           activeEpisode.confirmedPace !== "ACCELERATING" && currentPace === "ACCELERATING";

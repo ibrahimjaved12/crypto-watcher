@@ -42,6 +42,7 @@ export type CollectorCandle = {
   low: number;
   close: number;
   volume: number;
+  quoteVolume: number;
   /**
    * Actual exchange event time for this candle. WebSocket klines carry the
    * exchange event timestamp (`E`); REST bootstrap/recovery has no exchange event,
@@ -242,6 +243,7 @@ export interface OperationalStore {
   readMovementCandleHistory(
     symbols: string[],
     sinceMs: number,
+    beforeBoundaryMs: number,
   ): Promise<Map<string, MovementCandle[]>>;
   claimCollectorLease(instanceId: string, leaseSeconds?: number): Promise<boolean>;
   renewCollectorLease(instanceId: string, leaseSeconds?: number): Promise<boolean>;

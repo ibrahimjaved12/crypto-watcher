@@ -118,7 +118,7 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `OPERATIONAL_DB_ENABLED`                          | TanStack + collector worker         | `false` for rollback; exact `true` transfers checkpoint/run ownership and enables recent-candle storage |
 | `OPERATIONAL_SUPABASE_URL`                        | TanStack + collector worker         | Separate local/hosted operational Supabase origin; required when enabled                                |
 | `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`           | TanStack + collector worker secret  | Operational project service-role key; required when enabled; never `VITE_*`                             |
-| `OPERATIONAL_CANDLE_RETENTION_DAYS`               | TanStack + collector worker         | `7`; allowed range 1–30                                                                                 |
+| `OPERATIONAL_CANDLE_RETENTION_DAYS`               | TanStack + collector worker         | `8`; allowed range 1–30; collector needs at least 8 for #71 warm-up                                    |
 | `OPERATIONAL_MONITOR_RUN_RETENTION_DAYS`          | TanStack + collector worker         | `30`; allowed range 1–90                                                                                |
 | `OPERATIONAL_OUTBOX_MAX_ATTEMPTS`                 | TanStack + collector worker         | `10`; allowed range 1–100 before dead-letter                                                            |
 | `BINANCE_COLLECTOR_ENABLED`                       | Collector worker + app server       | Server-only cutover; requires operational DB and the separate collector worker process                  |

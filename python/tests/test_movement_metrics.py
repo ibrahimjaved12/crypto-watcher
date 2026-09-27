@@ -78,6 +78,12 @@ def evaluate(inputs, *, config=None, universe=None, window=1):
 
 
 class ExactWindowTests(unittest.TestCase):
+    def test_source_unavailable_in_required_history_maps_to_source_unavailable(self):
+        item = symbol_input("S0", states={1: ("unavailable", "source_unavailable_in_required_history")})
+        result = evaluate({"S0": item}, universe=("S0",))
+        self.assertIn("SOURCE_UNAVAILABLE", result.symbols[0].exclusion_reasons)
+        self.assertNotIn("MOVEMENT_HISTORY_UNAVAILABLE", result.symbols[0].exclusion_reasons)
+
     def test_exact_returns_velocity_acceleration_for_every_window(self):
         inputs = {f"S{i}": symbol_input(f"S{i}", current="121", previous="110") for i in range(5)}
         evaluation = calculate_market_movement(request(inputs))
@@ -276,6 +282,14 @@ class AggregateTests(unittest.TestCase):
 
 
 class VolumeOutlierTests(unittest.TestCase):
+    def test_rvol_uses_explicit_quote_notional(self):
+        item = symbol_input("QUOTE", volume=Decimal("1234"),
+                            prior_volumes=[Decimal("777")] * 20)
+        result = evaluate({"QUOTE": item})
+        symbol = result.symbols[0]
+        self.assertAlmostEqual(symbol.rvol.value,
+                               float(symbol.current_notional_volume.value) / 777)
+
     def test_rvol_uses_last_n_comparable_windows(self):
         prior = [Decimal("100")] + [Decimal("6")] * 20
         inputs = {f"S{i}": symbol_input(f"S{i}", prior_volumes=prior) for i in range(5)}

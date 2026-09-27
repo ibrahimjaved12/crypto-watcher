@@ -211,3 +211,76 @@ class MovementBoundaryRequest(InputModel):
         if len(symbols) != len(set(symbols)):
             raise ValueError("movement boundary symbols must be unique")
         return self
+
+
+class MovementMetricsConfigRequest(InputModel):
+    version: str = Field(min_length=1, max_length=128)
+    historical_lookback_ms: Annotated[int, Field(strict=True, gt=0)]
+    minimum_historical_coverage_ms: Annotated[int, Field(strict=True, gt=0)]
+    flat_z: float
+    material_z: float
+    trim_fraction: float
+    liquidity_weight_cap: float
+    rvol_comparison_windows: Annotated[int, Field(strict=True, gt=0)]
+    outlier_cross_z: float
+    outlier_historical_z: float
+    minimum_eligible_fraction: float
+    minimum_eligible_count: Annotated[int, Field(strict=True, gt=0)]
+
+
+class MovementCompletedCandleRequest(InputModel):
+    open_time_ms: Timestamp
+    close: Price
+    volume: Nonnegative
+    quote_volume: Nonnegative
+
+    @model_validator(mode="after")
+    def aligned(self):
+        if self.open_time_ms % 60_000:
+            raise ValueError("completed movement candle must align to one minute")
+        return self
+
+
+class MovementHistoricalSymbolRequest(InputModel):
+    symbol: str = Field(min_length=5, max_length=16)
+    instrument_compatible: bool | None = Field(strict=True)
+    candles: Annotated[tuple[MovementCompletedCandleRequest, ...], Field(max_length=10_110)]
+
+
+class MovementHistoryRegistrationRequest(InputModel):
+    schema_version: Literal[1]
+    session_id: UUID
+    history_version: str = Field(min_length=1, max_length=128)
+    as_of_boundary_time_ms: Timestamp
+    universe_id: str = Field(min_length=1, max_length=128)
+    universe_version: str = Field(min_length=1, max_length=128)
+    symbols: Annotated[tuple[str, ...], Field(min_length=1, max_length=100)]
+    config: MovementMetricsConfigRequest
+    historical: Annotated[tuple[MovementHistoricalSymbolRequest, ...], Field(max_length=100)]
+
+    @model_validator(mode="after")
+    def exact_symbols(self):
+        if self.as_of_boundary_time_ms % 5_000:
+            raise ValueError("history as-of boundary must align to five seconds")
+        if len(set(self.symbols)) != len(self.symbols):
+            raise ValueError("movement universe symbols must be unique")
+        if tuple(item.symbol for item in self.historical) != self.symbols:
+            raise ValueError("historical symbol set must match configured universe")
+        if any(symbol not in SUPPORTED_SYMBOLS for symbol in self.symbols):
+            raise ValueError("unsupported movement symbol")
+        return self
+
+
+class MovementMetricsRequest(InputModel):
+    schema_version: Literal[1]
+    session_id: UUID
+    evaluation_boundary_time_ms: Timestamp
+    history_version: str = Field(min_length=1, max_length=128)
+    universe_id: str = Field(min_length=1, max_length=128)
+    universe_version: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def aligned(self):
+        if self.evaluation_boundary_time_ms % 5_000:
+            raise ValueError("movement metrics boundary must align to five seconds")
+        return self

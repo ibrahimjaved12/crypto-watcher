@@ -24,6 +24,8 @@ export type CollectorInterval = (typeof COLLECTOR_INTERVALS)[number];
  * candle is excluded) with margin.
  */
 export const COLLECTOR_BOOTSTRAP_LIMIT = 300;
+export const MOVEMENT_HISTORY_BACKFILL_PAGE_LIMIT = 1_000;
+const MINUTE_MS = 60_000;
 export type CompletedCandleOrigin = "bootstrap" | "recovery" | "live";
 
 export type AggregateTrade = {
@@ -52,8 +54,10 @@ type RestRequest = {
 };
 
 type CollectorDependencies = {
-  store: Pick<OperationalStore, "recordCollectorCandles" | "recordCollectorHealth">;
+  store: Pick<OperationalStore,
+    "recordCollectorCandles" | "recordCollectorHealth" | "readMovementCandleHistory">;
   loadRest(request: RestRequest): Promise<CollectorCandle[]>;
+  loadHistoryListingTime(symbol: string): Promise<number>;
   onCompleted?(event: CompletedCandleEvent): Promise<void> | void;
   onOverload?(): void;
   now?: () => number;
@@ -65,6 +69,11 @@ type CollectorDependencies = {
     boundaryTime: number,
     symbols: MovementBoundarySymbolInput[],
   ): Promise<MovementBoundaryResult>;
+};
+
+export type MovementHistoryBackfillResult = {
+  historyChanged: boolean;
+  retryNeeded: boolean;
 };
 
 type HealthState = {
@@ -114,6 +123,10 @@ function positiveDecimalText(value: unknown, label: string): string {
 }
 
 function finiteNonnegative(value: unknown, label: string): number {
+  if (value === null || value === undefined ||
+      (typeof value === "string" && value.trim() === "")) {
+    throw new Error(`invalid ${label}`);
+  }
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`invalid ${label}`);
   return parsed;
@@ -185,6 +198,7 @@ export function normalizeRestCandles(input: {
         low: finitePositive(candle.low, "low price"),
         close: finitePositive(candle.close, "close price"),
         volume: finiteNonnegative(candle.volume, "volume"),
+        quoteVolume: finiteNonnegative(candle.quoteVolume, "quote volume"),
         // REST bootstrap/recovery has no exchange event, so the source event time is
         // honestly absent. The deterministic completion boundary is open + timeframe.
         sourceEventTime: null,
@@ -274,6 +288,7 @@ export function parseBinanceMarketMessage(
     low: finitePositive(kline["l"], "low price"),
     close: finitePositive(kline["c"], "close price"),
     volume: finiteNonnegative(kline["v"], "volume"),
+    quoteVolume: finiteNonnegative(kline["q"], "quote volume"),
     // The exchange event time is preserved exactly as received; completion is
     // defined by openTime + timeframeMinutes, not by this timestamp.
     sourceEventTime,
@@ -395,9 +410,119 @@ export class BinanceFuturesCollector {
     );
   }
 
+  /** Opaque identity of the canonical Python #70 session currently owned here. */
+  currentMovementSessionId(): string {
+    return this.movementSessionId;
+  }
+
   /** Trades rejected because their exchange-time bucket had already been finalized. */
   movementLateRejections(): number {
     return this.movementLateRejectionCount;
+  }
+
+  /**
+   * Fills the missing older prefix of canonical one-minute normalization history.
+   * Pages are exact, bounded Binance ranges and are persisted without touching
+   * live in-memory candle cursors, so historical work cannot regress live state.
+   */
+  async backfillMovementHistory(
+    lookbackMs: number,
+    beforeBoundaryMs = this.now(),
+    shouldContinue: () => boolean = () => true,
+  ): Promise<MovementHistoryBackfillResult> {
+    const result: MovementHistoryBackfillResult = {
+      historyChanged: false,
+      retryNeeded: false,
+    };
+    if (!Number.isSafeInteger(lookbackMs) || lookbackMs < MINUTE_MS ||
+        lookbackMs % MINUTE_MS !== 0) {
+      throw new Error("movement history lookback must be a positive whole-minute duration");
+    }
+    safeTimestamp(beforeBoundaryMs, "movement history backfill boundary");
+    const requiredCount = lookbackMs / MINUTE_MS;
+    const lastOpen = Math.floor(beforeBoundaryMs / MINUTE_MS) * MINUTE_MS - MINUTE_MS;
+    if (lastOpen < 0) return result;
+    const firstOpen = lastOpen - (requiredCount - 1) * MINUTE_MS;
+    if (firstOpen < 0) return result;
+    const symbols = this.subscribedSymbols();
+    if (symbols.length === 0 || !shouldContinue()) return result;
+    const existing = await this.dependencies.store.readMovementCandleHistory(
+      symbols, firstOpen, beforeBoundaryMs,
+    );
+    if (!shouldContinue()) return result;
+
+    for (const symbol of symbols) {
+      if (!shouldContinue()) return result;
+      let availableFirstOpen: number;
+      try {
+        const listedAt = await this.dependencies.loadHistoryListingTime(symbol);
+        safeTimestamp(listedAt, `${symbol} listing time`);
+        availableFirstOpen = Math.max(
+          firstOpen,
+          Math.ceil(listedAt / MINUTE_MS) * MINUTE_MS,
+        );
+      } catch {
+        result.retryNeeded = true;
+        continue;
+      }
+      if (!shouldContinue()) return result;
+      if (availableFirstOpen > lastOpen) continue;
+      const opens = new Set(
+        (existing.get(symbol) ?? [])
+          .filter((candle) =>
+            candle.openTime >= availableFirstOpen && candle.openTime <= lastOpen)
+          .map((candle) => candle.openTime),
+      );
+      let suffixFirstOpen = lastOpen + MINUTE_MS;
+      while (
+        suffixFirstOpen > availableFirstOpen &&
+        opens.has(suffixFirstOpen - MINUTE_MS)
+      ) {
+        suffixFirstOpen -= MINUTE_MS;
+      }
+
+      for (let pageLastOpen = suffixFirstOpen - MINUTE_MS;
+        pageLastOpen >= availableFirstOpen;) {
+        if (!shouldContinue()) return result;
+        const remaining = Math.floor((pageLastOpen - availableFirstOpen) / MINUTE_MS) + 1;
+        const count = Math.min(MOVEMENT_HISTORY_BACKFILL_PAGE_LIMIT, remaining);
+        const pageStart = pageLastOpen - (count - 1) * MINUTE_MS;
+        let candles: CollectorCandle[];
+        try {
+          candles = (
+            await this.dependencies.loadRest({
+              symbol,
+              timeframeMinutes: 1,
+              startTime: pageStart,
+              endTime: pageLastOpen + MINUTE_MS - 1,
+              limit: count,
+            })
+          ).sort((left, right) => left.openTime - right.openTime);
+          if (
+            candles.length !== count ||
+            candles[0]?.openTime !== pageStart ||
+            candles.at(-1)?.openTime !== pageLastOpen ||
+            !this.contiguous(candles, 1) ||
+            candles.some((candle) =>
+              candle.symbol !== symbol || candle.timeframeMinutes !== 1 ||
+              candle.transport !== "rest" || candle.endpoint !== BINANCE_USDM_REST_ENDPOINT ||
+              candle.closeTime !== candle.openTime + MINUTE_MS - 1 ||
+              candle.closeTime >= beforeBoundaryMs ||
+              !Number.isFinite(candle.quoteVolume) || candle.quoteVolume < 0)
+          ) {
+            throw new Error(`REST movement-history continuity unavailable for ${symbol}`);
+          }
+        } catch {
+          result.retryNeeded = true;
+          break;
+        }
+        if (!shouldContinue()) return result;
+        await this.dependencies.store.recordCollectorCandles(candles);
+        result.historyChanged = true;
+        pageLastOpen = pageStart - MINUTE_MS;
+      }
+    }
+    return result;
   }
 
   movementSourceStatus(symbol: string): MovementSourceState {
@@ -1066,6 +1191,7 @@ export class BinanceFuturesCollector {
       low: 1,
       close: 1,
       volume: 0,
+      quoteVolume: 0,
       sourceEventTime: now,
       receivedAt: now,
       transport: "rest",

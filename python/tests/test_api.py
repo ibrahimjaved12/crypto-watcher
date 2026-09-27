@@ -1,5 +1,6 @@
 import asyncio
 from copy import deepcopy
+from dataclasses import asdict
 from decimal import Decimal
 import unittest
 
@@ -10,6 +11,7 @@ from market_analysis.core import Candle, MINUTE
 from market_analysis.service import analyze_request, load_series, load_workload
 from market_analysis.providers import ANALYSIS_PROVIDERS, SOURCE, source_instrument
 from market_analysis.technical import TechnicalCandle
+from market_analysis.movement_metrics import MarketMovementConfig
 
 NOW = 1704153600000
 TOKEN = "test-service-token-" + "x" * 32
@@ -189,6 +191,39 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(readiness["state"], "warming")
         self.assertEqual(readiness["reason"], "insufficient_exact_live_history")
         self.assertEqual(readiness["status"], "WARMING")
+
+    def test_authenticated_history_and_metrics_use_session_engines(self):
+        app = create_app(TOKEN, analyzer_for())
+        boundary = movement_payload()
+        session_id = boundary["session_id"]
+        self.assertEqual(self.request(app, "POST", "/v1/movement/boundary",
+                                      json=boundary, headers=HEADERS).status_code, 200)
+        history = {
+            "schema_version": 1, "session_id": session_id,
+            "history_version": "history-v1", "as_of_boundary_time_ms": NOW,
+            "universe_id": "watched",
+            "universe_version": "watched-v1", "symbols": ["BTCUSDT"],
+            "config": asdict(MarketMovementConfig()),
+            "historical": [{"symbol": "BTCUSDT", "instrument_compatible": True,
+                            "candles": []}],
+        }
+        self.assertEqual(self.request(app, "POST", "/v1/movement/history",
+                                      json=history).status_code, 401)
+        self.assertEqual(self.request(app, "POST", "/v1/movement/history",
+                                      json=history, headers=HEADERS).status_code, 200)
+        metrics = {"schema_version": 1, "session_id": session_id,
+                   "history_version": "history-v1", "universe_id": "watched",
+                   "universe_version": "watched-v1",
+                   "evaluation_boundary_time_ms": NOW}
+        response = self.request(app, "POST", "/v1/movement/metrics",
+                                json=metrics, headers=HEADERS)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["evaluation"]["windows"]["1"]["symbols"][0]
+                         ["exclusion_reasons"], ["WARMING_INSUFFICIENT_LIVE_HISTORY",
+                                                  "INSUFFICIENT_NORMALIZATION_HISTORY"])
+        self.assertEqual(self.request(app, "POST", "/v1/movement/metrics",
+                                      json={**metrics, "snapshots": []},
+                                      headers=HEADERS).status_code, 422)
 
     def test_batch_provenance_and_completion_boundary(self):
         app = create_app(TOKEN, analyzer_for())

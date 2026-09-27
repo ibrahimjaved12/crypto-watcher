@@ -18,7 +18,7 @@ async function transpile(path, rewrites = {}) {
 
 const movementBucketsUrl = await transpile("../src/lib/market/movement-contract.ts");
 const stateUrl = await transpile("../src/lib/market/market-movement-state.ts");
-const metricsUrl = await transpile("../src/lib/market/movement-metrics.ts", {
+const metricsUrl = await transpile("../src/lib/market/movement-metrics-contract.ts", {
   "./movement-contract": movementBucketsUrl,
 });
 const classifierUrl = await transpile("../src/lib/market/market-state-classifier.ts");
@@ -31,7 +31,7 @@ const finalizationUrl = await transpile("../src/lib/market/movement-finalization
 });
 const engineUrl = await transpile("../src/lib/market/market-movement-engine.ts", {
   "./movement-contract": movementBucketsUrl,
-  "./movement-metrics": metricsUrl,
+  "./movement-metrics-contract": metricsUrl,
   "./market-state-classifier": classifierUrl,
   "./market-episode-lifecycle": lifecycleUrl,
   "./market-universe": universeUrl,
@@ -40,7 +40,6 @@ const engineUrl = await transpile("../src/lib/market/market-movement-engine.ts",
 const {
   MarketMovementEngine,
   buildMovementCurrentEvidence,
-  buildMovementNormalizationHistory,
   snapshotEventTimes,
 } = await import(engineUrl);
 const {
@@ -221,44 +220,95 @@ test("universe version is deterministic and changes only with membership", () =>
   assert.notEqual(buildMarketUniverse(["BTCUSDT"]).version, first.version);
 });
 
-test("one shared finalized boundary produces exactly one evaluation", () => {
+function warmingMovement(universe, boundary) {
+  const missing = { available: false, value: null, reason: "MARKET_UNIVERSE_INELIGIBLE" };
+  return {
+    algorithmVersion: "market-movement-v1", configVersion: "market-movement-config-v1",
+    universeId: universe.id, universeVersion: universe.version,
+    configuredUniverse: [...universe.symbols],
+    provider: "binance-usdm", exchange: "binance", priceType: "trade",
+    evaluationBoundaryTime: boundary,
+    windows: [1, 5, 15].map((windowMinutes) => ({
+      algorithmVersion: "market-movement-v1", configVersion: "market-movement-config-v1",
+      universeId: universe.id, universeVersion: universe.version,
+      configuredUniverse: [...universe.symbols], includedSymbols: [],
+      excludedSymbols: universe.symbols.map((symbol) => ({
+        symbol, reasons: ["WARMING_INSUFFICIENT_LIVE_HISTORY"],
+      })),
+      windowMinutes, provider: "binance-usdm", exchange: "binance", priceType: "trade",
+      evaluationBoundaryTime: boundary, historicalLookbackMs: 7 * 24 * 60 * MINUTE_MS,
+      minimumHistoricalCoverageMs: 3 * 24 * 60 * MINUTE_MS,
+      marketWideEligible: false, eligibleCount: 0, eligibleFraction: 0, symbols: [],
+      breadth: { available: false, unavailableReason: "MARKET_UNIVERSE_INELIGIBLE",
+        denominator: 0, flatFraction: null, risingFraction: null, fallingFraction: null,
+        materialRisingFraction: null, materialFallingFraction: null },
+      aggregates: { medianRawReturn: missing, medianNormalizedMovement: missing,
+        dispersionMadNormalizedMovement: missing },
+    })),
+  };
+}
+
+function broadRiseMovement(universe, boundary) {
+  const movement = warmingMovement(universe, boundary);
+  for (const window of movement.windows) {
+    window.marketWideEligible = true;
+    window.eligibleCount = 8;
+    window.eligibleFraction = 0.8;
+    window.includedSymbols = universe.symbols.slice(0, 8);
+    window.excludedSymbols = [];
+    window.breadth = {
+      available: true, unavailableReason: null, denominator: 8,
+      flatFraction: 0.1, risingFraction: 0.8, fallingFraction: 0.1,
+      materialRisingFraction: 0.8, materialFallingFraction: 0.1,
+    };
+    window.aggregates = {
+      medianRawReturn: available(0.02),
+      medianNormalizedMovement: available(1),
+      dispersionMadNormalizedMovement: available(0.1),
+    };
+  }
+  return movement;
+}
+
+test("one shared finalized boundary produces exactly one canonical supplier call", async () => {
   const engine = new MarketMovementEngine();
   const universe = buildMarketUniverse(SYMBOLS);
-  const snapshots = new Map(SYMBOLS.map((symbol) => [symbol, warmingSnapshot(symbol)]));
-  const sourceStatus = new Map(SYMBOLS.map((symbol) => [symbol, "LIVE"]));
+  const calls = [];
   const input = {
     finalizableBoundary: BASE,
-    snapshots,
-    sourceStatus,
-    historical: new Map(),
     universe,
+    movementForBoundary: async (boundary) => {
+      calls.push(boundary);
+      return warmingMovement(universe, boundary);
+    },
   };
 
-  const first = engine.advance(input);
+  const first = await engine.advance(input);
   assert.equal(first.length, 1);
   assert.equal(engine.lastEvaluatedBoundary, BASE);
+  assert.deepEqual(calls, [BASE]);
 
   // Re-advancing to the same boundary performs no new market evaluation.
-  assert.deepEqual(engine.advance(input), []);
+  assert.deepEqual(await engine.advance(input), []);
 
   // The next boundary evaluates exactly once more.
-  const next = engine.advance({ ...input, finalizableBoundary: BASE + 5_000 });
+  const next = await engine.advance({ ...input, finalizableBoundary: BASE + 5_000 });
   assert.equal(next.length, 1);
   assert.equal(engine.lastEvaluatedBoundary, BASE + 5_000);
+  assert.deepEqual(calls, [BASE, BASE + 5_000]);
 });
 
-test("all three windows are evaluated and a fresh restart stays WARMING", () => {
+test("canonical Python DTO passes unchanged to #72 and a fresh restart stays WARMING", async () => {
   const engine = new MarketMovementEngine();
   const universe = buildMarketUniverse(SYMBOLS);
-  const snapshots = new Map(SYMBOLS.map((symbol) => [symbol, warmingSnapshot(symbol)]));
-  const results = engine.advance({
+  const movement = warmingMovement(universe, BASE);
+  const results = await engine.advance({
     finalizableBoundary: BASE,
-    snapshots,
-    sourceStatus: new Map(SYMBOLS.map((symbol) => [symbol, "LIVE"])),
-    historical: normalizationHistory(SYMBOLS),
     universe,
+    movementForBoundary: async () => movement,
   });
   assert.equal(results.length, 1);
+  assert.strictEqual(results[0].movement, movement);
   const { classification } = results[0];
   assert.deepEqual(
     classification.windows.map((window) => window.windowMinutes),
@@ -273,99 +323,54 @@ test("all three windows are evaluated and a fresh restart stays WARMING", () => 
   assert.equal(classification.windows.find((w) => w.windowMinutes === 5).directionState, "WARMING");
 });
 
-test("normalization history is derived from contiguous one-minute candles only", () => {
-  const minutes = 200;
-  const candles = Array.from({ length: minutes }, (_, index) => ({
-    openTime: BASE + index * MINUTE_MS,
-    close: 100 + index * 0.1,
-    volume: 2,
-  }));
-  const history = buildMovementNormalizationHistory(new Map([["BTCUSDT", candles]]));
-  const entry = history.get("BTCUSDT");
-  assert.equal(entry[1].returns.length, minutes - 1);
-  assert.equal(entry[1].previousNotionalVolumes.length, 20);
-  assert.equal(entry[1].usableCoverageMs, minutes * MINUTE_MS);
-  assert.equal(entry[5].returns.length, 39);
-  assert.equal(entry[15].returns.length, 12);
-  const expected = Math.log(candles[1].close / candles[0].close);
-  assert.ok(Math.abs(entry[1].returns[0] - expected) < 1e-12);
+test("failed or mismatched canonical movement never advances lifecycle boundary", async () => {
+  const engine = new MarketMovementEngine();
+  const universe = buildMarketUniverse(SYMBOLS);
+  await assert.rejects(engine.advance({ finalizableBoundary: BASE, universe,
+    movementForBoundary: async () => { throw new Error("Python unavailable"); } }));
+  assert.equal(engine.lastEvaluatedBoundary, null);
+  await assert.rejects(engine.advance({ finalizableBoundary: BASE, universe,
+    movementForBoundary: async () => warmingMovement(universe, BASE + 5_000) }));
+  assert.equal(engine.lastEvaluatedBoundary, null);
 });
 
-test("a history gap drops non-comparable earlier candles", () => {
-  const minutes = 200;
-  const candles = Array.from({ length: minutes }, (_, index) => ({
-    openTime: BASE + index * MINUTE_MS,
-    close: 100 + index * 0.1,
-    volume: 1,
-  }));
-  const gapped = [...candles.slice(0, 100), ...candles.slice(101)];
-  const history = buildMovementNormalizationHistory(new Map([["BTCUSDT", gapped]]));
-  const entry = history.get("BTCUSDT");
-  // Only the trailing contiguous run (99 candles) is trusted.
-  assert.equal(entry[1].returns.length, 98);
-  assert.equal(entry[1].usableCoverageMs, 99 * MINUTE_MS);
+test("catch-up commits lifecycle and boundary only after every canonical result succeeds", async () => {
+  const engine = new MarketMovementEngine();
+  const universe = buildMarketUniverse(SYMBOLS);
+  await engine.advance({ finalizableBoundary: BASE, universe,
+    movementForBoundary: async (boundary) => broadRiseMovement(universe, boundary) });
+  const boundaryBefore = engine.lastEvaluatedBoundary;
+  const lifecycleBefore = structuredClone(engine.lifecycleState);
+  let failSecond = true;
+  await assert.rejects(engine.advance({ finalizableBoundary: BASE + 10_000, universe,
+    movementForBoundary: async (boundary) => {
+      if (boundary === BASE + 10_000 && failSecond) throw new Error("Python #71 unavailable");
+      return broadRiseMovement(universe, boundary);
+    } }));
+  assert.equal(engine.lastEvaluatedBoundary, boundaryBefore);
+  assert.deepEqual(engine.lifecycleState, lifecycleBefore);
+
+  failSecond = false;
+  const retry = await engine.advance({ finalizableBoundary: BASE + 10_000, universe,
+    movementForBoundary: async (boundary) => broadRiseMovement(universe, boundary) });
+  assert.equal(retry.length, 2);
+  assert.equal(retry[0].lifecycle.transitions[0]?.transition, "STARTED");
+  assert.equal(engine.lastEvaluatedBoundary, BASE + 10_000);
 });
 
-test("5m/15m history sampling is exchange-time aligned and phase-independent", () => {
-  const minutes = 130;
-  const candleAt = (offsetMinutes) => ({
-    openTime: BASE + offsetMinutes * MINUTE_MS,
-    close: 100 + offsetMinutes * 0.1 + (offsetMinutes % 5) * 0.01,
-    volume: 1 + (offsetMinutes % 3),
-  });
-  // The first three minutes are irrelevant to the 5m/15m population: dropping
-  // them must not shift the aligned endpoints or their returns/notionals.
-  const withLeading = Array.from({ length: minutes }, (_, index) => candleAt(index));
-  const withoutLeading = Array.from({ length: minutes - 3 }, (_, index) => candleAt(index + 3));
-
-  const withLeadingHistory = buildMovementNormalizationHistory(
-    new Map([["BTCUSDT", withLeading]]),
-  ).get("BTCUSDT");
-  const withoutLeadingHistory = buildMovementNormalizationHistory(
-    new Map([["BTCUSDT", withoutLeading]]),
-  ).get("BTCUSDT");
-
-  for (const windowMinutes of [5, 15]) {
-    assert.deepEqual(
-      withoutLeadingHistory[windowMinutes].returns,
-      withLeadingHistory[windowMinutes].returns,
-      `${windowMinutes}m returns must not shift with irrelevant leading candles`,
-    );
-    assert.deepEqual(
-      withoutLeadingHistory[windowMinutes].previousNotionalVolumes,
-      withLeadingHistory[windowMinutes].previousNotionalVolumes,
-      `${windowMinutes}m notional windows must use the same aligned intervals`,
-    );
-  }
-  // 1m remains canonical one-minute sampling.
-  assert.equal(withLeadingHistory[1].returns.length, minutes - 1);
-});
-
-test("5m history uses the 1m close completing at the boundary, not the boundary-open candle", () => {
-  const boundary = BASE; // 5m-aligned; call it 12:05 for the regression narrative
-  // openTimes are boundary-relative minutes: -6 = 11:59, -1 = 12:04, 0 = 12:05.
-  const closes = [
-    [-6, 200], // 11:59-open, the close immediately preceding the 12:00 boundary
-    [-5, 1],
-    [-4, 1],
-    [-3, 1],
-    [-2, 1],
-    [-1, 100], // 12:04-open, the close immediately preceding the 12:05 boundary
-    [0, 999], // 12:05-open, must never represent the 12:05 boundary
-  ];
-  const candles = closes.map(([offset, close]) => ({
-    openTime: boundary + offset * MINUTE_MS,
-    close,
-    volume: 1,
-  }));
-
-  const returns = buildMovementNormalizationHistory(new Map([["BTCUSDT", candles]])).get(
-    "BTCUSDT",
-  )[5].returns;
-  assert.equal(returns.length, 1);
-  // 12:05 boundary uses the 12:04-open close (100) against the 11:59-open close (200).
-  assert.ok(Math.abs(returns[0] - Math.log(100 / 200)) < 1e-12);
-  assert.notEqual(returns[0], Math.log(999 / 1));
+test("universe change evaluates the latest finalized boundary from its own session", async () => {
+  const engine = new MarketMovementEngine();
+  const firstUniverse = buildMarketUniverse(SYMBOLS);
+  await engine.advance({ finalizableBoundary: BASE, universe: firstUniverse,
+    movementForBoundary: async (boundary) => warmingMovement(firstUniverse, boundary) });
+  const newUniverse = buildMarketUniverse([...SYMBOLS, "DOTUSDT"]);
+  const calls = [];
+  await engine.advance({ finalizableBoundary: BASE + 20_000, universe: newUniverse,
+    movementForBoundary: async (boundary) => {
+      calls.push(boundary);
+      return warmingMovement(newUniverse, boundary);
+    } });
+  assert.deepEqual(calls, [BASE + 20_000]);
 });
 
 test("engine status keeps LIVE, WARMING, STALE and UNAVAILABLE distinct", () => {

@@ -17,6 +17,8 @@ export type Candle = {
   low: number;
   close: number;
   volume: number;
+  /** Exact Binance quote-asset volume when supplied by USD-M klines. */
+  quoteVolume?: number;
   complete?: boolean;
 };
 
@@ -189,6 +191,10 @@ function finiteNumber(value: unknown, label: string): number {
 }
 
 function finiteNonnegative(value: unknown, label: string): number {
+  if (value === null || value === undefined ||
+      (typeof value === "string" && value.trim() === "")) {
+    throw new Error(`invalid ${label}`);
+  }
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0) throw new Error(`invalid ${label}`);
   return number;
@@ -214,6 +220,8 @@ function fallbackContract(symbol: string): FuturesContract {
   };
 }
 
+class IncompatibleFuturesContractError extends Error {}
+
 async function resolveInstrument(
   source: MarketSource,
   symbol: string,
@@ -221,7 +229,7 @@ async function resolveInstrument(
 ): Promise<FuturesContract> {
   const normalized = symbol.toUpperCase();
   if (!isSupportedSymbol(normalized))
-    throw new Error(`unsupported futures contract: ${normalized}`);
+    throw new IncompatibleFuturesContractError(`unsupported futures contract: ${normalized}`);
   const canonical = fallbackContract(normalized);
 
   if (source === "kraken-futures") return canonical;
@@ -241,7 +249,7 @@ async function resolveInstrument(
       item.settleCcy !== "USDT" ||
       item.state !== "live"
     ) {
-      throw new Error(`inactive or incompatible futures contract: ${normalized}`);
+      throw new IncompatibleFuturesContractError(`inactive or incompatible futures contract: ${normalized}`);
     }
     const listedAt = Number(item.listTime);
     if (!Number.isSafeInteger(listedAt))
@@ -271,7 +279,7 @@ async function resolveInstrument(
     item.quoteAsset !== "USDT" ||
     item.marginAsset !== "USDT"
   ) {
-    throw new Error(`inactive or incompatible futures contract: ${normalized}`);
+    throw new IncompatibleFuturesContractError(`inactive or incompatible futures contract: ${normalized}`);
   }
   const filter = (type: string) => item.filters?.find((value) => value["filterType"] === type);
   const priceFilter = filter("PRICE_FILTER");
@@ -291,11 +299,26 @@ async function resolveInstrument(
   };
 }
 
+/** Factual Binance USD-M listing time used to bound collector-owned history backfill. */
+export async function loadBinanceFuturesListingTime(symbol: string): Promise<number> {
+  return (await resolveInstrument(MARKET_SOURCE, symbol)).listedAt;
+}
+
+/** Compatibility is factual only when metadata resolves or rejects the contract. */
+export async function loadBinanceFuturesCompatibility(symbol: string): Promise<boolean | null> {
+  try {
+    await resolveInstrument(MARKET_SOURCE, symbol);
+    return true;
+  } catch (error) {
+    return error instanceof IncompatibleFuturesContractError ? false : null;
+  }
+}
+
 function parseBinance(raw: unknown, minutes: number, now = Date.now()): Candle[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error("empty kline response");
   const duration = minutes * 60_000;
   return raw.map((row) => {
-    if (!Array.isArray(row) || row.length < 7) throw new Error("invalid kline row");
+    if (!Array.isArray(row) || row.length < 8) throw new Error("invalid kline row");
     const time = Number(row[0]);
     const closeTime = Number(row[6]);
     if (!Number.isSafeInteger(time) || closeTime !== time + duration - 1) {
@@ -308,6 +331,7 @@ function parseBinance(raw: unknown, minutes: number, now = Date.now()): Candle[]
       low: finiteNumber(row[3], "low price"),
       close: finiteNumber(row[4], "close price"),
       volume: finiteNonnegative(row[5], "volume"),
+      quoteVolume: finiteNonnegative(row[7], "quote volume"),
       complete: closeTime < now,
     };
   });

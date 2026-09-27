@@ -14,12 +14,11 @@ import type { MovementBucketSnapshot } from "./movement-contract";
 import type { BinanceFuturesCollector } from "./collector";
 import {
   buildMovementCurrentEvidence,
-  buildMovementNormalizationHistory,
   MarketMovementEngine,
   snapshotEventTimes,
   transitionToPersisted,
-  type MovementNormalizationHistory,
 } from "./market-movement-engine";
+import type { MovementInstrumentCompatibility, MovementRawHistory } from "./movement-normalization-input";
 import { buildMarketUniverse, type MarketUniverse } from "./market-universe";
 import {
   DEFAULT_MARKET_EPISODE_LIFECYCLE_CONFIG,
@@ -34,7 +33,8 @@ import {
   finalizableMovementBoundary,
   type MovementFinalizationConfig,
 } from "./movement-finalization";
-import { DEFAULT_MARKET_MOVEMENT_CONFIG, type MarketMovementConfig } from "./movement-metrics";
+import { DEFAULT_MARKET_MOVEMENT_CONFIG, type MarketMovementConfig,
+  type MarketMovementEvaluation } from "./movement-metrics-contract";
 import {
   DEFAULT_MARKET_STATE_CLASSIFIER_CONFIG,
   type MarketStateClassifierConfig,
@@ -42,12 +42,13 @@ import {
 import {
   deriveMovementEngineStatus,
   MARKET_UNIVERSE_ID,
-  type MovementSourceStatus,
   type PersistedMovementTransition,
 } from "./market-movement-state";
 
 export const MOVEMENT_ENGINE_TICK_MS = 1_000;
-export const MOVEMENT_HISTORICAL_REFRESH_MS = 15 * 60_000;
+const MINUTE_MS = 60_000;
+const LONGEST_MOVEMENT_WINDOW_MS = 15 * MINUTE_MS;
+const RAW_HISTORY_WARMUP_MS = LONGEST_MOVEMENT_WINDOW_MS + MINUTE_MS;
 
 /**
  * Bounded exponential backoff for operational reads/writes that must not be
@@ -67,13 +68,20 @@ export type MovementCollectorPort = Pick<
   | "subscribedSymbols"
   | "movementSnapshot"
   | "advanceMovementBuckets"
-  | "movementSourceStatus"
   | "movementLateRejections"
+  | "currentMovementSessionId"
 >;
 
 export type MovementEngineRuntimeDependencies = {
   store: OperationalStore;
   collector: MovementCollectorPort;
+  registerHistory: (sessionId: string, historyVersion: string, universe: MarketUniverse,
+    config: MarketMovementConfig, historical: MovementRawHistory,
+    compatibility: MovementInstrumentCompatibility,
+    asOfBoundaryTime: number) => Promise<void>;
+  instrumentCompatibility: (symbol: string) => Promise<boolean | null>;
+  calculateMovement: (sessionId: string, boundaryTime: number, historyVersion: string,
+    universe: MarketUniverse, configVersion: string) => Promise<MarketMovementEvaluation>;
   finalization?: MovementFinalizationConfig;
   movementConfig?: MarketMovementConfig;
   classifierConfig?: MarketStateClassifierConfig;
@@ -115,12 +123,19 @@ export class MovementEngineRuntime {
   private lifecycleRestored = false;
   private lifecycleRestoreRetryAt = 0;
   private lifecycleRestoreFailures = 0;
-  private historical: MovementNormalizationHistory = new Map();
-  private historicalLoadedAt = 0;
+  private historical: MovementRawHistory = new Map();
+  private historicalCompatibility: MovementInstrumentCompatibility = new Map();
+  private historicalCutoff: number | null = null;
   private historicalRetryAt = 0;
   private historicalFailures = 0;
   private historicalUniverseVersion: string | null = null;
+  private historicalVersion: string | null = null;
+  private historicalAsOfBoundary: number | null = null;
+  private registeredSessionId: string | null = null;
+  private registeredUniverseVersion: string | null = null;
   private historicalLoading: Promise<void> | null = null;
+  private historicalRefreshGeneration = 0;
+  private appliedHistoricalRefreshGeneration = 0;
   private lastTransition: PersistedMovementTransition | null = null;
   private pendingPersistence: PendingMovementPersistence | null = null;
 
@@ -153,6 +168,12 @@ export class MovementEngineRuntime {
     await this.historicalLoading?.catch(() => undefined);
   }
 
+  /** Forces the next evaluation cycle to reload normalization input from storage. */
+  requestNormalizationHistoryRefresh(): void {
+    this.historicalRefreshGeneration += 1;
+    this.historicalRetryAt = 0;
+  }
+
   /**
    * Drops every piece of in-memory lifecycle ownership so a reacquisition cannot
    * continue from stale counters or blindly write an old tenure's pending batch.
@@ -163,10 +184,17 @@ export class MovementEngineRuntime {
     this.lifecycleRestoreRetryAt = 0;
     this.lifecycleRestoreFailures = 0;
     this.historical = new Map();
-    this.historicalLoadedAt = 0;
+    this.historicalCompatibility = new Map();
+    this.historicalCutoff = null;
     this.historicalRetryAt = 0;
     this.historicalFailures = 0;
     this.historicalUniverseVersion = null;
+    this.historicalVersion = null;
+    this.historicalAsOfBoundary = null;
+    this.registeredSessionId = null;
+    this.registeredUniverseVersion = null;
+    this.historicalRefreshGeneration = 0;
+    this.appliedHistoricalRefreshGeneration = 0;
     this.lastTransition = null;
     this.pendingPersistence = null;
     this.engine = new MarketMovementEngine();
@@ -205,33 +233,52 @@ export class MovementEngineRuntime {
     // consuming safe explicit boundaries even while #73 restore/write I/O fails.
     await this.deps.collector.advanceMovementBuckets(finalizable);
     if (tenure !== this.tenure) return;
+    const movementSessionId = this.deps.collector.currentMovementSessionId();
+    const stillCurrent = () =>
+      tenure === this.tenure &&
+      this.deps.collector.currentMovementSessionId() === movementSessionId &&
+      buildMarketUniverse(this.deps.collector.subscribedSymbols()).version === universe.version;
+    if (!stillCurrent()) return;
     // Fail closed downstream: never evaluate against lifecycle state that has
     // not been established by a successful operational read.
     if (!this.lifecycleRestored && !(await this.attemptLifecycleRestore(now))) return;
-    if (tenure !== this.tenure) return;
+    if (!stillCurrent()) return;
     // An outstanding #73 batch must persist before any later lifecycle boundary
     // is evaluated, but it no longer blocks upstream #70 bucket finalization.
     if (this.pendingPersistence && !(await this.flushPendingPersistence())) return;
-    if (tenure !== this.tenure) return;
-    await this.refreshHistorical(universe, now);
-    if (tenure !== this.tenure) return;
+    if (!stillCurrent()) return;
+    const firstBoundary = this.engine.firstPendingBoundary(finalizable, universe.version);
+    if (firstBoundary === null) return;
+    await this.refreshHistorical(universe, now, movementSessionId, firstBoundary, finalizable);
+    if (!stillCurrent() || !this.historicalVersion ||
+        this.registeredSessionId !== movementSessionId ||
+        this.registeredUniverseVersion !== universe.version) return;
     const snapshots = new Map<string, MovementBucketSnapshot>();
-    const sourceStatus = new Map<string, MovementSourceStatus>();
     for (const symbol of universe.symbols) {
       const snapshot = this.deps.collector.movementSnapshot(symbol);
       if (snapshot) snapshots.set(symbol, snapshot);
-      sourceStatus.set(symbol, this.deps.collector.movementSourceStatus(symbol));
     }
-    const results = this.engine.advance({
-      finalizableBoundary: finalizable,
-      snapshots,
-      sourceStatus,
-      historical: this.historical,
-      universe,
-      movementConfig: this.movementConfig,
-      classifierConfig: this.classifierConfig,
-      lifecycleConfig: this.lifecycleConfig,
-    });
+    let results: Awaited<ReturnType<MarketMovementEngine["advance"]>>;
+    try {
+      results = await this.engine.advance({
+        finalizableBoundary: finalizable,
+        universe,
+        movementForBoundary: async (boundary) => {
+          const movement = await this.deps.calculateMovement(
+            movementSessionId, boundary, this.historicalVersion!, universe,
+            this.movementConfig.version,
+          );
+          if (!stillCurrent()) throw new Error("stale movement session or universe response");
+          return movement;
+        },
+        classifierConfig: this.classifierConfig,
+        lifecycleConfig: this.lifecycleConfig,
+      });
+    } catch (error) {
+      console.error(`[movement-engine] canonical #71 unavailable: ${message(error)}`);
+      return;
+    }
+    if (!stillCurrent()) return;
     if (results.length === 0) return;
     await this.persist(results, universe, snapshots, now);
   }
@@ -270,31 +317,57 @@ export class MovementEngineRuntime {
     }
   }
 
-  private async refreshHistorical(universe: MarketUniverse, now: number): Promise<void> {
+  private async refreshHistorical(universe: MarketUniverse, now: number,
+    sessionId: string, firstBoundary: number, finalizable: number): Promise<void> {
     if (this.historicalLoading) return;
     if (now < this.historicalRetryAt) return;
-    // A changed universe (e.g. a newly watched symbol) needs history immediately
-    // rather than waiting out the normal refresh cadence.
+    // Reuse only raw candles for the same strict completed-minute cutoff.
+    const cutoff = Math.ceil(finalizable / MINUTE_MS) * MINUTE_MS;
     const universeChanged = this.historicalUniverseVersion !== universe.version;
-    if (
-      !universeChanged &&
-      this.historicalLoadedAt !== 0 &&
-      now - this.historicalLoadedAt < MOVEMENT_HISTORICAL_REFRESH_MS
-    ) {
-      return;
-    }
+    const refreshGeneration = this.historicalRefreshGeneration;
+    const needsRefresh = universeChanged || this.historicalCutoff !== cutoff ||
+      this.historicalAsOfBoundary === null || firstBoundary < this.historicalAsOfBoundary ||
+      this.appliedHistoricalRefreshGeneration !== refreshGeneration ||
+      this.historicalVersion === null;
+    const needsRegistration = this.registeredSessionId !== sessionId ||
+      this.registeredUniverseVersion !== universe.version;
+    if (!needsRefresh && !needsRegistration) return;
     const tenure = this.tenure;
     this.historicalLoading = (async () => {
       try {
-        const candles = await this.deps.store.readMovementCandleHistory(
-          universe.symbols,
-          now - this.movementConfig.historicalLookbackMs,
-        );
-        // Ownership may have been lost while the read was in flight.
-        if (tenure !== this.tenure) return;
-        this.historical = buildMovementNormalizationHistory(candles, this.movementConfig);
-        this.historicalLoadedAt = now;
-        this.historicalUniverseVersion = universe.version;
+        if (needsRefresh) {
+          const candles = await this.deps.store.readMovementCandleHistory(
+            universe.symbols,
+            Math.max(0, firstBoundary - this.movementConfig.historicalLookbackMs -
+              RAW_HISTORY_WARMUP_MS),
+            finalizable,
+          );
+          if (tenure !== this.tenure ||
+              this.deps.collector.currentMovementSessionId() !== sessionId ||
+              buildMarketUniverse(this.deps.collector.subscribedSymbols()).version !== universe.version) return;
+          this.historical = candles;
+          this.historicalCompatibility = new Map(await Promise.all(universe.symbols.map(
+            async (symbol) => [symbol, await this.deps.instrumentCompatibility(symbol)] as const,
+          )));
+          if (tenure !== this.tenure ||
+              this.deps.collector.currentMovementSessionId() !== sessionId ||
+              buildMarketUniverse(this.deps.collector.subscribedSymbols()).version !== universe.version) return;
+          this.historicalVersion = crypto.randomUUID();
+          this.historicalAsOfBoundary = firstBoundary;
+          this.historicalCutoff = cutoff;
+          this.historicalUniverseVersion = universe.version;
+          this.appliedHistoricalRefreshGeneration = refreshGeneration;
+          this.registeredSessionId = null;
+          this.registeredUniverseVersion = null;
+        }
+        await this.deps.registerHistory(sessionId, this.historicalVersion!, universe,
+          this.movementConfig, this.historical, this.historicalCompatibility,
+          this.historicalAsOfBoundary!);
+        if (tenure !== this.tenure ||
+            this.deps.collector.currentMovementSessionId() !== sessionId ||
+            buildMarketUniverse(this.deps.collector.subscribedSymbols()).version !== universe.version) return;
+        this.registeredSessionId = sessionId;
+        this.registeredUniverseVersion = universe.version;
         this.historicalFailures = 0;
         this.historicalRetryAt = 0;
       } catch (error) {
@@ -313,7 +386,7 @@ export class MovementEngineRuntime {
   }
 
   private async persist(
-    results: ReturnType<MarketMovementEngine["advance"]>,
+    results: Awaited<ReturnType<MarketMovementEngine["advance"]>>,
     universe: MarketUniverse,
     snapshots: ReadonlyMap<string, MovementBucketSnapshot>,
     now: number,

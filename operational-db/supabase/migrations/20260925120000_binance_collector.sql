@@ -18,7 +18,8 @@ CREATE TABLE public.collector_recent_candles (
   low DOUBLE PRECISION NOT NULL CHECK (low > 0 AND low < 'Infinity'::float8),
   close DOUBLE PRECISION NOT NULL CHECK (close > 0 AND close < 'Infinity'::float8),
   volume DOUBLE PRECISION NOT NULL CHECK (volume >= 0 AND volume < 'Infinity'::float8),
-  source_event_at TIMESTAMPTZ NOT NULL,
+  quote_volume DOUBLE PRECISION NOT NULL CHECK (quote_volume >= 0 AND quote_volume < 'Infinity'::float8),
+  source_event_at TIMESTAMPTZ,
   received_at TIMESTAMPTZ NOT NULL,
   transport TEXT NOT NULL CHECK (transport IN ('rest', 'websocket')),
   inserted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
@@ -26,8 +27,6 @@ CREATE TABLE public.collector_recent_candles (
   CHECK (instrument_id = provider || ':' || native_symbol),
   CHECK (high >= greatest(open, close) AND low <= least(open, close) AND high >= low),
   CHECK (close_time = open_time + make_interval(mins => timeframe_minutes) - interval '1 millisecond'),
-  CHECK (source_event_at >= close_time),
-  CHECK (received_at >= source_event_at),
   CHECK (mod(extract(epoch FROM open_time)::BIGINT, timeframe_minutes * 60) = 0)
 );
 CREATE INDEX collector_recent_candles_time
@@ -82,13 +81,15 @@ BEGIN
       provider TEXT, instrument_id TEXT, price_type TEXT, timeframe_minutes INTEGER,
       open_time TIMESTAMPTZ, close_time TIMESTAMPTZ, open DOUBLE PRECISION,
       high DOUBLE PRECISION, low DOUBLE PRECISION, close DOUBLE PRECISION,
-      volume DOUBLE PRECISION, source_event_at TIMESTAMPTZ
+      volume DOUBLE PRECISION, quote_volume DOUBLE PRECISION,
+      source_event_at TIMESTAMPTZ
     )
     JOIN public.collector_recent_candles c USING (
       provider, instrument_id, price_type, timeframe_minutes, open_time
     )
     WHERE c.close_time <> x.close_time OR c.open <> x.open OR c.high <> x.high
       OR c.low <> x.low OR c.close <> x.close OR c.volume <> x.volume
+      OR c.quote_volume IS DISTINCT FROM x.quote_volume
   ) THEN
     RAISE EXCEPTION 'Conflicting collector candle for stable identity';
   END IF;
@@ -98,17 +99,19 @@ BEGIN
     INSERT INTO public.collector_recent_candles (
       instrument_id, symbol, native_symbol, provider, endpoint, price_type,
       timeframe_minutes, open_time, close_time, open, high, low, close, volume,
-      source_event_at, received_at, transport
+      quote_volume, source_event_at, received_at, transport
     )
     SELECT x.instrument_id, x.symbol, x.native_symbol, x.provider, x.endpoint,
       x.price_type, x.timeframe_minutes, x.open_time, x.close_time, x.open, x.high,
-      x.low, x.close, x.volume, x.source_event_at, x.received_at, x.transport
+      x.low, x.close, x.volume, x.quote_volume, x.source_event_at, x.received_at,
+      x.transport
     FROM jsonb_to_recordset(p_rows) AS x(
       instrument_id TEXT, symbol TEXT, native_symbol TEXT, provider TEXT, endpoint TEXT,
       price_type TEXT, timeframe_minutes INTEGER, open_time TIMESTAMPTZ,
       close_time TIMESTAMPTZ, open DOUBLE PRECISION, high DOUBLE PRECISION,
       low DOUBLE PRECISION, close DOUBLE PRECISION, volume DOUBLE PRECISION,
-      source_event_at TIMESTAMPTZ, received_at TIMESTAMPTZ, transport TEXT
+      quote_volume DOUBLE PRECISION, source_event_at TIMESTAMPTZ,
+      received_at TIMESTAMPTZ, transport TEXT
     )
     ON CONFLICT (provider, instrument_id, price_type, timeframe_minutes, open_time)
       DO NOTHING
@@ -210,6 +213,70 @@ AS $$
     (SELECT count(*) FROM public.collector_health),
     (SELECT min(open_time) FROM public.collector_recent_candles),
     (SELECT max(open_time) FROM public.collector_recent_candles);
+$$;
+
+-- Read the collector's canonical completed-candle evidence for application-owned TA.
+-- REST rows have no exchange event timestamp; every stored provenance field is
+-- returned as recorded, without reconstruction.
+CREATE FUNCTION public.get_collector_ta_candles(
+  p_symbol TEXT, p_timeframe_minutes INTEGER, p_limit INTEGER
+) RETURNS JSONB
+LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = public
+AS $$
+DECLARE
+  normalized TEXT;
+  recent JSONB;
+BEGIN
+  IF p_symbol IS NULL OR btrim(p_symbol) = '' THEN
+    RAISE EXCEPTION 'Invalid collector TA candle request';
+  END IF;
+  IF p_timeframe_minutes IS NULL OR p_timeframe_minutes NOT IN (1, 15, 60, 240) THEN
+    RAISE EXCEPTION 'Invalid collector TA candle timeframe';
+  END IF;
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
+    RAISE EXCEPTION 'Invalid collector TA candle limit';
+  END IF;
+  normalized := upper(btrim(p_symbol));
+  SELECT coalesce(
+      jsonb_agg(
+        jsonb_build_object(
+          'provider', newest.provider,
+          'instrument_id', newest.instrument_id,
+          'native_symbol', newest.native_symbol,
+          'price_type', newest.price_type,
+          'endpoint', newest.endpoint,
+          'transport', newest.transport,
+          'open_time_ms', (extract(epoch FROM newest.open_time) * 1000)::BIGINT,
+          'close_time_ms', (extract(epoch FROM newest.close_time) * 1000)::BIGINT,
+          'source_event_at_ms',
+            CASE WHEN newest.source_event_at IS NULL THEN NULL
+                 ELSE (extract(epoch FROM newest.source_event_at) * 1000)::BIGINT END,
+          'received_at_ms', (extract(epoch FROM newest.received_at) * 1000)::BIGINT,
+          'open', newest.open,
+          'high', newest.high,
+          'low', newest.low,
+          'close', newest.close,
+          'volume', newest.volume
+        )
+        ORDER BY newest.open_time
+      ),
+      '[]'::jsonb
+    )
+    INTO recent
+    FROM (
+      SELECT c.provider, c.instrument_id, c.native_symbol, c.price_type, c.endpoint,
+             c.transport, c.open_time, c.close_time, c.source_event_at, c.received_at,
+             c.open, c.high, c.low, c.close, c.volume
+      FROM public.collector_recent_candles c
+      WHERE c.provider = 'binance-usdm'
+        AND c.price_type = 'trade'
+        AND c.symbol = normalized
+        AND c.timeframe_minutes = p_timeframe_minutes
+      ORDER BY c.open_time DESC
+      LIMIT p_limit
+    ) newest;
+  RETURN recent;
+END;
 $$;
 
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, anon, authenticated;

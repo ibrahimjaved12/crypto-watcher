@@ -4,7 +4,7 @@
 -- Service-role only, external operational database.
 
 CREATE FUNCTION public.get_collector_movement_candles(
-  p_symbols TEXT[], p_since TIMESTAMPTZ
+  p_symbols TEXT[], p_since TIMESTAMPTZ, p_before_boundary TIMESTAMPTZ
 ) RETURNS JSONB
 LANGUAGE sql STABLE SECURITY INVOKER SET search_path = public
 AS $$
@@ -15,7 +15,8 @@ AS $$
         jsonb_build_array(
           (extract(epoch FROM open_time) * 1000)::BIGINT,
           close,
-          volume
+          volume,
+          quote_volume
         )
         ORDER BY open_time
       ) AS rows
@@ -23,11 +24,12 @@ AS $$
     WHERE timeframe_minutes = 1
       AND symbol = ANY(p_symbols)
       AND open_time >= p_since
+      AND open_time + interval '1 minute' < p_before_boundary
     GROUP BY symbol
   ) grouped;
 $$;
 
-REVOKE ALL ON FUNCTION public.get_collector_movement_candles(TEXT[], TIMESTAMPTZ)
+REVOKE ALL ON FUNCTION public.get_collector_movement_candles(TEXT[], TIMESTAMPTZ, TIMESTAMPTZ)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.get_collector_movement_candles(TEXT[], TIMESTAMPTZ)
+GRANT EXECUTE ON FUNCTION public.get_collector_movement_candles(TEXT[], TIMESTAMPTZ, TIMESTAMPTZ)
   TO service_role;

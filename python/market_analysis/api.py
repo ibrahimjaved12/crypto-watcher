@@ -13,6 +13,8 @@ import httpx
 from .api_models import (
     AnalysisRequest,
     MovementBoundaryRequest,
+    MovementHistoryRegistrationRequest,
+    MovementMetricsRequest,
     TechnicalAnalysisBatchRequest,
     TechnicalAnalysisRequest,
 )
@@ -91,6 +93,20 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
             return request.app.state.movement_boundary_service.advance(body)
         except ValueError:
             raise HTTPException(409, "Movement boundary could not be applied") from None
+
+    @app.post("/v1/movement/history", dependencies=[Depends(authorize)])
+    async def movement_history(body: MovementHistoryRegistrationRequest, request: Request):
+        try:
+            return request.app.state.movement_boundary_service.register_history(body)
+        except ValueError:
+            raise HTTPException(409, "Movement history could not be registered") from None
+
+    @app.post("/v1/movement/metrics", dependencies=[Depends(authorize)])
+    async def movement_metrics(body: MovementMetricsRequest, request: Request):
+        try:
+            return request.app.state.movement_boundary_service.calculate_metrics(body)
+        except ValueError:
+            raise HTTPException(409, "Movement metrics could not be calculated") from None
 
     return app
 
