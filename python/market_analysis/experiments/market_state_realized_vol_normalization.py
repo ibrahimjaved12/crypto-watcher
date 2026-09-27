@@ -443,6 +443,7 @@ class RealizedVolatilityComparisonSummary:
     median_abs_material_falling_breadth_difference_by_window: tuple[tuple[int, float | None], ...]
     baseline_outlier_candidate_count: int
     candidate_outlier_candidate_count: int
+    outlier_comparable_count: int
     both_outlier_count: int
     baseline_only_outlier_count: int
     candidate_only_outlier_count: int
@@ -538,14 +539,13 @@ def _summary(points: tuple, partition: str) -> RealizedVolatilityComparisonSumma
         _median_or_none(tuple(abs(after.normalized_z.value - before.normalized_z.value)
                               for before, after in pairs)),
     ) for symbol, pairs in primary_by_symbol.items())
-    all_pairs = tuple(pair for minute in WINDOWS
-                      for pair in _included_pairs(selected, minute))
+    outlier_pairs = tuple(pair for minute in WINDOWS for pair in z_pairs[minute])
     both_outliers = sum(before.outlier_candidate and after.outlier_candidate
-                        for before, after in all_pairs)
+                        for before, after in outlier_pairs)
     baseline_only = sum(before.outlier_candidate and not after.outlier_candidate
-                        for before, after in all_pairs)
+                        for before, after in outlier_pairs)
     candidate_only = sum(after.outlier_candidate and not before.outlier_candidate
-                         for before, after in all_pairs)
+                         for before, after in outlier_pairs)
     direction_counts = {}
     direction_disagreements = {}
     for minute in WINDOWS:
@@ -610,6 +610,7 @@ def _summary(points: tuple, partition: str) -> RealizedVolatilityComparisonSumma
             for minute in WINDOWS),
         baseline_outlier_candidate_count=both_outliers + baseline_only,
         candidate_outlier_candidate_count=both_outliers + candidate_only,
+        outlier_comparable_count=len(outlier_pairs),
         both_outlier_count=both_outliers,
         baseline_only_outlier_count=baseline_only,
         candidate_only_outlier_count=candidate_only,

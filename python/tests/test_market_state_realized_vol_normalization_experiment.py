@@ -5,7 +5,10 @@ from decimal import Decimal
 import math
 import unittest
 
-from market_analysis.experiments.market_state_common import MarketStateExperimentPoint
+from market_analysis.experiments.market_state_common import (
+    MarketStateExperimentPoint,
+    advance_canonical_branch,
+)
 from market_analysis.experiments.market_state_realized_vol_normalization import (
     REALIZED_VOLATILITY_ALGORITHM_VERSION,
     REALIZED_VOL_CONFIG_30M,
@@ -19,13 +22,19 @@ from market_analysis.experiments.market_state_realized_vol_normalization import 
     RealizedVolatilityNormalizationConfig,
     RealizedVolatilitySample,
     RealizedVolatilitySymbolHistory,
+    PairedMarketStateRealizedVolatilityPoint,
     _candidate_z,
     _horizon_sigma,
     _realized_sigma_1m,
+    _summary,
     run_market_state_realized_vol_normalization_experiment,
     transform_market_movement_with_realized_vol_normalization,
 )
-from market_analysis.movement_classifier import SymbolSourceTimeEvidence
+from market_analysis.market_episode_lifecycle import MarketEpisodeLifecycleConfig
+from market_analysis.movement_classifier import (
+    MarketClassifierConfig,
+    SymbolSourceTimeEvidence,
+)
 from market_analysis.movement_metrics import (
     ALGORITHM_VERSION,
     DEFAULT_CONFIG_VERSION,
@@ -164,6 +173,23 @@ def _ready_state(current_boundary, config=REALIZED_VOL_CONFIG_30M, *,
 
 def _symbol_result(evaluation, minute=5, symbol="S1"):
     return next(item for item in evaluation.windows[minute].symbols if item.symbol == symbol)
+
+
+def _single_point_summary(baseline, candidate, candidate_state):
+    source = tuple(SymbolSourceTimeEvidence(symbol, None, None, None)
+                   for symbol in baseline.configured_universe)
+    baseline_classification, baseline_lifecycle = advance_canonical_branch(
+        baseline, source, None, MarketClassifierConfig(), MarketEpisodeLifecycleConfig())
+    candidate_classification, candidate_lifecycle = advance_canonical_branch(
+        candidate, source, None, MarketClassifierConfig(), MarketEpisodeLifecycleConfig())
+    paired = PairedMarketStateRealizedVolatilityPoint(
+        baseline.evaluation_boundary_time_ms, "development", baseline, candidate,
+        baseline_classification, candidate_classification,
+        baseline_lifecycle.next_state, candidate_lifecycle.next_state,
+        baseline_lifecycle.transitions, candidate_lifecycle.transitions,
+        candidate_state, (),
+    )
+    return _summary((paired,), "all")
 
 
 class RealizedVolatilityExperimentTests(unittest.TestCase):
@@ -455,7 +481,7 @@ class RealizedVolatilityExperimentTests(unittest.TestCase):
         ):
             with self.subTest(mad=mad, sigma=sigma):
                 baseline = _evaluation(boundary, symbols=symbols, returns=raw, mads=mad)
-                candidate, _ = transform_market_movement_with_realized_vol_normalization(
+                candidate, next_state = transform_market_movement_with_realized_vol_normalization(
                     baseline, REALIZED_VOL_CONFIG_30M,
                     _ready_state(boundary, symbols=symbols, prior_returns=sigma))
                 before = _symbol_result(baseline, 5, "S10")
@@ -465,6 +491,37 @@ class RealizedVolatilityExperimentTests(unittest.TestCase):
                 self.assertEqual(after.cross_sectional_z, before.cross_sectional_z)
                 self.assertEqual(before.outlier_candidate, baseline_expected)
                 self.assertEqual(after.outlier_candidate, candidate_expected)
+                summary = _single_point_summary(baseline, candidate, next_state)
+                self.assertEqual(summary.outlier_comparable_count, len(symbols) * len(WINDOWS))
+                self.assertEqual(summary.both_outlier_count, 0)
+                self.assertEqual(summary.baseline_only_outlier_count,
+                                 len(WINDOWS) if baseline_expected else 0)
+                self.assertEqual(summary.candidate_only_outlier_count,
+                                 len(WINDOWS) if candidate_expected else 0)
+                self.assertEqual(summary.baseline_outlier_candidate_count,
+                                 len(WINDOWS) if baseline_expected else 0)
+                self.assertEqual(summary.candidate_outlier_candidate_count,
+                                 len(WINDOWS) if candidate_expected else 0)
+
+    def test_warming_baseline_outlier_is_not_a_comparable_outlier_result(self):
+        boundary = 30 * 60_000
+        symbols = tuple(f"S{index}" for index in range(1, 11))
+        raw = {symbol: 0.01 + index * 0.001 for index, symbol in enumerate(symbols)}
+        raw["S10"] = 0.2
+        baseline = _evaluation(boundary, symbols=symbols, returns=raw, mads=0.03)
+        candidate, state = transform_market_movement_with_realized_vol_normalization(
+            baseline, REALIZED_VOL_CONFIG_30M)
+        self.assertTrue(_symbol_result(baseline, 5, "S10").outlier_candidate)
+        self.assertEqual(_symbol_result(candidate, 5, "S10").normalized_z.reason,
+                         REALIZED_VOL_WARMING)
+        self.assertFalse(_symbol_result(candidate, 5, "S10").outlier_candidate)
+        summary = _single_point_summary(baseline, candidate, state)
+        self.assertEqual(summary.outlier_comparable_count, 0)
+        self.assertEqual(summary.baseline_outlier_candidate_count, 0)
+        self.assertEqual(summary.candidate_outlier_candidate_count, 0)
+        self.assertEqual(summary.both_outlier_count, 0)
+        self.assertEqual(summary.baseline_only_outlier_count, 0)
+        self.assertEqual(summary.candidate_only_outlier_count, 0)
 
     def test_ready_aggregate_uses_candidate_z_and_canonical_helpers(self):
         boundary = 30 * 60_000
