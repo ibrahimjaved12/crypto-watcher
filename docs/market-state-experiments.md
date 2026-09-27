@@ -3,9 +3,10 @@
 This registry preregisters the deferred Issue #75 candidates. Each candidate is
 evaluated independently against the unchanged canonical #28 V1 event stream.
 The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
-**EXP-75-03 Kalman/state-space**, **EXP-75-04A offline PELT**, and
-**EXP-75-04B online Bayesian change-point detection**. EXP-75-05 through
-EXP-75-12 remain unimplemented.
+**EXP-75-03 Kalman/state-space**, **EXP-75-04A offline PELT**,
+**EXP-75-04B online Bayesian change-point detection**, and
+**EXP-75-05 regression-slope acceleration**. EXP-75-06 through EXP-75-12
+remain unimplemented.
 
 ## EXP-75-01 — EWMA aggregate smoothing
 
@@ -159,21 +160,33 @@ EXP-75-12 remain unimplemented.
 
 ## EXP-75-05 — Regression-slope acceleration
 
-- **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** A preregistered local regression-slope change may be less
-  boundary-sensitive than V1 adjacent-window acceleration while retaining useful
-  detection latency.
-- **Input/data prerequisite:** Fixed regression window, weighting, and robustness
-  method.
-- **Causal/live suitability:** Potentially causal after the window and estimator
-  are fixed.
-- **What changes relative to V1:** Future candidate acceleration evidence only.
-- **What remains unchanged:** V1 movement metrics, breadth, classifier thresholds,
-  and lifecycle rules.
-- **Evaluation measurements:** Pace disagreement, onset lead/lag, and episode
-  stability.
-- **Promotion constraint:** The estimator must be versioned before independent
-  comparison.
+- **Status:** `IMPLEMENTED_EXPERIMENT`
+- **Hypothesis:** A causal uniformly weighted OLS slope of each symbol's
+  canonical 5m velocity may provide less boundary-sensitive primary
+  acceleration/pace evidence than V1's adjacent-window acceleration. Benefit
+  requires improved pace/strength stability without excessive estimator lag or
+  unavailability, while broad direction and directional episode boundaries
+  remain unchanged.
+- **Input/data prerequisite:** Consecutive five-second canonical #71 5m
+  per-symbol velocity observations (log return per second), not raw
+  intra-window price history. Preregistered windows contain 12, 36, or 60
+  points, each with uniform-weight OLS against five-second timestamps.
+- **Causal/live suitability:** Each candidate uses only observations through
+  the current boundary; missing or excluded symbol velocity resets that
+  symbol's bounded history.
+- **What changes relative to V1:** Included symbols' 5m acceleration metric
+  only. The candidate evaluation has a separate movement algorithm/config
+  identity and uses the same canonical #72 classifier and #73 lifecycle.
+- **What remains unchanged:** All 1m and 15m metric values, 5m direction
+  inputs, market eligibility, breadth, classifier thresholds, lifecycle rules,
+  and the baseline branch.
+- **Evaluation measurements:** Regression warm-up and availability, primary 5m
+  pace disagreement, acceleration sign and breadth differences, matched pace
+  changes within a one-to-one ±300-second causal window, and downstream
+  `STRENGTHENED`/`WEAKENED` counts. Directional episode boundaries are an
+  invariance check, not a lead/lag outcome.
+- **Promotion constraint:** The three fixed window lengths remain independent
+  research candidates. No automatic selection or live promotion.
 
 ## EXP-75-06 — ATR / realized-volatility normalization
 
