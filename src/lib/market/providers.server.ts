@@ -220,6 +220,8 @@ function fallbackContract(symbol: string): FuturesContract {
   };
 }
 
+class IncompatibleFuturesContractError extends Error {}
+
 async function resolveInstrument(
   source: MarketSource,
   symbol: string,
@@ -227,7 +229,7 @@ async function resolveInstrument(
 ): Promise<FuturesContract> {
   const normalized = symbol.toUpperCase();
   if (!isSupportedSymbol(normalized))
-    throw new Error(`unsupported futures contract: ${normalized}`);
+    throw new IncompatibleFuturesContractError(`unsupported futures contract: ${normalized}`);
   const canonical = fallbackContract(normalized);
 
   if (source === "kraken-futures") return canonical;
@@ -247,7 +249,7 @@ async function resolveInstrument(
       item.settleCcy !== "USDT" ||
       item.state !== "live"
     ) {
-      throw new Error(`inactive or incompatible futures contract: ${normalized}`);
+      throw new IncompatibleFuturesContractError(`inactive or incompatible futures contract: ${normalized}`);
     }
     const listedAt = Number(item.listTime);
     if (!Number.isSafeInteger(listedAt))
@@ -277,7 +279,7 @@ async function resolveInstrument(
     item.quoteAsset !== "USDT" ||
     item.marginAsset !== "USDT"
   ) {
-    throw new Error(`inactive or incompatible futures contract: ${normalized}`);
+    throw new IncompatibleFuturesContractError(`inactive or incompatible futures contract: ${normalized}`);
   }
   const filter = (type: string) => item.filters?.find((value) => value["filterType"] === type);
   const priceFilter = filter("PRICE_FILTER");
@@ -300,6 +302,16 @@ async function resolveInstrument(
 /** Factual Binance USD-M listing time used to bound collector-owned history backfill. */
 export async function loadBinanceFuturesListingTime(symbol: string): Promise<number> {
   return (await resolveInstrument(MARKET_SOURCE, symbol)).listedAt;
+}
+
+/** Compatibility is factual only when metadata resolves or rejects the contract. */
+export async function loadBinanceFuturesCompatibility(symbol: string): Promise<boolean | null> {
+  try {
+    await resolveInstrument(MARKET_SOURCE, symbol);
+    return true;
+  } catch (error) {
+    return error instanceof IncompatibleFuturesContractError ? false : null;
+  }
 }
 
 function parseBinance(raw: unknown, minutes: number, now = Date.now()): Candle[] {

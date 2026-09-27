@@ -64,7 +64,7 @@ export function operationalDbConfig(
     enabled: true,
     url: url.origin,
     serviceRoleKey,
-    candleRetentionDays: boundedInteger(env["OPERATIONAL_CANDLE_RETENTION_DAYS"], 7, 1, 30),
+    candleRetentionDays: boundedInteger(env["OPERATIONAL_CANDLE_RETENTION_DAYS"], 8, 1, 30),
     monitorRunRetentionDays: boundedInteger(
       env["OPERATIONAL_MONITOR_RUN_RETENTION_DAYS"],
       30,

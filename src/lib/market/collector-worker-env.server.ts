@@ -24,7 +24,8 @@ export function validateCollectorWorkerEnvironment(env: Env = process.env): void
     throw new Error("Binance collector requires OPERATIONAL_DB_ENABLED=true");
   }
   const requiredRetentionDays = Math.ceil(
-    DEFAULT_MARKET_MOVEMENT_CONFIG.historicalLookbackMs / (24 * 60 * 60_000),
+    (DEFAULT_MARKET_MOVEMENT_CONFIG.historicalLookbackMs + 16 * 60_000) /
+      (24 * 60 * 60_000),
   );
   if (operational.candleRetentionDays < requiredRetentionDays) {
     throw new Error(

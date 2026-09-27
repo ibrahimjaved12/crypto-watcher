@@ -18,8 +18,7 @@ import {
   snapshotEventTimes,
   transitionToPersisted,
 } from "./market-movement-engine";
-import { buildMovementNormalizationHistory,
-  type MovementNormalizationHistory } from "./movement-normalization-input";
+import type { MovementInstrumentCompatibility, MovementRawHistory } from "./movement-normalization-input";
 import { buildMarketUniverse, type MarketUniverse } from "./market-universe";
 import {
   DEFAULT_MARKET_EPISODE_LIFECYCLE_CONFIG,
@@ -47,7 +46,9 @@ import {
 } from "./market-movement-state";
 
 export const MOVEMENT_ENGINE_TICK_MS = 1_000;
-export const MOVEMENT_HISTORICAL_REFRESH_MS = 15 * 60_000;
+const MINUTE_MS = 60_000;
+const LONGEST_MOVEMENT_WINDOW_MS = 15 * MINUTE_MS;
+const RAW_HISTORY_WARMUP_MS = LONGEST_MOVEMENT_WINDOW_MS + MINUTE_MS;
 
 /**
  * Bounded exponential backoff for operational reads/writes that must not be
@@ -75,8 +76,10 @@ export type MovementEngineRuntimeDependencies = {
   store: OperationalStore;
   collector: MovementCollectorPort;
   registerHistory: (sessionId: string, historyVersion: string, universe: MarketUniverse,
-    config: MarketMovementConfig, historical: MovementNormalizationHistory,
+    config: MarketMovementConfig, historical: MovementRawHistory,
+    compatibility: MovementInstrumentCompatibility,
     asOfBoundaryTime: number) => Promise<void>;
+  instrumentCompatibility: (symbol: string) => Promise<boolean | null>;
   calculateMovement: (sessionId: string, boundaryTime: number, historyVersion: string,
     universe: MarketUniverse, configVersion: string) => Promise<MarketMovementEvaluation>;
   finalization?: MovementFinalizationConfig;
@@ -120,8 +123,9 @@ export class MovementEngineRuntime {
   private lifecycleRestored = false;
   private lifecycleRestoreRetryAt = 0;
   private lifecycleRestoreFailures = 0;
-  private historical: MovementNormalizationHistory = new Map();
-  private historicalLoadedAt = 0;
+  private historical: MovementRawHistory = new Map();
+  private historicalCompatibility: MovementInstrumentCompatibility = new Map();
+  private historicalCutoff: number | null = null;
   private historicalRetryAt = 0;
   private historicalFailures = 0;
   private historicalUniverseVersion: string | null = null;
@@ -180,7 +184,8 @@ export class MovementEngineRuntime {
     this.lifecycleRestoreRetryAt = 0;
     this.lifecycleRestoreFailures = 0;
     this.historical = new Map();
-    this.historicalLoadedAt = 0;
+    this.historicalCompatibility = new Map();
+    this.historicalCutoff = null;
     this.historicalRetryAt = 0;
     this.historicalFailures = 0;
     this.historicalUniverseVersion = null;
@@ -244,7 +249,7 @@ export class MovementEngineRuntime {
     if (!stillCurrent()) return;
     const firstBoundary = this.engine.firstPendingBoundary(finalizable, universe.version);
     if (firstBoundary === null) return;
-    await this.refreshHistorical(universe, now, movementSessionId, firstBoundary);
+    await this.refreshHistorical(universe, now, movementSessionId, firstBoundary, finalizable);
     if (!stillCurrent() || !this.historicalVersion ||
         this.registeredSessionId !== movementSessionId ||
         this.registeredUniverseVersion !== universe.version) return;
@@ -313,16 +318,17 @@ export class MovementEngineRuntime {
   }
 
   private async refreshHistorical(universe: MarketUniverse, now: number,
-    sessionId: string, firstBoundary: number): Promise<void> {
+    sessionId: string, firstBoundary: number, finalizable: number): Promise<void> {
     if (this.historicalLoading) return;
     if (now < this.historicalRetryAt) return;
-    // A changed universe (e.g. a newly watched symbol) needs history immediately
-    // rather than waiting out the normal refresh cadence.
+    // Reuse only raw candles for the same strict completed-minute cutoff.
+    const cutoff = Math.ceil(finalizable / MINUTE_MS) * MINUTE_MS;
     const universeChanged = this.historicalUniverseVersion !== universe.version;
     const refreshGeneration = this.historicalRefreshGeneration;
-    const needsRefresh = universeChanged || this.historicalLoadedAt === 0 ||
+    const needsRefresh = universeChanged || this.historicalCutoff !== cutoff ||
+      this.historicalAsOfBoundary === null || firstBoundary < this.historicalAsOfBoundary ||
       this.appliedHistoricalRefreshGeneration !== refreshGeneration ||
-      now - this.historicalLoadedAt >= MOVEMENT_HISTORICAL_REFRESH_MS;
+      this.historicalVersion === null;
     const needsRegistration = this.registeredSessionId !== sessionId ||
       this.registeredUniverseVersion !== universe.version;
     if (!needsRefresh && !needsRegistration) return;
@@ -332,25 +338,31 @@ export class MovementEngineRuntime {
         if (needsRefresh) {
           const candles = await this.deps.store.readMovementCandleHistory(
             universe.symbols,
-            firstBoundary - this.movementConfig.historicalLookbackMs,
-            firstBoundary,
+            Math.max(0, firstBoundary - this.movementConfig.historicalLookbackMs -
+              RAW_HISTORY_WARMUP_MS),
+            finalizable,
           );
           if (tenure !== this.tenure ||
               this.deps.collector.currentMovementSessionId() !== sessionId ||
               buildMarketUniverse(this.deps.collector.subscribedSymbols()).version !== universe.version) return;
-          this.historical = buildMovementNormalizationHistory(
-            candles, firstBoundary, this.movementConfig,
-          );
+          this.historical = candles;
+          this.historicalCompatibility = new Map(await Promise.all(universe.symbols.map(
+            async (symbol) => [symbol, await this.deps.instrumentCompatibility(symbol)] as const,
+          )));
+          if (tenure !== this.tenure ||
+              this.deps.collector.currentMovementSessionId() !== sessionId ||
+              buildMarketUniverse(this.deps.collector.subscribedSymbols()).version !== universe.version) return;
           this.historicalVersion = crypto.randomUUID();
           this.historicalAsOfBoundary = firstBoundary;
-          this.historicalLoadedAt = now;
+          this.historicalCutoff = cutoff;
           this.historicalUniverseVersion = universe.version;
           this.appliedHistoricalRefreshGeneration = refreshGeneration;
           this.registeredSessionId = null;
           this.registeredUniverseVersion = null;
         }
         await this.deps.registerHistory(sessionId, this.historicalVersion!, universe,
-          this.movementConfig, this.historical, this.historicalAsOfBoundary!);
+          this.movementConfig, this.historical, this.historicalCompatibility,
+          this.historicalAsOfBoundary!);
         if (tenure !== this.tenure ||
             this.deps.collector.currentMovementSessionId() !== sessionId ||
             buildMarketUniverse(this.deps.collector.subscribedSymbols()).version !== universe.version) return;

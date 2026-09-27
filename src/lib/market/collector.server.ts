@@ -3,6 +3,7 @@ import type { OperationalStore } from "../operational/types";
 import {
   loadBinanceFuturesKlines,
   loadBinanceFuturesListingTime,
+  loadBinanceFuturesCompatibility,
 } from "./providers.server";
 import {
   BINANCE_USDM_WS_ENDPOINT,
@@ -92,6 +93,7 @@ export class CollectorRuntime {
       finalization: movementFinalizationConfig(process.env),
       registerHistory: registerPythonMovementHistory,
       calculateMovement: calculatePythonMarketMovement,
+      instrumentCompatibility: loadBinanceFuturesCompatibility,
     });
   }
 
@@ -336,7 +338,7 @@ export class CollectorRuntime {
     const isCurrent = () =>
       !this.stopped && this.active && generation === this.historyBackfillGeneration;
     const task = this.collector.backfillMovementHistory(
-      DEFAULT_MARKET_MOVEMENT_CONFIG.historicalLookbackMs,
+      DEFAULT_MARKET_MOVEMENT_CONFIG.historicalLookbackMs + 16 * 60_000,
       Date.now(),
       isCurrent,
     ).then((result) => {

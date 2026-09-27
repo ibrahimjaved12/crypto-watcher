@@ -259,7 +259,8 @@ test("futures provider preserves OHLCV and contract identity", async () => {
   const providerUrl = await moduleUrl("../src/lib/market/providers.server.ts", {
     "./symbols": await moduleUrl("../src/lib/market/symbols.ts"),
   });
-  const { clearExchangeInfoCache, loadFuturesSnapshot, loadObservationCandles, loadTACandles } =
+  const { clearExchangeInfoCache, loadFuturesSnapshot, loadObservationCandles, loadTACandles,
+    loadBinanceFuturesCompatibility } =
     await import(providerUrl);
   const original = globalThis.fetch;
   try {
@@ -279,6 +280,7 @@ test("futures provider preserves OHLCV and contract identity", async () => {
       ]);
     };
     const result = await loadTACandles("BTCUSDT", 15, () => {});
+    assert.equal(await loadBinanceFuturesCompatibility("BTCUSDT"), true);
     assert.deepEqual(
       result.candles[0],
       candle({ close: 101, volume: 35, quoteVolume: 3535, complete: end < Date.now() }),
@@ -291,6 +293,25 @@ test("futures provider preserves OHLCV and contract identity", async () => {
     assert.equal(result.instrument.quantityStep, "0.001");
     assert.equal(result.instrument.minNotional, "100");
     assert.equal(calls.length, 2);
+    clearExchangeInfoCache();
+    globalThis.fetch = async () => Response.json({ symbols: [futuresMetadata("BREAK")] });
+    assert.equal(await loadBinanceFuturesCompatibility("BTCUSDT"), false);
+    clearExchangeInfoCache();
+    globalThis.fetch = async () => { throw new Error("metadata unavailable"); };
+    assert.equal(await loadBinanceFuturesCompatibility("BTCUSDT"), null);
+    clearExchangeInfoCache();
+    globalThis.fetch = async (url) => {
+      calls.push(url);
+      if (url.endsWith("/fapi/v1/exchangeInfo"))
+        return Response.json({ symbols: [futuresMetadata()] });
+      if (url.includes("/fapi/v2/ticker/price"))
+        return Response.json({ symbol: "BTCUSDT", price: "101", time: end });
+      if (url.includes("/fapi/v1/premiumIndex"))
+        return Response.json({ symbol: "BTCUSDT", markPrice: "100.5", indexPrice: "100.4" });
+      if (url.includes("/fapi/v1/fundingRate"))
+        return Response.json([{ symbol: "BTCUSDT", fundingRate: "0.0001", fundingTime: end }]);
+      return Response.json([]);
+    };
     const snapshot = await loadFuturesSnapshot("BTCUSDT");
     assert.deepEqual(
       [snapshot.lastPrice, snapshot.markPrice, snapshot.indexPrice, snapshot.fundingRate],

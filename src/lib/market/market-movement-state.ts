@@ -39,7 +39,7 @@ export type MovementEngineStatus = "LIVE" | "WARMING" | "STALE" | "UNAVAILABLE";
 /** Structural mirror of the collector health status used as a movement source gate. */
 export type MovementSourceStatus = "LIVE" | "RECOVERING" | "STALE" | "UNAVAILABLE";
 
-/** One compact five-second candle used only to derive caller-supplied normalization history. */
+/** Canonical completed one-minute candle transported as raw #71 history. */
 export type MovementCandle = {
   openTime: number;
   close: number;

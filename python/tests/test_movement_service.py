@@ -325,20 +325,28 @@ class MovementMetricsAdapterTests(unittest.TestCase):
         return service
 
     @classmethod
-    def history_request(cls, version="history-v1", returns=None):
+    def history_request(cls, version="history-v1", close_delta=Decimal("0"),
+                        compatible=True):
+        candles = [{
+            "open_time_ms": BASE - (65 - index) * 60_000,
+            "close": str(Decimal("100") + Decimal(index % 7) / 100 +
+                         Decimal(index) / 10000 +
+                         (close_delta if index == 0 else Decimal("0"))),
+            "volume": "1",
+            "quote_volume": str(100 + index % 3),
+        } for index in range(64)]
         return MovementHistoryRegistrationRequest.model_validate({
             "schema_version": 1, "session_id": SESSION,
             "history_version": version, "as_of_boundary_time_ms": BASE + 350 * 5_000,
             "universe_id": "watched",
             "universe_version": "watched-v1", "symbols": cls.SYMBOLS,
-            "config": asdict(MarketMovementConfig()),
+            "config": {**asdict(MarketMovementConfig()),
+                       "historical_lookback_ms": 2 * 60 * 60_000,
+                       "minimum_historical_coverage_ms": 30 * 60_000},
             "historical": [{
                 "symbol": symbol,
-                "windows": {str(window): {
-                    "returns": returns if returns is not None else [-0.02, -0.01, 0.01, 0.02],
-                    "usable_coverage_ms": 3 * 24 * 60 * 60 * 1000,
-                    "previous_notional_volumes": ["1200"] * 20,
-                } for window in (1, 5, 15)},
+                "instrument_compatible": compatible,
+                "candles": candles,
             } for symbol in cls.SYMBOLS],
         })
 
@@ -379,7 +387,7 @@ class MovementMetricsAdapterTests(unittest.TestCase):
         self.assertEqual(service.register_history(self.history_request()),
                          service.register_history(self.history_request()))
         with self.assertRaises(ValueError):
-            service.register_history(self.history_request(returns=[-0.1, -0.01, 0.01, 0.1]))
+            service.register_history(self.history_request(close_delta=Decimal("1")))
         with self.assertRaises(ValueError):
             service.calculate_metrics(self.metrics_request(version="wrong-version"))
         with self.assertRaises(ValueError):
@@ -406,6 +414,24 @@ class MovementMetricsAdapterTests(unittest.TestCase):
         result = service.calculate_metrics(self.metrics_request(BASE + 355 * 5_000))
         excluded = result["evaluation"]["windows"]["1"]["excluded_symbols"]
         self.assertIn({"symbol": "SOLUSDT", "reasons": ["MISSING_SYMBOL_INPUT"]}, excluded)
+
+    def test_factual_instrument_compatibility_and_unknown_metadata(self):
+        service = self.populated_service()
+        service.register_history(self.history_request(compatible=False))
+        excluded = service.calculate_metrics(self.metrics_request())["evaluation"]["windows"]["1"]["excluded_symbols"]
+        self.assertIn("UNSUPPORTED_INSTRUMENT", excluded[0]["reasons"])
+        service.register_history(self.history_request(version="history-v2", compatible=None))
+        excluded = service.calculate_metrics(self.metrics_request(version="history-v2"))["evaluation"]["windows"]["1"]["excluded_symbols"]
+        self.assertIn("SOURCE_UNAVAILABLE", excluded[0]["reasons"])
+        self.assertNotIn("UNSUPPORTED_INSTRUMENT", excluded[0]["reasons"])
+
+    def test_replacing_raw_history_version_preserves_same_boundary_result(self):
+        service = self.populated_service()
+        service.register_history(self.history_request())
+        first = service.calculate_metrics(self.metrics_request())["evaluation"]
+        service.register_history(self.history_request(version="history-v2"))
+        second = service.calculate_metrics(self.metrics_request(version="history-v2"))["evaluation"]
+        self.assertEqual(first, second)
 
 
 if __name__ == "__main__":

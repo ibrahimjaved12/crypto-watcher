@@ -21,10 +21,6 @@ const stateUrl = await transpile("../src/lib/market/market-movement-state.ts");
 const metricsUrl = await transpile("../src/lib/market/movement-metrics-contract.ts", {
   "./movement-contract": movementBucketsUrl,
 });
-const normalizationUrl = await transpile("../src/lib/market/movement-normalization-input.ts", {
-  "./movement-contract": movementBucketsUrl,
-  "./movement-metrics-contract": metricsUrl,
-});
 const classifierUrl = await transpile("../src/lib/market/market-state-classifier.ts");
 const lifecycleUrl = await transpile("../src/lib/market/market-episode-lifecycle.ts");
 const universeUrl = await transpile("../src/lib/market/market-universe.ts", {
@@ -46,7 +42,6 @@ const {
   buildMovementCurrentEvidence,
   snapshotEventTimes,
 } = await import(engineUrl);
-const { buildMovementNormalizationHistory } = await import(normalizationUrl);
 const {
   deriveMovementEngineStatus,
   toMovementEngineDiagnostics,
@@ -376,141 +371,6 @@ test("universe change evaluates the latest finalized boundary from its own sessi
       return warmingMovement(newUniverse, boundary);
     } });
   assert.deepEqual(calls, [BASE + 20_000]);
-});
-
-test("normalization history is derived from contiguous one-minute candles only", () => {
-  const minutes = 200;
-  const candles = Array.from({ length: minutes }, (_, index) => ({
-    openTime: BASE + index * MINUTE_MS,
-    close: 100 + index * 0.1,
-    volume: 2,
-    quoteVolume: 210 + index,
-  }));
-  const history = buildMovementNormalizationHistory(
-    new Map([["BTCUSDT", candles]]), BASE + (minutes + 1) * MINUTE_MS,
-  );
-  const entry = history.get("BTCUSDT");
-  assert.equal(entry[1].returns.length, minutes - 1);
-  assert.equal(entry[1].previousNotionalVolumes.length, 20);
-  assert.equal(entry[1].usableCoverageMs, minutes * MINUTE_MS);
-  assert.equal(entry[5].returns.length, 39);
-  assert.equal(entry[15].returns.length, 12);
-  const expected = Math.log(candles[1].close / candles[0].close);
-  assert.ok(Math.abs(entry[1].returns[0] - expected) < 1e-12);
-});
-
-test("a history gap drops non-comparable earlier candles", () => {
-  const minutes = 200;
-  const candles = Array.from({ length: minutes }, (_, index) => ({
-    openTime: BASE + index * MINUTE_MS,
-    close: 100 + index * 0.1,
-    volume: 1,
-    quoteVolume: 100 + index,
-  }));
-  const gapped = [...candles.slice(0, 100), ...candles.slice(101)];
-  const history = buildMovementNormalizationHistory(
-    new Map([["BTCUSDT", gapped]]), BASE + (minutes + 1) * MINUTE_MS,
-  );
-  const entry = history.get("BTCUSDT");
-  // Only the trailing contiguous run (99 candles) is trusted.
-  assert.equal(entry[1].returns.length, 98);
-  assert.equal(entry[1].usableCoverageMs, 99 * MINUTE_MS);
-});
-
-test("5m/15m history sampling is exchange-time aligned and phase-independent", () => {
-  const minutes = 130;
-  const candleAt = (offsetMinutes) => ({
-    openTime: BASE + offsetMinutes * MINUTE_MS,
-    close: 100 + offsetMinutes * 0.1 + (offsetMinutes % 5) * 0.01,
-    volume: 1 + (offsetMinutes % 3),
-    quoteVolume: 200 + offsetMinutes,
-  });
-  // The first three minutes are irrelevant to the 5m/15m population: dropping
-  // them must not shift the aligned endpoints or their returns/notionals.
-  const withLeading = Array.from({ length: minutes }, (_, index) => candleAt(index));
-  const withoutLeading = Array.from({ length: minutes - 3 }, (_, index) => candleAt(index + 3));
-
-  const withLeadingHistory = buildMovementNormalizationHistory(
-    new Map([["BTCUSDT", withLeading]]), BASE + (minutes + 1) * MINUTE_MS,
-  ).get("BTCUSDT");
-  const withoutLeadingHistory = buildMovementNormalizationHistory(
-    new Map([["BTCUSDT", withoutLeading]]), BASE + (minutes + 1) * MINUTE_MS,
-  ).get("BTCUSDT");
-
-  for (const windowMinutes of [5, 15]) {
-    assert.deepEqual(
-      withoutLeadingHistory[windowMinutes].returns,
-      withLeadingHistory[windowMinutes].returns,
-      `${windowMinutes}m returns must not shift with irrelevant leading candles`,
-    );
-    assert.deepEqual(
-      withoutLeadingHistory[windowMinutes].previousNotionalVolumes,
-      withLeadingHistory[windowMinutes].previousNotionalVolumes,
-      `${windowMinutes}m notional windows must use the same aligned intervals`,
-    );
-  }
-  // 1m remains canonical one-minute sampling.
-  assert.equal(withLeadingHistory[1].returns.length, minutes - 1);
-});
-
-test("5m history uses the 1m close completing at the boundary, not the boundary-open candle", () => {
-  const boundary = BASE; // 5m-aligned; call it 12:05 for the regression narrative
-  // openTimes are boundary-relative minutes: -6 = 11:59, -1 = 12:04, 0 = 12:05.
-  const closes = [
-    [-6, 200], // 11:59-open, the close immediately preceding the 12:00 boundary
-    [-5, 1],
-    [-4, 1],
-    [-3, 1],
-    [-2, 1],
-    [-1, 100], // 12:04-open, the close immediately preceding the 12:05 boundary
-    [0, 999], // 12:05-open, must never represent the 12:05 boundary
-  ];
-  const candles = closes.map(([offset, close]) => ({
-    openTime: boundary + offset * MINUTE_MS,
-    close,
-    volume: 1,
-    quoteVolume: 150,
-  }));
-
-  const returns = buildMovementNormalizationHistory(
-    new Map([["BTCUSDT", candles]]), boundary + 1,
-  ).get("BTCUSDT")[5].returns;
-  assert.equal(returns.length, 1);
-  // 12:05 boundary uses the 12:04-open close (100) against the 11:59-open close (200).
-  assert.ok(Math.abs(returns[0] - Math.log(100 / 200)) < 1e-12);
-  assert.notEqual(returns[0], Math.log(999 / 1));
-});
-
-test("normalization history cutoff excludes candles completed at or after its as-of boundary", () => {
-  const asOf = BASE + 5 * MINUTE_MS;
-  const candles = Array.from({ length: 12 }, (_, index) => ({
-    openTime: BASE + index * MINUTE_MS,
-    close: 100 + index,
-    volume: 2,
-    quoteVolume: index < 5 ? 700 + index : 9_999,
-  }));
-  const withFutureRows = buildMovementNormalizationHistory(
-    new Map([["BTCUSDT", candles]]), asOf,
-  ).get("BTCUSDT");
-  const withoutFutureRows = buildMovementNormalizationHistory(
-    new Map([["BTCUSDT", candles.filter((candle) => candle.openTime + MINUTE_MS < asOf)]]), asOf,
-  ).get("BTCUSDT");
-  assert.deepEqual(withFutureRows, withoutFutureRows);
-  assert.ok(withFutureRows[1].previousNotionalVolumes.every((value) => value < 1_000));
-});
-
-test("historical comparable notionals use exact Binance quoteVolume", () => {
-  const candles = Array.from({ length: 8 }, (_, index) => ({
-    openTime: BASE + index * MINUTE_MS,
-    close: 100,
-    volume: 2,
-    quoteVolume: 777,
-  }));
-  const entry = buildMovementNormalizationHistory(
-    new Map([["BTCUSDT", candles]]), BASE + 9 * MINUTE_MS,
-  ).get("BTCUSDT")[1];
-  assert.deepEqual(entry.previousNotionalVolumes, Array(7).fill(777));
-  assert.notEqual(entry.previousNotionalVolumes[0], candles[0].close * candles[0].volume);
 });
 
 test("engine status keeps LIVE, WARMING, STALE and UNAVAILABLE distinct", () => {

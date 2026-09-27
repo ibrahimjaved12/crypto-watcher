@@ -78,6 +78,12 @@ def evaluate(inputs, *, config=None, universe=None, window=1):
 
 
 class ExactWindowTests(unittest.TestCase):
+    def test_source_unavailable_in_required_history_maps_to_source_unavailable(self):
+        item = symbol_input("S0", states={1: ("unavailable", "source_unavailable_in_required_history")})
+        result = evaluate({"S0": item}, universe=("S0",))
+        self.assertIn("SOURCE_UNAVAILABLE", result.symbols[0].exclusion_reasons)
+        self.assertNotIn("MOVEMENT_HISTORY_UNAVAILABLE", result.symbols[0].exclusion_reasons)
+
     def test_exact_returns_velocity_acceleration_for_every_window(self):
         inputs = {f"S{i}": symbol_input(f"S{i}", current="121", previous="110") for i in range(5)}
         evaluation = calculate_market_movement(request(inputs))

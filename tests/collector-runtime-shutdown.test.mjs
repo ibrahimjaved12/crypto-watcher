@@ -29,6 +29,7 @@ const replacements = {
       return { candles: [], retrievedAt: new Date().toISOString() };
     }
     export async function loadBinanceFuturesListingTime() { return 0; }
+    export async function loadBinanceFuturesCompatibility() { return true; }
   `,
   "./collector": `
     export const BINANCE_USDM_WS_ENDPOINT = "wss://example.invalid/stream";

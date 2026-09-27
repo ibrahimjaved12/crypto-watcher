@@ -31,7 +31,8 @@ const collectorReplacements = {
     `export async function loadBinanceFuturesKlines() {
        return { candles: [], retrievedAt: new Date().toISOString() };
      }
-     export async function loadBinanceFuturesListingTime() { return 0; }`,
+     export async function loadBinanceFuturesListingTime() { return 0; }
+     export async function loadBinanceFuturesCompatibility() { return true; }`,
   ),
   "./collector": stub(`
     export const BINANCE_USDM_WS_ENDPOINT = "wss://example.invalid/stream";
@@ -769,9 +770,9 @@ test("collector worker rejects retention shorter than the active movement lookba
   assert.throws(
     () => workerEnvironment.validateCollectorWorkerEnvironment({
       ...base,
-      OPERATIONAL_CANDLE_RETENTION_DAYS: "6",
+      OPERATIONAL_CANDLE_RETENTION_DAYS: "7",
     }),
-    /OPERATIONAL_CANDLE_RETENTION_DAYS>=7/,
+    /OPERATIONAL_CANDLE_RETENTION_DAYS>=8/,
   );
 });
 

@@ -228,21 +228,23 @@ class MovementMetricsConfigRequest(InputModel):
     minimum_eligible_count: Annotated[int, Field(strict=True, gt=0)]
 
 
-class MovementHistoricalWindowRequest(InputModel):
-    returns: Annotated[tuple[float, ...], Field(max_length=10_080)]
-    usable_coverage_ms: Annotated[int, Field(strict=True, ge=0)]
-    previous_notional_volumes: Annotated[tuple[Nonnegative, ...], Field(max_length=10_080)]
+class MovementCompletedCandleRequest(InputModel):
+    open_time_ms: Timestamp
+    close: Price
+    volume: Nonnegative
+    quote_volume: Nonnegative
+
+    @model_validator(mode="after")
+    def aligned(self):
+        if self.open_time_ms % 60_000:
+            raise ValueError("completed movement candle must align to one minute")
+        return self
 
 
 class MovementHistoricalSymbolRequest(InputModel):
     symbol: str = Field(min_length=5, max_length=16)
-    windows: dict[str, MovementHistoricalWindowRequest]
-
-    @model_validator(mode="after")
-    def valid_windows(self):
-        if any(window not in {"1", "5", "15"} for window in self.windows):
-            raise ValueError("historical windows must be 1, 5, or 15")
-        return self
+    instrument_compatible: bool | None = Field(strict=True)
+    candles: Annotated[tuple[MovementCompletedCandleRequest, ...], Field(max_length=10_110)]
 
 
 class MovementHistoryRegistrationRequest(InputModel):

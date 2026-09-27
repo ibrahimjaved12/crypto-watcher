@@ -97,7 +97,7 @@ test("mismatched or non-finite Python metrics fail closed without a fallback", a
   ));
 });
 
-test("history registration sends prepared inputs once with exact identity", async () => {
+test("history registration transports raw candles and factual compatibility", async () => {
   const sent = [];
   const send = async (url, init) => {
     sent.push({ url, body: JSON.parse(init.body) });
@@ -110,13 +110,17 @@ test("history registration sends prepared inputs once with exact identity", asyn
     trimFraction: 0.1, liquidityWeightCap: 0.25, rvolComparisonWindows: 20,
     outlierCrossZ: 3.5, outlierHistoricalZ: 1.5,
     minimumEligibleFraction: 0.6, minimumEligibleCount: 5 };
-  const historical = new Map([["BTCUSDT", { 1: { returns: [0.01, -0.01],
-    usableCoverageMs: 259_200_000, previousNotionalVolumes: [100] } }]]);
+  const historical = new Map([["BTCUSDT", [{ openTime: BOUNDARY - 120_000,
+    close: 101, volume: 2, quoteVolume: 207 }]]]);
+  const compatibility = new Map([["BTCUSDT", true]]);
   await registerPythonMovementHistory(SESSION, "history-v1", universe, config, historical,
-    BOUNDARY, {}, send);
+    compatibility, BOUNDARY, {}, send);
   assert.equal(sent.length, 1);
   assert.equal(sent[0].url, "http://python.local/v1/movement/history");
-  assert.deepEqual(sent[0].body.historical[0].windows["1"].returns, [0.01, -0.01]);
+  assert.deepEqual(sent[0].body.historical[0].candles, [{ open_time_ms: BOUNDARY - 120_000,
+    close: 101, volume: 2, quote_volume: 207 }]);
+  assert.equal(sent[0].body.historical[0].instrument_compatible, true);
+  assert.equal("windows" in sent[0].body.historical[0], false);
   assert.equal(sent[0].body.session_id, SESSION);
   assert.equal(sent[0].body.as_of_boundary_time_ms, BOUNDARY);
 });

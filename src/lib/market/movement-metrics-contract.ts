@@ -34,12 +34,6 @@ export const DEFAULT_MARKET_MOVEMENT_CONFIG: Readonly<MarketMovementConfig> = {
   minimumEligibleCount: 5,
 };
 
-export type HistoricalMovementWindowInput = {
-  returns: readonly number[];
-  usableCoverageMs: number;
-  previousNotionalVolumes: readonly number[];
-};
-
 export type SymbolExclusionReason =
   | "MISSING_SYMBOL_INPUT" | "SOURCE_RECOVERING" | "SOURCE_STALE"
   | "SOURCE_UNAVAILABLE" | "UNSUPPORTED_INSTRUMENT"

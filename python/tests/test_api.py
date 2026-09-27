@@ -204,7 +204,8 @@ class ApiTests(unittest.TestCase):
             "universe_id": "watched",
             "universe_version": "watched-v1", "symbols": ["BTCUSDT"],
             "config": asdict(MarketMovementConfig()),
-            "historical": [{"symbol": "BTCUSDT", "windows": {}}],
+            "historical": [{"symbol": "BTCUSDT", "instrument_compatible": True,
+                            "candles": []}],
         }
         self.assertEqual(self.request(app, "POST", "/v1/movement/history",
                                       json=history).status_code, 401)

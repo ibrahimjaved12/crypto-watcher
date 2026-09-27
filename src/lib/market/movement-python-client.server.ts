@@ -9,7 +9,7 @@ import type {
 } from "./movement-contract";
 import type { MarketUniverse } from "./market-universe";
 import type { MarketMovementConfig, MarketMovementEvaluation } from "./movement-metrics-contract";
-import type { MovementNormalizationHistory } from "./movement-normalization-input";
+import type { MovementInstrumentCompatibility, MovementRawHistory } from "./movement-normalization-input";
 
 const TIMEOUT_MS = 6_000;
 const MAX_ATTEMPTS = 2;
@@ -278,7 +278,8 @@ async function postCanonicalMovement(
 
 export async function registerPythonMovementHistory(
   sessionId: string, historyVersion: string, universe: MarketUniverse,
-  config: MarketMovementConfig, historical: MovementNormalizationHistory,
+  config: MarketMovementConfig, historical: MovementRawHistory,
+  compatibility: MovementInstrumentCompatibility,
   asOfBoundaryTime: number,
   env: Record<string, string | undefined> = process.env, send: typeof fetch = fetch,
 ): Promise<void> {
@@ -299,9 +300,11 @@ export async function registerPythonMovementHistory(
     },
     historical: universe.symbols.map((symbol) => ({
       symbol,
-      windows: Object.fromEntries(Object.entries(historical.get(symbol) ?? {}).map(([window, entry]) =>
-        [window, { returns: entry!.returns, usable_coverage_ms: entry!.usableCoverageMs,
-          previous_notional_volumes: entry!.previousNotionalVolumes }])),
+      instrument_compatible: compatibility.get(symbol) ?? null,
+      candles: (historical.get(symbol) ?? []).map((candle) => ({
+        open_time_ms: candle.openTime, close: candle.close,
+        volume: candle.volume, quote_volume: candle.quoteVolume,
+      })),
     })),
   }, env, send);
   const parsed = historyResponse.safeParse(response);

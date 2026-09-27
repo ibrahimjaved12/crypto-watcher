@@ -19,9 +19,10 @@ from .movement import (
     MarketObservation,
     MovementBucketEngine,
 )
-from .movement_metrics import (HistoricalWindowInput, MarketMovementConfig,
+from .movement_metrics import (MarketMovementConfig,
                                MarketMovementInput, MarketMovementSymbolInput,
                                MarketUniverseInput, calculate_market_movement)
+from .movement_history import CompletedMovementCandle, build_historical_window_inputs
 
 DEFAULT_RESPONSE_CACHE_CAPACITY = 4
 DEFAULT_SESSION_CAPACITY = 4
@@ -164,11 +165,11 @@ class MovementBoundaryService:
         else:
             historical = {
                 item.symbol: {
-                    int(window): HistoricalWindowInput(
-                        values.returns, values.usable_coverage_ms,
-                        values.previous_notional_volumes,
-                    )
-                    for window, values in item.windows.items()
+                    "instrument_compatible": item.instrument_compatible,
+                    "candles": tuple(CompletedMovementCandle(
+                        candle.open_time_ms, candle.close, candle.volume,
+                        candle.quote_volume,
+                    ) for candle in item.candles),
                 }
                 for item in request.historical
             }
@@ -217,11 +218,13 @@ class MovementBoundaryService:
             found_boundary = True
             readiness = {window: engine.readiness(boundary, window, endpoint.source_state)
                          for window in (1, 5, 15)}
+            history = registration["historical"][symbol]
             symbol_inputs[symbol] = MarketMovementSymbolInput(
                 symbol=symbol, instrument_id=engine.instrument_id,
-                instrument_compatible=engine.instrument_id == f"{BINANCE_USDM}:{symbol}",
+                instrument_compatible=history["instrument_compatible"],
                 readiness=readiness,
-                historical=registration["historical"].get(symbol, {}),
+                historical=build_historical_window_inputs(
+                    history["candles"], boundary, registration["config"]),
             )
         if not found_boundary:
             raise ValueError("requested boundary is not finalized in this session")

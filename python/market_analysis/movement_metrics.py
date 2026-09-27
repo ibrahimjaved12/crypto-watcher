@@ -1,6 +1,6 @@
 """Pure, versioned market movement calculations over canonical #70 readiness.
 
-Callers prepare historical returns and comparable completed-window notionals.
+The pure historical builder prepares returns and comparable notionals.
 No clock, history acquisition, or provider access is performed here.
 """
 
@@ -113,15 +113,15 @@ class HistoricalWindowInput:
 class MarketMovementSymbolInput:
     symbol: str
     instrument_id: str
-    instrument_compatible: bool
+    instrument_compatible: bool | None
     readiness: Mapping[int, MovementReadiness]
     historical: Mapping[int, HistoricalWindowInput]
 
     def __post_init__(self):
         if not isinstance(self.symbol, str) or not self.symbol or not isinstance(self.instrument_id, str) or not self.instrument_id:
             raise ValueError("symbol and instrument_id are required")
-        if type(self.instrument_compatible) is not bool:
-            raise ValueError("instrument_compatible must be boolean")
+        if self.instrument_compatible is not None and type(self.instrument_compatible) is not bool:
+            raise ValueError("instrument_compatible must be boolean or unknown")
         if any(not isinstance(value, MovementReadiness) for value in self.readiness.values()):
             raise ValueError("readiness must contain canonical MovementReadiness values")
         if any(not isinstance(value, HistoricalWindowInput) for value in self.historical.values()):
@@ -295,7 +295,7 @@ _READINESS_REASONS = {
     "last_real_trade_expired": "STALE_LAST_TRADE",
     "boundary_not_retained_or_finalized": "MISSING_EXACT_BOUNDARY",
     "noncontiguous_live_history": "MISSING_EXACT_BOUNDARY",
-    "source_unavailable_in_required_history": "MOVEMENT_HISTORY_UNAVAILABLE",
+    "source_unavailable_in_required_history": "SOURCE_UNAVAILABLE",
     "no_real_trade_history": "MOVEMENT_HISTORY_UNAVAILABLE",
     "unusable_price_history": "MOVEMENT_HISTORY_UNAVAILABLE",
     "no_real_trade_endpoint": "MOVEMENT_HISTORY_UNAVAILABLE",
@@ -412,8 +412,10 @@ def _symbol_result(request, symbol, window):
     if supplied is None:
         reasons.append("MISSING_SYMBOL_INPUT")
     else:
-        if not supplied.instrument_compatible:
+        if supplied.instrument_compatible is False:
             reasons.append("UNSUPPORTED_INSTRUMENT")
+        elif supplied.instrument_compatible is None:
+            reasons.append("SOURCE_UNAVAILABLE")
         readiness = supplied.readiness.get(window)
         historical = supplied.historical.get(window)
         if readiness is None:

@@ -17,10 +17,10 @@ depends on a browser timer or a per-user engine.
 
 Accepted, validated `aggTrade` observations remain in a bounded collector transport buffer and are
 sent with each explicit finalization boundary to the authenticated Python movement endpoint. The
-Python service invokes the shared pure `market_analysis.movement` engine and returns the bucket
-snapshots consumed by the downstream metrics, classification, and lifecycle layers. TypeScript owns
-WebSocket ingestion, boundary scheduling, transport, and persistence, not a second bucket
-calculation. No additional WebSocket, raw tick persistence, or per-five-second append-only stream
+Python service invokes the shared pure `market_analysis.movement` engine and retains its buckets
+for canonical Python #71 evaluation. TypeScript transports the resulting metrics to #72 and #73.
+TypeScript owns WebSocket ingestion, boundary scheduling, transport, and persistence. No additional
+WebSocket, raw tick persistence, or per-five-second append-only stream
 is created. #26 completed-candle bootstrap/recovery is unchanged.
 
 Each finalized bucket retains its provider/instrument/price type and the last real trade's exchange
@@ -73,9 +73,9 @@ hash of the sorted membership (`market-universe-v1:<hash>`).
 
 ## Historical normalization input
 
-#71 requires caller-supplied historical normalization data. The engine derives it from canonical
-completed one-minute candles in the operational database (`collector_recent_candles`), read through
-`get_collector_movement_candles` and refreshed periodically:
+#71 receives raw canonical completed one-minute candles from the operational database
+(`collector_recent_candles`) through `get_collector_movement_candles`. Python derives the
+normalization input for each explicit evaluation boundary:
 
 - Window returns use the same horizon as the live window (`log(close[t]/close[t-window])`).
 - Sampling is exchange-time aligned, not index/phase dependent: 1m stays canonical 1m, while 5m and
@@ -86,14 +86,15 @@ completed one-minute candles in the operational database (`collector_recent_cand
   12:04-open candle's close, never the 12:05-open candle. The prior endpoint is exactly `w` minutes
   earlier and the notional window covers the same aligned interval.
 - `usableCoverageMs` is the trailing contiguous run; a gap discards earlier, non-comparable candles.
-- `previousNotionalVolumes` are the last `rvolComparisonWindows` completed-window notionals
-  (base volume × close as the quote-notional proxy), measured over the exact same aligned intervals.
+- `previousNotionalVolumes` are the last `rvolComparisonWindows` exact Binance quote-volume
+  sums over those completed aligned intervals.
 - Five-second history is never fabricated from candles. A restart warms the live bucket path per
   #70/#73; it does not backfill buckets.
 
 If retained candle coverage is below #71's three-day minimum, the affected symbols are excluded with
 `INSUFFICIENT_NORMALIZATION_HISTORY` rather than weakening the contract. Candle retention defaults
-to 7 days (`OPERATIONAL_CANDLE_RETENTION_DAYS`).
+to 8 days (`OPERATIONAL_CANDLE_RETENTION_DAYS`) to retain the 7-day lookback and 15-minute
+historical return warm-up.
 
 ## Current-state exposure
 
@@ -143,8 +144,9 @@ reloads `market_state_current` with #73 restart/interruption semantics before ev
 reacquiring instance never resumes from a previous tenure's counters and never writes a stale
 tenure's pending batch over a newer owner's durable state.
 
-The normalization history is refreshed immediately when `universe.version` changes (for example a
-newly watched symbol), and on the normal 15-minute cadence otherwise.
+Raw candle history is re-registered when the completed-minute cutoff, universe, movement session,
+or collector backfill changes. Python derives aligned historical inputs separately for each
+requested evaluation boundary.
 
 ## Migration
 
