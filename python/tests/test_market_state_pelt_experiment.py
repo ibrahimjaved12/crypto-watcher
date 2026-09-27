@@ -289,6 +289,20 @@ class MarketStatePELTExperimentTests(unittest.TestCase):
         _, constrained = _run_values((0.0,) * 6 + (1.0,) * 5, PELT_CONFIG_BETA_1)
         self.assertEqual(constrained.segmentations["all"].change_points, ())
 
+    def test_delayed_pruning_matches_exact_minimum_segment_counterexample(self):
+        values = (
+            0.0, 0.0, -1.0, 0.0, 1.0, -0.5, 1.0, 1.0,
+            1.0, 0.0, 1.0, 0.5, 0.5, -0.5, -1.0,
+        )
+        oracle = _unpruned_oracle(values, beta=1.0, min_segment_points=6)
+        self.assertAlmostEqual(oracle[0], 7.4, delta=NUMERICAL_TOL)
+        self.assertEqual(oracle[1], ())
+
+        _, result = _run_values(values, PELT_CONFIG_BETA_1)
+        block = result.segmentations["all"].blocks[0]
+        self.assertAlmostEqual(block.penalized_objective, 7.4, delta=NUMERICAL_TOL)
+        self.assertEqual(block.changepoint_indices, ())
+
     def test_independent_unpruned_oracle_matches_pelt(self):
         series = (
             (0.0,) * 18,
@@ -296,6 +310,12 @@ class MarketStatePELTExperimentTests(unittest.TestCase):
             (0.0,) * 6 + (0.9,) * 6 + (-0.4,) * 6,
             tuple((index % 5 - 2) * 0.13 for index in range(24)),
             tuple((index % 3) * 0.2 for index in range(11)),
+            (0.13, -0.42, 0.08, 0.71, -0.19, 0.36, -0.83, 0.24,
+             0.57, -0.11, 0.92, -0.34, 0.05, -0.68, 0.41, 0.17),
+            (-0.31, 0.64, -0.07, 0.22, -0.95, 0.48, 0.12, -0.53,
+             0.79, -0.16, 0.33, -0.72, 0.09, 0.56, -0.28, 0.84, -0.44),
+            (0.52, -0.24, 0.03, -0.61, 0.38, 0.91, -0.12, -0.47,
+             0.26, -0.88, 0.14, 0.69, -0.35, 0.44, -0.05, 0.77, -0.56, 0.19),
         )
         for values in series:
             for config in PELT_CONFIGURATIONS:
@@ -323,7 +343,9 @@ class MarketStatePELTExperimentTests(unittest.TestCase):
         self.assertEqual(view.change_points, ())
         self.assertEqual(view.segments[0].end_boundary_time_ms, 25_000)
         self.assertEqual(view.segments[1].start_boundary_time_ms, 35_000)
-        self.assertEqual(points[6].evaluation_boundary_time_ms, 30_000)
+        self.assertEqual(
+            points[6].movement_evaluation.evaluation_boundary_time_ms, 30_000
+        )
 
     def test_each_scope_identity_change_starts_new_block(self):
         identity_fields = (
@@ -358,7 +380,7 @@ class MarketStatePELTExperimentTests(unittest.TestCase):
                          complete.segmentations["development"])
         self.assertEqual(dev_only.summaries["development"],
                          complete.summaries["development"])
-        self.assertEqual(dev_only.segmentations["all"],
+        self.assertEqual(replace(dev_only.segmentations["all"], partition="development"),
                          complete.segmentations["development"])
         val_prefix = run_market_state_pelt_experiment(all_points[:18], PELT_CONFIG_BETA_1)
         self.assertEqual(val_prefix.segmentations["validation"],

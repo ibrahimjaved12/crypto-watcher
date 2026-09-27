@@ -257,13 +257,24 @@ def _pelt_optimal_partition(
     objective[0] = -beta
     paths[0] = ()
     admissible = [0]
+    scheduled_removal: dict[int, int] = {}
 
     for end in range(min_segment_points, n + 1):
+        expired = tuple(
+            start for start, removal_end in scheduled_removal.items()
+            if removal_end <= end
+        )
+        if expired:
+            expired_set = set(expired)
+            admissible = [start for start in admissible if start not in expired_set]
+            for start in expired:
+                del scheduled_removal[start]
+
         newly_eligible = end - min_segment_points
         if (paths[newly_eligible] is not None
                 and newly_eligible not in admissible):
             admissible.append(newly_eligible)
-            admissible.sort()
+        admissible.sort()
         candidates = tuple(
             start for start in admissible
             if end - start >= min_segment_points and objective[start] is not None
@@ -282,14 +293,17 @@ def _pelt_optimal_partition(
             continue
         objective[end], paths[end] = best
 
-        # A candidate is pruned only after this endpoint formed a valid segment
-        # from it. The K=0 inequality is the specified least-squares pruning rule.
-        admissible = [
-            start for start in candidates
-            if objective[start]
-            + _segment_cost(prefix_sum, prefix_sq, start, end)
-            <= objective[end] + PELT_NUMERICAL_TOL
-        ]
+        # A dominated candidate stays active until this endpoint can itself
+        # serve as a legal previous changepoint after a minimum-length segment.
+        # The K=0 inequality remains the specified least-squares pruning rule.
+        removal_end = end + min_segment_points
+        for start in candidates:
+            if (objective[start]
+                    + _segment_cost(prefix_sum, prefix_sq, start, end)
+                    > objective[end] + PELT_NUMERICAL_TOL):
+                scheduled_removal[start] = min(
+                    scheduled_removal.get(start, removal_end), removal_end
+                )
 
     if objective[n] is None or paths[n] is None:
         return None
