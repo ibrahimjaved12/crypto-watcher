@@ -48,7 +48,8 @@ class HistoricalBuilderTests(unittest.TestCase):
         first = build_historical_window_inputs(raw, BASE, CONFIG)
         self.assertEqual(first, build_historical_window_inputs(tuple(reversed(raw)), BASE, CONFIG))
         next_boundary = build_historical_window_inputs(raw, BASE + 5_000, CONFIG)
-        self.assertEqual(len(next_boundary[15].returns), len(first[15].returns) + 1)
+        self.assertEqual(len(next_boundary[15].returns), len(first[15].returns))
+        self.assertAlmostEqual(next_boundary[15].returns[0], math.log(134 / 119))
         self.assertAlmostEqual(next_boundary[15].returns[-1], math.log(149 / 134))
         self.assertEqual(first, build_historical_window_inputs(raw, BASE, CONFIG))
 
