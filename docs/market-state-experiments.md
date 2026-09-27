@@ -3,8 +3,8 @@
 This registry preregisters the deferred Issue #75 candidates. Each candidate is
 evaluated independently against the unchanged canonical #28 V1 event stream.
 The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
-**EXP-75-03 Kalman/state-space**, and **EXP-75-04A offline PELT**.
-EXP-75-04B online Bayesian change-point detection and EXP-75-05 through
+**EXP-75-03 Kalman/state-space**, **EXP-75-04A offline PELT**, and
+**EXP-75-04B online Bayesian change-point detection**. EXP-75-05 through
 EXP-75-12 remain unimplemented.
 
 ## EXP-75-01 — EWMA aggregate smoothing
@@ -115,19 +115,47 @@ EXP-75-12 remain unimplemented.
 
 ## EXP-75-04B — Online Bayesian change-point detection
 
-- **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** A separately preregistered causal Bayesian online change-point
-  model may provide point-in-time structural-change evidence, but its hazard,
-  predictive distribution, priors, and reset semantics must be fixed before
-  implementation.
-- **Input/data prerequisite:** A fixed online probabilistic model and explicit
-  point-in-time input contract.
-- **Causal/live suitability:** Potentially causal; not implemented here.
-- **What changes relative to V1:** No current change to V1.
-- **What remains unchanged:** Canonical calculations and lifecycle rules.
-- **Evaluation measurements:** To be preregistered in a separate experiment.
-- **Promotion constraint:** Evaluate separately from offline PELT; no automatic
-  promotion.
+- **Status:** `IMPLEMENTED_EXPERIMENT`
+- **Hypothesis:** A causal posterior over recent structural-change timing may
+  provide useful point-in-time evidence to compare with unchanged V1 episodes.
+  V1 is the comparator, not ground truth; BOCPD evidence is not a trade signal,
+  prediction, or replacement classifier.
+- **Input/data prerequisite:** Only the raw canonical #71 5m
+  `median_normalized_movement` from explicit chronological experiment points.
+  The model does not consume another experiment's output or any future state.
+- **Model:** A scalar Gaussian observation model with unknown segment mean and
+  known observation variance. The prior is `mu ~ Normal(0, 4)` and each
+  observation is `Normal(mu, 1)`; variance is fixed, not estimated. Conjugate
+  predictive densities and the standard constant-hazard run-length recursion
+  are calculated in log space.
+- **Preregistered hazard configurations:** Expected run lengths are 30, 60, and
+  120 points, with hazards `1/30`, `1/60`, and `1/120` respectively. At the
+  fixed 5-second cadence, these correspond to prior run durations of 150, 300,
+  and 600 seconds. No winner is selected in code.
+- **Evidence state:** The exact, untruncated posterior retains run lengths
+  `0..N`. The directionless `recent_change_probability` is
+  `P(run_length_steps <= 2)`. The first six consecutive usable observations are
+  `WARMING`; afterward `CHANGE` requires recent-run mass >= `0.50`, with
+  `NONE` otherwise. Run length zero alone is only a hazard diagnostic.
+- **Causal/live suitability:** Online and causal as a research transform, but
+  exact posterior state grows with uninterrupted history. This is a research
+  reference only and is not wired live; indefinite live retention would require
+  a separately versioned and exactness-tested approximation.
+- **What changes relative to V1:** Nothing. BOCPD is an independent, directionless
+  evidence stream. Only V1 runs through canonical #71 → #72 → #73.
+- **What remains unchanged:** Canonical calculations and lifecycle rules; BOCPD
+  creates no candidate market evaluation, classifier branch, or lifecycle branch.
+- **Evaluation measurements:** Change-boundary and detection-region incidence,
+  short-lived closed regions, recent-change and expected-run-length diagnostics,
+  hazard sensitivity, unmatched regions, and signed lead/lag to V1 `STARTED` and
+  `REVERSED` onsets within a one-to-one ±60-second matching window. Unmatched
+  regions are not labeled false positives.
+- **Partition discipline:** Development, validation, and test summaries use
+  causal cutoffs. Earlier evidence remains available to later partition state;
+  later events cannot alter an earlier summary, and regions open at a cutoff are
+  censored there.
+- **Promotion constraint:** BOCPD is evaluated separately from offline PELT and
+  other experiments. There is no automatic hazard selection or live promotion.
 
 ## EXP-75-05 — Regression-slope acceleration
 
