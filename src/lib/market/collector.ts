@@ -185,6 +185,7 @@ export function normalizeRestCandles(input: {
         low: finitePositive(candle.low, "low price"),
         close: finitePositive(candle.close, "close price"),
         volume: finiteNonnegative(candle.volume, "volume"),
+        quoteVolume: finiteNonnegative(candle.quoteVolume, "quote volume"),
         // REST bootstrap/recovery has no exchange event, so the source event time is
         // honestly absent. The deterministic completion boundary is open + timeframe.
         sourceEventTime: null,
@@ -274,6 +275,7 @@ export function parseBinanceMarketMessage(
     low: finitePositive(kline["l"], "low price"),
     close: finitePositive(kline["c"], "close price"),
     volume: finiteNonnegative(kline["v"], "volume"),
+    quoteVolume: finiteNonnegative(kline["q"], "quote volume"),
     // The exchange event time is preserved exactly as received; completion is
     // defined by openTime + timeframeMinutes, not by this timestamp.
     sourceEventTime,
@@ -1071,6 +1073,7 @@ export class BinanceFuturesCollector {
       low: 1,
       close: 1,
       volume: 0,
+      quoteVolume: 0,
       sourceEventTime: now,
       receivedAt: now,
       transport: "rest",

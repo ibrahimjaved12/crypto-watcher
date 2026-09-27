@@ -405,6 +405,25 @@ test("an aggTrade stream rejects an otherwise valid kline event", async () => {
   }
 });
 
+test("WebSocket Binance kline preserves exact quote asset volume", async () => {
+  const previousWebSocket = globalThis.WebSocket;
+  ValidatingFakeWebSocket.instances.length = 0;
+  globalThis.WebSocket = ValidatingFakeWebSocket;
+  try {
+    const module = await loadBehavioralCollectorRuntime();
+    const { runtime, socket } = await openBehavioralRuntime(module, ["BTCUSDT"]);
+    const openTime = 1_800_000_000_000;
+    socket.emit("message", { data: JSON.stringify({
+      e: "kline", E: openTime + 1_000, s: "BTCUSDT", st: 1,
+      k: { t: openTime, T: openTime + 59_999, s: "BTCUSDT", i: "1m",
+        o: "100", h: "102", l: "99", c: "101", v: "2", q: "345.67", x: false },
+    }) });
+    assert.equal(runtime.collector.developingCandle("BTCUSDT", 1).quoteVolume, 345.67);
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
 test("subscription acknowledgement makes movement LIVE while candle recovery is pending", async () => {
   const previousWebSocket = globalThis.WebSocket;
   ValidatingFakeWebSocket.instances.length = 0;

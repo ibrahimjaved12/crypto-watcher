@@ -103,7 +103,7 @@ test("history registration sends prepared inputs once with exact identity", asyn
     sent.push({ url, body: JSON.parse(init.body) });
     return new Response(JSON.stringify({ schema_version: 1, session_id: SESSION,
       history_version: "history-v1", universe_id: universe.id,
-      universe_version: universe.version }), { status: 200 });
+      universe_version: universe.version, as_of_boundary_time_ms: BOUNDARY }), { status: 200 });
   };
   const config = { version: "market-movement-config-v1", historicalLookbackMs: 604_800_000,
     minimumHistoricalCoverageMs: 259_200_000, flatZ: 0.5, materialZ: 1,
@@ -112,9 +112,11 @@ test("history registration sends prepared inputs once with exact identity", asyn
     minimumEligibleFraction: 0.6, minimumEligibleCount: 5 };
   const historical = new Map([["BTCUSDT", { 1: { returns: [0.01, -0.01],
     usableCoverageMs: 259_200_000, previousNotionalVolumes: [100] } }]]);
-  await registerPythonMovementHistory(SESSION, "history-v1", universe, config, historical, {}, send);
+  await registerPythonMovementHistory(SESSION, "history-v1", universe, config, historical,
+    BOUNDARY, {}, send);
   assert.equal(sent.length, 1);
   assert.equal(sent[0].url, "http://python.local/v1/movement/history");
   assert.deepEqual(sent[0].body.historical[0].windows["1"].returns, [0.01, -0.01]);
   assert.equal(sent[0].body.session_id, SESSION);
+  assert.equal(sent[0].body.as_of_boundary_time_ms, BOUNDARY);
 });

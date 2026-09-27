@@ -279,6 +279,7 @@ export function createOperationalStore(
           low: candle.low,
           close: candle.close,
           volume: candle.volume,
+          quote_volume: candle.quoteVolume,
           source_event_at:
             candle.sourceEventTime === null ? null : new Date(candle.sourceEventTime).toISOString(),
           received_at: new Date(candle.receivedAt).toISOString(),
@@ -410,11 +411,12 @@ export function createOperationalStore(
         candles,
       };
     },
-    async readMovementCandleHistory(symbols, sinceMs) {
+    async readMovementCandleHistory(symbols, sinceMs, beforeBoundaryMs) {
       if (symbols.length === 0) return new Map<string, MovementCandle[]>();
       const { data, error } = await client.rpc("get_collector_movement_candles", {
         p_symbols: symbols.map((symbol) => symbol.toUpperCase()),
         p_since: new Date(sinceMs).toISOString(),
+        p_before_boundary: new Date(beforeBoundaryMs).toISOString(),
       });
       rpcError(error, "movement candle history read");
       const result = new Map<string, MovementCandle[]>();
@@ -423,10 +425,11 @@ export function createOperationalStore(
         if (!Array.isArray(rows)) continue;
         const candles: MovementCandle[] = [];
         for (const row of rows) {
-          if (!Array.isArray(row) || row.length < 3) continue;
+          if (!Array.isArray(row) || row.length < 4) continue;
           const openTime = Number(row[0]);
           const close = Number(row[1]);
           const volume = Number(row[2]);
+          const quoteVolume = row[3] === null ? null : Number(row[3]);
           if (
             !Number.isSafeInteger(openTime) ||
             !Number.isFinite(close) ||
@@ -434,7 +437,8 @@ export function createOperationalStore(
           ) {
             continue;
           }
-          candles.push({ openTime, close, volume });
+          if (quoteVolume !== null && !Number.isFinite(quoteVolume)) continue;
+          candles.push({ openTime, close, volume, quoteVolume });
         }
         result.set(symbol.toUpperCase(), candles);
       }

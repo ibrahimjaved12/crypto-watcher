@@ -75,7 +75,8 @@ export type MovementEngineRuntimeDependencies = {
   store: OperationalStore;
   collector: MovementCollectorPort;
   registerHistory: (sessionId: string, historyVersion: string, universe: MarketUniverse,
-    config: MarketMovementConfig, historical: MovementNormalizationHistory) => Promise<void>;
+    config: MarketMovementConfig, historical: MovementNormalizationHistory,
+    asOfBoundaryTime: number) => Promise<void>;
   calculateMovement: (sessionId: string, boundaryTime: number, historyVersion: string,
     universe: MarketUniverse, configVersion: string) => Promise<MarketMovementEvaluation>;
   finalization?: MovementFinalizationConfig;
@@ -125,6 +126,7 @@ export class MovementEngineRuntime {
   private historicalFailures = 0;
   private historicalUniverseVersion: string | null = null;
   private historicalVersion: string | null = null;
+  private historicalAsOfBoundary: number | null = null;
   private registeredSessionId: string | null = null;
   private registeredUniverseVersion: string | null = null;
   private historicalLoading: Promise<void> | null = null;
@@ -175,6 +177,7 @@ export class MovementEngineRuntime {
     this.historicalFailures = 0;
     this.historicalUniverseVersion = null;
     this.historicalVersion = null;
+    this.historicalAsOfBoundary = null;
     this.registeredSessionId = null;
     this.registeredUniverseVersion = null;
     this.lastTransition = null;
@@ -229,7 +232,9 @@ export class MovementEngineRuntime {
     // is evaluated, but it no longer blocks upstream #70 bucket finalization.
     if (this.pendingPersistence && !(await this.flushPendingPersistence())) return;
     if (!stillCurrent()) return;
-    await this.refreshHistorical(universe, now, movementSessionId);
+    const firstBoundary = this.engine.firstPendingBoundary(finalizable, universe.version);
+    if (firstBoundary === null) return;
+    await this.refreshHistorical(universe, now, movementSessionId, firstBoundary);
     if (!stillCurrent() || !this.historicalVersion ||
         this.registeredSessionId !== movementSessionId ||
         this.registeredUniverseVersion !== universe.version) return;
@@ -298,7 +303,7 @@ export class MovementEngineRuntime {
   }
 
   private async refreshHistorical(universe: MarketUniverse, now: number,
-    sessionId: string): Promise<void> {
+    sessionId: string, firstBoundary: number): Promise<void> {
     if (this.historicalLoading) return;
     if (now < this.historicalRetryAt) return;
     // A changed universe (e.g. a newly watched symbol) needs history immediately
@@ -314,20 +319,25 @@ export class MovementEngineRuntime {
       try {
         if (needsRefresh) {
           const candles = await this.deps.store.readMovementCandleHistory(
-            universe.symbols, now - this.movementConfig.historicalLookbackMs,
+            universe.symbols,
+            firstBoundary - this.movementConfig.historicalLookbackMs,
+            firstBoundary,
           );
           if (tenure !== this.tenure ||
               this.deps.collector.currentMovementSessionId() !== sessionId ||
               buildMarketUniverse(this.deps.collector.subscribedSymbols()).version !== universe.version) return;
-          this.historical = buildMovementNormalizationHistory(candles, this.movementConfig);
+          this.historical = buildMovementNormalizationHistory(
+            candles, firstBoundary, this.movementConfig,
+          );
           this.historicalVersion = crypto.randomUUID();
+          this.historicalAsOfBoundary = firstBoundary;
           this.historicalLoadedAt = now;
           this.historicalUniverseVersion = universe.version;
           this.registeredSessionId = null;
           this.registeredUniverseVersion = null;
         }
         await this.deps.registerHistory(sessionId, this.historicalVersion!, universe,
-                                        this.movementConfig, this.historical);
+          this.movementConfig, this.historical, this.historicalAsOfBoundary!);
         if (tenure !== this.tenure ||
             this.deps.collector.currentMovementSessionId() !== sessionId ||
             buildMarketUniverse(this.deps.collector.subscribedSymbols()).version !== universe.version) return;

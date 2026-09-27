@@ -276,6 +276,14 @@ class AggregateTests(unittest.TestCase):
 
 
 class VolumeOutlierTests(unittest.TestCase):
+    def test_rvol_uses_explicit_quote_notional(self):
+        item = symbol_input("QUOTE", volume=Decimal("1234"),
+                            prior_volumes=[Decimal("777")] * 20)
+        result = evaluate({"QUOTE": item})
+        symbol = result.symbols[0]
+        self.assertAlmostEqual(symbol.rvol.value,
+                               float(symbol.current_notional_volume.value) / 777)
+
     def test_rvol_uses_last_n_comparable_windows(self):
         prior = [Decimal("100")] + [Decimal("6")] * 20
         inputs = {f"S{i}": symbol_input(f"S{i}", prior_volumes=prior) for i in range(5)}

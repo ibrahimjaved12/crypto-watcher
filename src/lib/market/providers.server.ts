@@ -17,6 +17,8 @@ export type Candle = {
   low: number;
   close: number;
   volume: number;
+  /** Exact Binance quote-asset volume when supplied by USD-M klines. */
+  quoteVolume?: number;
   complete?: boolean;
 };
 
@@ -295,7 +297,7 @@ function parseBinance(raw: unknown, minutes: number, now = Date.now()): Candle[]
   if (!Array.isArray(raw) || raw.length === 0) throw new Error("empty kline response");
   const duration = minutes * 60_000;
   return raw.map((row) => {
-    if (!Array.isArray(row) || row.length < 7) throw new Error("invalid kline row");
+    if (!Array.isArray(row) || row.length < 8) throw new Error("invalid kline row");
     const time = Number(row[0]);
     const closeTime = Number(row[6]);
     if (!Number.isSafeInteger(time) || closeTime !== time + duration - 1) {
@@ -308,6 +310,7 @@ function parseBinance(raw: unknown, minutes: number, now = Date.now()): Candle[]
       low: finiteNumber(row[3], "low price"),
       close: finiteNumber(row[4], "close price"),
       volume: finiteNonnegative(row[5], "volume"),
+      quoteVolume: finiteNonnegative(row[7], "quote volume"),
       complete: closeTime < now,
     };
   });

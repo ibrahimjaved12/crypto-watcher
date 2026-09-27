@@ -242,6 +242,7 @@ const historyResponse = z.object({
   schema_version: z.literal(1), session_id: z.string().uuid(),
   history_version: z.string().min(1), universe_id: z.string().min(1),
   universe_version: z.string().min(1),
+  as_of_boundary_time_ms: z.number().int().nonnegative().max(4_102_444_800_000),
 }).strict();
 const metricsResponse = z.object({
   schema_version: z.literal(1), session_id: z.string().uuid(),
@@ -278,11 +279,13 @@ async function postCanonicalMovement(
 export async function registerPythonMovementHistory(
   sessionId: string, historyVersion: string, universe: MarketUniverse,
   config: MarketMovementConfig, historical: MovementNormalizationHistory,
+  asOfBoundaryTime: number,
   env: Record<string, string | undefined> = process.env, send: typeof fetch = fetch,
 ): Promise<void> {
   const response = await postCanonicalMovement("/v1/movement/history", {
     schema_version: 1, session_id: sessionId, history_version: historyVersion,
     universe_id: universe.id, universe_version: universe.version,
+    as_of_boundary_time_ms: asOfBoundaryTime,
     symbols: universe.symbols,
     config: {
       version: config.version, historical_lookback_ms: config.historicalLookbackMs,
@@ -304,7 +307,8 @@ export async function registerPythonMovementHistory(
   const parsed = historyResponse.safeParse(response);
   if (!parsed.success || parsed.data.session_id !== sessionId ||
       parsed.data.history_version !== historyVersion ||
-      parsed.data.universe_id !== universe.id || parsed.data.universe_version !== universe.version) {
+      parsed.data.universe_id !== universe.id || parsed.data.universe_version !== universe.version ||
+      parsed.data.as_of_boundary_time_ms !== asOfBoundaryTime) {
     throw new Error("Python movement history response has mismatched provenance");
   }
 }

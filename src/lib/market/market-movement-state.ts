@@ -44,6 +44,8 @@ export type MovementCandle = {
   openTime: number;
   close: number;
   volume: number;
+  /** Exact Binance USD-M quote-asset volume; null for legacy rows lacking provenance. */
+  quoteVolume: number | null;
 };
 
 export type PersistedMovementTransition = {

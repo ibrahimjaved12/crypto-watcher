@@ -200,7 +200,8 @@ class ApiTests(unittest.TestCase):
                                       json=boundary, headers=HEADERS).status_code, 200)
         history = {
             "schema_version": 1, "session_id": session_id,
-            "history_version": "history-v1", "universe_id": "watched",
+            "history_version": "history-v1", "as_of_boundary_time_ms": NOW,
+            "universe_id": "watched",
             "universe_version": "watched-v1", "symbols": ["BTCUSDT"],
             "config": asdict(MarketMovementConfig()),
             "historical": [{"symbol": "BTCUSDT", "windows": {}}],

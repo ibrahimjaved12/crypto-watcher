@@ -175,6 +175,7 @@ class MovementBoundaryService:
             # One slot per bounded movement session; replacement releases old history.
             session["history"] = {
                 "version": request.history_version,
+                "as_of_boundary": request.as_of_boundary_time_ms,
                 "fingerprint": fingerprint,
                 "universe": universe,
                 "config": config,
@@ -183,7 +184,8 @@ class MovementBoundaryService:
         self.sessions.move_to_end(session_id)
         return {"schema_version": 1, "session_id": session_id,
                 "history_version": request.history_version,
-                "universe_id": universe.id, "universe_version": universe.version}
+                "universe_id": universe.id, "universe_version": universe.version,
+                "as_of_boundary_time_ms": request.as_of_boundary_time_ms}
 
     def calculate_metrics(self, request: MovementMetricsRequest):
         session_id = str(request.session_id)
@@ -197,6 +199,8 @@ class MovementBoundaryService:
                 or request.universe_version != universe.version):
             raise ValueError("movement history identity does not match")
         boundary = request.evaluation_boundary_time_ms
+        if boundary < registration["as_of_boundary"]:
+            raise ValueError("movement boundary predates registered history cutoff")
         engines = session["engines"]
         symbol_inputs = {}
         found_boundary = False

@@ -327,7 +327,8 @@ class MovementMetricsAdapterTests(unittest.TestCase):
     def history_request(cls, version="history-v1", returns=None):
         return MovementHistoryRegistrationRequest.model_validate({
             "schema_version": 1, "session_id": SESSION,
-            "history_version": version, "universe_id": "watched",
+            "history_version": version, "as_of_boundary_time_ms": BASE + 350 * 5_000,
+            "universe_id": "watched",
             "universe_version": "watched-v1", "symbols": cls.SYMBOLS,
             "config": asdict(MarketMovementConfig()),
             "historical": [{
@@ -369,6 +370,8 @@ class MovementMetricsAdapterTests(unittest.TestCase):
         earlier = service.calculate_metrics(self.metrics_request(BASE + 355 * 5_000))
         self.assertEqual(earlier["evaluation"]["evaluation_boundary_time_ms"], BASE + 355 * 5_000)
         self.assertEqual(earlier["evaluation"]["windows"]["1"]["symbols"][0]["current_return"]["value"], 0)
+        with self.assertRaisesRegex(ValueError, "predates registered history cutoff"):
+            service.calculate_metrics(self.metrics_request(BASE + 349 * 5_000))
 
     def test_version_retries_identity_and_evicted_session_fail_closed(self):
         service = self.populated_service()

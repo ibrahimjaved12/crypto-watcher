@@ -249,6 +249,7 @@ class MovementHistoryRegistrationRequest(InputModel):
     schema_version: Literal[1]
     session_id: UUID
     history_version: str = Field(min_length=1, max_length=128)
+    as_of_boundary_time_ms: Timestamp
     universe_id: str = Field(min_length=1, max_length=128)
     universe_version: str = Field(min_length=1, max_length=128)
     symbols: Annotated[tuple[str, ...], Field(min_length=1, max_length=100)]
@@ -257,6 +258,8 @@ class MovementHistoryRegistrationRequest(InputModel):
 
     @model_validator(mode="after")
     def exact_symbols(self):
+        if self.as_of_boundary_time_ms % 5_000:
+            raise ValueError("history as-of boundary must align to five seconds")
         if len(set(self.symbols)) != len(self.symbols):
             raise ValueError("movement universe symbols must be unique")
         if tuple(item.symbol for item in self.historical) != self.symbols:

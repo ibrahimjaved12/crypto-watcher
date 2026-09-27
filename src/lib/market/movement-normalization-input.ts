@@ -17,7 +17,8 @@ function trailingContiguousRun(candles: readonly MovementCandle[]): MovementCand
     .filter((candle) =>
       Number.isSafeInteger(candle.openTime) && candle.openTime >= 0 &&
       Number.isFinite(candle.close) && candle.close > 0 &&
-      Number.isFinite(candle.volume) && candle.volume >= 0)
+      Number.isFinite(candle.volume) && candle.volume >= 0 &&
+      candle.quoteVolume !== null && Number.isFinite(candle.quoteVolume) && candle.quoteVolume >= 0)
     .sort((left, right) => left.openTime - right.openTime);
   const deduped: MovementCandle[] = [];
   for (const candle of usable) {
@@ -35,11 +36,17 @@ function trailingContiguousRun(candles: readonly MovementCandle[]): MovementCand
 
 export function buildMovementNormalizationHistory(
   candlesBySymbol: ReadonlyMap<string, readonly MovementCandle[]>,
+  asOfBoundaryTime: number,
   config: MarketMovementConfig = DEFAULT_MARKET_MOVEMENT_CONFIG,
 ): MovementNormalizationHistory {
+  if (!Number.isSafeInteger(asOfBoundaryTime) || asOfBoundaryTime < 0) {
+    throw new Error("movement history as-of boundary must be a nonnegative integer");
+  }
   const result: MovementNormalizationHistory = new Map();
   for (const [symbol, candles] of candlesBySymbol) {
-    result.set(symbol.toUpperCase(), buildSymbolNormalization(candles, config));
+    result.set(symbol.toUpperCase(), buildSymbolNormalization(
+      candles.filter((candle) => candle.openTime + MINUTE_MS < asOfBoundaryTime), config,
+    ));
   }
   return result;
 }
@@ -76,7 +83,7 @@ function buildSymbolNormalization(
           contiguous = false;
           break;
         }
-        notional += candle.close * candle.volume;
+        notional += candle.quoteVolume!;
       }
       if (!contiguous) continue;
       returns.push(Math.log(current.close / previous.close));

@@ -80,6 +80,7 @@ function historicalCandles() {
     openTime: start + index * MINUTE,
     close: 100 + Math.sin(index / 5) * 0.005 + index * 0.0000002,
     volume: 1 + (index % 3),
+    quoteVolume: 100 + (index % 3),
   }));
 }
 
@@ -166,7 +167,7 @@ function createHarness() {
   const control = { failRestore: 0, failHistory: 0, failPersist: false,
     failMetrics: false, rotateDuringMetrics: false, changeUniverseDuringMetrics: false,
     symbols: [...SYMBOLS] };
-  const calls = { restore: 0, history: 0, register: [], metrics: [], persist: [] };
+  const calls = { restore: 0, history: 0, historyReads: [], register: [], metrics: [], persist: [] };
   const persistedEvents = new Map();
   const candles = new Map(SYMBOLS.map((symbol) => [symbol, historicalCandles()]));
   let durableCurrent = null;
@@ -185,8 +186,9 @@ function createHarness() {
       if (calls.restore <= control.failRestore) throw new Error("restore read failed");
       return durableCurrent;
     },
-    async readMovementCandleHistory() {
+    async readMovementCandleHistory(symbols, sinceMs, beforeBoundaryMs) {
       calls.history += 1;
+      calls.historyReads.push({symbols, sinceMs, beforeBoundaryMs});
       if (calls.history <= control.failHistory) throw new Error("history read failed");
       return candles;
     },
@@ -209,8 +211,8 @@ function createHarness() {
   const runtime = new MovementEngineRuntime({
     store,
     collector,
-    async registerHistory(sessionId, historyVersion, universe, config, historical) {
-      calls.register.push({sessionId, historyVersion, universe, config, historical});
+    async registerHistory(sessionId, historyVersion, universe, config, historical, asOfBoundary) {
+      calls.register.push({sessionId, historyVersion, universe, config, historical, asOfBoundary});
     },
     async calculateMovement(sessionId, boundary, historyVersion, universe) {
       calls.metrics.push({sessionId, boundary, historyVersion, universe});
@@ -253,6 +255,10 @@ test("history registers once per refresh and metrics use the same canonical sess
   await harness.runtime.runOnce();
   assert.equal(harness.calls.register.length, 1);
   assert.equal(harness.calls.metrics.length, 1);
+  assert.equal(harness.calls.register[0].asOfBoundary, BASE - 5_000);
+  assert.equal(harness.calls.historyReads[0].sinceMs,
+    BASE - harness.calls.register[0].config.historicalLookbackMs);
+  assert.equal(harness.calls.historyReads[0].beforeBoundaryMs, BASE - 5_000);
   assert.equal(harness.calls.metrics[0].sessionId, harness.calls.register[0].sessionId);
   assert.equal(harness.calls.metrics[0].historyVersion, harness.calls.register[0].historyVersion);
   harness.state.now = BASE + 5_000;

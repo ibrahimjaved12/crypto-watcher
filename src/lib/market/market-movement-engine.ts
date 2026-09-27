@@ -144,6 +144,32 @@ export class MarketMovementEngine {
     return this.lastEvaluated;
   }
 
+  /** First boundary this engine will evaluate using the same catch-up policy as advance(). */
+  firstPendingBoundary(finalizableBoundary: number, universeVersion: string): number | null {
+    if (
+      !Number.isSafeInteger(finalizableBoundary) ||
+      finalizableBoundary < 0 ||
+      finalizableBoundary % MOVEMENT_BUCKET_MS !== 0
+    ) {
+      throw new Error("movement finalizable boundary must be an aligned exchange boundary");
+    }
+    if (this.lastEvaluated === null && this.lifecycleState !== null &&
+        finalizableBoundary < this.lifecycleState.evaluationBoundaryTime) return null;
+    if (this.lastEvaluated !== null && finalizableBoundary <= this.lastEvaluated) return null;
+    let next = this.lastEvaluated === null
+      ? finalizableBoundary
+      : this.lastEvaluated + MOVEMENT_BUCKET_MS;
+    if (this.lastUniverseVersion !== null && this.lastUniverseVersion !== universeVersion) {
+      next = finalizableBoundary;
+    }
+    if (next > finalizableBoundary) return null;
+    const maxCatchUp = this.options.maxCatchUpBoundaries ?? MOVEMENT_ENGINE_MAX_CATCHUP_BOUNDARIES;
+    if (finalizableBoundary - next > maxCatchUp * MOVEMENT_BUCKET_MS) {
+      next = finalizableBoundary;
+    }
+    return next;
+  }
+
   /** Seeds #73 state loaded from the bounded operational current state after restart. */
   restoreLifecycleState(state: MarketEpisodeLifecycleState | null): void {
     this.lifecycleState = state;
@@ -168,44 +194,33 @@ export class MarketMovementEngine {
     ) {
       throw new Error("movement finalizable boundary must be an aligned exchange boundary");
     }
-    // A restored episode can only advance; never evaluate behind its persisted boundary.
-    if (
-      this.lastEvaluated === null &&
-      this.lifecycleState !== null &&
-      input.finalizableBoundary < this.lifecycleState.evaluationBoundaryTime
-    ) {
-      return [];
-    }
-    if (this.lastEvaluated !== null && input.finalizableBoundary <= this.lastEvaluated) return [];
-    let next =
-      this.lastEvaluated === null
-        ? input.finalizableBoundary
-        : this.lastEvaluated + MOVEMENT_BUCKET_MS;
-    // Earlier boundaries may predate every member of a newly configured
-    // universe. Evaluate its latest finalized boundary with the new identity.
-    if (this.lastUniverseVersion !== null &&
-        this.lastUniverseVersion !== input.universe.version) {
-      next = input.finalizableBoundary;
-    }
-    if (next > input.finalizableBoundary) return [];
-    const maxCatchUp = this.options.maxCatchUpBoundaries ?? MOVEMENT_ENGINE_MAX_CATCHUP_BOUNDARIES;
-    if (input.finalizableBoundary - next > maxCatchUp * MOVEMENT_BUCKET_MS) {
-      next = input.finalizableBoundary;
-    }
+    const next = this.firstPendingBoundary(input.finalizableBoundary, input.universe.version);
+    if (next === null) return [];
     const results: MovementBoundaryEvaluation[] = [];
+    let stagedLifecycleState = this.lifecycleState;
+    let stagedLastEvaluated = this.lastEvaluated;
+    let stagedUniverseVersion = this.lastUniverseVersion;
     for (
       let boundary = next;
       boundary <= input.finalizableBoundary;
       boundary += MOVEMENT_BUCKET_MS
     ) {
-      results.push(await this.evaluateBoundary(boundary, input));
+      const result = await this.evaluateBoundary(boundary, input, stagedLifecycleState);
+      results.push(result);
+      stagedLifecycleState = result.lifecycle.nextState;
+      stagedLastEvaluated = boundary;
+      stagedUniverseVersion = input.universe.version;
     }
+    this.lifecycleState = stagedLifecycleState;
+    this.lastEvaluated = stagedLastEvaluated;
+    this.lastUniverseVersion = stagedUniverseVersion;
     return results;
   }
 
   private async evaluateBoundary(
     boundaryTime: number,
     input: MovementEngineAdvanceInput,
+    previousState: MarketEpisodeLifecycleState | null,
   ): Promise<MovementBoundaryEvaluation> {
     const movement = await input.movementForBoundary(boundaryTime);
     if (
@@ -241,12 +256,9 @@ export class MarketMovementEngine {
     const lifecycle = processMarketEpisodeLifecycle({
       classification,
       movement,
-      previousState: this.lifecycleState,
+      previousState,
       ...(input.lifecycleConfig ? { config: input.lifecycleConfig } : {}),
     });
-    this.lifecycleState = lifecycle.nextState;
-    this.lastEvaluated = boundaryTime;
-    this.lastUniverseVersion = input.universe.version;
     return { boundaryTime, movement, classification, lifecycle };
   }
 }
