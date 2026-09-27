@@ -195,6 +195,8 @@ Continue developing this project in the [Lovable editor](https://lovable.dev/pro
 
 ## Development
 
+Pull requests run the [Python and Node verification checks](docs/ci-verification.md).
+
 Prefer working locally? Install Node.js with
 [nvm](https://github.com/nvm-sh/nvm#installing-and-updating) and install Docker as
 described in the [environment setup](docs/environments.md).
