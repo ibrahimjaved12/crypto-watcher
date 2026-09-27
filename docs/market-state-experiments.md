@@ -5,8 +5,8 @@ evaluated independently against the unchanged canonical #28 V1 event stream.
 The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
 **EXP-75-03 Kalman/state-space**, **EXP-75-04A offline PELT**,
 **EXP-75-04B online Bayesian change-point detection**, and
-**EXP-75-05 regression-slope acceleration**. EXP-75-06 through EXP-75-12
-remain unimplemented.
+**EXP-75-05 regression-slope acceleration**, and **EXP-75-06A realized-volatility
+normalization**. EXP-75-06B and EXP-75-07 through EXP-75-12 remain unimplemented.
 
 ## EXP-75-01 — EWMA aggregate smoothing
 
@@ -188,23 +188,48 @@ remain unimplemented.
 - **Promotion constraint:** The three fixed window lengths remain independent
   research candidates. No automatic selection or live promotion.
 
-## EXP-75-06 — ATR / realized-volatility normalization
+## EXP-75-06A — Realized-volatility normalization
+
+- **Status:** `IMPLEMENTED_EXPERIMENT`
+- **Hypothesis:** Scaling each symbol's canonical returns by causal realized
+  volatility estimated from synchronized, non-overlapping completed 1m returns
+  may produce more comparable normalized magnitudes across instruments than
+  historical MAD scaling. Any benefit must appear as improved cross-asset
+  normalization consistency and useful regime stability without excessive
+  warming, outlier masking, or unstable V1 state changes.
+- **Input/data prerequisite:** Canonical #71 1m `current_return` sampled only at
+  boundaries divisible by 60,000 ms. Every other five-second rolling 1m return
+  is ignored. The 30, 60, and 120-minute configs require that many consecutive
+  prior synchronized one-minute samples per symbol.
+- **Estimator:** `sigma_1m = sqrt(sum(prior_1m_return²) / N)` with no centering,
+  annualization, Bessel correction, or exponential weighting. For a `w`-minute
+  horizon, `sigma_w = sigma_1m * sqrt(w)` and candidate
+  `normalized_z = (current_return - canonical_historical_median) / sigma_w`.
+  The current return is appended to history only after the candidate at that
+  boundary is calculated, so it cannot normalize itself. There is no MAD
+  conversion factor `0.6745` in the candidate formula.
+- **What changes relative to V1:** Only the normalization method and derived
+  direction, material flags, normalized breadth/aggregates, and outlier status
+  across 1m, 5m, and 15m. Canonical #71 pure helpers recompute the derived
+  evidence; canonical #72 and #73 process both independent branches.
+- **What remains unchanged:** Returns, velocities, acceleration, historical
+  center and MAD diagnostic, notionals/RVOL, raw cross-sectional z, included
+  universe and eligibility, and V1 classifier/lifecycle rules.
+- **Evaluation measurements:** Availability, normalized magnitudes, primary
+  cross-asset median-absolute-z dispersion, material breadth, paired outlier
+  changes, broad direction, episodes, onset timing, and active overlap. These
+  descriptive comparisons do not rank or promote a lookback.
+- **Promotion constraint:** Three fixed lookbacks are independent candidates;
+  no automatic selection or live integration.
+
+## EXP-75-06B — ATR / range normalization
 
 - **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** Alternative per-symbol volatility scaling may improve
-  cross-contract comparability in changing volatility regimes, only if it does not
-  mask genuine outliers or reduce regime stability compared with V1 median/MAD
-  normalization.
-- **Input/data prerequisite:** Separate fixed ATR and realized-volatility data
-  requirements and point-in-time history.
-- **Causal/live suitability:** Potentially causal; ATR and realized volatility are
-  separate future candidate configurations.
-- **What changes relative to V1:** Future per-symbol normalization only.
-- **What remains unchanged:** Raw returns, breadth, lifecycle, and V1 thresholds.
-- **Evaluation measurements:** Outlier retention, state disagreement, and regime
-  stability.
-- **Promotion constraint:** ATR and realized volatility must not be combined into
-  one unidentifiable candidate.
+- **Input/data prerequisite:** ATR requires causal replay inputs containing
+  actual OHLC/range evidence, including high, low, and previous-close semantics.
+  `MarketStateExperimentPoint` contains canonical #71 evaluations, not the raw
+  OHLC sequence required for ATR. High/low must not be inferred from close
+  prices or rolling returns.
 
 ## EXP-75-07 — PCA/common factor
 
