@@ -2,8 +2,8 @@
 
 This registry preregisters the deferred Issue #75 candidates. Each candidate is
 evaluated independently against the unchanged canonical #28 V1 event stream.
-The current experiment implements only **EXP-75-01**; the other candidates remain
-unimplemented.
+The current experiments implement **EXP-75-01 EWMA** and **EXP-75-02 CUSUM**;
+EXP-75-03 through EXP-75-12 remain unimplemented.
 
 ## EXP-75-01 — EWMA aggregate smoothing
 
@@ -32,22 +32,28 @@ unimplemented.
 
 ## EXP-75-02 — CUSUM
 
-- **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** A causal two-sided CUSUM applied to the primary 5m market-level
-  normalized movement may identify persistent small shifts before V1 transitions,
-  if earlier detection does not create excessive additional changes or short-lived
-  episodes.
-- **Input/data prerequisite:** Explicit aggregate series, preregistered
-  reference/drift and decision thresholds, and explicit reset rules.
-- **Causal/live suitability:** Potentially causal, but not evaluated here.
-- **What changes relative to V1:** A future candidate transform would change the
-  primary aggregate evidence only.
-- **What remains unchanged:** Canonical #71 metrics, #72 classification rules,
-  and #73 lifecycle rules.
-- **Evaluation measurements:** Direction disagreement, onset timing, transition
-  counts, and short-lived episodes.
-- **Promotion constraint:** Versioned thresholds and independent replay evidence
-  are required before any consideration of live use.
+- **Status:** `IMPLEMENTED_EXPERIMENT`
+- **Hypothesis:** A causal two-sided CUSUM of the canonical #71 primary 5m median
+  normalized market movement may identify persistent directional shifts before V1
+  episode onsets. Any earlier detection is useful only if it does not create
+  excessive unmatched detections, unstable short detection regions, or poor
+  directional overlap with the unchanged V1 episode stream.
+- **Input/data prerequisite:** The raw canonical #71 5m
+  `median_normalized_movement` and point-in-time source evidence in an explicit
+  chronological development/validation/test replay.
+- **Causal/live suitability:** Causal and replayable as a research detector; it is
+  not wired into live behavior. V1 episodes are the comparator, not ground truth.
+- **What changes relative to V1:** A separate CUSUM detector uses the fixed
+  `reference=0.0` parameter and one of the preregistered `(k, h)` pairs:
+  `(0.10, 0.75)`, `(0.10, 1.50)`, or `(0.25, 1.50)`.
+- **What remains unchanged:** The canonical #71 evaluation, #72 classifier, and
+  #73 lifecycle branch. CUSUM never replaces or mutates a movement evaluation.
+- **Evaluation measurements:** CUSUM detection regions and onsets, unmatched
+  alarms, baseline onset lead/lag, same-direction overlap, baseline coverage,
+  transition/episode counts, ambiguous/unavailable points, and short-lived closed
+  regions.
+- **Promotion constraint:** No parameter optimization or automatic promotion;
+  unmatched alarms are not labelled statistical false positives.
 
 ## EXP-75-03 — Kalman/state-space
 
