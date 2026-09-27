@@ -718,6 +718,7 @@ test("collector retention keeps enough canonical history for the longest TA fram
         low: 90,
         close: 101,
         volume: 5,
+        quote_volume: 505,
         source_event_at: new Date(openTime + step).toISOString(),
         received_at: new Date(openTime + step).toISOString(),
         transport: "websocket",
@@ -781,7 +782,6 @@ test("repository movement history read maps compact rows and skips malformed ent
   const history = await store.readMovementCandleHistory(["btcusdt", "ethusdt"], 0, 5000);
   assert.deepEqual(history.get("BTCUSDT"), [
     { openTime: 1000, close: 101.5, volume: 2, quoteVolume: 400 },
-    { openTime: 2000, close: 102, volume: 3, quoteVolume: null },
   ]);
   assert.equal(history.has("ETHUSDT"), false);
 });

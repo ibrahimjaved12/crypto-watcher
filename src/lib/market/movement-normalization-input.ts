@@ -18,7 +18,7 @@ function trailingContiguousRun(candles: readonly MovementCandle[]): MovementCand
       Number.isSafeInteger(candle.openTime) && candle.openTime >= 0 &&
       Number.isFinite(candle.close) && candle.close > 0 &&
       Number.isFinite(candle.volume) && candle.volume >= 0 &&
-      candle.quoteVolume !== null && Number.isFinite(candle.quoteVolume) && candle.quoteVolume >= 0)
+      Number.isFinite(candle.quoteVolume) && candle.quoteVolume >= 0)
     .sort((left, right) => left.openTime - right.openTime);
   const deduped: MovementCandle[] = [];
   for (const candle of usable) {
@@ -83,7 +83,7 @@ function buildSymbolNormalization(
           contiguous = false;
           break;
         }
-        notional += candle.quoteVolume!;
+        notional += candle.quoteVolume;
       }
       if (!contiguous) continue;
       returns.push(Math.log(current.close / previous.close));

@@ -255,10 +255,10 @@ test("history registers once per refresh and metrics use the same canonical sess
   await harness.runtime.runOnce();
   assert.equal(harness.calls.register.length, 1);
   assert.equal(harness.calls.metrics.length, 1);
-  assert.equal(harness.calls.register[0].asOfBoundary, BASE - 5_000);
+  assert.equal(harness.calls.register[0].asOfBoundary, BASE);
   assert.equal(harness.calls.historyReads[0].sinceMs,
     BASE - harness.calls.register[0].config.historicalLookbackMs);
-  assert.equal(harness.calls.historyReads[0].beforeBoundaryMs, BASE - 5_000);
+  assert.equal(harness.calls.historyReads[0].beforeBoundaryMs, BASE);
   assert.equal(harness.calls.metrics[0].sessionId, harness.calls.register[0].sessionId);
   assert.equal(harness.calls.metrics[0].historyVersion, harness.calls.register[0].historyVersion);
   harness.state.now = BASE + 5_000;

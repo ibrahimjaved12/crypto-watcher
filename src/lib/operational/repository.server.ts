@@ -426,18 +426,19 @@ export function createOperationalStore(
         const candles: MovementCandle[] = [];
         for (const row of rows) {
           if (!Array.isArray(row) || row.length < 4) continue;
+          if (row[3] === null || row[3] === undefined) continue;
           const openTime = Number(row[0]);
           const close = Number(row[1]);
           const volume = Number(row[2]);
-          const quoteVolume = row[3] === null ? null : Number(row[3]);
+          const quoteVolume = Number(row[3]);
           if (
             !Number.isSafeInteger(openTime) ||
             !Number.isFinite(close) ||
-            !Number.isFinite(volume)
+            !Number.isFinite(volume) || volume < 0 ||
+            !Number.isFinite(quoteVolume) || quoteVolume < 0
           ) {
             continue;
           }
-          if (quoteVolume !== null && !Number.isFinite(quoteVolume)) continue;
           candles.push({ openTime, close, volume, quoteVolume });
         }
         result.set(symbol.toUpperCase(), candles);

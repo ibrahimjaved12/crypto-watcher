@@ -114,6 +114,10 @@ function positiveDecimalText(value: unknown, label: string): string {
 }
 
 function finiteNonnegative(value: unknown, label: string): number {
+  if (value === null || value === undefined ||
+      (typeof value === "string" && value.trim() === "")) {
+    throw new Error(`invalid ${label}`);
+  }
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`invalid ${label}`);
   return parsed;

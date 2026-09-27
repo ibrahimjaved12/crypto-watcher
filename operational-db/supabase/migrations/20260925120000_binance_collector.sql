@@ -18,6 +18,7 @@ CREATE TABLE public.collector_recent_candles (
   low DOUBLE PRECISION NOT NULL CHECK (low > 0 AND low < 'Infinity'::float8),
   close DOUBLE PRECISION NOT NULL CHECK (close > 0 AND close < 'Infinity'::float8),
   volume DOUBLE PRECISION NOT NULL CHECK (volume >= 0 AND volume < 'Infinity'::float8),
+  quote_volume DOUBLE PRECISION NOT NULL CHECK (quote_volume >= 0 AND quote_volume < 'Infinity'::float8),
   source_event_at TIMESTAMPTZ NOT NULL,
   received_at TIMESTAMPTZ NOT NULL,
   transport TEXT NOT NULL CHECK (transport IN ('rest', 'websocket')),
@@ -82,13 +83,15 @@ BEGIN
       provider TEXT, instrument_id TEXT, price_type TEXT, timeframe_minutes INTEGER,
       open_time TIMESTAMPTZ, close_time TIMESTAMPTZ, open DOUBLE PRECISION,
       high DOUBLE PRECISION, low DOUBLE PRECISION, close DOUBLE PRECISION,
-      volume DOUBLE PRECISION, source_event_at TIMESTAMPTZ
+      volume DOUBLE PRECISION, quote_volume DOUBLE PRECISION,
+      source_event_at TIMESTAMPTZ
     )
     JOIN public.collector_recent_candles c USING (
       provider, instrument_id, price_type, timeframe_minutes, open_time
     )
     WHERE c.close_time <> x.close_time OR c.open <> x.open OR c.high <> x.high
       OR c.low <> x.low OR c.close <> x.close OR c.volume <> x.volume
+      OR c.quote_volume IS DISTINCT FROM x.quote_volume
   ) THEN
     RAISE EXCEPTION 'Conflicting collector candle for stable identity';
   END IF;
@@ -98,17 +101,19 @@ BEGIN
     INSERT INTO public.collector_recent_candles (
       instrument_id, symbol, native_symbol, provider, endpoint, price_type,
       timeframe_minutes, open_time, close_time, open, high, low, close, volume,
-      source_event_at, received_at, transport
+      quote_volume, source_event_at, received_at, transport
     )
     SELECT x.instrument_id, x.symbol, x.native_symbol, x.provider, x.endpoint,
       x.price_type, x.timeframe_minutes, x.open_time, x.close_time, x.open, x.high,
-      x.low, x.close, x.volume, x.source_event_at, x.received_at, x.transport
+      x.low, x.close, x.volume, x.quote_volume, x.source_event_at, x.received_at,
+      x.transport
     FROM jsonb_to_recordset(p_rows) AS x(
       instrument_id TEXT, symbol TEXT, native_symbol TEXT, provider TEXT, endpoint TEXT,
       price_type TEXT, timeframe_minutes INTEGER, open_time TIMESTAMPTZ,
       close_time TIMESTAMPTZ, open DOUBLE PRECISION, high DOUBLE PRECISION,
       low DOUBLE PRECISION, close DOUBLE PRECISION, volume DOUBLE PRECISION,
-      source_event_at TIMESTAMPTZ, received_at TIMESTAMPTZ, transport TEXT
+      quote_volume DOUBLE PRECISION, source_event_at TIMESTAMPTZ,
+      received_at TIMESTAMPTZ, transport TEXT
     )
     ON CONFLICT (provider, instrument_id, price_type, timeframe_minutes, open_time)
       DO NOTHING

@@ -47,6 +47,7 @@ function canonical(symbol, timeframeMinutes, openTime, transport = "rest") {
     low: 99,
     close: 101,
     volume: 12,
+    quoteVolume: 1234,
     // REST has no exchange event time; a WebSocket fixture uses the event time.
     sourceEventTime: transport === "rest" ? null : openTime + duration,
     receivedAt: BASE,
@@ -79,6 +80,7 @@ function wsKline(
         l: "99",
         c: "101",
         v: "12",
+        q: "1234",
         x: closed,
       },
     },
@@ -999,6 +1001,7 @@ test("WebSocket event and receive times are preserved exactly; REST invents no e
         low: 99,
         close: 101,
         volume: 12,
+        quoteVolume: 1234,
         complete: true,
       },
     ],
@@ -1009,6 +1012,7 @@ test("WebSocket event and receive times are preserved exactly; REST invents no e
   assert.equal(rest.openTime, openTime);
   assert.equal(rest.closeTime, openTime + duration - 1);
   assert.equal(rest.sourceEventTime, null);
+  assert.equal(rest.quoteVolume, 1234);
   assert.equal(rest.receivedAt, BASE);
 
   // A completed WebSocket candle keeps the exchange event time verbatim, even when
@@ -1020,6 +1024,7 @@ test("WebSocket event and receive times are preserved exactly; REST invents no e
   assert.equal(completed.candle.transport, "websocket");
   assert.equal(completed.candle.endpoint, "wss://fstream.binance.com/market/stream");
   assert.equal(completed.candle.closeTime, openTime + duration - 1);
+  assert.equal(completed.candle.quoteVolume, 1234);
   assert.equal(completed.candle.sourceEventTime, eventTime);
   assert.notEqual(completed.candle.sourceEventTime, openTime + duration);
   assert.equal(completed.candle.receivedAt, receivedAt);
@@ -1029,6 +1034,7 @@ test("WebSocket event and receive times are preserved exactly; REST invents no e
   const developing = parseBinanceMarketMessage(wsKline(openTime, 1, false, developingEvent), BASE);
   assert.equal(developing.kind, "developing");
   assert.equal(developing.candle.sourceEventTime, developingEvent);
+  assert.equal(developing.candle.quoteVolume, 1234);
   assert.equal(developing.candle.receivedAt, BASE);
 });
 

@@ -191,6 +191,10 @@ function finiteNumber(value: unknown, label: string): number {
 }
 
 function finiteNonnegative(value: unknown, label: string): number {
+  if (value === null || value === undefined ||
+      (typeof value === "string" && value.trim() === "")) {
+    throw new Error(`invalid ${label}`);
+  }
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0) throw new Error(`invalid ${label}`);
   return number;
