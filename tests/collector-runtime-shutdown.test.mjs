@@ -40,7 +40,7 @@ const replacements = {
   "./movement-python-client.server": `
     export async function advancePythonMovementBoundary() {}
     export async function registerPythonMovementHistory() {}
-    export async function calculatePythonMarketMovement() {}
+    export async function calculatePythonMarketAssessment() {}
   `,
   "./movement-finalization": `export function movementFinalizationConfig() { return {}; }`,
   "./movement-metrics-contract": `

@@ -25,7 +25,7 @@ const normalizationUrl = await transpile("../src/lib/market/movement-normalizati
   "./movement-contract": movementBucketsUrl,
   "./movement-metrics-contract": metricsUrl,
 });
-const classifierUrl = await transpile("../src/lib/market/market-state-classifier.ts");
+const episodeClassificationUrl = await transpile("../src/lib/market/market-episode-classification.ts");
 const lifecycleUrl = await transpile("../src/lib/market/market-episode-lifecycle.ts");
 const universeUrl = await transpile("../src/lib/market/market-universe.ts", {
   "./market-movement-state": stateUrl,
@@ -36,7 +36,7 @@ const finalizationUrl = await transpile("../src/lib/market/movement-finalization
 const engineUrl = await transpile("../src/lib/market/market-movement-engine.ts", {
   "./movement-contract": movementBucketsUrl,
   "./movement-metrics-contract": metricsUrl,
-  "./market-state-classifier": classifierUrl,
+  "./market-episode-classification": episodeClassificationUrl,
   "./market-episode-lifecycle": lifecycleUrl,
   "./market-universe": universeUrl,
 });
@@ -47,7 +47,6 @@ const runtimeUrl = await transpile("../src/lib/market/movement-engine.server.ts"
   "./movement-finalization": finalizationUrl,
   "./movement-metrics-contract": metricsUrl,
   "./movement-normalization-input": normalizationUrl,
-  "./market-state-classifier": classifierUrl,
   "./market-movement-state": stateUrl,
 });
 
@@ -162,6 +161,63 @@ function canonicalMovement(universe, boundary) {
   };
 }
 
+function canonicalAssessment(universe, boundary) {
+  const movement = canonicalMovement(universe, boundary);
+  const value = (number) => ({ available: true, value: number });
+  const side = (count, fraction) => value({ count, fraction });
+  return {
+    movement,
+    classification: {
+      classifierAlgorithmVersion: "market-state-classifier-v1",
+      classifierConfigVersion: "market-state-classifier-config-v1",
+      classifierConfig: { version: "market-state-classifier-config-v1",
+        directionalBreadth: 0.7, materialBreadth: 0.5, normalizedMovement: 0.5,
+        accelerationBreadth: 0.6, isolatedOutlierBreadthDisagreement: 0.5 },
+      movementAlgorithmVersion: movement.algorithmVersion,
+      movementConfigVersion: movement.configVersion,
+      universeId: movement.universeId, universeVersion: movement.universeVersion,
+      provider: movement.provider, exchange: movement.exchange, priceType: movement.priceType,
+      evaluationBoundaryTime: boundary, primaryWindowMinutes: 5,
+      windows: movement.windows.map((snapshot) => ({
+        windowMinutes: snapshot.windowMinutes,
+        horizonRole: snapshot.windowMinutes === 1 ? "RAPID" :
+          snapshot.windowMinutes === 5 ? "PRIMARY" : "PERSISTENCE",
+        isPrimary: snapshot.windowMinutes === 5,
+        directionState: "BROAD_RISE", pace: value("ACCELERATING"),
+        priorConfirmedEpisodeDirection: null,
+        reversalCandidate: null, isolatedOutliers: [],
+        breadth: { flat: side(0, 0), rising: side(universe.symbols.length, 1),
+          falling: side(0, 0), materialRising: side(universe.symbols.length, 1),
+          materialFalling: side(0, 0), denominator: universe.symbols.length },
+        medianRawReturn: snapshot.aggregates.medianRawReturn,
+        medianNormalizedMovement: snapshot.aggregates.medianNormalizedMovement,
+        medianAcceleration: value(0.0001),
+        positiveAccelerationBreadth: side(universe.symbols.length, 1),
+        negativeAccelerationBreadth: side(0, 0),
+        dispersionMadNormalizedMovement: snapshot.aggregates.dispersionMadNormalizedMovement,
+        trimmedMeanNormalizedMovement: value(1),
+        liquidityWeightedNormalizedMovement: value(1), liquidityWeights: value([]),
+        volumeContext: [], marketWideEligible: true,
+        eligibleCount: snapshot.eligibleCount, eligibleFraction: 1,
+        configuredUniverse: snapshot.configuredUniverse,
+        includedSymbols: snapshot.includedSymbols, excludedSymbols: [],
+        availabilityReasons: [],
+        classifierAlgorithmVersion: "market-state-classifier-v1",
+        classifierConfigVersion: "market-state-classifier-config-v1",
+        movementAlgorithmVersion: movement.algorithmVersion,
+        movementConfigVersion: movement.configVersion,
+        universeId: movement.universeId, universeVersion: movement.universeVersion,
+        provider: movement.provider, exchange: movement.exchange, priceType: movement.priceType,
+        evaluationBoundaryTime: boundary,
+        sourceTimeEvidence: universe.symbols.map((symbol) => ({ symbol,
+          lastRealTradeTimeMs: boundary, lastRealEventTimeMs: boundary,
+          lastReceivedAtMs: boundary + 123 })),
+        movementSnapshot: snapshot,
+      })),
+    },
+  };
+}
+
 function createHarness() {
   const state = { now: BASE, boundary: BASE, advanced: [], sessionId: crypto.randomUUID() };
   const control = { failRestore: 0, failHistory: 0, failPersist: false,
@@ -217,12 +273,14 @@ function createHarness() {
       calls.register.push({sessionId, historyVersion, universe, config, historical,
         compatibility, asOfBoundary});
     },
-    async calculateMovement(sessionId, boundary, historyVersion, universe) {
-      calls.metrics.push({sessionId, boundary, historyVersion, universe});
-      if (control.failMetrics) throw new Error("Python #71 unavailable");
+    async calculateAssessment(sessionId, boundary, historyVersion, universe,
+      configVersion, previousConfirmedPrimaryEpisode) {
+      calls.metrics.push({sessionId, boundary, historyVersion, universe,
+        configVersion, previousConfirmedPrimaryEpisode});
+      if (control.failMetrics) throw new Error("Python #71/#72 assessment unavailable");
       if (control.rotateDuringMetrics) state.sessionId = crypto.randomUUID();
       if (control.changeUniverseDuringMetrics) control.symbols = [...SYMBOLS, "XRPUSDT"];
-      return canonicalMovement(universe, boundary);
+      return canonicalAssessment(universe, boundary);
     },
     finalization: { version: "movement-finalization-config-v1:grace-0", graceMs: 0 },
     now: () => state.now,
@@ -303,7 +361,7 @@ test("raw candles are reused within a completed-minute cutoff while each boundar
     [BASE, BASE + 5_000, BASE + 10_000]);
 });
 
-test("Python #71 failure does not stop later #70 finalization or advance lifecycle", async () => {
+test("Python #71/#72 assessment failure does not stop #70 finalization or advance #73", async () => {
   const harness = createHarness();
   harness.control.failMetrics = true;
   await harness.runtime.runOnce();

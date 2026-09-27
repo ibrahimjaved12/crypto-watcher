@@ -13,6 +13,7 @@ import httpx
 from .api_models import (
     AnalysisRequest,
     MovementBoundaryRequest,
+    MovementClassificationRequest,
     MovementHistoryRegistrationRequest,
     MovementMetricsRequest,
     TechnicalAnalysisBatchRequest,
@@ -107,6 +108,13 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
             return request.app.state.movement_boundary_service.calculate_metrics(body)
         except ValueError:
             raise HTTPException(409, "Movement metrics could not be calculated") from None
+
+    @app.post("/v1/movement/classification", dependencies=[Depends(authorize)])
+    async def movement_classification(body: MovementClassificationRequest, request: Request):
+        try:
+            return request.app.state.movement_boundary_service.calculate_assessment(body)
+        except ValueError:
+            raise HTTPException(409, "Movement assessment could not be calculated") from None
 
     return app
 

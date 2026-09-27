@@ -3,7 +3,7 @@ import type {
   ConfirmedMarketDirection,
   MarketDirectionState,
   MarketPace,
-} from "../market/market-state-classifier";
+} from "../market/market-episode-classification";
 import type {
   MarketEpisodeTransitionType,
   SerializedMarketEpisodeLifecycleState,
@@ -170,7 +170,7 @@ export type PersistedMarketMovementEvent = {
   medianRawReturn: number | null;
   medianNormalizedMovement: number | null;
   medianAcceleration: number | null;
-  accelerationBreadth: number;
+  accelerationBreadth: number | null;
   dispersion: number | null;
   rvolSummary: unknown;
   outliers: unknown;

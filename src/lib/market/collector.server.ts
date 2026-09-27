@@ -11,7 +11,7 @@ import {
   normalizeRestCandles,
 } from "./collector";
 import { MovementEngineRuntime } from "./movement-engine.server";
-import { advancePythonMovementBoundary, calculatePythonMarketMovement,
+import { advancePythonMovementBoundary, calculatePythonMarketAssessment,
   registerPythonMovementHistory } from "./movement-python-client.server";
 import { movementFinalizationConfig } from "./movement-finalization";
 import { DEFAULT_MARKET_MOVEMENT_CONFIG } from "./movement-metrics-contract";
@@ -92,7 +92,7 @@ export class CollectorRuntime {
       collector: this.collector,
       finalization: movementFinalizationConfig(process.env),
       registerHistory: registerPythonMovementHistory,
-      calculateMovement: calculatePythonMarketMovement,
+      calculateAssessment: calculatePythonMarketAssessment,
       instrumentCompatibility: loadBinanceFuturesCompatibility,
     });
   }

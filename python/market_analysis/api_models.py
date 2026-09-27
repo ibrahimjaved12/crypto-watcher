@@ -284,3 +284,17 @@ class MovementMetricsRequest(InputModel):
         if self.evaluation_boundary_time_ms % 5_000:
             raise ValueError("movement metrics boundary must align to five seconds")
         return self
+
+
+class PreviousConfirmedPrimaryEpisode(InputModel):
+    direction: Literal["BROAD_RISE", "BROAD_DROP"]
+    universe_id: str = Field(min_length=1, max_length=128)
+    universe_version: str = Field(min_length=1, max_length=128)
+    movement_algorithm_version: str = Field(min_length=1, max_length=128)
+    movement_config_version: str = Field(min_length=1, max_length=128)
+    classifier_algorithm_version: str = Field(min_length=1, max_length=128)
+    classifier_config_version: str = Field(min_length=1, max_length=128)
+
+
+class MovementClassificationRequest(MovementMetricsRequest):
+    previous_confirmed_primary_episode: PreviousConfirmedPrimaryEpisode | None = None

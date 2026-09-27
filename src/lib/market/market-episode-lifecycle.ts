@@ -7,7 +7,8 @@ import type {
   MarketStateClassification,
   MarketStateEvidence,
   MarketStateWindowClassification,
-} from "./market-state-classifier";
+} from "./market-episode-classification";
+import type { MarketClassificationWindow } from "./market-state-contract";
 import type {
   MarketMovementEvaluation,
   MarketMovementWindowResult,
@@ -163,7 +164,7 @@ export type MarketMovementEvent = {
   medianRawReturn: number | null;
   medianNormalizedMovement: number | null;
   medianAcceleration: number | null;
-  accelerationBreadth: number;
+  accelerationBreadth: number | null;
   dispersion: number | null;
   rvolSummary: MarketStateEvidence["rvolSummary"];
   outliers: IsolatedMarketOutlier[];
@@ -172,7 +173,7 @@ export type MarketMovementEvent = {
   configuredUniverse: string[];
   includedSymbols: string[];
   excludedSymbols: Array<{ symbol: string; reasons: SymbolExclusionReason[] }>;
-  windowsContext: MarketStateWindowClassification[];
+  windowsContext: MarketClassificationWindow[];
   classifierAlgorithmVersion: string;
   classifierConfigVersion: string;
   movementAlgorithmVersion: string;
@@ -443,7 +444,7 @@ function buildEvent(input: {
       symbol,
       reasons: [...reasons],
     })),
-    windowsContext: classification.windows,
+    windowsContext: classification.canonicalWindows,
     classifierAlgorithmVersion:
       episodeScope?.classifierAlgorithmVersion ?? classification.algorithmVersion,
     classifierConfigVersion: episodeScope?.classifierConfigVersion ?? classification.configVersion,

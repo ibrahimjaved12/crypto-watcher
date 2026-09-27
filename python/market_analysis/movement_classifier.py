@@ -292,7 +292,7 @@ def _pace(direction, median_acceleration, positive, negative, config):
 
 
 def _isolated_outliers(window, config):
-    if not _v1_eligible(window) or not window.breadth.available:
+    if not window.breadth.available:
         return ()
     found = []
     for item in window.symbols:

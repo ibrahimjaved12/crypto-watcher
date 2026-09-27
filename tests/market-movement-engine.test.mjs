@@ -21,7 +21,7 @@ const stateUrl = await transpile("../src/lib/market/market-movement-state.ts");
 const metricsUrl = await transpile("../src/lib/market/movement-metrics-contract.ts", {
   "./movement-contract": movementBucketsUrl,
 });
-const classifierUrl = await transpile("../src/lib/market/market-state-classifier.ts");
+const episodeClassificationUrl = await transpile("../src/lib/market/market-episode-classification.ts");
 const lifecycleUrl = await transpile("../src/lib/market/market-episode-lifecycle.ts");
 const universeUrl = await transpile("../src/lib/market/market-universe.ts", {
   "./market-movement-state": stateUrl,
@@ -32,7 +32,7 @@ const finalizationUrl = await transpile("../src/lib/market/movement-finalization
 const engineUrl = await transpile("../src/lib/market/market-movement-engine.ts", {
   "./movement-contract": movementBucketsUrl,
   "./movement-metrics-contract": metricsUrl,
-  "./market-state-classifier": classifierUrl,
+  "./market-episode-classification": episodeClassificationUrl,
   "./market-episode-lifecycle": lifecycleUrl,
   "./market-universe": universeUrl,
 });
@@ -97,7 +97,7 @@ function warmingSnapshot(symbol) {
 }
 
 function available(value) {
-  return { available: true, value };
+  return { available: true, value, reason: null };
 }
 
 /** Candles persist across restart; only the in-memory five-second buckets do not. */
@@ -132,59 +132,26 @@ function fakeEvidence(overrides = {}) {
     medianRawReturn: available(0.01),
     medianNormalizedMovement: available(0.9),
     medianAcceleration: available(0.2),
-    availableAccelerationCount: 8,
-    accelerationCoverage: 1,
     positiveAccelerationFraction: 0.8,
     negativeAccelerationFraction: 0.2,
     dispersion: available(0.2),
-    rvolSummary: { availableCount: 8, coverage: 1, median: available(1.2), bySymbol: [] },
+    rvolSummary: [],
     isolatedOutliers: [],
     ...overrides,
   };
 }
 
-function fakeWindow(windowMinutes, directionState, pace) {
-  const horizonRole =
-    windowMinutes === 1 ? "RAPID" : windowMinutes === 5 ? "PRIMARY" : "PERSISTENCE";
-  return {
-    windowMinutes,
-    horizonRole,
-    directionState,
-    pace,
-    reversalCandidate: false,
-    algorithmVersion: "market-state-v1",
-    configVersion: "market-state-config-v1",
-    movementAlgorithmVersion: "market-movement-v1",
-    movementConfigVersion: "market-movement-config-v1",
-    universeId: MARKET_UNIVERSE_ID,
-    universeVersion: "market-universe-v1:test",
-    evaluationBoundaryTime: BASE,
-    provider: "binance-usdm",
-    exchange: "binance",
-    priceType: "trade",
-    evidence: fakeEvidence(),
-  };
-}
-
 function fakeClassification() {
-  return {
-    algorithmVersion: "market-state-v1",
-    configVersion: "market-state-config-v1",
-    movementAlgorithmVersion: "market-movement-v1",
-    movementConfigVersion: "market-movement-config-v1",
-    universeId: MARKET_UNIVERSE_ID,
-    universeVersion: "market-universe-v1:test",
-    evaluationBoundaryTime: BASE,
-    provider: "binance-usdm",
-    exchange: "binance",
-    priceType: "trade",
-    primaryWindowMinutes: 5,
-    windows: [
-      fakeWindow(1, "NEUTRAL", "NOT_APPLICABLE"),
-      fakeWindow(5, "BROAD_RISE", "ACCELERATING"),
-      fakeWindow(15, "BROAD_RISE", "DECELERATING"),
-    ],
-  };
+  const movement = broadRiseMovement(buildMarketUniverse(SYMBOLS), BASE);
+  const classification = classificationFor(movement, "BROAD_RISE");
+  classification.windows[0].directionState = "NEUTRAL";
+  classification.windows[0].pace = unavailable("NO_BROAD_DIRECTION");
+  classification.windows[2].pace = available("DECELERATING");
+  classification.windows[1].includedSymbols = ["BTCUSDT", "ETHUSDT"];
+  classification.windows[1].excludedSymbols = [
+    { symbol: "ADAUSDT", reasons: ["STALE_LAST_TRADE"] },
+  ];
+  return classification;
 }
 
 test("finalization watermark never finalizes the current wall-clock boundary early", () => {
@@ -270,6 +237,107 @@ function broadRiseMovement(universe, boundary) {
   return movement;
 }
 
+function broadDropMovement(universe, boundary) {
+  const movement = broadRiseMovement(universe, boundary);
+  for (const window of movement.windows) {
+    window.breadth = {
+      available: true, unavailableReason: null, denominator: 8,
+      flatFraction: 0.1, risingFraction: 0.1, fallingFraction: 0.8,
+      materialRisingFraction: 0.1, materialFallingFraction: 0.8,
+    };
+    window.aggregates = {
+      medianRawReturn: available(-0.02),
+      medianNormalizedMovement: available(-1),
+      dispersionMadNormalizedMovement: available(0.1),
+    };
+  }
+  return movement;
+}
+
+// Explicit Python #72 results: these fixtures do not run a TypeScript classifier.
+function classificationFor(movement, directionState) {
+  const side = (count, fraction) => available({ count, fraction });
+  return {
+    classifierAlgorithmVersion: "market-state-classifier-v1",
+    classifierConfigVersion: "market-state-classifier-config-v1",
+    classifierConfig: { version: "market-state-classifier-config-v1",
+      directionalBreadth: 0.7, materialBreadth: 0.5, normalizedMovement: 0.5,
+      accelerationBreadth: 0.6, isolatedOutlierBreadthDisagreement: 0.5 },
+    movementAlgorithmVersion: movement.algorithmVersion,
+    movementConfigVersion: movement.configVersion,
+    universeId: movement.universeId, universeVersion: movement.universeVersion,
+    provider: movement.provider, exchange: movement.exchange, priceType: movement.priceType,
+    evaluationBoundaryTime: movement.evaluationBoundaryTime, primaryWindowMinutes: 5,
+    windows: movement.windows.map((snapshot) => {
+      const risingBroad = directionState === "BROAD_RISE";
+      const fallingBroad = directionState === "BROAD_DROP";
+      const broad = risingBroad || fallingBroad;
+      const n = snapshot.eligibleCount;
+      const rising = broad ? side(risingBroad ? 8 : 1, risingBroad ? 0.8 : 0.1) : unavailable();
+      const falling = broad ? side(fallingBroad ? 8 : 1, fallingBroad ? 0.8 : 0.1) : unavailable();
+      return {
+        windowMinutes: snapshot.windowMinutes,
+        horizonRole: snapshot.windowMinutes === 1 ? "RAPID" :
+          snapshot.windowMinutes === 5 ? "PRIMARY" : "PERSISTENCE",
+        isPrimary: snapshot.windowMinutes === 5,
+        directionState,
+        pace: broad ? available("ACCELERATING") : unavailable("NO_BROAD_DIRECTION"),
+        priorConfirmedEpisodeDirection: null,
+        reversalCandidate: null,
+        isolatedOutliers: [],
+        breadth: { flat: broad ? side(1, 0.1) : unavailable(),
+          rising, falling, materialRising: rising,
+          materialFalling: falling, denominator: n },
+        medianRawReturn: snapshot.aggregates.medianRawReturn,
+        medianNormalizedMovement: snapshot.aggregates.medianNormalizedMovement,
+        medianAcceleration: broad ? available(risingBroad ? 0.1 : -0.1) :
+          unavailable("ACCELERATION_UNAVAILABLE"),
+        positiveAccelerationBreadth: broad ? side(risingBroad ? 8 : 0, risingBroad ? 1 : 0) :
+          unavailable("ACCELERATION_UNAVAILABLE"),
+        negativeAccelerationBreadth: broad ? side(fallingBroad ? 8 : 0, fallingBroad ? 1 : 0) :
+          unavailable("ACCELERATION_UNAVAILABLE"),
+        dispersionMadNormalizedMovement: snapshot.aggregates.dispersionMadNormalizedMovement,
+        trimmedMeanNormalizedMovement: unavailable(),
+        liquidityWeightedNormalizedMovement: unavailable(),
+        liquidityWeights: unavailable(),
+        volumeContext: [], marketWideEligible: snapshot.marketWideEligible,
+        eligibleCount: n, eligibleFraction: snapshot.eligibleFraction,
+        configuredUniverse: snapshot.configuredUniverse,
+        includedSymbols: snapshot.includedSymbols,
+        excludedSymbols: snapshot.excludedSymbols,
+        availabilityReasons: broad ? [] : ["WARMING_INSUFFICIENT_LIVE_HISTORY"],
+        classifierAlgorithmVersion: "market-state-classifier-v1",
+        classifierConfigVersion: "market-state-classifier-config-v1",
+        movementAlgorithmVersion: movement.algorithmVersion,
+        movementConfigVersion: movement.configVersion,
+        universeId: movement.universeId, universeVersion: movement.universeVersion,
+        provider: movement.provider, exchange: movement.exchange, priceType: movement.priceType,
+        evaluationBoundaryTime: movement.evaluationBoundaryTime,
+        sourceTimeEvidence: snapshot.configuredUniverse.map((symbol) => ({
+          symbol, lastRealTradeTimeMs: null, lastRealEventTimeMs: null,
+          lastReceivedAtMs: null,
+        })),
+        movementSnapshot: snapshot,
+      };
+    }),
+  };
+}
+
+function assessmentFor(movement, directionState) {
+  return { movement, classification: classificationFor(movement, directionState) };
+}
+
+function broadRiseWithoutAcceleration(universe, boundary) {
+  const assessment = assessmentFor(broadRiseMovement(universe, boundary), "BROAD_RISE");
+  for (const window of assessment.classification.windows) {
+    window.pace = unavailable("ACCELERATION_UNAVAILABLE");
+    window.medianAcceleration = unavailable("ACCELERATION_UNAVAILABLE");
+    window.positiveAccelerationBreadth = unavailable("ACCELERATION_UNAVAILABLE");
+    window.negativeAccelerationBreadth = unavailable("ACCELERATION_UNAVAILABLE");
+  }
+  return assessment;
+}
+
 test("one shared finalized boundary produces exactly one canonical supplier call", async () => {
   const engine = new MarketMovementEngine();
   const universe = buildMarketUniverse(SYMBOLS);
@@ -277,9 +345,9 @@ test("one shared finalized boundary produces exactly one canonical supplier call
   const input = {
     finalizableBoundary: BASE,
     universe,
-    movementForBoundary: async (boundary) => {
+    assessmentForBoundary: async (boundary) => {
       calls.push(boundary);
-      return warmingMovement(universe, boundary);
+      return assessmentFor(warmingMovement(universe, boundary), "WARMING");
     },
   };
 
@@ -298,17 +366,19 @@ test("one shared finalized boundary produces exactly one canonical supplier call
   assert.deepEqual(calls, [BASE, BASE + 5_000]);
 });
 
-test("canonical Python DTO passes unchanged to #72 and a fresh restart stays WARMING", async () => {
+test("canonical Python assessment passes unchanged and a fresh restart stays WARMING", async () => {
   const engine = new MarketMovementEngine();
   const universe = buildMarketUniverse(SYMBOLS);
   const movement = warmingMovement(universe, BASE);
+  const assessment = assessmentFor(movement, "WARMING");
   const results = await engine.advance({
     finalizableBoundary: BASE,
     universe,
-    movementForBoundary: async () => movement,
+    assessmentForBoundary: async () => assessment,
   });
   assert.equal(results.length, 1);
   assert.strictEqual(results[0].movement, movement);
+  assert.strictEqual(results[0].classification, assessment.classification);
   const { classification } = results[0];
   assert.deepEqual(
     classification.windows.map((window) => window.windowMinutes),
@@ -316,7 +386,7 @@ test("canonical Python DTO passes unchanged to #72 and a fresh restart stays WAR
   );
   for (const window of classification.windows) {
     assert.equal(window.directionState, "WARMING");
-    assert.equal(window.evidence.eligibleCount, 0);
+    assert.equal(window.eligibleCount, 0);
   }
   // A restart has no persisted five-second history: the live path warms, it does
   // not reconstruct buckets from candles.
@@ -327,32 +397,147 @@ test("failed or mismatched canonical movement never advances lifecycle boundary"
   const engine = new MarketMovementEngine();
   const universe = buildMarketUniverse(SYMBOLS);
   await assert.rejects(engine.advance({ finalizableBoundary: BASE, universe,
-    movementForBoundary: async () => { throw new Error("Python unavailable"); } }));
+    assessmentForBoundary: async () => { throw new Error("Python unavailable"); } }));
   assert.equal(engine.lastEvaluatedBoundary, null);
   await assert.rejects(engine.advance({ finalizableBoundary: BASE, universe,
-    movementForBoundary: async () => warmingMovement(universe, BASE + 5_000) }));
+    assessmentForBoundary: async () => assessmentFor(
+      warmingMovement(universe, BASE + 5_000), "WARMING") }));
   assert.equal(engine.lastEvaluatedBoundary, null);
+  await assert.rejects(engine.advance({ finalizableBoundary: BASE, universe,
+    assessmentForBoundary: async () => {
+      const assessment = assessmentFor(warmingMovement(universe, BASE), "WARMING");
+      assessment.classification.windows[1].universeVersion = "wrong";
+      return assessment;
+    } }));
+  assert.equal(engine.lastEvaluatedBoundary, null);
+});
+
+test("each catch-up assessment receives the staged confirmed episode scope", async () => {
+  const engine = new MarketMovementEngine();
+  const universe = buildMarketUniverse(SYMBOLS);
+  const supplied = [];
+  await engine.advance({ finalizableBoundary: BASE, universe,
+    assessmentForBoundary: async (boundary, prior) => {
+      supplied.push([boundary, prior]);
+      return assessmentFor(broadRiseMovement(universe, boundary), "BROAD_RISE");
+    } });
+  const catchUp = await engine.advance({ finalizableBoundary: BASE + 10_000, universe,
+    assessmentForBoundary: async (boundary, prior) => {
+      supplied.push([boundary, prior]);
+      return assessmentFor(broadRiseMovement(universe, boundary), "BROAD_RISE");
+    } });
+  const active = catchUp[0].lifecycle.nextState.activeEpisode;
+  assert.ok(active);
+  assert.deepEqual(supplied, [
+    [BASE, null], [BASE + 5_000, null], [BASE + 10_000, {
+      direction: active.direction, universeId: active.universeId,
+      universeVersion: active.universeVersion,
+      movementAlgorithmVersion: active.movementAlgorithmVersion,
+      movementConfigVersion: active.movementConfigVersion,
+      classifierAlgorithmVersion: active.classifierAlgorithmVersion,
+      classifierConfigVersion: active.classifierConfigVersion,
+    }],
+  ]);
+});
+
+test("interrupted same-scope active episode remains prior context", async () => {
+  const engine = new MarketMovementEngine();
+  const universe = buildMarketUniverse(SYMBOLS);
+  await engine.advance({ finalizableBoundary: BASE, universe,
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      broadRiseMovement(universe, boundary), "BROAD_RISE") });
+  await engine.advance({ finalizableBoundary: BASE + 5_000, universe,
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      broadRiseMovement(universe, boundary), "BROAD_RISE") });
+  const active = engine.lifecycleState.activeEpisode;
+  assert.ok(active);
+  const restarted = new MarketMovementEngine();
+  restarted.restoreLifecycleState({ ...engine.lifecycleState, interrupted: true });
+  let supplied;
+  await restarted.advance({ finalizableBoundary: BASE + 10_000, universe,
+    assessmentForBoundary: async (boundary, prior) => {
+      supplied = prior;
+      return assessmentFor(broadRiseMovement(universe, boundary), "BROAD_RISE");
+    } });
+  assert.equal(supplied.direction, active.direction);
+  assert.equal(supplied.universeVersion, active.universeVersion);
+  assert.equal(supplied.classifierConfigVersion, active.classifierConfigVersion);
+});
+
+test("universe change carries old scope to Python and #73 ends the old episode", async () => {
+  const engine = new MarketMovementEngine();
+  const firstUniverse = buildMarketUniverse(SYMBOLS);
+  await engine.advance({ finalizableBoundary: BASE, universe: firstUniverse,
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      broadRiseMovement(firstUniverse, boundary), "BROAD_RISE") });
+  await engine.advance({ finalizableBoundary: BASE + 5_000, universe: firstUniverse,
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      broadRiseMovement(firstUniverse, boundary), "BROAD_RISE") });
+  const oldEpisode = engine.lifecycleState.activeEpisode;
+  assert.ok(oldEpisode);
+  const secondUniverse = buildMarketUniverse([...SYMBOLS, "DOTUSDT"]);
+  let supplied;
+  const changed = await engine.advance({ finalizableBoundary: BASE + 10_000,
+    universe: secondUniverse,
+    assessmentForBoundary: async (boundary, prior) => {
+      supplied = prior;
+      // Explicit canonical #72 fixture for B: the Python service ignores A's
+      // scope, so no B window uses A as reversal context.
+      return assessmentFor(broadDropMovement(secondUniverse, boundary), "BROAD_DROP");
+    } });
+  assert.equal(supplied.direction, "BROAD_RISE");
+  assert.equal(supplied.universeVersion, oldEpisode.universeVersion);
+  assert.notEqual(supplied.universeVersion, secondUniverse.version);
+  assert.equal(changed[0].classification.windows[1].directionState, "BROAD_DROP");
+  assert.equal(changed[0].classification.windows[1].priorConfirmedEpisodeDirection, null);
+  assert.equal(changed[0].classification.windows[1].reversalCandidate, null);
+  assert.equal(changed[0].lifecycle.transitions[0].transition, "ENDED");
+  assert.equal(changed[0].lifecycle.transitions[0].transitionReason, "universe_version_changed");
+  assert.equal(changed[0].lifecycle.transitions[0].episodeId, oldEpisode.episodeId);
+  assert.equal(changed[0].lifecycle.nextState.activeEpisode, null);
+});
+
+test("unavailable canonical acceleration stays null through a confirmed broad transition", async () => {
+  const engine = new MarketMovementEngine();
+  const universe = buildMarketUniverse(SYMBOLS);
+  const first = await engine.advance({ finalizableBoundary: BASE, universe,
+    assessmentForBoundary: async (boundary) => broadRiseWithoutAcceleration(universe, boundary) });
+  assert.equal(first[0].classification.windows[1].directionState, "BROAD_RISE");
+  assert.deepEqual(first[0].classification.windows[1].pace,
+    unavailable("ACCELERATION_UNAVAILABLE"));
+  assert.equal(first[0].lifecycle.nextState.currentPace, "NOT_APPLICABLE");
+  assert.equal(first[0].lifecycle.transitions.length, 0);
+
+  const second = await engine.advance({ finalizableBoundary: BASE + 5_000, universe,
+    assessmentForBoundary: async (boundary) => broadRiseWithoutAcceleration(universe, boundary) });
+  assert.equal(second[0].lifecycle.transitions.length, 1);
+  assert.equal(second[0].lifecycle.transitions[0].transition, "STARTED");
+  assert.equal(second[0].lifecycle.transitions[0].pace, "NOT_APPLICABLE");
+  assert.equal(second[0].lifecycle.transitions[0].medianAcceleration, null);
+  assert.equal(second[0].lifecycle.transitions[0].accelerationBreadth, null);
 });
 
 test("catch-up commits lifecycle and boundary only after every canonical result succeeds", async () => {
   const engine = new MarketMovementEngine();
   const universe = buildMarketUniverse(SYMBOLS);
   await engine.advance({ finalizableBoundary: BASE, universe,
-    movementForBoundary: async (boundary) => broadRiseMovement(universe, boundary) });
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      broadRiseMovement(universe, boundary), "BROAD_RISE") });
   const boundaryBefore = engine.lastEvaluatedBoundary;
   const lifecycleBefore = structuredClone(engine.lifecycleState);
   let failSecond = true;
   await assert.rejects(engine.advance({ finalizableBoundary: BASE + 10_000, universe,
-    movementForBoundary: async (boundary) => {
+    assessmentForBoundary: async (boundary) => {
       if (boundary === BASE + 10_000 && failSecond) throw new Error("Python #71 unavailable");
-      return broadRiseMovement(universe, boundary);
+      return assessmentFor(broadRiseMovement(universe, boundary), "BROAD_RISE");
     } }));
   assert.equal(engine.lastEvaluatedBoundary, boundaryBefore);
   assert.deepEqual(engine.lifecycleState, lifecycleBefore);
 
   failSecond = false;
   const retry = await engine.advance({ finalizableBoundary: BASE + 10_000, universe,
-    movementForBoundary: async (boundary) => broadRiseMovement(universe, boundary) });
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      broadRiseMovement(universe, boundary), "BROAD_RISE") });
   assert.equal(retry.length, 2);
   assert.equal(retry[0].lifecycle.transitions[0]?.transition, "STARTED");
   assert.equal(engine.lastEvaluatedBoundary, BASE + 10_000);
@@ -362,13 +547,14 @@ test("universe change evaluates the latest finalized boundary from its own sessi
   const engine = new MarketMovementEngine();
   const firstUniverse = buildMarketUniverse(SYMBOLS);
   await engine.advance({ finalizableBoundary: BASE, universe: firstUniverse,
-    movementForBoundary: async (boundary) => warmingMovement(firstUniverse, boundary) });
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      warmingMovement(firstUniverse, boundary), "WARMING") });
   const newUniverse = buildMarketUniverse([...SYMBOLS, "DOTUSDT"]);
   const calls = [];
   await engine.advance({ finalizableBoundary: BASE + 20_000, universe: newUniverse,
-    movementForBoundary: async (boundary) => {
+    assessmentForBoundary: async (boundary) => {
       calls.push(boundary);
-      return warmingMovement(newUniverse, boundary);
+      return assessmentFor(warmingMovement(newUniverse, boundary), "WARMING");
     } });
   assert.deepEqual(calls, [BASE + 20_000]);
 });
@@ -412,7 +598,7 @@ test("1m/5m/15m context, universe and timestamps reach the persisted current evi
   const universe = buildMarketUniverse(SYMBOLS);
   const classification = fakeClassification();
   const evidence = buildMovementCurrentEvidence({
-    evidence: classification.windows[1].evidence,
+    evidence: fakeEvidence(),
     classification,
     universe,
     status: "LIVE",
@@ -447,7 +633,7 @@ test("1m/5m/15m context, universe and timestamps reach the persisted current evi
 test("current-state exposure maps persisted evidence without leaking credentials", () => {
   const classification = fakeClassification();
   const currentEvidence = buildMovementCurrentEvidence({
-    evidence: classification.windows[1].evidence,
+    evidence: fakeEvidence(),
     classification,
     universe: buildMarketUniverse(SYMBOLS),
     status: "LIVE",
@@ -515,7 +701,7 @@ test("unavailable current state is exposed explicitly, never as a generic state"
 test("diagnostics reflect engine status, counts, timestamps and transition", () => {
   const classification = fakeClassification();
   const currentEvidence = buildMovementCurrentEvidence({
-    evidence: classification.windows[1].evidence,
+    evidence: fakeEvidence(),
     classification,
     universe: buildMarketUniverse(SYMBOLS),
     status: "LIVE",

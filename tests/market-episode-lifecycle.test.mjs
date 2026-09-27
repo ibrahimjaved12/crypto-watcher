@@ -4,18 +4,6 @@ import { after, before, test } from "node:test";
 import ts from "../node_modules/typescript/lib/typescript.js";
 import { PGlite } from "./node_modules/@electric-sql/pglite/dist/index.js";
 
-// Transpile and load market-state-classifier
-const classifierSource = await readFile(
-  new URL("../src/lib/market/market-state-classifier.ts", import.meta.url),
-  "utf8",
-);
-const classifierOutput = ts.transpileModule(classifierSource, {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const { classifyMarketState } = await import(
-  `data:text/javascript;base64,${Buffer.from(classifierOutput).toString("base64")}`
-);
-
 // Transpile and load market-episode-lifecycle
 const lifecycleSource = await readFile(
   new URL("../src/lib/market/market-episode-lifecycle.ts", import.meta.url),
@@ -58,6 +46,22 @@ const unavailable = (reason = "MARKET_UNIVERSE_INELIGIBLE") => ({
   value: null,
   reason,
 });
+
+// Explicit #72 acceleration evidence supplied to #73 fixtures; no classification runs here.
+const ACCELERATION_EVIDENCE = {
+  RISE_ACCELERATING: { medianAcceleration: available(1),
+    positiveAccelerationFraction: 1, negativeAccelerationFraction: 0 },
+  RISE_DECELERATING: { medianAcceleration: available(-1),
+    positiveAccelerationFraction: 0, negativeAccelerationFraction: 1 },
+  DROP_ACCELERATING: { medianAcceleration: available(-1),
+    positiveAccelerationFraction: 0, negativeAccelerationFraction: 1 },
+  DROP_DECELERATING: { medianAcceleration: available(1),
+    positiveAccelerationFraction: 1, negativeAccelerationFraction: 0 },
+  MIXED: { medianAcceleration: available(0),
+    positiveAccelerationFraction: 0.5, negativeAccelerationFraction: 0.5 },
+  UNAVAILABLE: { medianAcceleration: unavailable("ACCELERATION_UNAVAILABLE"),
+    positiveAccelerationFraction: null, negativeAccelerationFraction: null },
+};
 
 function makeSymbol(index, overrides = {}) {
   const isRising = overrides.direction === "RISING";
@@ -108,6 +112,9 @@ function windowFixture({
   boundaryTime = BASE_TIME,
   universeId = "top-usdm",
   universeVersion = "2026-09-25",
+  classificationDirection = "NEUTRAL",
+  classificationPace = "NOT_APPLICABLE",
+  classificationAccelerationEvidence = ACCELERATION_EVIDENCE.RISE_ACCELERATING,
 } = {}) {
   const configuredUniverse = Array.from({ length: configuredCount }, (_, index) => `S${index}USDT`);
   const included =
@@ -125,6 +132,9 @@ function windowFixture({
     configVersion: "market-movement-config-v1",
     universeId,
     universeVersion,
+    classificationDirection,
+    classificationPace,
+    classificationAccelerationEvidence,
     configuredUniverse,
     includedSymbols: included.filter((s) => s.included).map((s) => s.symbol),
     excludedSymbols,
@@ -168,6 +178,9 @@ function windowFixture({
 
 function broadRiseWindow(options = {}) {
   return windowFixture({
+    classificationDirection: "BROAD_RISE",
+    classificationPace: "ACCELERATING",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.RISE_ACCELERATING,
     breadth: {
       flatFraction: 0.1,
       risingFraction: 0.8,
@@ -184,6 +197,9 @@ function broadRiseWindow(options = {}) {
 
 function broadDropWindow(options = {}) {
   return windowFixture({
+    classificationDirection: "BROAD_DROP",
+    classificationPace: "ACCELERATING",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.DROP_ACCELERATING,
     breadth: {
       flatFraction: 0.1,
       risingFraction: 0.1,
@@ -200,6 +216,7 @@ function broadDropWindow(options = {}) {
 
 function neutralWindow(options = {}) {
   return windowFixture({
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.MIXED,
     breadth: {
       flatFraction: 0.4,
       risingFraction: 0.3,
@@ -242,7 +259,53 @@ function makePair({
       windowFixture({ windowMinutes: 15, boundaryTime, universeId, universeVersion }),
     ],
   };
-  const classification = classifyMarketState({ movement });
+  // #73 fixtures carry explicit canonical #72 labels. No classifier runs in TS.
+  const classification = {
+    algorithmVersion: "market-state-classifier-v1",
+    configVersion: "market-state-classifier-config-v1",
+    movementAlgorithmVersion: movement.algorithmVersion,
+    movementConfigVersion: movement.configVersion,
+    universeId, universeVersion,
+    evaluationBoundaryTime: boundaryTime,
+    provider: movement.provider, exchange: movement.exchange, priceType: movement.priceType,
+    primaryWindowMinutes: 5,
+    canonicalWindows: movement.windows,
+    windows: movement.windows.map((snapshot) => ({
+      windowMinutes: snapshot.windowMinutes,
+      horizonRole: snapshot.windowMinutes === 1 ? "RAPID" :
+        snapshot.windowMinutes === 5 ? "PRIMARY" : "PERSISTENCE",
+      directionState: snapshot.classificationDirection,
+      pace: snapshot.classificationPace,
+      reversalCandidate: false,
+      algorithmVersion: "market-state-classifier-v1",
+      configVersion: "market-state-classifier-config-v1",
+      movementAlgorithmVersion: movement.algorithmVersion,
+      movementConfigVersion: movement.configVersion,
+      universeId, universeVersion,
+      evaluationBoundaryTime: boundaryTime,
+      provider: movement.provider, exchange: movement.exchange, priceType: movement.priceType,
+      evidence: {
+        eligibleCount: snapshot.eligibleCount,
+        eligibleFraction: snapshot.eligibleFraction,
+        includedSymbols: snapshot.includedSymbols,
+        excludedSymbols: snapshot.excludedSymbols,
+        flatFraction: snapshot.breadth.flatFraction,
+        risingFraction: snapshot.breadth.risingFraction,
+        fallingFraction: snapshot.breadth.fallingFraction,
+        materialRisingFraction: snapshot.breadth.materialRisingFraction,
+        materialFallingFraction: snapshot.breadth.materialFallingFraction,
+        medianRawReturn: snapshot.aggregates.medianRawReturn,
+        medianNormalizedMovement: snapshot.aggregates.medianNormalizedMovement,
+        medianAcceleration: snapshot.classificationAccelerationEvidence.medianAcceleration,
+        positiveAccelerationFraction:
+          snapshot.classificationAccelerationEvidence.positiveAccelerationFraction,
+        negativeAccelerationFraction:
+          snapshot.classificationAccelerationEvidence.negativeAccelerationFraction,
+        dispersion: snapshot.aggregates.dispersionMadNormalizedMovement,
+        rvolSummary: [], isolatedOutliers: [],
+      },
+    })),
+  };
   return { movement, classification };
 }
 
@@ -337,6 +400,19 @@ test("1. one broad evaluation => no STARTED", () => {
   assert.equal(result.nextState.pendingCandidate.direction, "BROAD_RISE");
   assert.equal(result.nextState.pendingCandidate.count, 1);
   assert.equal(result.nextState.pendingCandidate.startBoundaryTime, BASE_TIME);
+});
+
+test("explicit decelerating broad-drop evidence stays directionally coherent", () => {
+  const drop = broadDropWindow({
+    classificationPace: "DECELERATING",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.DROP_DECELERATING,
+    accelerations: Array(10).fill(1),
+  });
+  const pair = makePair({ primaryWindow: drop });
+  const evidence = pair.classification.windows[1].evidence;
+  assert.deepEqual(evidence.medianAcceleration, available(1));
+  assert.equal(evidence.positiveAccelerationFraction, 1);
+  assert.equal(evidence.negativeAccelerationFraction, 0);
 });
 
 test("duplicate and backward boundaries never advance start confirmation", () => {
@@ -684,6 +760,7 @@ test("7, 8, 9. 2 consecutive full opposite broad states => one REVERSED, new epi
   assert.equal(rev.pace, "ACCELERATING");
   assert.equal(rev.directionalBreadth, 0.8);
   assert.equal(rev.materialBreadth, 0.6);
+  assert.equal(rev.medianAcceleration, -1);
   assert.equal(rev.accelerationBreadth, 1);
   assert.deepEqual(
     rev.supportingContracts,
@@ -801,6 +878,8 @@ test("an active episode becomes interrupted after a gap and requires fresh resum
 test("10. strengthened via pace crossing after 2 confirmations", () => {
   // Start BROAD_RISE with MIXED pace (5 symbols positive, 5 negative)
   const mixedRise = broadRiseWindow({
+    classificationPace: "MIXED",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.MIXED,
     accelerations: [-1, -1, -1, -1, -1, 1, 1, 1, 1, 1],
   });
   const eval1 = makePair({ primaryWindow: mixedRise, boundaryTime: BASE_TIME });
@@ -906,7 +985,11 @@ test("12. weakened via pace crossing after 2 confirmations", () => {
   assert.equal(step2.nextState.activeEpisode?.confirmedPace, "ACCELERATING");
 
   // Tick 1 with DECELERATING pace
-  const decelRise = broadRiseWindow({ accelerations: Array(10).fill(-1) });
+  const decelRise = broadRiseWindow({
+    classificationPace: "DECELERATING",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.RISE_DECELERATING,
+    accelerations: Array(10).fill(-1),
+  });
   const eval3 = makePair({ primaryWindow: decelRise, boundaryTime: BASE_TIME + 10_000 });
   const step3 = processMarketEpisodeLifecycle({
     classification: eval3.classification,
@@ -1467,6 +1550,29 @@ test("17. operational event insertion is idempotent in database", async () => {
   assert.equal(Number(countRes.rows[0].count), 1);
 });
 
+test("base event schema stores unavailable acceleration breadth as NULL", async () => {
+  const result = await db.query(
+    `INSERT INTO public.market_movement_events (
+      event_id, episode_id, episode_algorithm_version, lifecycle_config_version,
+      transition, transition_reason, episode_start_boundary_time, evaluation_boundary_time,
+      universe_id, universe_version, primary_window_minutes, provider, exchange, price_type,
+      direction, pace, directional_breadth, material_breadth, acceleration_breadth,
+      classifier_algorithm_version, classifier_config_version,
+      movement_algorithm_version, movement_config_version
+    ) VALUES (
+      'event-null-acceleration', 'episode-null-acceleration',
+      'market-episode-v1', 'market-episode-config-v1', 'STARTED',
+      'confirmed_broad_entry', $1, $2, 'top-usdm', 'fixture', 5,
+      'binance-usdm', 'binance', 'trade', 'BROAD_RISE', 'NOT_APPLICABLE',
+      0.8, 0.6, NULL, 'market-state-classifier-v1',
+      'market-state-classifier-config-v1', 'market-movement-v1',
+      'market-movement-config-v1'
+    ) RETURNING acceleration_breadth`,
+    [new Date(BASE_TIME).toISOString(), new Date(BASE_TIME + 5_000).toISOString()],
+  );
+  assert.equal(result.rows[0].acceleration_breadth, null);
+});
+
 test("18. WARMING/UNAVAILABLE interrupts rather than pretending continuity", () => {
   // Start active episode
   const eval1 = makePair({ primaryWindow: broadRiseWindow(), boundaryTime: BASE_TIME });
@@ -1485,6 +1591,8 @@ test("18. WARMING/UNAVAILABLE interrupts rather than pretending continuity", () 
 
   // WARMING evaluation arrives
   const warmingWindow = windowFixture({
+    classificationDirection: "WARMING",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.UNAVAILABLE,
     marketWideEligible: false,
     excludedSymbols: Array.from({ length: 10 }, (_, i) => ({
       symbol: `S${i}USDT`,
@@ -1505,6 +1613,8 @@ test("18. WARMING/UNAVAILABLE interrupts rather than pretending continuity", () 
 
   // UNAVAILABLE arrives next
   const unavailWindow = windowFixture({
+    classificationDirection: "UNAVAILABLE",
+    classificationAccelerationEvidence: ACCELERATION_EVIDENCE.UNAVAILABLE,
     marketWideEligible: false,
     excludedSymbols: [{ symbol: "S0USDT", reasons: ["SOURCE_UNAVAILABLE"] }],
   });

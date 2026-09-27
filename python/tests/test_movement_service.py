@@ -4,11 +4,13 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from market_analysis.api_models import (MovementBoundaryRequest,
+                                        MovementClassificationRequest,
                                         MovementHistoryRegistrationRequest,
                                         MovementMetricsRequest)
 from market_analysis.movement import (DEFAULT_HISTORY_BUCKETS, MarketObservation,
                                       MovementBucketEngine)
 from market_analysis.movement_metrics import MarketMovementConfig
+from market_analysis.movement_classifier import ALGORITHM_VERSION, MarketClassifierConfig
 from market_analysis.movement_service import MovementBoundaryService
 
 BASE = 1_800_000_000_000
@@ -302,6 +304,19 @@ class MovementBoundaryServiceTests(unittest.TestCase):
 class MovementMetricsAdapterTests(unittest.TestCase):
     SYMBOLS = ("BTCUSDT", "ETHUSDT", "ADAUSDT", "BNBUSDT", "SOLUSDT")
 
+    @staticmethod
+    def confirmed_episode_scope(**overrides):
+        return {
+            "direction": "BROAD_DROP",
+            "universe_id": "watched",
+            "universe_version": "watched-v1",
+            "movement_algorithm_version": "market-movement-v1",
+            "movement_config_version": MarketMovementConfig().version,
+            "classifier_algorithm_version": ALGORITHM_VERSION,
+            "classifier_config_version": MarketClassifierConfig().version,
+            **overrides,
+        }
+
     @classmethod
     def populated_service(cls, session_capacity=None):
         service = (MovementBoundaryService() if session_capacity is None else
@@ -414,6 +429,83 @@ class MovementMetricsAdapterTests(unittest.TestCase):
         result = service.calculate_metrics(self.metrics_request(BASE + 355 * 5_000))
         excluded = result["evaluation"]["windows"]["1"]["excluded_symbols"]
         self.assertIn({"symbol": "SOLUSDT", "reasons": ["MISSING_SYMBOL_INPUT"]}, excluded)
+
+    def test_assessment_uses_same_boundary_and_exact_symbol_source_times(self):
+        service = self.populated_service()
+        service.register_history(self.history_request())
+        request = MovementClassificationRequest.model_validate({
+            **self.metrics_request().model_dump(mode="json"),
+            "previous_confirmed_primary_episode": self.confirmed_episode_scope(),
+        })
+        first = service.calculate_assessment(request)
+        self.assertEqual(first, service.calculate_assessment(request))
+        self.assertEqual(first["evaluation"], service.calculate_metrics(self.metrics_request())["evaluation"])
+        self.assertEqual((first["session_id"], first["history_version"]), (SESSION, "history-v1"))
+        self.assertEqual(first["effective_previous_confirmed_primary_direction"], "BROAD_DROP")
+        for window in ("1", "5", "15"):
+            classification = first["classification"]["windows"][window]
+            self.assertEqual(classification["movement_snapshot"], first["evaluation"]["windows"][window])
+            self.assertEqual(classification["evaluation_boundary_time_ms"], BASE + 360 * 5_000)
+            self.assertEqual([item["symbol"] for item in classification["source_time_evidence"]],
+                             list(self.SYMBOLS))
+            for item in classification["source_time_evidence"]:
+                bucket = next(bucket for bucket in service.sessions[SESSION]["engines"][item["symbol"]].history
+                              if bucket.boundary_time_ms == BASE + 360 * 5_000)
+                self.assertEqual((item["last_real_trade_time_ms"], item["last_real_event_time_ms"],
+                                  item["last_received_at_ms"]),
+                                 (bucket.last_real_trade_time_ms, bucket.last_real_event_time_ms,
+                                  bucket.last_received_at_ms))
+            self.assertEqual(classification["prior_confirmed_episode_direction"],
+                             "BROAD_DROP" if window == "5" else None)
+        primary = first["classification"]["windows"]["5"]
+        self.assertEqual(primary["direction_state"], "BROAD_RISE")
+        self.assertEqual(primary["reversal_candidate"]["prior_confirmed_episode_direction"],
+                         "BROAD_DROP")
+
+    def test_assessment_ignores_prior_episode_outside_current_scope(self):
+        service = self.populated_service()
+        service.register_history(self.history_request())
+        mismatches = {
+            "universe_id": "other-universe",
+            "universe_version": "other-universe-version",
+            "movement_algorithm_version": "other-movement-algorithm",
+            "movement_config_version": "other-movement-config",
+            "classifier_algorithm_version": "other-classifier-algorithm",
+            "classifier_config_version": "other-classifier-config",
+        }
+        for field, wrong_value in mismatches.items():
+            with self.subTest(field=field):
+                request = MovementClassificationRequest.model_validate({
+                    **self.metrics_request().model_dump(mode="json"),
+                    "previous_confirmed_primary_episode": self.confirmed_episode_scope(
+                        **{field: wrong_value}),
+                })
+                result = service.calculate_assessment(request)
+                self.assertIsNone(result["effective_previous_confirmed_primary_direction"])
+                self.assertIsNone(result["classification"]["windows"]["5"]
+                                  ["prior_confirmed_episode_direction"])
+                self.assertIsNone(result["classification"]["windows"]["5"]
+                                  ["reversal_candidate"])
+                self.assertEqual(result["classification"]["windows"]["5"]
+                                 ["direction_state"], "BROAD_RISE")
+
+    def test_assessment_keeps_missing_exact_symbol_bucket_as_three_none_times(self):
+        service = self.populated_service()
+        service.register_history(self.history_request())
+        replacement = MovementBucketEngine("binance-usdm:SOLUSDT")
+        replacement.advance(BASE + 360 * 5_000, "LIVE")
+        service.sessions[SESSION]["engines"]["SOLUSDT"] = replacement
+        request = MovementClassificationRequest.model_validate({
+            **self.metrics_request(BASE + 355 * 5_000).model_dump(mode="json"),
+            "previous_confirmed_primary_episode": None,
+        })
+        result = service.calculate_assessment(request)
+        for window in ("1", "5", "15"):
+            evidence = result["classification"]["windows"][window]["source_time_evidence"]
+            self.assertEqual(evidence[-1], {"symbol": "SOLUSDT",
+                                            "last_real_trade_time_ms": None,
+                                            "last_real_event_time_ms": None,
+                                            "last_received_at_ms": None})
 
     def test_factual_instrument_compatibility_and_unknown_metadata(self):
         service = self.populated_service()
