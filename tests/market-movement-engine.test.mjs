@@ -317,6 +317,21 @@ test("failed or mismatched canonical movement never advances lifecycle boundary"
   assert.equal(engine.lastEvaluatedBoundary, null);
 });
 
+test("universe change evaluates the latest finalized boundary from its own session", async () => {
+  const engine = new MarketMovementEngine();
+  const firstUniverse = buildMarketUniverse(SYMBOLS);
+  await engine.advance({ finalizableBoundary: BASE, universe: firstUniverse,
+    movementForBoundary: async (boundary) => warmingMovement(firstUniverse, boundary) });
+  const newUniverse = buildMarketUniverse([...SYMBOLS, "XRPUSDT"]);
+  const calls = [];
+  await engine.advance({ finalizableBoundary: BASE + 20_000, universe: newUniverse,
+    movementForBoundary: async (boundary) => {
+      calls.push(boundary);
+      return warmingMovement(newUniverse, boundary);
+    } });
+  assert.deepEqual(calls, [BASE + 20_000]);
+});
+
 test("normalization history is derived from contiguous one-minute candles only", () => {
   const minutes = 200;
   const candles = Array.from({ length: minutes }, (_, index) => ({

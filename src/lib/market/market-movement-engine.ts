@@ -135,6 +135,7 @@ export function buildMovementCurrentEvidence(
 
 export class MarketMovementEngine {
   private lastEvaluated: number | null = null;
+  private lastUniverseVersion: string | null = null;
   private lifecycleState: MarketEpisodeLifecycleState | null = null;
 
   constructor(private readonly options: { maxCatchUpBoundaries?: number } = {}) {}
@@ -180,6 +181,12 @@ export class MarketMovementEngine {
       this.lastEvaluated === null
         ? input.finalizableBoundary
         : this.lastEvaluated + MOVEMENT_BUCKET_MS;
+    // Earlier boundaries may predate every member of a newly configured
+    // universe. Evaluate its latest finalized boundary with the new identity.
+    if (this.lastUniverseVersion !== null &&
+        this.lastUniverseVersion !== input.universe.version) {
+      next = input.finalizableBoundary;
+    }
     if (next > input.finalizableBoundary) return [];
     const maxCatchUp = this.options.maxCatchUpBoundaries ?? MOVEMENT_ENGINE_MAX_CATCHUP_BOUNDARIES;
     if (input.finalizableBoundary - next > maxCatchUp * MOVEMENT_BUCKET_MS) {
@@ -239,6 +246,7 @@ export class MarketMovementEngine {
     });
     this.lifecycleState = lifecycle.nextState;
     this.lastEvaluated = boundaryTime;
+    this.lastUniverseVersion = input.universe.version;
     return { boundaryTime, movement, classification, lifecycle };
   }
 }

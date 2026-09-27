@@ -207,7 +207,9 @@ class MovementBoundaryService:
             endpoint = next((bucket for bucket in engine.history
                              if bucket.boundary_time_ms == boundary), None)
             if endpoint is None:
-                raise ValueError("requested boundary is unavailable in canonical history")
+                # A newly joined membership may have no engine history for an
+                # older catch-up boundary. #71 represents that symbol as missing.
+                continue
             found_boundary = True
             readiness = {window: engine.readiness(boundary, window, endpoint.source_state)
                          for window in (1, 5, 15)}

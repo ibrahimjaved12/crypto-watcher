@@ -392,6 +392,17 @@ class MovementMetricsAdapterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.calculate_metrics(self.metrics_request())
 
+    def test_new_membership_without_older_bucket_is_missing_symbol_input(self):
+        service = self.populated_service()
+        service.register_history(self.history_request())
+        # This engine still exists, but joined after the requested old boundary.
+        replacement = MovementBucketEngine("binance-usdm:SOLUSDT")
+        replacement.advance(BASE + 360 * 5_000, "LIVE")
+        service.sessions[SESSION]["engines"]["SOLUSDT"] = replacement
+        result = service.calculate_metrics(self.metrics_request(BASE + 355 * 5_000))
+        excluded = result["evaluation"]["windows"]["1"]["excluded_symbols"]
+        self.assertIn({"symbol": "SOLUSDT", "reasons": ["MISSING_SYMBOL_INPUT"]}, excluded)
+
 
 if __name__ == "__main__":
     unittest.main()
