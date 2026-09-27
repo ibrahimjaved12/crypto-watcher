@@ -55,15 +55,18 @@ class MarketClassifierConfig:
 
 @dataclass(frozen=True)
 class SymbolSourceTimeEvidence:
+    """Canonical #70 per-symbol times; None means unavailable or untrusted."""
+
     symbol: str
-    trade_time_ms: int | None
-    event_time_ms: int | None
-    received_at_ms: int | None
+    last_real_trade_time_ms: int | None
+    last_real_event_time_ms: int | None
+    last_received_at_ms: int | None
 
     def __post_init__(self):
         if not isinstance(self.symbol, str) or not self.symbol:
             raise ValueError("source time evidence requires a symbol")
-        for name in ("trade_time_ms", "event_time_ms", "received_at_ms"):
+        for name in ("last_real_trade_time_ms", "last_real_event_time_ms",
+                     "last_received_at_ms"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a nonnegative integer or None")
@@ -71,15 +74,13 @@ class SymbolSourceTimeEvidence:
 
 @dataclass(frozen=True)
 class MarketWindowClassificationContext:
-    source_time_evidence: tuple[SymbolSourceTimeEvidence, ...] = ()
+    source_time_evidence: tuple[SymbolSourceTimeEvidence, ...]
     prior_confirmed_episode_direction: str | None = None
 
     def __post_init__(self):
         evidence = tuple(self.source_time_evidence)
         if any(not isinstance(item, SymbolSourceTimeEvidence) for item in evidence):
             raise ValueError("source time evidence must contain SymbolSourceTimeEvidence values")
-        if len({item.symbol for item in evidence}) != len(evidence):
-            raise ValueError("source time evidence symbols must be unique")
         object.__setattr__(self, "source_time_evidence", evidence)
         if (self.prior_confirmed_episode_direction is not None
                 and self.prior_confirmed_episode_direction not in _BROAD_DIRECTIONS):
@@ -316,6 +317,16 @@ def _reversal(direction, prior, window):
     )
 
 
+def _validate_source_time_evidence(snapshot, supplied):
+    symbols = tuple(item.symbol for item in supplied.source_time_evidence)
+    if len(set(symbols)) != len(symbols):
+        raise ValueError(f"{snapshot.window_minutes}m source time evidence has duplicate symbols")
+    if symbols != snapshot.configured_universe:
+        raise ValueError(
+            f"{snapshot.window_minutes}m source time evidence must match the configured universe in order"
+        )
+
+
 def classify_market_movement(
     evaluation: MarketMovementEvaluation,
     context: MarketClassificationContext,
@@ -337,6 +348,7 @@ def classify_market_movement(
         if snapshot.window_minutes != window_minutes:
             raise ValueError("movement window key and window_minutes disagree")
         supplied = context.windows[window_minutes]
+        _validate_source_time_evidence(snapshot, supplied)
         direction = _direction(snapshot, config)
         middle, positive, negative = _acceleration_evidence(snapshot)
         aggregates = snapshot.aggregates

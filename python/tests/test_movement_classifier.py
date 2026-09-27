@@ -136,7 +136,13 @@ def evaluation(primary):
     )
 
 
-def classify(primary, *, prior=None, provenance=()):
+def provenance_for(primary):
+    return tuple(SymbolSourceTimeEvidence(symbol, None, None, None)
+                 for symbol in primary.configured_universe)
+
+
+def classify(primary, *, prior=None, provenance=None):
+    provenance = provenance_for(primary) if provenance is None else provenance
     context = MarketClassificationContext({
         minutes: MarketWindowClassificationContext(provenance, prior)
         for minutes in (1, 5, 15)
@@ -340,11 +346,14 @@ class AvailabilityAndOutputTests(unittest.TestCase):
         provenance = (
             SymbolSourceTimeEvidence("S0", 1_799_000, 1_798_000, 1_799_500),
             SymbolSourceTimeEvidence("S1", 1_797_000, None, 1_799_100),
+            *(SymbolSourceTimeEvidence(symbol, None, None, None)
+              for symbol in primary.configured_universe[2:]),
         )
+        unavailable_provenance = provenance_for(primary)
         context = MarketClassificationContext({
-            1: MarketWindowClassificationContext(),
+            1: MarketWindowClassificationContext(unavailable_provenance),
             5: MarketWindowClassificationContext(provenance, "BROAD_DROP"),
-            15: MarketWindowClassificationContext(),
+            15: MarketWindowClassificationContext(unavailable_provenance),
         })
         input_evaluation = evaluation(primary)
         first = classify_market_movement(input_evaluation, context)
@@ -371,24 +380,45 @@ class AvailabilityAndOutputTests(unittest.TestCase):
                              Decimal("100"))
             self.assertEqual(result.volume_context[0].rvol.value, 1.25)
         self.assertEqual(first.windows[5].source_time_evidence, provenance)
-        self.assertEqual(first.windows[1].source_time_evidence, ())
-        self.assertEqual(first.windows[15].source_time_evidence, ())
-        self.assertEqual(first.windows[5].source_time_evidence[1].event_time_ms, None)
+        self.assertIs(first.windows[5].source_time_evidence,
+                      context.windows[5].source_time_evidence)
+        self.assertEqual(first.windows[1].source_time_evidence, unavailable_provenance)
+        self.assertEqual(first.windows[15].source_time_evidence, unavailable_provenance)
+        self.assertEqual(first.windows[5].source_time_evidence[1].last_real_event_time_ms, None)
+        self.assertEqual(first.windows[5].source_time_evidence[3],
+                         SymbolSourceTimeEvidence("S3", None, None, None))
         with self.assertRaises(FrozenInstanceError):
-            provenance[0].trade_time_ms = 0
+            provenance[0].last_real_trade_time_ms = 0
         with self.assertRaises(FrozenInstanceError):
             first.windows[5].direction_state = "NEUTRAL"
         with self.assertRaises(TypeError):
             first.windows[5] = first.windows[1]
 
-    def test_source_time_evidence_validates_types_and_unique_symbols(self):
+    def test_source_time_evidence_validates_timestamp_types(self):
         with self.assertRaises(ValueError):
             SymbolSourceTimeEvidence("S0", True, None, None)
         with self.assertRaises(ValueError):
             SymbolSourceTimeEvidence("S0", None, -1, None)
-        record = SymbolSourceTimeEvidence("S0", None, None, None)
-        with self.assertRaises(ValueError):
-            MarketWindowClassificationContext((record, record))
+
+    def test_source_time_evidence_must_match_each_window_universe_in_order(self):
+        primary = window_result()
+        valid = provenance_for(primary)
+        cases = {
+            "empty": (),
+            "missing": valid[:-1],
+            "extra": (*valid, SymbolSourceTimeEvidence("OTHER", None, None, None)),
+            "duplicate": (valid[0], valid[0], *valid[2:]),
+            "wrong_order": (valid[1], valid[0], *valid[2:]),
+        }
+        for case, invalid in cases.items():
+            with self.subTest(case=case):
+                context = MarketClassificationContext({
+                    1: MarketWindowClassificationContext(valid),
+                    5: MarketWindowClassificationContext(valid),
+                    15: MarketWindowClassificationContext(invalid),
+                })
+                with self.assertRaises(ValueError):
+                    classify_market_movement(evaluation(primary), context)
 
     def test_excluded_reasons_are_preserved_without_reconstruction(self):
         primary = window_result(directions=("RISING",) * 6, material_count=5,
