@@ -1,19 +1,11 @@
-"""Independent EXP-75-01 EWMA market-state experiment.
-
-This module accepts already-built canonical #71 evaluations and runs two
-isolated streams through the canonical #72 classifier and #73 lifecycle: the
-unchanged movement evaluation and an EWMA-transformed candidate evaluation.
-It has no clock, persistence, provider, network, or live-runtime integration.
-"""
+"""Independent EXP-75-01 EWMA market-state experiment."""
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass, replace
 import math
-from statistics import median
 from types import MappingProxyType
-from typing import Iterable, Literal, Mapping
+from typing import Iterable, Mapping
 
 from ..market_episode_lifecycle import (
     MarketEpisodeLifecycleConfig,
@@ -22,7 +14,6 @@ from ..market_episode_lifecycle import (
     process_market_episode_lifecycle,
 )
 from ..movement_classifier import (
-    ALGORITHM_VERSION as CLASSIFIER_ALGORITHM_VERSION,
     MarketClassificationContext,
     MarketClassificationEvaluation,
     MarketClassifierConfig,
@@ -30,10 +21,20 @@ from ..movement_classifier import (
     SymbolSourceTimeEvidence,
     classify_market_movement,
 )
-from ..movement_metrics import (
-    MarketMovementEvaluation,
-    Metric,
-    WINDOWS,
+from ..movement_metrics import MarketMovementEvaluation, Metric, WINDOWS
+from .market_state_common import (
+    ExperimentPartition,
+    MarketStateExperimentPoint,
+    advance_canonical_branch,
+    directional_onset_count,
+    episode_count,
+    episode_spans,
+    match_directional_onsets,
+    observed_points_for_partition,
+    selected_points_for_partition,
+    short_lived_episode_count,
+    transition_counts,
+    validate_experiment_points,
 )
 
 
@@ -41,9 +42,6 @@ EWMA_ALGORITHM_VERSION = "market-movement-ewma-primary-median-v1"
 EWMA_CONFIG_VERSION_PREFIX = "market-movement-ewma-primary-median-config-v1"
 EWMA_HALF_LIVES_MS = (10_000, 30_000, 60_000)
 EWMA_EVALUATION_INTERVAL_MS = 5_000
-ExperimentPartition = Literal["development", "validation", "test"]
-_PARTITIONS = ("development", "validation", "test")
-_SUMMARY_ALL = "all"
 
 
 def _config_version(half_life_ms: int) -> str:
@@ -109,36 +107,6 @@ class EWMACandidateState:
         if (isinstance(self.current_ewma, bool) or not isinstance(self.current_ewma, (int, float))
                 or not math.isfinite(self.current_ewma)):
             raise ValueError("EWMA state value must be finite")
-
-
-@dataclass(frozen=True)
-class MarketStateExperimentPoint:
-    """One explicit chronological replay point for the EWMA experiment."""
-
-    movement_evaluation: MarketMovementEvaluation
-    source_time_evidence: tuple[SymbolSourceTimeEvidence, ...]
-    partition: ExperimentPartition
-
-    def __post_init__(self):
-        if not isinstance(self.movement_evaluation, MarketMovementEvaluation):
-            raise ValueError("movement_evaluation must be MarketMovementEvaluation")
-        if self.partition not in _PARTITIONS:
-            raise ValueError("experiment partition is invalid")
-        evidence = tuple(self.source_time_evidence)
-        if any(not isinstance(item, SymbolSourceTimeEvidence) for item in evidence):
-            raise ValueError("source_time_evidence contains an invalid item")
-        symbols = tuple(item.symbol for item in evidence)
-        if symbols != self.movement_evaluation.configured_universe:
-            raise ValueError("source_time_evidence must match the configured universe in order")
-        boundary = self.movement_evaluation.evaluation_boundary_time_ms
-        if (type(boundary) is not int or boundary < 0
-                or boundary % EWMA_EVALUATION_INTERVAL_MS):
-            raise ValueError("movement evaluation boundary must be aligned to 5000 ms")
-        for minute in WINDOWS:
-            window = self.movement_evaluation.windows.get(minute)
-            if window is None or window.evaluation_boundary_time_ms != self.movement_evaluation.evaluation_boundary_time_ms:
-                raise ValueError("movement evaluation windows must share the evaluation boundary")
-        object.__setattr__(self, "source_time_evidence", evidence)
 
 
 @dataclass(frozen=True)
@@ -290,52 +258,56 @@ def transform_market_movement_with_ewma(
                    config_version=config.version, windows=windows), next_state
 
 
-def _prior_direction(state, evaluation, classifier_config):
-    """Use a prior episode only when its branch scope matches current evidence."""
-    if state is None or state.active_episode is None:
-        return None
-    scope = state.active_episode.scope
-    expected = (
-        scope.universe_id == evaluation.universe_id,
-        scope.universe_version == evaluation.universe_version,
-        scope.movement_algorithm_version == evaluation.algorithm_version,
-        scope.movement_config_version == evaluation.config_version,
-        scope.classifier_algorithm_version == CLASSIFIER_ALGORITHM_VERSION,
-        scope.classifier_config_version == classifier_config.version,
-        scope.provider == evaluation.provider,
-        scope.exchange == evaluation.exchange,
-        scope.price_type == evaluation.price_type,
+def _summary(points, partition):
+    selected = selected_points_for_partition(points, partition)
+    observed = observed_points_for_partition(points, partition)
+    baseline_spans = episode_spans(observed, "baseline")
+    candidate_spans = episode_spans(observed, "candidate")
+    both_active = 0
+    same_active = 0
+    for point in selected:
+        baseline_episode = point.baseline_lifecycle_state.active_episode
+        candidate_episode = point.candidate_lifecycle_state.active_episode
+        if baseline_episode is not None and candidate_episode is not None:
+            both_active += 1
+            if baseline_episode.direction == candidate_episode.direction:
+                same_active += 1
+    disagreement = sum(
+        point.baseline_primary_direction_state != point.candidate_primary_direction_state
+        for point in selected
     )
-    return state.active_episode.direction if all(expected) else None
-
-
-def _classification_context(point, prior_direction):
-    return MarketClassificationContext({
-        minute: MarketWindowClassificationContext(
-            point.source_time_evidence,
-            prior_direction if minute == 5 else None,
-        )
-        for minute in WINDOWS
-    })
-
-
-def _validate_points(points):
-    last_boundary = None
-    last_partition_index = 0
-    for index, point in enumerate(points):
-        if not isinstance(point, MarketStateExperimentPoint):
-            raise ValueError(f"experiment point {index} has the wrong type")
-        boundary = point.movement_evaluation.evaluation_boundary_time_ms
-        partition_index = _PARTITIONS.index(point.partition)
-        if partition_index < last_partition_index:
-            raise ValueError("experiment partitions must be development, validation, then test")
-        if last_boundary is not None:
-            if boundary <= last_boundary:
-                raise ValueError("experiment boundaries must be strictly increasing")
-            if boundary != last_boundary + EWMA_EVALUATION_INTERVAL_MS:
-                raise ValueError("experiment boundaries must advance exactly 5000 ms")
-        last_boundary = boundary
-        last_partition_index = partition_index
+    matched, unmatched, median_delta = match_directional_onsets(
+        observed, selected, baseline_spans, candidate_spans)
+    evaluation_count = len(selected)
+    return ExperimentComparisonSummary(
+        partition=partition,
+        evaluation_count=evaluation_count,
+        usable_candidate_count=sum(
+            point.ewma_primary_median_normalized_movement.available for point in selected
+        ),
+        unavailable_candidate_count=sum(
+            not point.ewma_primary_median_normalized_movement.available for point in selected
+        ),
+        baseline_transition_counts=transition_counts(selected, "baseline"),
+        candidate_transition_counts=transition_counts(selected, "candidate"),
+        baseline_directional_onset_count=directional_onset_count(selected, "baseline"),
+        candidate_directional_onset_count=directional_onset_count(selected, "candidate"),
+        direction_state_disagreement_count=disagreement,
+        direction_state_disagreement_fraction=(disagreement / evaluation_count
+                                               if evaluation_count else 0.0),
+        both_active_episode_boundary_count=both_active,
+        same_active_direction_boundary_count=same_active,
+        same_active_direction_overlap_fraction=(same_active / both_active if both_active else 0.0),
+        baseline_episode_count=episode_count(baseline_spans, selected, partition),
+        candidate_episode_count=episode_count(candidate_spans, selected, partition),
+        baseline_short_lived_episode_count=short_lived_episode_count(
+            baseline_spans, selected, partition),
+        candidate_short_lived_episode_count=short_lived_episode_count(
+            candidate_spans, selected, partition),
+        matched_onset_count=matched,
+        unmatched_baseline_onset_count=unmatched,
+        median_signed_onset_delta_ms=median_delta,
+    )
 
 
 def run_market_state_ewma_experiment(
@@ -355,26 +327,21 @@ def run_market_state_ewma_experiment(
     if not isinstance(lifecycle_config, MarketEpisodeLifecycleConfig):
         raise ValueError("lifecycle_config must be MarketEpisodeLifecycleConfig")
     points = tuple(points)
-    _validate_points(points)
+    validate_experiment_points(points)
     baseline_state = None
     candidate_lifecycle_state = None
     ewma_state = None
     paired = []
     for point in points:
         evaluation = point.movement_evaluation
-        baseline_prior = _prior_direction(baseline_state, evaluation, classifier_config)
         candidate_evaluation, ewma_state = transform_market_movement_with_ewma(
             evaluation, config, ewma_state)
-        candidate_prior = _prior_direction(
-            candidate_lifecycle_state, candidate_evaluation, classifier_config)
-        baseline_classification = classify_market_movement(
-            evaluation, _classification_context(point, baseline_prior), classifier_config)
-        candidate_classification = classify_market_movement(
-            candidate_evaluation, _classification_context(point, candidate_prior), classifier_config)
-        baseline_result = process_market_episode_lifecycle(
-            baseline_classification, baseline_state, lifecycle_config)
-        candidate_result = process_market_episode_lifecycle(
-            candidate_classification, candidate_lifecycle_state, lifecycle_config)
+        baseline_classification, baseline_result = advance_canonical_branch(
+            evaluation, point.source_time_evidence, baseline_state,
+            classifier_config, lifecycle_config)
+        candidate_classification, candidate_result = advance_canonical_branch(
+            candidate_evaluation, point.source_time_evidence, candidate_lifecycle_state,
+            classifier_config, lifecycle_config)
         paired.append(PairedMarketStateExperimentPoint(
             evaluation.evaluation_boundary_time_ms, point.partition,
             evaluation.windows[5].aggregates.median_normalized_movement,
@@ -387,211 +354,7 @@ def run_market_state_ewma_experiment(
         baseline_state = baseline_result.next_state
         candidate_lifecycle_state = candidate_result.next_state
     paired = tuple(paired)
-    summaries = {_SUMMARY_ALL: _summary(paired, _SUMMARY_ALL)}
-    for partition in _PARTITIONS:
+    summaries = {"all": _summary(paired, "all")}
+    for partition in ("development", "validation", "test"):
         summaries[partition] = _summary(paired, partition)
     return MarketStateEWMAExperimentResult(config, paired, summaries)
-
-
-@dataclass(frozen=True)
-class _EpisodeSpan:
-    episode_id: str
-    direction: str
-    start_boundary_time_ms: int
-    end_boundary_time_ms: int | None
-    observed_through_boundary_time_ms: int
-
-
-def _branch_transitions(point, branch):
-    return (point.baseline_transitions if branch == "baseline"
-            else point.candidate_transitions)
-
-
-def _episode_spans(points, branch):
-    if not points:
-        return ()
-    observed_through = points[-1].evaluation_boundary_time_ms
-    starts = {}
-    spans = []
-
-    def close(episode_id, end_boundary, fallback=None):
-        start = starts.pop(episode_id, None)
-        if start is None:
-            start = fallback
-        if start is not None:
-            spans.append(_EpisodeSpan(
-                episode_id, start[0], start[1], end_boundary, observed_through,
-            ))
-
-    for point in points:
-        for transition in _branch_transitions(point, branch):
-            if transition.transition == "STARTED":
-                starts[transition.episode_id] = (
-                    transition.episode_direction,
-                    transition.episode_start_boundary_time_ms,
-                )
-            elif transition.transition == "REVERSED":
-                if transition.previous_episode_id is not None:
-                    close(transition.previous_episode_id, transition.evaluation_boundary_time_ms)
-                starts[transition.episode_id] = (
-                    transition.episode_direction,
-                    transition.episode_start_boundary_time_ms,
-                )
-            elif transition.transition == "ENDED":
-                close(
-                    transition.episode_id,
-                    transition.evaluation_boundary_time_ms,
-                    (transition.episode_direction,
-                     transition.episode_start_boundary_time_ms),
-                )
-    if points:
-        for episode_id, (direction, start) in tuple(starts.items()):
-            spans.append(_EpisodeSpan(
-                episode_id, direction, start, None, observed_through,
-            ))
-    return tuple(sorted(spans, key=lambda span: (span.start_boundary_time_ms, span.episode_id)))
-
-
-def _is_onset(transition):
-    return transition.transition in ("STARTED", "REVERSED")
-
-
-def _transition_counts(points, branch):
-    counts = Counter(
-        transition.transition
-        for point in points
-        for transition in _branch_transitions(point, branch)
-    )
-    return tuple(sorted(counts.items()))
-
-
-def _directional_onset_count(points, branch):
-    return sum(
-        _is_onset(transition)
-        for point in points
-        for transition in _branch_transitions(point, branch)
-    )
-
-
-def _onset_comparison(all_points, selected_points, baseline_spans, candidate_spans, branch):
-    if branch != "baseline":
-        return 0, 0, None
-    baseline_by_id = {span.episode_id: span for span in baseline_spans}
-    candidate_by_id = {span.episode_id: span for span in candidate_spans}
-    candidate_onsets = [
-        (point, transition)
-        for point in all_points
-        for transition in _branch_transitions(point, "candidate")
-        if _is_onset(transition) and transition.episode_id in candidate_by_id
-    ]
-    used = set()
-    deltas = []
-    unmatched = 0
-    for point in selected_points:
-        for transition in _branch_transitions(point, "baseline"):
-            if not _is_onset(transition):
-                continue
-            baseline_span = baseline_by_id.get(transition.episode_id)
-            if baseline_span is None:
-                unmatched += 1
-                continue
-            matches = []
-            for candidate_point, candidate_transition in candidate_onsets:
-                if candidate_transition.episode_id in used:
-                    continue
-                candidate_span = candidate_by_id[candidate_transition.episode_id]
-                candidate_end = (candidate_span.end_boundary_time_ms
-                                 if candidate_span.end_boundary_time_ms is not None
-                                 else candidate_span.observed_through_boundary_time_ms)
-                baseline_end = (baseline_span.end_boundary_time_ms
-                                if baseline_span.end_boundary_time_ms is not None
-                                else baseline_span.observed_through_boundary_time_ms)
-                if (candidate_transition.episode_direction == transition.episode_direction
-                        and candidate_span.start_boundary_time_ms <= baseline_end
-                        and baseline_span.start_boundary_time_ms <= candidate_end):
-                    matches.append((abs(candidate_transition.evaluation_boundary_time_ms -
-                                        transition.evaluation_boundary_time_ms),
-                                    candidate_point, candidate_transition))
-            if not matches:
-                unmatched += 1
-                continue
-            _, _, candidate_transition = min(matches, key=lambda item: item[0])
-            used.add(candidate_transition.episode_id)
-            deltas.append(float(candidate_transition.evaluation_boundary_time_ms -
-                               transition.evaluation_boundary_time_ms))
-    return len(deltas), unmatched, (float(median(deltas)) if deltas else None)
-
-
-def _summary(points, partition):
-    selected = tuple(point for point in points
-                     if partition == _SUMMARY_ALL or point.partition == partition)
-    cutoff = (points[-1].evaluation_boundary_time_ms if partition == _SUMMARY_ALL and points
-              else selected[-1].evaluation_boundary_time_ms if selected else None)
-    observed = tuple(point for point in points
-                     if cutoff is not None and point.evaluation_boundary_time_ms <= cutoff)
-    baseline_spans = _episode_spans(observed, "baseline")
-    candidate_spans = _episode_spans(observed, "candidate")
-    boundaries = {point.evaluation_boundary_time_ms for point in selected}
-    baseline_episode_count = sum(
-        partition == _SUMMARY_ALL or span.start_boundary_time_ms in boundaries
-        for span in baseline_spans
-    )
-    candidate_episode_count = sum(
-        partition == _SUMMARY_ALL or span.start_boundary_time_ms in boundaries
-        for span in candidate_spans
-    )
-    baseline_short = sum(
-        span.end_boundary_time_ms is not None
-        and span.end_boundary_time_ms - span.start_boundary_time_ms < 30_000
-        and (partition == _SUMMARY_ALL or span.start_boundary_time_ms in boundaries)
-        for span in baseline_spans
-    )
-    candidate_short = sum(
-        span.end_boundary_time_ms is not None
-        and span.end_boundary_time_ms - span.start_boundary_time_ms < 30_000
-        and (partition == _SUMMARY_ALL or span.start_boundary_time_ms in boundaries)
-        for span in candidate_spans
-    )
-    both_active = 0
-    same_active = 0
-    for point in selected:
-        baseline_episode = point.baseline_lifecycle_state.active_episode
-        candidate_episode = point.candidate_lifecycle_state.active_episode
-        if baseline_episode is not None and candidate_episode is not None:
-            both_active += 1
-            if baseline_episode.direction == candidate_episode.direction:
-                same_active += 1
-    disagreement = sum(
-        point.baseline_primary_direction_state != point.candidate_primary_direction_state
-        for point in selected
-    )
-    matched, unmatched, median_delta = _onset_comparison(
-        observed, selected, baseline_spans, candidate_spans, "baseline")
-    evaluation_count = len(selected)
-    return ExperimentComparisonSummary(
-        partition=partition,
-        evaluation_count=evaluation_count,
-        usable_candidate_count=sum(
-            point.ewma_primary_median_normalized_movement.available for point in selected
-        ),
-        unavailable_candidate_count=sum(
-            not point.ewma_primary_median_normalized_movement.available for point in selected
-        ),
-        baseline_transition_counts=_transition_counts(selected, "baseline"),
-        candidate_transition_counts=_transition_counts(selected, "candidate"),
-        baseline_directional_onset_count=_directional_onset_count(selected, "baseline"),
-        candidate_directional_onset_count=_directional_onset_count(selected, "candidate"),
-        direction_state_disagreement_count=disagreement,
-        direction_state_disagreement_fraction=(disagreement / evaluation_count
-                                               if evaluation_count else 0.0),
-        both_active_episode_boundary_count=both_active,
-        same_active_direction_boundary_count=same_active,
-        same_active_direction_overlap_fraction=(same_active / both_active if both_active else 0.0),
-        baseline_episode_count=baseline_episode_count,
-        candidate_episode_count=candidate_episode_count,
-        baseline_short_lived_episode_count=baseline_short,
-        candidate_short_lived_episode_count=candidate_short,
-        matched_onset_count=matched,
-        unmatched_baseline_onset_count=unmatched,
-        median_signed_onset_delta_ms=median_delta,
-    )
