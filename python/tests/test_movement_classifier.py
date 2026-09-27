@@ -284,6 +284,28 @@ class PaceTests(unittest.TestCase):
 
 
 class OutlierAndReversalTests(unittest.TestCase):
+    def test_relaxed_upstream_eligibility_keeps_independent_isolated_outlier_evidence(self):
+        primary = window_result(
+            directions=("RISING", "FALLING", "FALLING", "FALLING"),
+            material_count=1, eligible=True, outlier_index=0,
+            configured_count=10,
+        )
+        self.assertTrue(primary.market_wide_eligible)
+        self.assertTrue(primary.breadth.available)
+        self.assertEqual((primary.eligible_count, primary.eligible_fraction), (4, 0.4))
+        self.assertTrue(primary.symbols[0].outlier_candidate)
+
+        result = classify(primary).windows[5]
+        self.assertEqual(result.direction_state, "UNAVAILABLE")
+        self.assertEqual(len(result.isolated_outliers), 1)
+        outlier = result.isolated_outliers[0]
+        self.assertEqual((outlier.symbol, outlier.direction, outlier.raw_return,
+                          outlier.historical_z, outlier.cross_sectional_z,
+                          outlier.same_direction_breadth_count,
+                          outlier.same_direction_breadth_fraction,
+                          outlier.same_direction_breadth_denominator),
+                         ("S0", "RISING", 0.01, 2.0, 4.0, 1, 0.25, 4))
+
     def test_isolated_outlier_requires_strictly_less_than_half_breadth(self):
         result = classify(window_result(
             directions=("RISING",) * 4 + ("FALLING",) * 6,
@@ -391,13 +413,12 @@ class AvailabilityAndOutputTests(unittest.TestCase):
             with self.subTest(eligible_count=len(directions)):
                 primary = window_result(
                     directions=directions, material_count=len(directions),
-                    eligible=True, outlier_index=0,
+                    eligible=True,
                 )
                 result = classify(primary).windows[5]
                 self.assertEqual(result.direction_state, "UNAVAILABLE")
                 self.assertFalse(result.pace.available)
                 self.assertEqual(result.pace.reason, "NO_BROAD_DIRECTION")
-                self.assertEqual(result.isolated_outliers, ())
                 self.assertIn("CLASSIFIER_V1_UNIVERSE_INELIGIBLE",
                               result.availability_reasons)
 
