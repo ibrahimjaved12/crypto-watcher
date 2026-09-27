@@ -1,5 +1,5 @@
 /**
- * Pure market-movement evaluation engine (Issue #74).
+ * Canonical-result sequencing and validation engine (Issue #74).
  *
  * Orchestrates the completed pure layers once per shared, finalized five-second
  * exchange-time boundary:
@@ -7,7 +7,8 @@
  *   #70 buckets -> #71 metrics -> #72 classification -> #73 lifecycle
  *
  * The runtime supplies canonical Python #71/#72/#73 for each boundary.
- * This engine owns only ordered boundary sequencing and the opaque state handoff.
+ * This engine owns only ordered boundary sequencing, canonical-result validation,
+ * and the opaque lifecycle-state handoff.
  */
 import {
   MOVEMENT_BUCKET_MS,
