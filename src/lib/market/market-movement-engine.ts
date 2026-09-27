@@ -20,8 +20,10 @@ import {
 } from "./movement-metrics-contract";
 import { projectClassificationForLifecycle,
   type MarketStateEvidence } from "./market-episode-classification";
-import type { ConfirmedMarketDirection, MarketClassification } from "./market-state-contract";
+import type { ConfirmedPrimaryEpisodeScope, MarketClassification } from "./market-state-contract";
 import {
+  DEFAULT_MARKET_EPISODE_LIFECYCLE_CONFIG,
+  MARKET_EPISODE_ALGORITHM_VERSION,
   markMarketEpisodeStatePersisted,
   processMarketEpisodeLifecycle,
   type MarketEpisodeLifecycleConfig,
@@ -49,7 +51,7 @@ export type MovementEngineAdvanceInput = {
   finalizableBoundary: number;
   universe: MarketUniverse;
   assessmentForBoundary: (boundaryTime: number,
-    previousConfirmedPrimaryDirection: ConfirmedMarketDirection | null) => Promise<{
+    previousConfirmedPrimaryEpisode: ConfirmedPrimaryEpisodeScope | null) => Promise<{
       movement: MarketMovementEvaluation;
       classification: MarketClassification;
     }>;
@@ -221,8 +223,22 @@ export class MarketMovementEngine {
     input: MovementEngineAdvanceInput,
     previousState: MarketEpisodeLifecycleState | null,
   ): Promise<MovementBoundaryEvaluation> {
+    const activeEpisode = previousState?.activeEpisode;
+    const previousConfirmedPrimaryEpisode: ConfirmedPrimaryEpisodeScope | null = activeEpisode &&
+      activeEpisode.episodeAlgorithmVersion === MARKET_EPISODE_ALGORITHM_VERSION &&
+      activeEpisode.lifecycleConfigVersion ===
+        (input.lifecycleConfig ?? DEFAULT_MARKET_EPISODE_LIFECYCLE_CONFIG).version
+      ? {
+        direction: activeEpisode.direction,
+        universeId: activeEpisode.universeId,
+        universeVersion: activeEpisode.universeVersion,
+        movementAlgorithmVersion: activeEpisode.movementAlgorithmVersion,
+        movementConfigVersion: activeEpisode.movementConfigVersion,
+        classifierAlgorithmVersion: activeEpisode.classifierAlgorithmVersion,
+        classifierConfigVersion: activeEpisode.classifierConfigVersion,
+      } : null;
     const { movement, classification } = await input.assessmentForBoundary(
-      boundaryTime, previousState?.activeEpisode?.direction ?? null,
+      boundaryTime, previousConfirmedPrimaryEpisode,
     );
     if (
       movement.evaluationBoundaryTime !== boundaryTime ||

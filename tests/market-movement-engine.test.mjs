@@ -237,6 +237,23 @@ function broadRiseMovement(universe, boundary) {
   return movement;
 }
 
+function broadDropMovement(universe, boundary) {
+  const movement = broadRiseMovement(universe, boundary);
+  for (const window of movement.windows) {
+    window.breadth = {
+      available: true, unavailableReason: null, denominator: 8,
+      flatFraction: 0.1, risingFraction: 0.1, fallingFraction: 0.8,
+      materialRisingFraction: 0.1, materialFallingFraction: 0.8,
+    };
+    window.aggregates = {
+      medianRawReturn: available(-0.02),
+      medianNormalizedMovement: available(-1),
+      dispersionMadNormalizedMovement: available(0.1),
+    };
+  }
+  return movement;
+}
+
 // Explicit Python #72 results: these fixtures do not run a TypeScript classifier.
 function classificationFor(movement, directionState) {
   const side = (count, fraction) => available({ count, fraction });
@@ -252,10 +269,12 @@ function classificationFor(movement, directionState) {
     provider: movement.provider, exchange: movement.exchange, priceType: movement.priceType,
     evaluationBoundaryTime: movement.evaluationBoundaryTime, primaryWindowMinutes: 5,
     windows: movement.windows.map((snapshot) => {
-      const broad = directionState === "BROAD_RISE";
+      const risingBroad = directionState === "BROAD_RISE";
+      const fallingBroad = directionState === "BROAD_DROP";
+      const broad = risingBroad || fallingBroad;
       const n = snapshot.eligibleCount;
-      const rising = broad ? side(8, 0.8) : unavailable();
-      const falling = broad ? side(1, 0.1) : unavailable();
+      const rising = broad ? side(risingBroad ? 8 : 1, risingBroad ? 0.8 : 0.1) : unavailable();
+      const falling = broad ? side(fallingBroad ? 8 : 1, fallingBroad ? 0.8 : 0.1) : unavailable();
       return {
         windowMinutes: snapshot.windowMinutes,
         horizonRole: snapshot.windowMinutes === 1 ? "RAPID" :
@@ -267,13 +286,16 @@ function classificationFor(movement, directionState) {
         reversalCandidate: null,
         isolatedOutliers: [],
         breadth: { flat: broad ? side(1, 0.1) : unavailable(),
-          rising, falling, materialRising: broad ? side(8, 0.8) : unavailable(),
-          materialFalling: broad ? side(1, 0.1) : unavailable(), denominator: n },
+          rising, falling, materialRising: rising,
+          materialFalling: falling, denominator: n },
         medianRawReturn: snapshot.aggregates.medianRawReturn,
         medianNormalizedMovement: snapshot.aggregates.medianNormalizedMovement,
-        medianAcceleration: broad ? available(0.1) : unavailable("ACCELERATION_UNAVAILABLE"),
-        positiveAccelerationBreadth: broad ? side(8, 1) : unavailable("ACCELERATION_UNAVAILABLE"),
-        negativeAccelerationBreadth: broad ? side(0, 0) : unavailable("ACCELERATION_UNAVAILABLE"),
+        medianAcceleration: broad ? available(risingBroad ? 0.1 : -0.1) :
+          unavailable("ACCELERATION_UNAVAILABLE"),
+        positiveAccelerationBreadth: broad ? side(risingBroad ? 8 : 0, risingBroad ? 1 : 0) :
+          unavailable("ACCELERATION_UNAVAILABLE"),
+        negativeAccelerationBreadth: broad ? side(fallingBroad ? 8 : 0, fallingBroad ? 1 : 0) :
+          unavailable("ACCELERATION_UNAVAILABLE"),
         dispersionMadNormalizedMovement: snapshot.aggregates.dispersionMadNormalizedMovement,
         trimmedMeanNormalizedMovement: unavailable(),
         liquidityWeightedNormalizedMovement: unavailable(),
@@ -390,7 +412,7 @@ test("failed or mismatched canonical movement never advances lifecycle boundary"
   assert.equal(engine.lastEvaluatedBoundary, null);
 });
 
-test("each catch-up assessment receives the staged prior confirmed direction", async () => {
+test("each catch-up assessment receives the staged confirmed episode scope", async () => {
   const engine = new MarketMovementEngine();
   const universe = buildMarketUniverse(SYMBOLS);
   const supplied = [];
@@ -399,14 +421,80 @@ test("each catch-up assessment receives the staged prior confirmed direction", a
       supplied.push([boundary, prior]);
       return assessmentFor(broadRiseMovement(universe, boundary), "BROAD_RISE");
     } });
-  await engine.advance({ finalizableBoundary: BASE + 10_000, universe,
+  const catchUp = await engine.advance({ finalizableBoundary: BASE + 10_000, universe,
     assessmentForBoundary: async (boundary, prior) => {
       supplied.push([boundary, prior]);
       return assessmentFor(broadRiseMovement(universe, boundary), "BROAD_RISE");
     } });
+  const active = catchUp[0].lifecycle.nextState.activeEpisode;
+  assert.ok(active);
   assert.deepEqual(supplied, [
-    [BASE, null], [BASE + 5_000, null], [BASE + 10_000, "BROAD_RISE"],
+    [BASE, null], [BASE + 5_000, null], [BASE + 10_000, {
+      direction: active.direction, universeId: active.universeId,
+      universeVersion: active.universeVersion,
+      movementAlgorithmVersion: active.movementAlgorithmVersion,
+      movementConfigVersion: active.movementConfigVersion,
+      classifierAlgorithmVersion: active.classifierAlgorithmVersion,
+      classifierConfigVersion: active.classifierConfigVersion,
+    }],
   ]);
+});
+
+test("interrupted same-scope active episode remains prior context", async () => {
+  const engine = new MarketMovementEngine();
+  const universe = buildMarketUniverse(SYMBOLS);
+  await engine.advance({ finalizableBoundary: BASE, universe,
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      broadRiseMovement(universe, boundary), "BROAD_RISE") });
+  await engine.advance({ finalizableBoundary: BASE + 5_000, universe,
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      broadRiseMovement(universe, boundary), "BROAD_RISE") });
+  const active = engine.lifecycleState.activeEpisode;
+  assert.ok(active);
+  const restarted = new MarketMovementEngine();
+  restarted.restoreLifecycleState({ ...engine.lifecycleState, interrupted: true });
+  let supplied;
+  await restarted.advance({ finalizableBoundary: BASE + 10_000, universe,
+    assessmentForBoundary: async (boundary, prior) => {
+      supplied = prior;
+      return assessmentFor(broadRiseMovement(universe, boundary), "BROAD_RISE");
+    } });
+  assert.equal(supplied.direction, active.direction);
+  assert.equal(supplied.universeVersion, active.universeVersion);
+  assert.equal(supplied.classifierConfigVersion, active.classifierConfigVersion);
+});
+
+test("universe change carries old scope to Python and #73 ends the old episode", async () => {
+  const engine = new MarketMovementEngine();
+  const firstUniverse = buildMarketUniverse(SYMBOLS);
+  await engine.advance({ finalizableBoundary: BASE, universe: firstUniverse,
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      broadRiseMovement(firstUniverse, boundary), "BROAD_RISE") });
+  await engine.advance({ finalizableBoundary: BASE + 5_000, universe: firstUniverse,
+    assessmentForBoundary: async (boundary) => assessmentFor(
+      broadRiseMovement(firstUniverse, boundary), "BROAD_RISE") });
+  const oldEpisode = engine.lifecycleState.activeEpisode;
+  assert.ok(oldEpisode);
+  const secondUniverse = buildMarketUniverse([...SYMBOLS, "DOTUSDT"]);
+  let supplied;
+  const changed = await engine.advance({ finalizableBoundary: BASE + 10_000,
+    universe: secondUniverse,
+    assessmentForBoundary: async (boundary, prior) => {
+      supplied = prior;
+      // Explicit canonical #72 fixture for B: the Python service ignores A's
+      // scope, so no B window uses A as reversal context.
+      return assessmentFor(broadDropMovement(secondUniverse, boundary), "BROAD_DROP");
+    } });
+  assert.equal(supplied.direction, "BROAD_RISE");
+  assert.equal(supplied.universeVersion, oldEpisode.universeVersion);
+  assert.notEqual(supplied.universeVersion, secondUniverse.version);
+  assert.equal(changed[0].classification.windows[1].directionState, "BROAD_DROP");
+  assert.equal(changed[0].classification.windows[1].priorConfirmedEpisodeDirection, null);
+  assert.equal(changed[0].classification.windows[1].reversalCandidate, null);
+  assert.equal(changed[0].lifecycle.transitions[0].transition, "ENDED");
+  assert.equal(changed[0].lifecycle.transitions[0].transitionReason, "universe_version_changed");
+  assert.equal(changed[0].lifecycle.transitions[0].episodeId, oldEpisode.episodeId);
+  assert.equal(changed[0].lifecycle.nextState.activeEpisode, null);
 });
 
 test("unavailable canonical acceleration stays null through a confirmed broad transition", async () => {

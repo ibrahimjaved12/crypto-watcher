@@ -10,7 +10,8 @@ import json
 from .api_models import (MovementBoundaryRequest, MovementHistoryRegistrationRequest,
                          MovementMetricsRequest, MovementClassificationRequest)
 from .movement_classifier import (
-    MarketClassificationContext, MarketWindowClassificationContext,
+    ALGORITHM_VERSION as CLASSIFIER_ALGORITHM_VERSION,
+    MarketClassifierConfig, MarketClassificationContext, MarketWindowClassificationContext,
     SymbolSourceTimeEvidence, classify_market_movement,
 )
 from .movement import (
@@ -200,6 +201,19 @@ class MovementBoundaryService:
 
     def calculate_assessment(self, request: MovementClassificationRequest):
         session_id, history_version, result, endpoints = self._evaluate_movement(request)
+        classifier_config = MarketClassifierConfig()
+        previous = request.previous_confirmed_primary_episode
+        effective_prior_direction = (
+            previous.direction
+            if previous is not None
+            and previous.universe_id == result.universe_id
+            and previous.universe_version == result.universe_version
+            and previous.movement_algorithm_version == result.algorithm_version
+            and previous.movement_config_version == result.config_version
+            and previous.classifier_algorithm_version == CLASSIFIER_ALGORITHM_VERSION
+            and previous.classifier_config_version == classifier_config.version
+            else None
+        )
         provenance = tuple(SymbolSourceTimeEvidence(
             symbol=symbol,
             last_real_trade_time_ms=(endpoints[symbol].last_real_trade_time_ms
@@ -213,13 +227,14 @@ class MovementBoundaryService:
             window: MarketWindowClassificationContext(
                 source_time_evidence=provenance,
                 prior_confirmed_episode_direction=(
-                    request.previous_confirmed_primary_direction if window == 5 else None
+                    effective_prior_direction if window == 5 else None
                 ),
             ) for window in (1, 5, 15)
         })
-        classification = classify_market_movement(result, context)
+        classification = classify_market_movement(result, context, classifier_config)
         return {"schema_version": 1, "session_id": session_id,
                 "history_version": history_version,
+                "effective_previous_confirmed_primary_direction": effective_prior_direction,
                 "evaluation": self._transport(result),
                 "classification": self._transport(classification)}
 

@@ -10,7 +10,7 @@ import type {
 import type { MarketUniverse } from "./market-universe";
 import type { MarketMovementConfig, MarketMovementEvaluation } from "./movement-metrics-contract";
 import { MARKET_STATE_CLASSIFIER_VERSION,
-  type ConfirmedMarketDirection, type MarketClassification } from "./market-state-contract";
+  type ConfirmedPrimaryEpisodeScope, type MarketClassification } from "./market-state-contract";
 import type { MovementInstrumentCompatibility, MovementRawHistory } from "./movement-normalization-input";
 
 const TIMEOUT_MS = 6_000;
@@ -333,7 +333,15 @@ const classificationSchema = z.object({
 const assessmentResponse = z.object({
   schema_version: z.literal(1), session_id: z.string().uuid(),
   history_version: z.string().min(1), evaluation: evaluationSchema,
+  effective_previous_confirmed_primary_direction:
+    z.enum(["BROAD_RISE", "BROAD_DROP"]).nullable(),
   classification: classificationSchema,
+}).strict();
+const confirmedPrimaryEpisodeScopeSchema = z.object({
+  direction: z.enum(["BROAD_RISE", "BROAD_DROP"]),
+  universeId: z.string().min(1), universeVersion: z.string().min(1),
+  movementAlgorithmVersion: z.string().min(1), movementConfigVersion: z.string().min(1),
+  classifierAlgorithmVersion: z.string().min(1), classifierConfigVersion: z.string().min(1),
 }).strict();
 
 async function postCanonicalMovement(
@@ -515,14 +523,24 @@ export async function calculatePythonMarketMovement(
 export async function calculatePythonMarketAssessment(
   sessionId: string, boundaryTime: number, historyVersion: string,
   universe: MarketUniverse, movementConfigVersion: string,
-  previousConfirmedPrimaryDirection: ConfirmedMarketDirection | null,
+  previousConfirmedPrimaryEpisode: ConfirmedPrimaryEpisodeScope | null,
   env: Record<string, string | undefined> = process.env, send: typeof fetch = fetch,
 ): Promise<{ movement: MarketMovementEvaluation; classification: MarketClassification }> {
+  const prior = previousConfirmedPrimaryEpisode === null ? null :
+    confirmedPrimaryEpisodeScopeSchema.parse(previousConfirmedPrimaryEpisode);
   const response = await postCanonicalMovement("/v1/movement/classification", {
     schema_version: 1, session_id: sessionId,
     evaluation_boundary_time_ms: boundaryTime, history_version: historyVersion,
     universe_id: universe.id, universe_version: universe.version,
-    previous_confirmed_primary_direction: previousConfirmedPrimaryDirection,
+    previous_confirmed_primary_episode: prior && {
+      direction: prior.direction,
+      universe_id: prior.universeId,
+      universe_version: prior.universeVersion,
+      movement_algorithm_version: prior.movementAlgorithmVersion,
+      movement_config_version: prior.movementConfigVersion,
+      classifier_algorithm_version: prior.classifierAlgorithmVersion,
+      classifier_config_version: prior.classifierConfigVersion,
+    },
   }, env, send);
   const parsed = assessmentResponse.safeParse(response);
   if (!parsed.success) throw new Error("Python movement assessment response is invalid");
@@ -532,6 +550,9 @@ export async function calculatePythonMarketAssessment(
     symbols.every((symbol, index) => symbol === universe.symbols[index]);
   const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
   if (parsed.data.session_id !== sessionId || parsed.data.history_version !== historyVersion ||
+      (parsed.data.effective_previous_confirmed_primary_direction !== null &&
+        parsed.data.effective_previous_confirmed_primary_direction !==
+          prior?.direction) ||
       rawMovement.evaluation_boundary_time_ms !== boundaryTime ||
       rawMovement.universe_id !== universe.id || rawMovement.universe_version !== universe.version ||
       rawMovement.config_version !== movementConfigVersion || !ordered(rawMovement.configured_universe) ||
@@ -554,7 +575,7 @@ export async function calculatePythonMarketAssessment(
         window.window_minutes !== minute || window.horizon_role !== role ||
         window.is_primary !== (minute === 5) ||
         window.prior_confirmed_episode_direction !==
-          (minute === 5 ? previousConfirmedPrimaryDirection : null) ||
+          (minute === 5 ? parsed.data.effective_previous_confirmed_primary_direction : null) ||
         movementWindow.evaluation_boundary_time_ms !== boundaryTime ||
         window.evaluation_boundary_time_ms !== boundaryTime ||
         movementWindow.config_version !== movementConfigVersion ||

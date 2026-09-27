@@ -274,9 +274,9 @@ function createHarness() {
         compatibility, asOfBoundary});
     },
     async calculateAssessment(sessionId, boundary, historyVersion, universe,
-      previousConfirmedPrimaryDirection) {
+      configVersion, previousConfirmedPrimaryEpisode) {
       calls.metrics.push({sessionId, boundary, historyVersion, universe,
-        previousConfirmedPrimaryDirection});
+        configVersion, previousConfirmedPrimaryEpisode});
       if (control.failMetrics) throw new Error("Python #71/#72 assessment unavailable");
       if (control.rotateDuringMetrics) state.sessionId = crypto.randomUUID();
       if (control.changeUniverseDuringMetrics) control.symbols = [...SYMBOLS, "XRPUSDT"];

@@ -25,6 +25,13 @@ const { calculatePythonMarketMovement, calculatePythonMarketAssessment,
 const SESSION = "2af3e7c8-b777-4e58-9ad2-18e36daac160";
 const BOUNDARY = 1_800_000_000_000;
 const universe = { id: "watched", version: "watched-v1", symbols: ["BTCUSDT"] };
+const priorEpisode = {
+  direction: "BROAD_DROP", universeId: universe.id, universeVersion: universe.version,
+  movementAlgorithmVersion: "market-movement-v1",
+  movementConfigVersion: "market-movement-config-v1",
+  classifierAlgorithmVersion: "market-state-classifier-v1",
+  classifierConfigVersion: "market-state-classifier-config-v1",
+};
 const missing = (reason) => ({ available: false, value: null, reason });
 const present = (value) => ({ available: true, value, reason: null });
 const metricSymbol = (window) => ({
@@ -108,6 +115,7 @@ const classificationWindow = (minute) => ({
 });
 const assessment = {
   ...canonical,
+  effective_previous_confirmed_primary_direction: "BROAD_DROP",
   classification: {
     classifier_algorithm_version: "market-state-classifier-v1",
     classifier_config_version: "market-state-classifier-config-v1",
@@ -139,10 +147,16 @@ test("canonical Python assessment transports pace and per-symbol provenance unch
     return response(supplied)();
   };
   const result = await calculatePythonMarketAssessment(
-    SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1", "BROAD_DROP", {}, send,
+    SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1", priorEpisode, {}, send,
   );
   assert.equal(sent[0].url, "http://python.local/v1/movement/classification");
-  assert.equal(sent[0].body.previous_confirmed_primary_direction, "BROAD_DROP");
+  assert.deepEqual(sent[0].body.previous_confirmed_primary_episode, {
+    direction: "BROAD_DROP", universe_id: universe.id, universe_version: universe.version,
+    movement_algorithm_version: "market-movement-v1",
+    movement_config_version: "market-movement-config-v1",
+    classifier_algorithm_version: "market-state-classifier-v1",
+    classifier_config_version: "market-state-classifier-config-v1",
+  });
   assert.deepEqual(result.classification.windows.map((window) => window.windowMinutes), [1, 5, 15]);
   assert.deepEqual(result.classification.windows[0].pace, missing("NO_BROAD_DIRECTION"));
   assert.deepEqual(result.classification.windows[1].pace, present("MIXED"));
@@ -161,11 +175,13 @@ test("distinct Python classifier config versions and finite values survive trans
   config.acceleration_breadth = 0.55;
   config.isolated_outlier_breadth_disagreement = 0.4;
   supplied.classification.classifier_config_version = config.version;
+  supplied.effective_previous_confirmed_primary_direction = null;
   for (const minute of [1, 5, 15]) {
     supplied.classification.windows[minute].classifier_config_version = config.version;
   }
+  supplied.classification.windows[5].prior_confirmed_episode_direction = null;
   const result = await calculatePythonMarketAssessment(
-    SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1", "BROAD_DROP", {},
+    SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1", priorEpisode, {},
     response(supplied),
   );
   assert.equal(result.classification.classifierConfigVersion, config.version);
@@ -182,9 +198,38 @@ test("distinct Python classifier config versions and finite values survive trans
   ));
 });
 
+test("Python may reject an out-of-scope prior episode while preserving the assessment", async () => {
+  const supplied = structuredClone(assessment);
+  supplied.effective_previous_confirmed_primary_direction = null;
+  supplied.classification.windows[5].prior_confirmed_episode_direction = null;
+  const result = await calculatePythonMarketAssessment(
+    SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1",
+    { ...priorEpisode, universeVersion: "older-universe" }, {}, response(supplied),
+  );
+  assert.equal(result.classification.windows[1].priorConfirmedEpisodeDirection, null);
+  assert.equal(result.classification.windows[1].reversalCandidate, null);
+});
+
+test("scoped prior episode request rejects missing, extra and invalid identity fields", async () => {
+  const invalid = [
+    { ...priorEpisode, universeId: "" },
+    { ...priorEpisode, direction: "NEUTRAL" },
+    { ...priorEpisode, classifierConfigVersion: undefined },
+    { ...priorEpisode, unexpected: "extra" },
+  ];
+  for (const prior of invalid) {
+    await assert.rejects(calculatePythonMarketAssessment(
+      SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1",
+      prior, {}, response(assessment),
+    ));
+  }
+});
+
 test("canonical assessment rejects mismatched identity, provenance and snapshots", async () => {
   const mutations = [
     (item) => { item.history_version = "wrong"; },
+    (item) => { item.effective_previous_confirmed_primary_direction = "BROAD_RISE"; },
+    (item) => { item.effective_previous_confirmed_primary_direction = null; },
     (item) => { item.classification.classifier_algorithm_version = "wrong"; },
     (item) => { item.classification.classifier_config_version = "wrong"; },
     (item) => { item.classification.classifier_config.version = "wrong"; },
@@ -212,7 +257,7 @@ test("canonical assessment rejects mismatched identity, provenance and snapshots
     const invalid = structuredClone(assessment);
     mutate(invalid);
     await assert.rejects(calculatePythonMarketAssessment(
-      SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1", "BROAD_DROP", {},
+      SESSION, BOUNDARY, "history-v1", universe, "market-movement-config-v1", priorEpisode, {},
       response(invalid),
     ));
   }
@@ -235,7 +280,7 @@ test("canonical assessment rejects per-symbol provenance in the wrong order", as
     ];
   }
   await assert.rejects(calculatePythonMarketAssessment(
-    SESSION, BOUNDARY, "history-v1", twoSymbols, "market-movement-config-v1", "BROAD_DROP", {},
+    SESSION, BOUNDARY, "history-v1", twoSymbols, "market-movement-config-v1", priorEpisode, {},
     response(swapped),
   ));
 });

@@ -286,5 +286,15 @@ class MovementMetricsRequest(InputModel):
         return self
 
 
+class PreviousConfirmedPrimaryEpisode(InputModel):
+    direction: Literal["BROAD_RISE", "BROAD_DROP"]
+    universe_id: str = Field(min_length=1, max_length=128)
+    universe_version: str = Field(min_length=1, max_length=128)
+    movement_algorithm_version: str = Field(min_length=1, max_length=128)
+    movement_config_version: str = Field(min_length=1, max_length=128)
+    classifier_algorithm_version: str = Field(min_length=1, max_length=128)
+    classifier_config_version: str = Field(min_length=1, max_length=128)
+
+
 class MovementClassificationRequest(MovementMetricsRequest):
-    previous_confirmed_primary_direction: Literal["BROAD_RISE", "BROAD_DROP"] | None = None
+    previous_confirmed_primary_episode: PreviousConfirmedPrimaryEpisode | None = None

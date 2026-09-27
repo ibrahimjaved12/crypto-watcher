@@ -224,13 +224,14 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.request(app, "POST", "/v1/movement/metrics",
                                       json={**metrics, "snapshots": []},
                                       headers=HEADERS).status_code, 422)
-        classification_request = {**metrics, "previous_confirmed_primary_direction": None}
+        classification_request = {**metrics, "previous_confirmed_primary_episode": None}
         self.assertEqual(self.request(app, "POST", "/v1/movement/classification",
                                       json=classification_request).status_code, 401)
         assessment = self.request(app, "POST", "/v1/movement/classification",
                                   json=classification_request, headers=HEADERS)
         self.assertEqual(assessment.status_code, 200)
         self.assertEqual(assessment.json()["evaluation"], response.json()["evaluation"])
+        self.assertIsNone(assessment.json()["effective_previous_confirmed_primary_direction"])
         self.assertEqual(assessment.json()["classification"]["windows"]["5"]
                          ["source_time_evidence"][0]["symbol"], "BTCUSDT")
 

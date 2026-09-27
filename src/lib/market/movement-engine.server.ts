@@ -35,7 +35,7 @@ import {
 } from "./movement-finalization";
 import { DEFAULT_MARKET_MOVEMENT_CONFIG, type MarketMovementConfig,
   type MarketMovementEvaluation } from "./movement-metrics-contract";
-import type { ConfirmedMarketDirection, MarketClassification } from "./market-state-contract";
+import type { ConfirmedPrimaryEpisodeScope, MarketClassification } from "./market-state-contract";
 import {
   deriveMovementEngineStatus,
   MARKET_UNIVERSE_ID,
@@ -79,7 +79,7 @@ export type MovementEngineRuntimeDependencies = {
   instrumentCompatibility: (symbol: string) => Promise<boolean | null>;
   calculateAssessment: (sessionId: string, boundaryTime: number, historyVersion: string,
     universe: MarketUniverse, configVersion: string,
-    previousConfirmedPrimaryDirection: ConfirmedMarketDirection | null) => Promise<{
+    previousConfirmedPrimaryEpisode: ConfirmedPrimaryEpisodeScope | null) => Promise<{
       movement: MarketMovementEvaluation;
       classification: MarketClassification;
     }>;
@@ -261,10 +261,10 @@ export class MovementEngineRuntime {
       results = await this.engine.advance({
         finalizableBoundary: finalizable,
         universe,
-        assessmentForBoundary: async (boundary, previousConfirmedPrimaryDirection) => {
+        assessmentForBoundary: async (boundary, previousConfirmedPrimaryEpisode) => {
           const assessment = await this.deps.calculateAssessment(
             movementSessionId, boundary, this.historicalVersion!, universe,
-            this.movementConfig.version, previousConfirmedPrimaryDirection,
+            this.movementConfig.version, previousConfirmedPrimaryEpisode,
           );
           if (!stillCurrent()) throw new Error("stale movement session or universe response");
           return assessment;

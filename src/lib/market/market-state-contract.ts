@@ -8,6 +8,15 @@ export const MARKET_STATE_CLASSIFIER_VERSION = "market-state-classifier-v1";
 export type MarketDirectionState =
   "BROAD_RISE" | "BROAD_DROP" | "NEUTRAL" | "WARMING" | "UNAVAILABLE";
 export type ConfirmedMarketDirection = Extract<MarketDirectionState, "BROAD_RISE" | "BROAD_DROP">;
+export type ConfirmedPrimaryEpisodeScope = {
+  direction: ConfirmedMarketDirection;
+  universeId: string;
+  universeVersion: string;
+  movementAlgorithmVersion: string;
+  movementConfigVersion: string;
+  classifierAlgorithmVersion: string;
+  classifierConfigVersion: string;
+};
 export type MarketPaceValue = "ACCELERATING" | "DECELERATING" | "MIXED";
 export type MarketHorizonRole = "RAPID" | "PRIMARY" | "PERSISTENCE";
 export type ClassifierMetric<T> =
