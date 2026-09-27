@@ -589,20 +589,31 @@ def process_market_episode_lifecycle(
 
     if direction in _BROAD and direction != episode.direction:
         candidate = _advance_direction(state.pending_reversal, direction, boundary)
+        failures = (0 if state.interrupted else
+                    state.continuation_failure_count + 1)
         if candidate.count >= config.reversal_confirmation_count:
             replacement = _new_episode(scope, direction, candidate.start_boundary_time_ms, boundary)
             state = _baseline(state, primary, replacement)
             transitions.append(_event(replacement, episode.episode_id, "REVERSED",
                                       "confirmed_opposite_broad_entry", episode.direction,
                                       direction, classification, scope, config, config))
+        elif failures >= config.end_confirmation_count:
+            transitions.append(_event(episode, None, "ENDED", "continuation_failed",
+                                      episode.direction, None, classification, scope,
+                                      config, config))
+            state = replace(state, active_episode=None, pending_start=
+                            PendingDirection(direction, 1, boundary),
+                            pending_reversal=None, continuation_failure_count=0,
+                            pending_strengthen=(), pending_weaken=(),
+                            previous_usable_pace=None,
+                            previous_same_direction_material_breadth=None,
+                            interrupted=False, pending_resume=None)
         else:
             state = replace(state, pending_reversal=candidate, pending_resume=None,
                             pending_strengthen=(), pending_weaken=(),
                             previous_usable_pace=None,
                             previous_same_direction_material_breadth=None,
-                            continuation_failure_count=(0 if state.interrupted else
-                                min(state.continuation_failure_count + 1,
-                                    config.end_confirmation_count - 1)))
+                            continuation_failure_count=failures)
         return MarketEpisodeLifecycleResult(state, tuple(transitions))
 
     state = replace(state, pending_reversal=None)

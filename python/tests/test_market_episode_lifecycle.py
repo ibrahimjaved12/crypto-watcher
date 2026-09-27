@@ -299,24 +299,61 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
                           breadth_direction="FALLING")
         self.assertEqual(failing.next_state.continuation_failure_count, 1)
 
-    def test_opposite_two_tick_reversal_precedes_exit_and_has_no_cooldown(self):
+    def test_clean_opposite_two_tick_reversal_precedes_exit_and_has_no_cooldown(self):
         state, started = start()
-        for offset in (10_000, 15_000):
-            state = advance(state, BASE + offset, direction="NEUTRAL", same_count=40).next_state
-        first = advance(state, BASE + 20_000, direction="BROAD_DROP")
+        first = advance(state, BASE + 10_000, direction="BROAD_DROP")
         self.assertEqual(first.transitions, ())
         self.assertEqual(first.next_state.pending_reversal.count, 1)
-        confirmed = advance(first.next_state, BASE + 25_000, direction="BROAD_DROP")
+        self.assertEqual(first.next_state.continuation_failure_count, 1)
+        confirmed = advance(first.next_state, BASE + 15_000, direction="BROAD_DROP")
         self.assertEqual([event.transition for event in confirmed.transitions], ["REVERSED"])
         reversal = confirmed.transitions[0]
         self.assertEqual((reversal.from_direction, reversal.to_direction),
                          ("BROAD_RISE", "BROAD_DROP"))
         self.assertEqual(reversal.previous_episode_id, started.episode_id)
         self.assertNotEqual(reversal.episode_id, started.episode_id)
-        self.assertEqual(reversal.episode_start_boundary_time_ms, BASE + 20_000)
-        again = advance(confirmed.next_state, BASE + 30_000, direction="BROAD_RISE")
-        final = advance(again.next_state, BASE + 35_000, direction="BROAD_RISE")
+        self.assertEqual(reversal.episode_start_boundary_time_ms, BASE + 10_000)
+        again = advance(confirmed.next_state, BASE + 20_000, direction="BROAD_RISE")
+        final = advance(again.next_state, BASE + 25_000, direction="BROAD_RISE")
         self.assertEqual([event.transition for event in final.transitions], ["REVERSED"])
+
+    def test_confirmed_reversal_wins_when_end_threshold_matures_together(self):
+        state, _ = start()
+        first_failure = advance(state, BASE + 10_000, direction="NEUTRAL", same_count=40)
+        self.assertEqual(first_failure.next_state.continuation_failure_count, 1)
+        first_opposite = advance(first_failure.next_state, BASE + 15_000,
+                                 direction="BROAD_DROP")
+        self.assertEqual(first_opposite.transitions, ())
+        self.assertEqual(first_opposite.next_state.pending_reversal.count, 1)
+        self.assertEqual(first_opposite.next_state.continuation_failure_count, 2)
+
+        confirmed = advance(first_opposite.next_state, BASE + 20_000,
+                            direction="BROAD_DROP")
+        self.assertEqual([event.transition for event in confirmed.transitions], ["REVERSED"])
+        self.assertEqual(confirmed.transitions[0].transition_reason,
+                         "confirmed_opposite_broad_entry")
+        self.assertEqual(confirmed.next_state.continuation_failure_count, 0)
+
+    def test_end_before_reversal_confirmation_starts_new_direction_candidate(self):
+        state, _ = start()
+        for offset in (10_000, 15_000):
+            state = advance(state, BASE + offset, direction="NEUTRAL",
+                            same_count=40).next_state
+        self.assertEqual(state.continuation_failure_count, 2)
+
+        ended = advance(state, BASE + 20_000, direction="BROAD_DROP")
+        self.assertEqual([event.transition for event in ended.transitions], ["ENDED"])
+        self.assertEqual(ended.transitions[0].transition_reason, "continuation_failed")
+        self.assertIsNone(ended.next_state.active_episode)
+        self.assertIsNone(ended.next_state.pending_reversal)
+        self.assertEqual((ended.next_state.pending_start.direction,
+                          ended.next_state.pending_start.count,
+                          ended.next_state.pending_start.start_boundary_time_ms),
+                         ("BROAD_DROP", 1, BASE + 20_000))
+
+        started = advance(ended.next_state, BASE + 25_000, direction="BROAD_DROP")
+        self.assertEqual([event.transition for event in started.transitions], ["STARTED"])
+        self.assertEqual(started.transitions[0].episode_start_boundary_time_ms, BASE + 20_000)
 
     def test_pace_strengthening_and_weakening_are_crossings(self):
         state, _ = start(pace="MIXED")
