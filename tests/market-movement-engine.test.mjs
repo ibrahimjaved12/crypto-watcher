@@ -368,7 +368,7 @@ test("universe change evaluates the latest finalized boundary from its own sessi
   const firstUniverse = buildMarketUniverse(SYMBOLS);
   await engine.advance({ finalizableBoundary: BASE, universe: firstUniverse,
     movementForBoundary: async (boundary) => warmingMovement(firstUniverse, boundary) });
-  const newUniverse = buildMarketUniverse([...SYMBOLS, "XRPUSDT"]);
+  const newUniverse = buildMarketUniverse([...SYMBOLS, "DOTUSDT"]);
   const calls = [];
   await engine.advance({ finalizableBoundary: BASE + 20_000, universe: newUniverse,
     movementForBoundary: async (boundary) => {

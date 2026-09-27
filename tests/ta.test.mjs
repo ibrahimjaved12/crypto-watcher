@@ -274,12 +274,14 @@ test("futures provider preserves OHLCV and contract identity", async () => {
         return Response.json({ symbol: "BTCUSDT", markPrice: "100.5", indexPrice: "100.4" });
       if (url.includes("/fapi/v1/fundingRate"))
         return Response.json([{ symbol: "BTCUSDT", fundingRate: "0.0001", fundingTime: end }]);
-      return Response.json([[end - duration, "100", "102", "98", "101", "35", end - 1]]);
+      return Response.json([
+        [end - duration, "100", "102", "98", "101", "35", end - 1, "3535"],
+      ]);
     };
     const result = await loadTACandles("BTCUSDT", 15, () => {});
     assert.deepEqual(
       result.candles[0],
-      candle({ close: 101, volume: 35, complete: end < Date.now() }),
+      candle({ close: 101, volume: 35, quoteVolume: 3535, complete: end < Date.now() }),
     );
     assert.equal(result.source, "binance-usdm");
     assert.equal(result.instrument.id, "binance-usdm:BTCUSDT");
@@ -305,8 +307,8 @@ test("futures provider preserves OHLCV and contract identity", async () => {
         return Response.json({ symbols: [futuresMetadata()] });
       }
       return Response.json([
-        [minuteEnd - 120_000, "100", "102", "98", "101", "35", minuteEnd - 60_001],
-        [minuteEnd - 60_000, "101", "103", "99", "102", "40", minuteEnd - 1],
+        [minuteEnd - 120_000, "100", "102", "98", "101", "35", minuteEnd - 60_001, "3535"],
+        [minuteEnd - 60_000, "101", "103", "99", "102", "40", minuteEnd - 1, "4080"],
       ]);
     };
     const observation = await loadObservationCandles("BTCUSDT", undefined, {
