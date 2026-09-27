@@ -46,11 +46,29 @@ CUSUM_AMBIGUOUS = "AMBIGUOUS"
 CUSUM_UNAVAILABLE = "UNAVAILABLE"
 _CUSUM_DIRECTIONS = frozenset((CUSUM_UP_SHIFT, CUSUM_DOWN_SHIFT))
 _CUSUM_STATES = _CUSUM_DIRECTIONS | frozenset((CUSUM_NONE, CUSUM_AMBIGUOUS, CUSUM_UNAVAILABLE))
+_CUSUM_THRESHOLD_ABS_TOL = 1e-12
 _PREREGISTERED_PARAMETERS = (
     (0.0, 0.10, 0.75),
     (0.0, 0.10, 1.50),
     (0.0, 0.25, 1.50),
 )
+
+
+def _at_or_above_threshold(value: float, threshold: float) -> bool:
+    return value >= threshold or math.isclose(
+        value, threshold, rel_tol=0.0, abs_tol=_CUSUM_THRESHOLD_ABS_TOL)
+
+
+def _direction(positive: float, negative: float, h: float) -> str:
+    positive_reached = _at_or_above_threshold(positive, h)
+    negative_reached = _at_or_above_threshold(negative, h)
+    if positive_reached and not negative_reached:
+        return CUSUM_UP_SHIFT
+    if negative_reached and not positive_reached:
+        return CUSUM_DOWN_SHIFT
+    if positive_reached and negative_reached:
+        return CUSUM_AMBIGUOUS
+    return CUSUM_NONE
 
 
 def _config_version(k: float, h: float) -> str:
@@ -132,6 +150,9 @@ class CUSUMCandidateState:
                 raise ValueError(f"{name} must be finite and nonnegative")
         if self.direction_state not in _CUSUM_STATES - {CUSUM_UNAVAILABLE}:
             raise ValueError("CUSUM state direction is invalid")
+        if self.direction_state != _direction(
+                self.positive_accumulator, self.negative_accumulator, self.h):
+            raise ValueError("CUSUM state direction is inconsistent with accumulators")
 
 
 @dataclass(frozen=True)
@@ -253,16 +274,6 @@ def _state_matches(state, evaluation, config):
         and state.exchange == evaluation.exchange
         and state.price_type == evaluation.price_type
     )
-
-
-def _direction(positive, negative, h):
-    if positive >= h and negative < h:
-        return CUSUM_UP_SHIFT
-    if negative >= h and positive < h:
-        return CUSUM_DOWN_SHIFT
-    if positive >= h and negative >= h:
-        return CUSUM_AMBIGUOUS
-    return CUSUM_NONE
 
 
 def transform_market_movement_with_cusum(

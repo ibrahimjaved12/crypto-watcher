@@ -223,15 +223,23 @@ class MarketStateCUSUMExperimentTests(unittest.TestCase):
         self.assertEqual(cleared.positive_accumulator, 0.0)
 
     def test_both_thresholds_are_ambiguous(self):
-        _, state = transform_market_movement_with_cusum(
-            _evaluation(0, normalized=0.25), CUSUM_CONFIG_K010_H075)
-        state = replace(state, positive_accumulator=1.0,
-                        negative_accumulator=1.0,
-                        direction_state=CUSUM_UP_SHIFT)
-        observation, _ = transform_market_movement_with_cusum(
-            _evaluation(5_000, normalized=0.0), CUSUM_CONFIG_K010_H075, state)
+        state = None
+        for index, normalized in enumerate((1.0, 1.0, 1.0, -1.0)):
+            observation, state = transform_market_movement_with_cusum(
+                _evaluation(index * 5_000, normalized=normalized),
+                CUSUM_CONFIG_K010_H075,
+                state,
+            )
         self.assertEqual(observation.direction_state, CUSUM_AMBIGUOUS)
         self.assertFalse(observation.directional_onset)
+
+    def test_inconsistent_state_direction_is_rejected(self):
+        _, state = transform_market_movement_with_cusum(
+            _evaluation(0, normalized=0.25), CUSUM_CONFIG_K010_H075)
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
+            replace(state, positive_accumulator=1.0,
+                    negative_accumulator=1.0,
+                    direction_state=CUSUM_UP_SHIFT)
 
     def test_preregistered_configurations_are_distinct_without_winner_selection(self):
         values = []
@@ -314,15 +322,42 @@ class MarketStateCUSUMExperimentTests(unittest.TestCase):
         self.assertEqual(result.summaries["all"].cusum_down_onset_count, 1)
 
     def test_ambiguous_and_unavailable_close_regions(self):
-        points = tuple(_point(index * 5_000, normalized=0.25) for index in range(5))
-        result = run_market_state_cusum_experiment(points, CUSUM_CONFIG_K010_H075)
-        ambiguous = replace(result.points[-1], cusum_direction_state=CUSUM_AMBIGUOUS)
-        self.assertEqual(detection_regions(result.points[:-1] + (ambiguous,))[0].end_boundary_time_ms,
-                         20_000)
-        missing = replace(result.points[-1], cusum_direction_state=CUSUM_UNAVAILABLE,
-                          cusum_available=False)
-        self.assertEqual(detection_regions(result.points[:-1] + (missing,))[0].end_boundary_time_ms,
-                         20_000)
+        ambiguous_result = run_market_state_cusum_experiment(
+            tuple(_point(index * 5_000, normalized=normalized)
+                  for index, normalized in enumerate((1.0, 1.0, 1.0, -1.0))),
+            CUSUM_CONFIG_K010_H075,
+        )
+        self.assertEqual(ambiguous_result.points[-1].cusum_direction_state,
+                         CUSUM_AMBIGUOUS)
+        self.assertEqual(detection_regions(ambiguous_result.points)[0].end_boundary_time_ms,
+                         15_000)
+
+        missing_point = _point(10_000, normalized=0.0)
+        missing_evaluation = replace(
+            missing_point.movement_evaluation,
+            windows={
+                **missing_point.movement_evaluation.windows,
+                5: replace(
+                    missing_point.movement_evaluation.windows[5],
+                    aggregates=replace(
+                        missing_point.movement_evaluation.windows[5].aggregates,
+                        median_normalized_movement=Metric.missing("missing"),
+                    ),
+                ),
+            },
+        )
+        unavailable_result = run_market_state_cusum_experiment(
+            (_point(0, normalized=1.0), _point(5_000, normalized=1.0),
+             replace(missing_point, movement_evaluation=missing_evaluation)),
+            CUSUM_CONFIG_K010_H075,
+        )
+        self.assertEqual(unavailable_result.points[-1].cusum_direction_state,
+                         CUSUM_UNAVAILABLE)
+        self.assertIsNone(unavailable_result.points[-1].cusum_state)
+        self.assertEqual(
+            detection_regions(unavailable_result.points)[0].end_boundary_time_ms,
+            10_000,
+        )
 
     def test_final_active_region_is_censored_and_not_short_lived(self):
         result = run_market_state_cusum_experiment(
@@ -364,13 +399,14 @@ class MarketStateCUSUMExperimentTests(unittest.TestCase):
 
     def test_opposite_direction_region_is_unmatched(self):
         points = (
-            _point(0, normalized=-1.0, raw=0.0),
+            _point(0, normalized=-2.0, raw=0.0),
             _point(5_000, state="rise", normalized=0.6, raw=0.1),
             _point(10_000, state="rise", normalized=0.6, raw=0.1),
         )
         summary = run_market_state_cusum_experiment(
-            points, CUSUM_CONFIG_K010_H075).summaries["all"]
+            points, CUSUM_CONFIG_K010_H150).summaries["all"]
         self.assertEqual(summary.matched_baseline_onset_count, 0)
+        self.assertEqual(summary.unmatched_baseline_onset_count, 1)
         self.assertEqual(summary.unmatched_cusum_detection_region_count, 1)
 
     def test_one_cusum_region_cannot_match_two_baseline_onsets(self):
