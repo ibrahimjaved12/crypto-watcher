@@ -1,6 +1,9 @@
 import { getOperationalStore } from "../operational/repository.server";
 import type { OperationalStore } from "../operational/types";
-import { loadBinanceFuturesKlines } from "./providers.server";
+import {
+  loadBinanceFuturesKlines,
+  loadBinanceFuturesListingTime,
+} from "./providers.server";
 import {
   BINANCE_USDM_WS_ENDPOINT,
   BinanceFuturesCollector,
@@ -77,6 +80,7 @@ export class CollectorRuntime {
           retrievedAt: Date.parse(result.retrievedAt),
         });
       },
+      loadHistoryListingTime: loadBinanceFuturesListingTime,
       onOverload: () =>
         this.socket?.close(RECOVERY_CLOSE_CODE, "bounded processing capacity exceeded"),
       advanceMovementBoundary: (sessionId, boundaryTime, symbols) =>
@@ -335,10 +339,21 @@ export class CollectorRuntime {
       DEFAULT_MARKET_MOVEMENT_CONFIG.historicalLookbackMs,
       Date.now(),
       isCurrent,
-    ).then((historyChanged) => {
+    ).then((result) => {
       if (!isCurrent()) return;
-      this.historyBackfillAttempts = 0;
-      if (historyChanged) this.movement.requestNormalizationHistoryRefresh();
+      if (result.historyChanged) this.movement.requestNormalizationHistoryRefresh();
+      if (!result.retryNeeded) {
+        this.historyBackfillAttempts = 0;
+        return;
+      }
+      retryDelay = Math.min(
+        HISTORY_BACKFILL_MAX_BACKOFF_MS,
+        HISTORY_BACKFILL_RETRY_BASE_MS * 2 ** Math.min(this.historyBackfillAttempts, 5),
+      );
+      this.historyBackfillAttempts += 1;
+      console.error(
+        `[binance-collector] movement history backfill incomplete; retrying in ${retryDelay}ms`,
+      );
     }).catch((error) => {
       if (!isCurrent()) return;
       retryDelay = Math.min(

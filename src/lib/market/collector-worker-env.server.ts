@@ -2,6 +2,7 @@ import { validatePublicSecrets } from "../environment";
 import { operationalDbConfig } from "../operational/config.server";
 import { pythonServiceConfig } from "../python-service.server";
 import { movementFinalizationConfig } from "./movement-finalization";
+import { DEFAULT_MARKET_MOVEMENT_CONFIG } from "./movement-metrics-contract";
 
 type Env = Record<string, string | undefined>;
 
@@ -18,8 +19,17 @@ type Env = Record<string, string | undefined>;
  */
 export function validateCollectorWorkerEnvironment(env: Env = process.env): void {
   validatePublicSecrets(env);
-  if (!operationalDbConfig(env).enabled) {
+  const operational = operationalDbConfig(env);
+  if (!operational.enabled) {
     throw new Error("Binance collector requires OPERATIONAL_DB_ENABLED=true");
+  }
+  const requiredRetentionDays = Math.ceil(
+    DEFAULT_MARKET_MOVEMENT_CONFIG.historicalLookbackMs / (24 * 60 * 60_000),
+  );
+  if (operational.candleRetentionDays < requiredRetentionDays) {
+    throw new Error(
+      `Binance collector requires OPERATIONAL_CANDLE_RETENTION_DAYS>=${requiredRetentionDays} for movement normalization history`,
+    );
   }
   try {
     pythonServiceConfig("/v1/movement/boundary", env);

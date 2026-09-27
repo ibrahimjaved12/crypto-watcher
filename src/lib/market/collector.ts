@@ -57,6 +57,7 @@ type CollectorDependencies = {
   store: Pick<OperationalStore,
     "recordCollectorCandles" | "recordCollectorHealth" | "readMovementCandleHistory">;
   loadRest(request: RestRequest): Promise<CollectorCandle[]>;
+  loadHistoryListingTime(symbol: string): Promise<number>;
   onCompleted?(event: CompletedCandleEvent): Promise<void> | void;
   onOverload?(): void;
   now?: () => number;
@@ -68,6 +69,11 @@ type CollectorDependencies = {
     boundaryTime: number,
     symbols: MovementBoundarySymbolInput[],
   ): Promise<MovementBoundaryResult>;
+};
+
+export type MovementHistoryBackfillResult = {
+  historyChanged: boolean;
+  retryNeeded: boolean;
 };
 
 type HealthState = {
@@ -423,7 +429,11 @@ export class BinanceFuturesCollector {
     lookbackMs: number,
     beforeBoundaryMs = this.now(),
     shouldContinue: () => boolean = () => true,
-  ): Promise<boolean> {
+  ): Promise<MovementHistoryBackfillResult> {
+    const result: MovementHistoryBackfillResult = {
+      historyChanged: false,
+      retryNeeded: false,
+    };
     if (!Number.isSafeInteger(lookbackMs) || lookbackMs < MINUTE_MS ||
         lookbackMs % MINUTE_MS !== 0) {
       throw new Error("movement history lookback must be a positive whole-minute duration");
@@ -431,65 +441,88 @@ export class BinanceFuturesCollector {
     safeTimestamp(beforeBoundaryMs, "movement history backfill boundary");
     const requiredCount = lookbackMs / MINUTE_MS;
     const lastOpen = Math.floor(beforeBoundaryMs / MINUTE_MS) * MINUTE_MS - MINUTE_MS;
-    if (lastOpen < 0) return false;
+    if (lastOpen < 0) return result;
     const firstOpen = lastOpen - (requiredCount - 1) * MINUTE_MS;
-    if (firstOpen < 0) return false;
+    if (firstOpen < 0) return result;
     const symbols = this.subscribedSymbols();
-    if (symbols.length === 0 || !shouldContinue()) return false;
+    if (symbols.length === 0 || !shouldContinue()) return result;
     const existing = await this.dependencies.store.readMovementCandleHistory(
       symbols, firstOpen, beforeBoundaryMs,
     );
-    if (!shouldContinue()) return false;
-    let changed = false;
+    if (!shouldContinue()) return result;
 
     for (const symbol of symbols) {
-      if (!shouldContinue()) return changed;
+      if (!shouldContinue()) return result;
+      let availableFirstOpen: number;
+      try {
+        const listedAt = await this.dependencies.loadHistoryListingTime(symbol);
+        safeTimestamp(listedAt, `${symbol} listing time`);
+        availableFirstOpen = Math.max(
+          firstOpen,
+          Math.ceil(listedAt / MINUTE_MS) * MINUTE_MS,
+        );
+      } catch {
+        result.retryNeeded = true;
+        continue;
+      }
+      if (!shouldContinue()) return result;
+      if (availableFirstOpen > lastOpen) continue;
       const opens = new Set(
         (existing.get(symbol) ?? [])
-          .filter((candle) => candle.openTime >= firstOpen && candle.openTime <= lastOpen)
+          .filter((candle) =>
+            candle.openTime >= availableFirstOpen && candle.openTime <= lastOpen)
           .map((candle) => candle.openTime),
       );
-      let suffixStart = lastOpen;
-      while (suffixStart >= firstOpen && opens.has(suffixStart)) suffixStart -= MINUTE_MS;
-      suffixStart += MINUTE_MS;
-      const missingLastOpen = suffixStart - MINUTE_MS;
-      if (missingLastOpen < firstOpen) continue;
+      let suffixFirstOpen = lastOpen + MINUTE_MS;
+      while (
+        suffixFirstOpen > availableFirstOpen &&
+        opens.has(suffixFirstOpen - MINUTE_MS)
+      ) {
+        suffixFirstOpen -= MINUTE_MS;
+      }
 
-      for (let pageStart = firstOpen; pageStart <= missingLastOpen;) {
-        if (!shouldContinue()) return changed;
-        const remaining = Math.floor((missingLastOpen - pageStart) / MINUTE_MS) + 1;
+      for (let pageLastOpen = suffixFirstOpen - MINUTE_MS;
+        pageLastOpen >= availableFirstOpen;) {
+        if (!shouldContinue()) return result;
+        const remaining = Math.floor((pageLastOpen - availableFirstOpen) / MINUTE_MS) + 1;
         const count = Math.min(MOVEMENT_HISTORY_BACKFILL_PAGE_LIMIT, remaining);
-        const pageLastOpen = pageStart + (count - 1) * MINUTE_MS;
-        const candles = (
-          await this.dependencies.loadRest({
-            symbol,
-            timeframeMinutes: 1,
-            startTime: pageStart,
-            endTime: pageLastOpen + MINUTE_MS - 1,
-            limit: count,
-          })
-        ).sort((left, right) => left.openTime - right.openTime);
-        if (!shouldContinue()) return changed;
-        if (
-          candles.length !== count ||
-          candles[0]?.openTime !== pageStart ||
-          candles.at(-1)?.openTime !== pageLastOpen ||
-          !this.contiguous(candles, 1) ||
-          candles.some((candle) =>
-            candle.symbol !== symbol || candle.timeframeMinutes !== 1 ||
-            candle.transport !== "rest" || candle.endpoint !== BINANCE_USDM_REST_ENDPOINT ||
-            candle.closeTime !== candle.openTime + MINUTE_MS - 1 ||
-            candle.closeTime >= beforeBoundaryMs ||
-            !Number.isFinite(candle.quoteVolume) || candle.quoteVolume < 0)
-        ) {
-          throw new Error(`REST movement-history continuity unavailable for ${symbol}`);
+        const pageStart = pageLastOpen - (count - 1) * MINUTE_MS;
+        let candles: CollectorCandle[];
+        try {
+          candles = (
+            await this.dependencies.loadRest({
+              symbol,
+              timeframeMinutes: 1,
+              startTime: pageStart,
+              endTime: pageLastOpen + MINUTE_MS - 1,
+              limit: count,
+            })
+          ).sort((left, right) => left.openTime - right.openTime);
+          if (
+            candles.length !== count ||
+            candles[0]?.openTime !== pageStart ||
+            candles.at(-1)?.openTime !== pageLastOpen ||
+            !this.contiguous(candles, 1) ||
+            candles.some((candle) =>
+              candle.symbol !== symbol || candle.timeframeMinutes !== 1 ||
+              candle.transport !== "rest" || candle.endpoint !== BINANCE_USDM_REST_ENDPOINT ||
+              candle.closeTime !== candle.openTime + MINUTE_MS - 1 ||
+              candle.closeTime >= beforeBoundaryMs ||
+              !Number.isFinite(candle.quoteVolume) || candle.quoteVolume < 0)
+          ) {
+            throw new Error(`REST movement-history continuity unavailable for ${symbol}`);
+          }
+        } catch {
+          result.retryNeeded = true;
+          break;
         }
+        if (!shouldContinue()) return result;
         await this.dependencies.store.recordCollectorCandles(candles);
-        changed = true;
-        pageStart = pageLastOpen + MINUTE_MS;
+        result.historyChanged = true;
+        pageLastOpen = pageStart - MINUTE_MS;
       }
     }
-    return changed;
+    return result;
   }
 
   movementSourceStatus(symbol: string): MovementSourceState {

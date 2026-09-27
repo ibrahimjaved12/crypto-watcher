@@ -138,6 +138,9 @@ function harness(overrides = {}) {
       },
     },
     loadRest,
+    async loadHistoryListingTime(symbol) {
+      return overrides.loadHistoryListingTime?.(symbol) ?? 0;
+    },
     async onCompleted(event) {
       events.push(event);
     },
@@ -160,23 +163,34 @@ function harness(overrides = {}) {
   };
 }
 
-function movementHistoryHarness(initialCandles = []) {
-  const history = new Map(initialCandles.map((candle) => [candle.openTime, candle]));
+function movementHistoryHarness(initialCandles = [], options = {}) {
+  const symbols = options.symbols ?? ["BTCUSDT"];
+  const history = new Map(
+    initialCandles.map((candle) => [`${candle.symbol}:${candle.openTime}`, candle]),
+  );
   const requests = [];
   const result = harness({
     async readMovementCandleHistory(symbols, sinceMs, beforeBoundaryMs) {
-      const rows = [...history.values()]
-        .filter((candle) =>
-          symbols.includes(candle.symbol) && candle.openTime >= sinceMs &&
-          candle.closeTime < beforeBoundaryMs)
-        .sort((left, right) => left.openTime - right.openTime);
-      return new Map([["BTCUSDT", rows]]);
+      return new Map(symbols.map((symbol) => [
+        symbol,
+        [...history.values()]
+          .filter((candle) =>
+            candle.symbol === symbol && candle.openTime >= sinceMs &&
+            candle.closeTime < beforeBoundaryMs)
+          .sort((left, right) => left.openTime - right.openTime),
+      ]));
     },
     async recordCollectorCandles(candles) {
-      for (const candle of candles) history.set(candle.openTime, candle);
+      for (const candle of candles) {
+        history.set(`${candle.symbol}:${candle.openTime}`, candle);
+      }
+    },
+    async loadHistoryListingTime(symbol) {
+      return options.listedAtBySymbol?.[symbol] ?? 0;
     },
     async loadRest(request) {
       requests.push(request);
+      if (options.loadRest) return options.loadRest(request, requests.length);
       return Array.from({ length: request.limit }, (_, index) => {
         const openTime = request.startTime + index * MINUTE_MS;
         return {
@@ -188,7 +202,7 @@ function movementHistoryHarness(initialCandles = []) {
   });
   // Backfill uses only the assigned symbol set; no ordinary bootstrap is needed
   // for these deterministic history fixtures.
-  result.collector.symbols.add("BTCUSDT");
+  for (const symbol of symbols) result.collector.symbols.add(symbol);
   return { ...result, history, requests };
 }
 
@@ -198,6 +212,16 @@ function movementHistoryBounds(beforeBoundaryMs = BASE) {
     lastOpen,
     firstOpen: lastOpen - (MOVEMENT_LOOKBACK_CANDLES - 1) * MINUTE_MS,
   };
+}
+
+function exactMovementHistoryPage(request) {
+  return Array.from({ length: request.limit }, (_, index) => {
+    const openTime = request.startTime + index * MINUTE_MS;
+    return {
+      ...canonical(request.symbol, 1, openTime),
+      quoteVolume: 50_000 + (openTime / MINUTE_MS) % 10_000,
+    };
+  });
 }
 
 async function exerciseCollectorRecoveryTenure(oldOutcome) {
@@ -1130,26 +1154,30 @@ test("REST bootstrap rebuilds enough completed history for every TA frame after 
   assert.ok(writes.length >= intervals.length * 200);
 });
 
-test("empty movement history is backfilled as exact bounded oldest-first pages", async () => {
+test("empty movement history is backfilled as exact bounded newest-first pages", async () => {
   const { collector, history, requests } = movementHistoryHarness();
   const { firstOpen, lastOpen } = movementHistoryBounds();
   const liveCursor = canonical("BTCUSDT", 1, lastOpen, "websocket");
   collector.latestCompleted.set("BTCUSDT:1", liveCursor);
 
-  assert.equal(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), true);
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: true,
+    retryNeeded: false,
+  });
 
   assert.equal(MOVEMENT_HISTORY_BACKFILL_PAGE_LIMIT, 1_000);
   assert.equal(requests.length, Math.ceil(MOVEMENT_LOOKBACK_CANDLES / 1_000));
   assert.equal(requests.reduce((total, request) => total + request.limit, 0), 10_080);
   for (let index = 0; index < requests.length; index += 1) {
     const request = requests[index];
-    const expectedStart = firstOpen + index * 1_000 * MINUTE_MS;
+    const expectedLastOpen = lastOpen - index * 1_000 * MINUTE_MS;
     const expectedCount = Math.min(1_000, MOVEMENT_LOOKBACK_CANDLES - index * 1_000);
+    const expectedStart = expectedLastOpen - (expectedCount - 1) * MINUTE_MS;
     assert.deepEqual(request, {
       symbol: "BTCUSDT",
       timeframeMinutes: 1,
       startTime: expectedStart,
-      endTime: expectedStart + expectedCount * MINUTE_MS - 1,
+      endTime: expectedLastOpen + MINUTE_MS - 1,
       limit: expectedCount,
     });
     assert.ok(request.limit <= 1_000);
@@ -1177,12 +1205,135 @@ test("partial recent movement history fetches only the missing older prefix", as
     canonical("BTCUSDT", 1, existingFirstOpen + index * MINUTE_MS));
   const { collector, history, requests } = movementHistoryHarness(existing);
 
-  assert.equal(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), true);
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: true,
+    retryNeeded: false,
+  });
 
   assert.equal(requests.reduce((total, request) => total + request.limit, 0), 9_780);
-  assert.equal(requests[0].startTime, firstOpen);
-  assert.equal(requests.at(-1).endTime, existingFirstOpen - 1);
+  assert.equal(requests[0].endTime, existingFirstOpen - 1);
+  assert.equal(requests.at(-1).startTime, firstOpen);
   assert.equal(history.size, MOVEMENT_LOOKBACK_CANDLES);
+});
+
+test("a five-day-old contract backfills its factual history without requiring seven days", async () => {
+  const { lastOpen } = movementHistoryBounds();
+  const availableCandles = 5 * 24 * 60;
+  const listedAt = lastOpen - (availableCandles - 1) * MINUTE_MS;
+  const { collector, history, requests } = movementHistoryHarness([], {
+    listedAtBySymbol: { BTCUSDT: listedAt },
+  });
+
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: true,
+    retryNeeded: false,
+  });
+
+  const stored = [...history.values()].sort((left, right) => left.openTime - right.openTime);
+  assert.equal(stored.length, availableCandles);
+  assert.equal(stored[0].openTime, listedAt);
+  assert.equal(stored.at(-1).openTime, lastOpen);
+  assert.ok(stored.length * MINUTE_MS >= 3 * 24 * 60 * MINUTE_MS);
+  assert.ok(requests.every((request) => request.limit <= 1_000));
+});
+
+test("a two-day-old contract stops at listing and remains truthfully below normalization minimum", async () => {
+  const { lastOpen } = movementHistoryBounds();
+  const availableCandles = 2 * 24 * 60;
+  const listedAt = lastOpen - (availableCandles - 1) * MINUTE_MS;
+  const { collector, history, requests } = movementHistoryHarness([], {
+    listedAtBySymbol: { BTCUSDT: listedAt },
+  });
+
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: true,
+    retryNeeded: false,
+  });
+  assert.equal(history.size, availableCandles);
+  assert.ok(history.size * MINUTE_MS < 3 * 24 * 60 * MINUTE_MS);
+  const requestCount = requests.length;
+
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: false,
+    retryNeeded: false,
+  });
+  assert.equal(requests.length, requestCount);
+});
+
+test("one symbol failure does not prevent another symbol from completing", async () => {
+  const { lastOpen } = movementHistoryBounds();
+  const listedAt = lastOpen - 9 * MINUTE_MS;
+  const { collector, history } = movementHistoryHarness([], {
+    symbols: ["BTCUSDT", "ETHUSDT"],
+    listedAtBySymbol: { BTCUSDT: listedAt, ETHUSDT: listedAt },
+    async loadRest(request) {
+      if (request.symbol === "BTCUSDT") throw new Error("transient BTC history failure");
+      return exactMovementHistoryPage(request);
+    },
+  });
+
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: true,
+    retryNeeded: true,
+  });
+  assert.equal(
+    [...history.values()].filter((candle) => candle.symbol === "BTCUSDT").length,
+    0,
+  );
+  assert.equal(
+    [...history.values()].filter((candle) => candle.symbol === "ETHUSDT").length,
+    10,
+  );
+});
+
+test("retry resumes before the persisted suffix without redownloading successful pages", async () => {
+  const { lastOpen } = movementHistoryBounds();
+  const listedAt = lastOpen - 3_499 * MINUTE_MS;
+  let failThirdPage = true;
+  const { collector, history, requests } = movementHistoryHarness([], {
+    listedAtBySymbol: { BTCUSDT: listedAt },
+    async loadRest(request, requestNumber) {
+      if (failThirdPage && requestNumber === 3) {
+        failThirdPage = false;
+        throw new Error("transient older page failure");
+      }
+      return exactMovementHistoryPage(request);
+    },
+  });
+
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: true,
+    retryNeeded: true,
+  });
+  assert.equal(history.size, 2_000);
+  const firstRetryRequest = requests.length;
+
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: true,
+    retryNeeded: false,
+  });
+  assert.equal(history.size, 3_500);
+  assert.equal(requests[firstRetryRequest].endTime, requests[1].startTime - 1);
+  assert.ok(
+    requests.slice(firstRetryRequest).every((request) => request.endTime < requests[1].startTime),
+  );
+});
+
+test("an internal provider gap after listing fails closed and requests retry", async () => {
+  const { lastOpen } = movementHistoryBounds();
+  const listedAt = lastOpen - 9 * MINUTE_MS;
+  const { collector, history } = movementHistoryHarness([], {
+    listedAtBySymbol: { BTCUSDT: listedAt },
+    async loadRest(request) {
+      return exactMovementHistoryPage(request).filter((_, index) => index !== 5);
+    },
+  });
+
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: false,
+    retryNeeded: true,
+  });
+  assert.equal(history.size, 0);
 });
 
 test("sufficient contiguous movement history performs no REST refetch", async () => {
@@ -1191,12 +1342,15 @@ test("sufficient contiguous movement history performs no REST refetch", async ()
     canonical("BTCUSDT", 1, firstOpen + index * MINUTE_MS));
   const { collector, requests } = movementHistoryHarness(existing);
 
-  assert.equal(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), false);
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: false,
+    retryNeeded: false,
+  });
 
   assert.deepEqual(requests, []);
 });
 
-test("movement-history backfill failure does not prevent later Python bucket finalization", async () => {
+test("movement-history backfill retry does not prevent later Python bucket finalization", async () => {
   const { collector, movementCalls } = harness({
     async loadRest(request) {
       if (request.startTime !== undefined) throw new Error("historical REST unavailable");
@@ -1206,10 +1360,10 @@ test("movement-history backfill failure does not prevent later Python bucket fin
   });
   await collector.reconcile(["BTCUSDT"]);
 
-  await assert.rejects(
-    collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE),
-    /historical REST unavailable/,
-  );
+  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
+    historyChanged: false,
+    retryNeeded: true,
+  });
   await collector.advanceMovementBuckets(BASE);
 
   assert.equal(movementCalls.length, 1);

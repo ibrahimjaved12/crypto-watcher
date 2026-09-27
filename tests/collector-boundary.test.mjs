@@ -30,7 +30,8 @@ const collectorReplacements = {
   "./providers.server": stub(
     `export async function loadBinanceFuturesKlines() {
        return { candles: [], retrievedAt: new Date().toISOString() };
-     }`,
+     }
+     export async function loadBinanceFuturesListingTime() { return 0; }`,
   ),
   "./collector": stub(`
     export const BINANCE_USDM_WS_ENDPOINT = "wss://example.invalid/stream";
@@ -45,7 +46,10 @@ const collectorReplacements = {
         if (globalThis.__collectorBoundary.historyBackfillError) {
           throw globalThis.__collectorBoundary.historyBackfillError;
         }
-        return true;
+        return globalThis.__collectorBoundary.historyBackfillResult ?? {
+          historyChanged: true,
+          retryNeeded: false,
+        };
       }
       async markConnectionStatus() {}
       async markCandleConnectionStatus() {}
@@ -267,6 +271,7 @@ test("the collector worker reads one shared subscription universe from the opera
     movementStarts: 0,
     historyBackfills: 0,
     historyRefreshes: 0,
+    historyBackfillResult: null,
     historyBackfillError: null,
   };
   const previousWebSocket = globalThis.WebSocket;
@@ -302,6 +307,7 @@ test("movement history backfill failure leaves the live collector and #70 runtim
     movementStarts: 0,
     historyBackfills: 0,
     historyRefreshes: 0,
+    historyBackfillResult: null,
     historyBackfillError: new Error("historical REST unavailable"),
   };
   const previousWebSocket = globalThis.WebSocket;
@@ -326,6 +332,40 @@ test("movement history backfill failure leaves the live collector and #70 runtim
   }
 });
 
+test("partial multi-symbol backfill refreshes normalization history while scheduling retry", async () => {
+  globalThis.__collectorBoundary = {
+    reconciled: [],
+    leaseClaims: 0,
+    leaseReleases: 0,
+    universeReads: 0,
+    movementResets: 0,
+    movementStarts: 0,
+    historyBackfills: 0,
+    historyRefreshes: 0,
+    historyBackfillResult: { historyChanged: true, retryNeeded: true },
+    historyBackfillError: null,
+  };
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  try {
+    const module = await import(
+      transpile(await read("../src/lib/market/collector.server.ts"), collectorReplacements)
+    );
+    const runtime = new module.CollectorRuntime(boundaryStore(["BTCUSDT", "ETHUSDT"]));
+    await runtime.tryBecomeActive();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(globalThis.__collectorBoundary.historyBackfills, 1);
+    assert.equal(globalThis.__collectorBoundary.historyRefreshes, 1);
+    assert.equal(runtime.historyBackfillAttempts, 1);
+    assert.notEqual(runtime.historyBackfillTimer, null);
+
+    await runtime.stop();
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
 test("movement transport resets on collector lease acquisition and loss", async () => {
   globalThis.__collectorBoundary = {
     reconciled: [],
@@ -336,6 +376,7 @@ test("movement transport resets on collector lease acquisition and loss", async 
     movementStarts: 0,
     historyBackfills: 0,
     historyRefreshes: 0,
+    historyBackfillResult: null,
     historyBackfillError: null,
   };
   const previousWebSocket = globalThis.WebSocket;
@@ -689,6 +730,38 @@ test("the collector worker validates operational-only runtime configuration", as
   assert.doesNotMatch(env, /SUPABASE_URL|SUPABASE_SERVICE_ROLE_KEY|APP_PROFILE/);
   assert.match(env, /operationalDbConfig/);
   assert.match(env, /movementFinalizationConfig/);
+  assert.match(env, /DEFAULT_MARKET_MOVEMENT_CONFIG\.historicalLookbackMs/);
+});
+
+test("collector worker rejects retention shorter than the active movement lookback", async () => {
+  const operationalConfig = transpile(
+    await read("../src/lib/operational/config.server.ts"),
+  );
+  const workerEnvironment = await import(
+    transpile(await read("../src/lib/market/collector-worker-env.server.ts"), {
+      "../environment": stub(`export function validatePublicSecrets() {}`),
+      "../operational/config.server": operationalConfig,
+      "../python-service.server": stub(`export function pythonServiceConfig() { return {}; }`),
+      "./movement-finalization": stub(`export function movementFinalizationConfig() {}`),
+      "./movement-metrics-contract": stub(`
+        export const DEFAULT_MARKET_MOVEMENT_CONFIG = { historicalLookbackMs: 604800000 };
+      `),
+    })
+  );
+  const base = {
+    OPERATIONAL_DB_ENABLED: "true",
+    OPERATIONAL_SUPABASE_URL: "https://operational.example",
+    OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY: "secret-test",
+  };
+
+  assert.doesNotThrow(() => workerEnvironment.validateCollectorWorkerEnvironment(base));
+  assert.throws(
+    () => workerEnvironment.validateCollectorWorkerEnvironment({
+      ...base,
+      OPERATIONAL_CANDLE_RETENTION_DAYS: "6",
+    }),
+    /OPERATIONAL_CANDLE_RETENTION_DAYS>=7/,
+  );
 });
 
 test("the operational store maps the collector subscription RPCs", async () => {

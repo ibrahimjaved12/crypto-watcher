@@ -297,6 +297,11 @@ async function resolveInstrument(
   };
 }
 
+/** Factual Binance USD-M listing time used to bound collector-owned history backfill. */
+export async function loadBinanceFuturesListingTime(symbol: string): Promise<number> {
+  return (await resolveInstrument(MARKET_SOURCE, symbol)).listedAt;
+}
+
 function parseBinance(raw: unknown, minutes: number, now = Date.now()): Candle[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error("empty kline response");
   const duration = minutes * 60_000;
