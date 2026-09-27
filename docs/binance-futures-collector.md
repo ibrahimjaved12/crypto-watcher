@@ -119,11 +119,10 @@ authoritative for watchlists, settings, movement state/alerts, and permanent TA 
 is written only by TanStack: the worker holds no Lovable credentials and never reads watchlists or
 settings or writes TA. No candle is dual-written to Lovable.
 
-Apply all unapplied SQL migrations in filename order to their designated databases. In particular,
-apply `supabase/migrations/20260926100000_ta_source_event_provenance.sql` to the application
-database and `operational-db/supabase/migrations/20260926150000_collector_candle_provenance_reset.sql`
-to the external operational database for this cutover. The operational retention migration keeps
-each canonical series' newest 260 completed candles even when that spans more than the day window,
+Apply all unapplied SQL migrations in filename order to the application database. Recreate the
+disposable pre-release operational database from its repository migrations; the base collector
+schema defines the final candle provenance and TA read function. The operational retention migration
+keeps each canonical series' newest 260 completed candles even when that spans more than the day window,
 so the longest TA frame always has enough canonical history. After the reset, the REST bootstrap
 fetches 300 klines per frame and persists the completed ones (excluding the developing candle),
 rebuilding 299 candles for the 15m, 1h, and 4h TA frames. Set this server-only flag (never a

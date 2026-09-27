@@ -92,17 +92,6 @@ before(async () => {
       "utf8",
     ),
   );
-  // Destructive pre-release provenance cutover: wipes disposable collector state, replaces the
-  // obsolete provenance constraints, and defines the provenance-preserving read adapter.
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260926150000_collector_candle_provenance_reset.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
 });
 beforeEach(async () => {
   await db.exec(`RESET ROLE;
