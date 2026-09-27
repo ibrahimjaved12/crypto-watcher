@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from market_analysis.movement_classifier import (
-    MarketClassificationContext, MarketWindowClassificationContext,
+    MarketClassificationContext, MarketClassifierConfig, MarketWindowClassificationContext,
     SymbolSourceTimeEvidence, classify_market_movement,
 )
 from market_analysis.movement_metrics import (
@@ -25,7 +25,8 @@ MISSING = Metric.missing("SYMBOL_EXCLUDED")
 
 def symbol(name, direction, window, acceleration, *, material=False, outlier=False):
     raw = 0.01 if direction == "RISING" else -0.01 if direction == "FALLING" else 0.0
-    z = 2.0 if outlier else 1.0 if direction == "RISING" else -1.0
+    sign = -1.0 if direction == "FALLING" else 1.0
+    z = 2.0 * sign if outlier else 1.0 if direction == "RISING" else -1.0
     return SymbolMovementResult(
         symbol=name, instrument_id=f"binance-usdm:{name}",
         provider="binance-usdm", exchange="binance", price_type="trade",
@@ -39,7 +40,8 @@ def symbol(name, direction, window, acceleration, *, material=False, outlier=Fal
         material_rising=material and direction == "RISING",
         material_falling=material and direction == "FALLING",
         current_notional_volume=Metric.present(Decimal("100")),
-        rvol=Metric.present(1.25), cross_sectional_z=Metric.present(4.0 if outlier else 0.0),
+        rvol=Metric.present(1.25),
+        cross_sectional_z=Metric.present(4.0 * sign if outlier else 0.0),
         outlier_candidate=outlier,
     )
 
@@ -150,6 +152,50 @@ def classify(primary, *, prior=None, provenance=None):
     return classify_market_movement(evaluation(primary), context)
 
 
+class ConfigVersionTests(unittest.TestCase):
+    def test_default_version_uses_exact_canonical_v1_thresholds(self):
+        config = MarketClassifierConfig()
+        self.assertEqual(config.version, "market-state-classifier-config-v1")
+        self.assertEqual((config.directional_breadth, config.material_breadth,
+                          config.normalized_movement, config.acceleration_breadth,
+                          config.isolated_outlier_breadth_disagreement),
+                         (0.70, 0.50, 0.50, 0.60, 0.50))
+
+    def test_default_version_rejects_each_changed_threshold(self):
+        changes = {
+            "directional_breadth": 0.90,
+            "material_breadth": 0.60,
+            "normalized_movement": 0.75,
+            "acceleration_breadth": 0.70,
+            "isolated_outlier_breadth_disagreement": 0.40,
+        }
+        for name, value in changes.items():
+            with self.subTest(threshold=name):
+                with self.assertRaises(ValueError):
+                    MarketClassifierConfig(
+                        version="market-state-classifier-config-v1", **{name: value}
+                    )
+
+    def test_custom_version_retains_exact_config_and_is_deterministic(self):
+        config = MarketClassifierConfig(
+            version="market-state-classifier-config-custom-v2",
+            directional_breadth=0.90, material_breadth=0.60,
+            normalized_movement=0.75, acceleration_breadth=0.70,
+            isolated_outlier_breadth_disagreement=0.40,
+        )
+        primary = window_result()
+        movement = evaluation(primary)
+        provenance = provenance_for(primary)
+        context = MarketClassificationContext({
+            minutes: MarketWindowClassificationContext(provenance)
+            for minutes in (1, 5, 15)
+        })
+        first = classify_market_movement(movement, context, config)
+        self.assertIs(first.classifier_config, config)
+        self.assertEqual(first.classifier_config_version, config.version)
+        self.assertEqual(first, classify_market_movement(movement, context, config))
+
+
 class DirectionTests(unittest.TestCase):
     def test_broad_rise_at_exact_directional_material_and_normalized_thresholds(self):
         result = classify(window_result()).windows[5]
@@ -249,6 +295,20 @@ class OutlierAndReversalTests(unittest.TestCase):
         self.assertEqual((outlier.symbol, outlier.direction, outlier.raw_return),
                          ("S0", "RISING", 0.01))
         self.assertEqual((outlier.historical_z, outlier.cross_sectional_z), (2.0, 4.0))
+        self.assertEqual((outlier.same_direction_breadth_count,
+                          outlier.same_direction_breadth_fraction,
+                          outlier.same_direction_breadth_denominator), (4, 0.4, 10))
+
+    def test_falling_isolated_outlier_uses_falling_breadth(self):
+        result = classify(window_result(
+            directions=("FALLING",) * 4 + ("RISING",) * 6,
+            material_count=4, outlier_index=0,
+        )).windows[5]
+        self.assertEqual(len(result.isolated_outliers), 1)
+        outlier = result.isolated_outliers[0]
+        self.assertEqual((outlier.symbol, outlier.direction, outlier.raw_return),
+                         ("S0", "FALLING", -0.01))
+        self.assertEqual((outlier.historical_z, outlier.cross_sectional_z), (-2.0, -4.0))
         self.assertEqual((outlier.same_direction_breadth_count,
                           outlier.same_direction_breadth_fraction,
                           outlier.same_direction_breadth_denominator), (4, 0.4, 10))

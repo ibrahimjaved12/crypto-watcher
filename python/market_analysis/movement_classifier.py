@@ -18,6 +18,11 @@ from .movement_metrics import (
 
 ALGORITHM_VERSION = "market-state-classifier-v1"
 DEFAULT_CONFIG_VERSION = "market-state-classifier-config-v1"
+V1_DIRECTIONAL_BREADTH = 0.70
+V1_MATERIAL_BREADTH = 0.50
+V1_NORMALIZED_MOVEMENT = 0.50
+V1_ACCELERATION_BREADTH = 0.60
+V1_ISOLATED_OUTLIER_BREADTH_DISAGREEMENT = 0.50
 # Fixed #71 evidence requirements of the #72 V1 algorithm. A relaxed upstream
 # config cannot weaken these requirements while retaining this algorithm version.
 V1_MINIMUM_ELIGIBLE_FRACTION = 0.60
@@ -32,11 +37,11 @@ _WARMING_REASONS = frozenset(("WARMING_INSUFFICIENT_LIVE_HISTORY",))
 @dataclass(frozen=True)
 class MarketClassifierConfig:
     version: str = DEFAULT_CONFIG_VERSION
-    directional_breadth: float = 0.70
-    material_breadth: float = 0.50
-    normalized_movement: float = 0.50
-    acceleration_breadth: float = 0.60
-    isolated_outlier_breadth_disagreement: float = 0.50
+    directional_breadth: float = V1_DIRECTIONAL_BREADTH
+    material_breadth: float = V1_MATERIAL_BREADTH
+    normalized_movement: float = V1_NORMALIZED_MOVEMENT
+    acceleration_breadth: float = V1_ACCELERATION_BREADTH
+    isolated_outlier_breadth_disagreement: float = V1_ISOLATED_OUTLIER_BREADTH_DISAGREEMENT
 
     def __post_init__(self):
         if not isinstance(self.version, str) or not self.version:
@@ -51,6 +56,18 @@ class MarketClassifierConfig:
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or value <= 0):
             raise ValueError("normalized_movement must be finite and positive")
+        if self.version == DEFAULT_CONFIG_VERSION:
+            canonical = (
+                ("directional_breadth", V1_DIRECTIONAL_BREADTH),
+                ("material_breadth", V1_MATERIAL_BREADTH),
+                ("normalized_movement", V1_NORMALIZED_MOVEMENT),
+                ("acceleration_breadth", V1_ACCELERATION_BREADTH),
+                ("isolated_outlier_breadth_disagreement",
+                 V1_ISOLATED_OUTLIER_BREADTH_DISAGREEMENT),
+            )
+            for name, expected in canonical:
+                if getattr(self, name) != expected:
+                    raise ValueError(f"{name} requires a distinct classifier config version")
 
 
 @dataclass(frozen=True)
@@ -175,6 +192,7 @@ class MarketWindowClassification:
 class MarketClassificationEvaluation:
     classifier_algorithm_version: str
     classifier_config_version: str
+    classifier_config: MarketClassifierConfig
     movement_algorithm_version: str
     movement_config_version: str
     universe_id: str
@@ -388,7 +406,7 @@ def classify_market_movement(
             movement_snapshot=snapshot,
         )
     return MarketClassificationEvaluation(
-        ALGORITHM_VERSION, config.version, evaluation.algorithm_version,
+        ALGORITHM_VERSION, config.version, config, evaluation.algorithm_version,
         evaluation.config_version, evaluation.universe_id, evaluation.universe_version,
         evaluation.provider, evaluation.exchange, evaluation.price_type,
         evaluation.evaluation_boundary_time_ms, 5, results,
