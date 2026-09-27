@@ -1,13 +1,11 @@
 from dataclasses import replace
 from decimal import Decimal
-
-import pytest
+import unittest
 
 from market_analysis.experiments.market_state_ewma import (
     EWMA_CONFIG_10S,
     EWMA_CONFIG_30S,
     EWMA_CONFIG_60S,
-    EWMACandidateState,
     MarketStateExperimentPoint,
     run_market_state_ewma_experiment,
     transform_market_movement_with_ewma,
@@ -160,149 +158,204 @@ def _point(boundary, state="rise", normalized=0.6, raw=0.1,
     )
 
 
-def test_ewma_uses_half_life_formula_and_seeds_first_point():
-    first, state = transform_market_movement_with_ewma(
-        _evaluation(0, normalized=1.0), EWMA_CONFIG_10S)
-    second, next_state = transform_market_movement_with_ewma(
-        _evaluation(5_000, normalized=0.0), EWMA_CONFIG_10S, state)
-    alpha = 1 - 2 ** (-5_000 / 10_000)
-    assert first.windows[5].aggregates.median_normalized_movement.value == 1.0
-    assert second.windows[5].aggregates.median_normalized_movement.value == pytest.approx(1 - alpha)
-    assert next_state.current_ewma == pytest.approx(1 - alpha)
+class MarketStateEWMAExperimentTests(unittest.TestCase):
+    def test_ewma_uses_half_life_formula_and_seeds_first_point(self):
+        first, state = transform_market_movement_with_ewma(
+            _evaluation(0, normalized=1.0), EWMA_CONFIG_10S)
+        second, next_state = transform_market_movement_with_ewma(
+            _evaluation(5_000, normalized=0.0), EWMA_CONFIG_10S, state)
+        alpha = 1 - 2 ** (-5_000 / 10_000)
+        self.assertEqual(first.windows[5].aggregates.median_normalized_movement.value, 1.0)
+        self.assertAlmostEqual(
+            second.windows[5].aggregates.median_normalized_movement.value,
+            1 - alpha,
+        )
+        self.assertAlmostEqual(next_state.current_ewma, 1 - alpha)
 
+    def test_fixed_half_lives_are_distinct_and_deterministic(self):
+        first = _evaluation(0, normalized=1.0)
+        second = _evaluation(5_000, normalized=0.0)
+        values = []
+        for config in (EWMA_CONFIG_10S, EWMA_CONFIG_30S, EWMA_CONFIG_60S):
+            _, state = transform_market_movement_with_ewma(first, config)
+            candidate, _ = transform_market_movement_with_ewma(second, config, state)
+            values.append(candidate.windows[5].aggregates.median_normalized_movement.value)
+        self.assertEqual(len(set(values)), 3)
+        self.assertLess(values[0], values[1])
+        self.assertLess(values[1], values[2])
 
-def test_fixed_half_lives_are_distinct_and_deterministic():
-    first = _evaluation(0, normalized=1.0)
-    second = _evaluation(5_000, normalized=0.0)
-    values = []
-    for config in (EWMA_CONFIG_10S, EWMA_CONFIG_30S, EWMA_CONFIG_60S):
-        _, state = transform_market_movement_with_ewma(first, config)
-        candidate, _ = transform_market_movement_with_ewma(second, config, state)
-        values.append(candidate.windows[5].aggregates.median_normalized_movement.value)
-    assert len(set(values)) == 3
-    assert values[0] < values[1] < values[2]
-
-
-def test_unavailable_metric_resets_without_bridging_or_future_access():
-    first, state = transform_market_movement_with_ewma(
-        _evaluation(0, normalized=1.0), EWMA_CONFIG_10S)
-    unavailable = replace(
-        _evaluation(5_000, normalized=0.0),
-        windows={
-            **_evaluation(5_000, normalized=0.0).windows,
-            5: replace(
-                _evaluation(5_000, normalized=0.0).windows[5],
-                aggregates=replace(
-                    _evaluation(5_000, normalized=0.0).windows[5].aggregates,
-                    median_normalized_movement=Metric.missing("missing"),
+    def test_unavailable_metric_resets_without_bridging_or_future_access(self):
+        first, state = transform_market_movement_with_ewma(
+            _evaluation(0, normalized=1.0), EWMA_CONFIG_10S)
+        unavailable_evaluation = _evaluation(5_000, normalized=0.0)
+        unavailable = replace(
+            unavailable_evaluation,
+            windows={
+                **unavailable_evaluation.windows,
+                5: replace(
+                    unavailable_evaluation.windows[5],
+                    aggregates=replace(
+                        unavailable_evaluation.windows[5].aggregates,
+                        median_normalized_movement=Metric.missing("missing"),
+                    ),
                 ),
-            ),
-        },
-    )
-    candidate, reset = transform_market_movement_with_ewma(unavailable, EWMA_CONFIG_10S, state)
-    assert first.windows[5].aggregates.median_normalized_movement.value == 1.0
-    assert reset is None
-    assert not candidate.windows[5].aggregates.median_normalized_movement.available
-    seeded, seeded_state = transform_market_movement_with_ewma(
-        _evaluation(10_000, normalized=0.25), EWMA_CONFIG_10S, reset)
-    assert seeded.windows[5].aggregates.median_normalized_movement.value == 0.25
-    assert seeded_state.current_ewma == 0.25
+            },
+        )
+        candidate, reset = transform_market_movement_with_ewma(
+            unavailable, EWMA_CONFIG_10S, state)
+        self.assertEqual(first.windows[5].aggregates.median_normalized_movement.value, 1.0)
+        self.assertIsNone(reset)
+        self.assertFalse(candidate.windows[5].aggregates.median_normalized_movement.available)
+        seeded, seeded_state = transform_market_movement_with_ewma(
+            _evaluation(10_000, normalized=0.25), EWMA_CONFIG_10S, reset)
+        self.assertEqual(seeded.windows[5].aggregates.median_normalized_movement.value, 0.25)
+        self.assertEqual(seeded_state.current_ewma, 0.25)
 
+    def test_gap_universe_and_baseline_identity_reset_state(self):
+        _, state = transform_market_movement_with_ewma(
+            _evaluation(0, normalized=1.0), EWMA_CONFIG_10S)
+        gap, gap_state = transform_market_movement_with_ewma(
+            _evaluation(10_000, normalized=0.25), EWMA_CONFIG_10S, state)
+        self.assertEqual(gap.windows[5].aggregates.median_normalized_movement.value, 0.25)
+        self.assertEqual(gap_state.current_ewma, 0.25)
+        changed, changed_state = transform_market_movement_with_ewma(
+            _evaluation(15_000, normalized=0.75, universe_id="u2"),
+            EWMA_CONFIG_10S,
+            gap_state,
+        )
+        self.assertEqual(changed_state.current_ewma, 0.75)
+        changed_config, changed_config_state = transform_market_movement_with_ewma(
+            _evaluation(20_000, normalized=0.5, movement_config_version="other-config"),
+            EWMA_CONFIG_10S,
+            changed_state,
+        )
+        self.assertEqual(changed_config_state.current_ewma, 0.5)
+        self.assertEqual(
+            changed_config.windows[5].aggregates.median_normalized_movement.value,
+            0.5,
+        )
 
-def test_gap_universe_and_baseline_identity_reset_state():
-    _, state = transform_market_movement_with_ewma(_evaluation(0, normalized=1.0), EWMA_CONFIG_10S)
-    gap, gap_state = transform_market_movement_with_ewma(
-        _evaluation(10_000, normalized=0.25), EWMA_CONFIG_10S, state)
-    assert gap.windows[5].aggregates.median_normalized_movement.value == 0.25
-    assert gap_state.current_ewma == 0.25
-    changed, changed_state = transform_market_movement_with_ewma(
-        _evaluation(15_000, normalized=0.75, universe_id="u2"), EWMA_CONFIG_10S, gap_state)
-    assert changed_state.current_ewma == 0.75
-    changed_config, changed_config_state = transform_market_movement_with_ewma(
-        _evaluation(20_000, normalized=0.5, movement_config_version="other-config"),
-        EWMA_CONFIG_10S, changed_state)
-    assert changed_config_state.current_ewma == 0.5
-    assert changed_config.windows[5].aggregates.median_normalized_movement.value == 0.5
+    def test_candidate_is_immutable_identity_scoped_and_changes_only_primary_metric(self):
+        baseline = _evaluation(0, normalized=0.75)
+        candidate, _ = transform_market_movement_with_ewma(baseline, EWMA_CONFIG_30S)
+        self.assertEqual(baseline.windows[5].aggregates.median_normalized_movement.value, 0.75)
+        self.assertNotEqual(candidate.algorithm_version, baseline.algorithm_version)
+        self.assertEqual(candidate.config_version, EWMA_CONFIG_30S.version)
+        self.assertEqual(candidate.windows[1].aggregates, baseline.windows[1].aggregates)
+        self.assertEqual(candidate.windows[15].aggregates, baseline.windows[15].aggregates)
+        self.assertEqual(candidate.windows[5].aggregates.median_normalized_movement.value, 0.75)
+        self.assertEqual(candidate.windows[5].breadth, baseline.windows[5].breadth)
+        self.assertEqual(candidate.windows[5].symbols, baseline.windows[5].symbols)
 
+    def test_runner_reuses_canonical_branches_and_keeps_lifecycle_states_isolated(self):
+        points = (
+            _point(0, normalized=0.6),
+            _point(5_000, normalized=0.0),
+        )
+        result = run_market_state_ewma_experiment(points, EWMA_CONFIG_10S)
+        first, second = result.points
+        self.assertIs(
+            first.baseline_classification.windows[5].movement_snapshot,
+            points[0].movement_evaluation.windows[5],
+        )
+        self.assertEqual(first.baseline_primary_direction_state, "BROAD_RISE")
+        self.assertEqual(second.baseline_primary_direction_state, "BROAD_RISE")
+        self.assertEqual(second.candidate_primary_direction_state, "NEUTRAL")
+        self.assertIsNotNone(second.baseline_lifecycle_state.active_episode)
+        self.assertIsNone(second.candidate_lifecycle_state.active_episode)
+        self.assertNotEqual(
+            first.candidate_classification.windows[5].movement_algorithm_version,
+            "market-movement-v1",
+        )
 
-def test_candidate_is_immutable_identity_scoped_and_changes_only_primary_metric():
-    baseline = _evaluation(0, normalized=0.75)
-    candidate, _ = transform_market_movement_with_ewma(baseline, EWMA_CONFIG_30S)
-    assert baseline.windows[5].aggregates.median_normalized_movement.value == 0.75
-    assert candidate.algorithm_version != baseline.algorithm_version
-    assert candidate.config_version == EWMA_CONFIG_30S.version
-    assert candidate.windows[1].aggregates == baseline.windows[1].aggregates
-    assert candidate.windows[15].aggregates == baseline.windows[15].aggregates
-    assert candidate.windows[5].aggregates.median_normalized_movement.value == 0.75
-    assert candidate.windows[5].breadth == baseline.windows[5].breadth
-    assert candidate.windows[5].symbols == baseline.windows[5].symbols
+    def test_partition_and_boundary_validation_is_strict(self):
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            run_market_state_ewma_experiment((_point(0), _point(0)), EWMA_CONFIG_10S)
+        with self.assertRaisesRegex(ValueError, "exactly 5000"):
+            run_market_state_ewma_experiment((_point(0), _point(10_000)), EWMA_CONFIG_10S)
+        with self.assertRaisesRegex(ValueError, "development, validation"):
+            run_market_state_ewma_experiment((
+                _point(0, partition="validation"),
+                _point(5_000, partition="development"),
+            ), EWMA_CONFIG_10S)
 
+    def test_experiment_point_requires_exact_ordered_source_evidence(self):
+        evaluation = _evaluation(0)
+        with self.assertRaisesRegex(ValueError, "configured universe"):
+            MarketStateExperimentPoint(evaluation, _evidence(SYMBOLS[:-1]), "development")
+        with self.assertRaisesRegex(ValueError, "configured universe"):
+            MarketStateExperimentPoint(evaluation, _evidence(SYMBOLS + ("S6",)), "development")
+        with self.assertRaisesRegex(ValueError, "configured universe"):
+            MarketStateExperimentPoint(
+                evaluation,
+                _evidence(("S2", "S1", "S3", "S4", "S5")),
+                "development",
+            )
 
-def test_runner_reuses_canonical_branches_and_keeps_lifecycle_states_isolated():
-    points = (
-        _point(0, normalized=0.6),
-        _point(5_000, normalized=0.0),
-    )
-    result = run_market_state_ewma_experiment(points, EWMA_CONFIG_10S)
-    first, second = result.points
-    assert first.baseline_classification.windows[5].movement_snapshot is points[0].movement_evaluation.windows[5]
-    assert first.baseline_primary_direction_state == "BROAD_RISE"
-    assert second.baseline_primary_direction_state == "BROAD_RISE"
-    assert second.candidate_primary_direction_state == "NEUTRAL"
-    assert second.baseline_lifecycle_state.active_episode is not None
-    assert second.candidate_lifecycle_state.active_episode is None
-    assert first.candidate_classification.windows[5].movement_algorithm_version != "market-movement-v1"
+    def test_development_summary_does_not_match_future_candidate_onset(self):
+        points = (
+            _point(0, state="neutral", normalized=0.0, raw=0.0),
+            _point(5_000, state="neutral", normalized=0.0, raw=0.0),
+            _point(10_000, normalized=1.0, raw=0.1),
+            _point(15_000, normalized=1.0, raw=0.1),
+            _point(20_000, normalized=1.0, raw=0.1, partition="validation"),
+            _point(25_000, normalized=1.0, raw=0.1, partition="validation"),
+        )
+        result = run_market_state_ewma_experiment(points, EWMA_CONFIG_10S)
+        development = result.summaries["development"]
+        self.assertEqual(development.matched_onset_count, 0)
+        self.assertEqual(development.unmatched_baseline_onset_count, 1)
+        self.assertGreaterEqual(result.summaries["all"].matched_onset_count, 1)
 
+    def test_future_close_does_not_make_development_episode_short_lived(self):
+        points = (
+            _point(0, normalized=0.6, partition="development"),
+            _point(5_000, normalized=0.6, partition="development"),
+            _point(10_000, state="neutral", normalized=0.0, raw=0.0,
+                   partition="development"),
+            _point(15_000, state="neutral", normalized=0.0, raw=0.0,
+                   partition="development"),
+            _point(20_000, state="neutral", normalized=0.0, raw=0.0,
+                   partition="validation"),
+        )
+        result = run_market_state_ewma_experiment(points, EWMA_CONFIG_10S)
+        self.assertEqual(result.summaries["development"].baseline_short_lived_episode_count, 0)
+        self.assertEqual(result.summaries["all"].baseline_short_lived_episode_count, 1)
 
-def test_partition_and_boundary_validation_is_strict():
-    with pytest.raises(ValueError, match="strictly increasing"):
-        run_market_state_ewma_experiment((_point(0), _point(0)), EWMA_CONFIG_10S)
-    with pytest.raises(ValueError, match="exactly 5000"):
-        run_market_state_ewma_experiment((_point(0), _point(10_000)), EWMA_CONFIG_10S)
-    with pytest.raises(ValueError, match="development, validation"):
-        run_market_state_ewma_experiment((
-            _point(0, partition="validation"),
-            _point(5_000, partition="development"),
+    def test_active_at_end_episode_is_censored_not_short_lived(self):
+        result = run_market_state_ewma_experiment((
+            _point(0, normalized=0.6),
+            _point(5_000, normalized=0.6),
         ), EWMA_CONFIG_10S)
+        self.assertEqual(result.summaries["all"].baseline_short_lived_episode_count, 0)
+        self.assertEqual(result.summaries["all"].candidate_short_lived_episode_count, 0)
 
+    def test_summary_reports_short_lived_episodes_and_onset_lead_lag(self):
+        points = (
+            _point(0, normalized=0.6),
+            _point(5_000, normalized=0.6),
+            _point(10_000, state="neutral", normalized=0.0, raw=0.0),
+            _point(15_000, state="neutral", normalized=0.0, raw=0.0),
+            _point(20_000, state="neutral", normalized=0.0, raw=0.0),
+        )
+        result = run_market_state_ewma_experiment(points, EWMA_CONFIG_10S)
+        summary = result.summaries["all"]
+        self.assertEqual(summary.baseline_short_lived_episode_count, 1)
+        self.assertEqual(summary.candidate_short_lived_episode_count, 1)
+        self.assertEqual(summary.matched_onset_count, 1)
+        self.assertEqual(summary.unmatched_baseline_onset_count, 0)
+        self.assertEqual(summary.median_signed_onset_delta_ms, 0.0)
+        self.assertEqual(summary.baseline_transition_counts, (("ENDED", 1), ("STARTED", 1)))
 
-def test_experiment_point_requires_exact_ordered_source_evidence():
-    evaluation = _evaluation(0)
-    with pytest.raises(ValueError, match="configured universe"):
-        MarketStateExperimentPoint(evaluation, _evidence(SYMBOLS[:-1]), "development")
-    with pytest.raises(ValueError, match="configured universe"):
-        MarketStateExperimentPoint(evaluation, _evidence(SYMBOLS + ("S6",)), "development")
-    with pytest.raises(ValueError, match="configured universe"):
-        MarketStateExperimentPoint(evaluation, _evidence(("S2", "S1", "S3", "S4", "S5")), "development")
-
-
-def test_summary_reports_short_lived_episodes_and_onset_lead_lag():
-    points = (
-        _point(0, normalized=0.6),
-        _point(5_000, normalized=0.6),
-        _point(10_000, state="neutral", normalized=0.0, raw=0.0),
-        _point(15_000, state="neutral", normalized=0.0, raw=0.0),
-        _point(20_000, state="neutral", normalized=0.0, raw=0.0),
-    )
-    result = run_market_state_ewma_experiment(points, EWMA_CONFIG_10S)
-    summary = result.summaries["all"]
-    assert summary.baseline_short_lived_episode_count == 1
-    assert summary.candidate_short_lived_episode_count == 1
-    assert summary.matched_onset_count == 1
-    assert summary.unmatched_baseline_onset_count == 0
-    assert summary.median_signed_onset_delta_ms == 0.0
-    assert summary.baseline_transition_counts == (("ENDED", 1), ("STARTED", 1))
-
-
-def test_identical_explicit_inputs_are_deterministic_and_partition_summaries_exist():
-    points = (
-        _point(0, partition="development"),
-        _point(5_000, partition="validation"),
-        _point(10_000, partition="test"),
-    )
-    first = run_market_state_ewma_experiment(points, EWMA_CONFIG_60S)
-    second = run_market_state_ewma_experiment(points, EWMA_CONFIG_60S)
-    assert first == second
-    assert set(first.summaries) == {"all", "development", "validation", "test"}
-    prefix = run_market_state_ewma_experiment(points[:2], EWMA_CONFIG_60S)
-    assert prefix.points == first.points[:2]
+    def test_identical_explicit_inputs_are_deterministic_and_partition_summaries_exist(self):
+        points = (
+            _point(0, partition="development"),
+            _point(5_000, partition="validation"),
+            _point(10_000, partition="test"),
+        )
+        first = run_market_state_ewma_experiment(points, EWMA_CONFIG_60S)
+        second = run_market_state_ewma_experiment(points, EWMA_CONFIG_60S)
+        self.assertEqual(first, second)
+        self.assertEqual(set(first.summaries), {"all", "development", "validation", "test"})
+        prefix = run_market_state_ewma_experiment(points[:2], EWMA_CONFIG_60S)
+        self.assertEqual(prefix.points, first.points[:2])

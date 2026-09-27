@@ -398,7 +398,8 @@ class _EpisodeSpan:
     episode_id: str
     direction: str
     start_boundary_time_ms: int
-    end_boundary_time_ms: int
+    end_boundary_time_ms: int | None
+    observed_through_boundary_time_ms: int
 
 
 def _branch_transitions(point, branch):
@@ -407,6 +408,9 @@ def _branch_transitions(point, branch):
 
 
 def _episode_spans(points, branch):
+    if not points:
+        return ()
+    observed_through = points[-1].evaluation_boundary_time_ms
     starts = {}
     spans = []
 
@@ -415,7 +419,9 @@ def _episode_spans(points, branch):
         if start is None:
             start = fallback
         if start is not None:
-            spans.append(_EpisodeSpan(episode_id, start[0], start[1], end_boundary))
+            spans.append(_EpisodeSpan(
+                episode_id, start[0], start[1], end_boundary, observed_through,
+            ))
 
     for point in points:
         for transition in _branch_transitions(point, branch):
@@ -439,9 +445,10 @@ def _episode_spans(points, branch):
                      transition.episode_start_boundary_time_ms),
                 )
     if points:
-        final_boundary = points[-1].evaluation_boundary_time_ms
         for episode_id, (direction, start) in tuple(starts.items()):
-            close(episode_id, final_boundary, (direction, start))
+            spans.append(_EpisodeSpan(
+                episode_id, direction, start, None, observed_through,
+            ))
     return tuple(sorted(spans, key=lambda span: (span.start_boundary_time_ms, span.episode_id)))
 
 
@@ -493,9 +500,15 @@ def _onset_comparison(all_points, selected_points, baseline_spans, candidate_spa
                 if candidate_transition.episode_id in used:
                     continue
                 candidate_span = candidate_by_id[candidate_transition.episode_id]
+                candidate_end = (candidate_span.end_boundary_time_ms
+                                 if candidate_span.end_boundary_time_ms is not None
+                                 else candidate_span.observed_through_boundary_time_ms)
+                baseline_end = (baseline_span.end_boundary_time_ms
+                                if baseline_span.end_boundary_time_ms is not None
+                                else baseline_span.observed_through_boundary_time_ms)
                 if (candidate_transition.episode_direction == transition.episode_direction
-                        and candidate_span.start_boundary_time_ms <= baseline_span.end_boundary_time_ms
-                        and baseline_span.start_boundary_time_ms <= candidate_span.end_boundary_time_ms):
+                        and candidate_span.start_boundary_time_ms <= baseline_end
+                        and baseline_span.start_boundary_time_ms <= candidate_end):
                     matches.append((abs(candidate_transition.evaluation_boundary_time_ms -
                                         transition.evaluation_boundary_time_ms),
                                     candidate_point, candidate_transition))
@@ -512,8 +525,12 @@ def _onset_comparison(all_points, selected_points, baseline_spans, candidate_spa
 def _summary(points, partition):
     selected = tuple(point for point in points
                      if partition == _SUMMARY_ALL or point.partition == partition)
-    baseline_spans = _episode_spans(points, "baseline")
-    candidate_spans = _episode_spans(points, "candidate")
+    cutoff = (points[-1].evaluation_boundary_time_ms if partition == _SUMMARY_ALL and points
+              else selected[-1].evaluation_boundary_time_ms if selected else None)
+    observed = tuple(point for point in points
+                     if cutoff is not None and point.evaluation_boundary_time_ms <= cutoff)
+    baseline_spans = _episode_spans(observed, "baseline")
+    candidate_spans = _episode_spans(observed, "candidate")
     boundaries = {point.evaluation_boundary_time_ms for point in selected}
     baseline_episode_count = sum(
         partition == _SUMMARY_ALL or span.start_boundary_time_ms in boundaries
@@ -524,12 +541,14 @@ def _summary(points, partition):
         for span in candidate_spans
     )
     baseline_short = sum(
-        span.end_boundary_time_ms - span.start_boundary_time_ms < 30_000
+        span.end_boundary_time_ms is not None
+        and span.end_boundary_time_ms - span.start_boundary_time_ms < 30_000
         and (partition == _SUMMARY_ALL or span.start_boundary_time_ms in boundaries)
         for span in baseline_spans
     )
     candidate_short = sum(
-        span.end_boundary_time_ms - span.start_boundary_time_ms < 30_000
+        span.end_boundary_time_ms is not None
+        and span.end_boundary_time_ms - span.start_boundary_time_ms < 30_000
         and (partition == _SUMMARY_ALL or span.start_boundary_time_ms in boundaries)
         for span in candidate_spans
     )
@@ -547,7 +566,7 @@ def _summary(points, partition):
         for point in selected
     )
     matched, unmatched, median_delta = _onset_comparison(
-        points, selected, baseline_spans, candidate_spans, "baseline")
+        observed, selected, baseline_spans, candidate_spans, "baseline")
     evaluation_count = len(selected)
     return ExperimentComparisonSummary(
         partition=partition,
