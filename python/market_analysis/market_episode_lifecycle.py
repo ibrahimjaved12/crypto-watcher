@@ -481,12 +481,16 @@ def _baseline(state, primary, episode):
 def interrupt_market_episode_state_on_restart(
     state: MarketEpisodeLifecycleState,
 ) -> MarketEpisodeLifecycleState:
-    """Retain an active episode but require fresh observations after restart."""
+    """Expose WARMING while retaining any episode for fresh confirmation."""
     if not isinstance(state, MarketEpisodeLifecycleState):
         raise ValueError("state must be a MarketEpisodeLifecycleState")
-    return replace(state, pending_start=None, pending_reversal=None,
+    return replace(state, current_direction_state="WARMING",
+                   current_pace=Metric.missing("NO_BROAD_DIRECTION"),
+                   pending_start=None, pending_reversal=None,
                    continuation_failure_count=0, pending_strengthen=(), pending_weaken=(),
-                   interrupted=state.active_episode is not None, pending_resume=None)
+                   interrupted=state.active_episode is not None, pending_resume=None,
+                   previous_usable_pace=None,
+                   previous_same_direction_material_breadth=None)
 
 
 def process_market_episode_lifecycle(

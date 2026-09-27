@@ -576,23 +576,46 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
 
     def test_restart_serialization_warming_resume_and_opposite_reversal(self):
         state, started = start()
+        self.assertEqual(state.current_direction_state, "BROAD_RISE")
+        self.assertTrue(state.current_pace.available)
         serialized = serialize_market_episode_lifecycle_state(state)
         self.assertEqual(serialized["serialization_version"], STATE_SERIALIZATION_VERSION)
         restored = deserialize_market_episode_lifecycle_state(deepcopy(serialized))
         self.assertEqual(restored, state)
         interrupted = interrupt_market_episode_state_on_restart(restored)
         self.assertTrue(interrupted.interrupted)
+        self.assertEqual(interrupted.active_episode, restored.active_episode)
         self.assertEqual(interrupted.active_episode.episode_id, started.episode_id)
+        self.assertEqual(interrupted.active_episode.direction, "BROAD_RISE")
+        self.assertEqual(interrupted.current_direction_state, "WARMING")
+        self.assertEqual(interrupted.current_pace, Metric.missing("NO_BROAD_DIRECTION"))
+        self.assertIsNone(interrupted.pending_start)
+        self.assertIsNone(interrupted.pending_reversal)
+        self.assertEqual(interrupted.continuation_failure_count, 0)
+        self.assertEqual(interrupted.pending_strengthen, ())
+        self.assertEqual(interrupted.pending_weaken, ())
+        self.assertIsNone(interrupted.pending_resume)
+        self.assertIsNone(interrupted.previous_usable_pace)
+        self.assertIsNone(interrupted.previous_same_direction_material_breadth)
         warm = advance(interrupted, BASE + 10_000, direction="WARMING")
         self.assertIsNone(warm.next_state.pending_resume)
+        self.assertEqual(warm.next_state.current_direction_state, "WARMING")
         self.assertEqual(warm.transitions, ())
-        one = advance(warm.next_state, BASE + 15_000)
+        one = advance(warm.next_state, BASE + 15_000, pace="DECELERATING")
         self.assertTrue(one.next_state.interrupted)
         self.assertEqual(one.next_state.pending_resume.count, 1)
-        two = advance(one.next_state, BASE + 20_000)
+        self.assertEqual(one.transitions, ())
+        self.assertEqual(one.next_state.current_direction_state, "BROAD_RISE")
+        self.assertEqual(one.next_state.current_pace, Metric.present("DECELERATING"))
+        two = advance(one.next_state, BASE + 20_000, pace="ACCELERATING",
+                      material_count=70)
         self.assertFalse(two.next_state.interrupted)
         self.assertEqual(two.transitions, ())
         self.assertEqual(two.next_state.active_episode.episode_id, started.episode_id)
+        self.assertEqual(two.next_state.current_direction_state, "BROAD_RISE")
+        self.assertEqual(two.next_state.current_pace, Metric.present("ACCELERATING"))
+        self.assertEqual(two.next_state.previous_usable_pace, "ACCELERATING")
+        self.assertEqual(two.next_state.previous_same_direction_material_breadth, 0.70)
         self.assertEqual(deserialize_market_episode_lifecycle_state(
             serialize_market_episode_lifecycle_state(two.next_state)), two.next_state)
 
@@ -600,6 +623,58 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
         opposite = advance(interrupted, BASE + 10_000, direction="BROAD_DROP")
         confirmed = advance(opposite.next_state, BASE + 15_000, direction="BROAD_DROP")
         self.assertEqual([event.transition for event in confirmed.transitions], ["REVERSED"])
+
+    def test_restart_marks_inactive_state_warming_and_clears_pending_start(self):
+        pending = advance(None, BASE).next_state
+        self.assertIsNone(pending.active_episode)
+        self.assertEqual(pending.current_direction_state, "BROAD_RISE")
+        self.assertIsNotNone(pending.pending_start)
+
+        restarted = interrupt_market_episode_state_on_restart(pending)
+        self.assertIsNone(restarted.active_episode)
+        self.assertFalse(restarted.interrupted)
+        self.assertEqual(restarted.current_direction_state, "WARMING")
+        self.assertEqual(restarted.current_pace, Metric.missing("NO_BROAD_DIRECTION"))
+        self.assertIsNone(restarted.pending_start)
+
+    def test_restart_clears_pending_confirmations_and_crossing_baselines(self):
+        state, _ = start(pace="MIXED", material_count=69)
+        pending_strengthen = advance(state, BASE + 10_000,
+                                     pace="ACCELERATING", material_count=70).next_state
+        pending_weaken = advance(state, BASE + 10_000,
+                                 direction="NEUTRAL", same_count=60,
+                                 material_count=49).next_state
+        pending_reversal = advance(state, BASE + 10_000,
+                                   direction="BROAD_DROP").next_state
+        failed = advance(state, BASE + 10_000,
+                         direction="NEUTRAL", same_count=54).next_state
+        pending_resume = advance(interrupt_market_episode_state_on_restart(state),
+                                 BASE + 10_000).next_state
+        self.assertTrue(pending_strengthen.pending_strengthen)
+        self.assertTrue(pending_weaken.pending_weaken)
+        self.assertIsNotNone(pending_reversal.pending_reversal)
+        self.assertEqual(failed.continuation_failure_count, 1)
+        self.assertIsNotNone(pending_resume.pending_resume)
+
+        for name, candidate in (("strengthen", pending_strengthen),
+                                ("weaken", pending_weaken),
+                                ("reversal", pending_reversal),
+                                ("continuation failure", failed),
+                                ("resume", pending_resume)):
+            with self.subTest(name=name):
+                restarted = interrupt_market_episode_state_on_restart(candidate)
+                self.assertEqual(restarted.active_episode, candidate.active_episode)
+                self.assertTrue(restarted.interrupted)
+                self.assertEqual(restarted.current_direction_state, "WARMING")
+                self.assertEqual(restarted.current_pace, Metric.missing("NO_BROAD_DIRECTION"))
+                self.assertIsNone(restarted.pending_start)
+                self.assertIsNone(restarted.pending_reversal)
+                self.assertEqual(restarted.continuation_failure_count, 0)
+                self.assertEqual(restarted.pending_strengthen, ())
+                self.assertEqual(restarted.pending_weaken, ())
+                self.assertIsNone(restarted.pending_resume)
+                self.assertIsNone(restarted.previous_usable_pace)
+                self.assertIsNone(restarted.previous_same_direction_material_breadth)
 
     def test_serialization_rejects_malformed_state(self):
         state, _ = start()
