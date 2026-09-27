@@ -89,22 +89,20 @@ transaction.
 
 ## Ownership and operation
 
-### Pre-release provenance cutover
+### Pre-release operational database reset
 
-The timestamp provenance change is a destructive pre-release reset, not a
-production-compatible migration. Existing development data is disposable: clear
-`ta_signals` in the application database and `collector_recent_candles`,
-`collector_health`, and `collector_leases` in the operational database. Apply the
-TA provenance migration to the application database and the collector provenance
-reset migration to the operational database before starting the collector. No old
-rows are migrated, and no compatibility columns or legacy timestamp semantics are
-kept.
+The operational database contains disposable pre-release working state. When adopting
+this schema, wipe/reset the operational database and recreate it from the current
+repository migration chain rather than migrating old collector rows forward. The base
+collector schema already defines the final candle provenance and TA read semantics, so
+no compatibility or provenance-reset migration is required.
 
-After reset, WebSocket `source_event_at` is the actual Binance event time (`E`),
-REST `source_event_at` is `NULL`, and `received_at` is the actual receive or REST
-retrieval time. Candle completion is determined independently as
+After recreation, WebSocket `source_event_at` is the actual Binance event time (`E`),
+REST `source_event_at` is `NULL`, and `received_at` is the actual collector receive
+or REST retrieval time. Candle completion is determined independently as
 `open_time + timeframe`; event and receive timestamps are provenance, not a
-completion boundary.
+completion boundary. The collector then rebuilds the required working history through
+its normal REST bootstrap/backfill path.
 
 With the collector enabled, `collector_recent_candles`, `collector_health`, and `collector_leases`
 in the operational database are the only shared completed-candle/checkpoint working-state path, and
