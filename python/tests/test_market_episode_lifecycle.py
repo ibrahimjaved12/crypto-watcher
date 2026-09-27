@@ -1,8 +1,9 @@
 """Focused #73 fixtures with explicit canonical #72 evidence. Do not run upstream math."""
 
 from copy import deepcopy
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
 from decimal import Decimal
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -14,7 +15,7 @@ from market_analysis.market_episode_lifecycle import (
     _episode_id,
     MarketEpisodeLifecycleConfig, deserialize_market_episode_lifecycle_state,
     interrupt_market_episode_state_on_restart, process_market_episode_lifecycle,
-    serialize_market_episode_lifecycle_state,
+    serialize_market_episode_lifecycle_state, serialize_market_episode_transition,
 )
 from market_analysis.movement_classifier import (
     IsolatedOutlier, MarketClassificationEvaluation, MarketClassifierConfig,
@@ -204,6 +205,18 @@ def start(**kwargs):
 
 
 class MarketEpisodeLifecycleTests(unittest.TestCase):
+    def test_public_transition_serializer_preserves_complete_canonical_evidence(self):
+        _, event = start()
+        serialized = serialize_market_episode_transition(event)
+        self.assertEqual(set(serialized), {field.name for field in fields(event)})
+        self.assertEqual(serialized["event_id"], event.event_id)
+        self.assertEqual(serialized["source_time_evidence"][0]["symbol"], SYMBOLS[0])
+        self.assertEqual(serialized["volume_context"][0]
+                         ["current_notional_volume"]["value"], "100")
+        self.assertEqual(json.loads(json.dumps(serialized)), serialized)
+        with self.assertRaises(ValueError):
+            serialize_market_episode_transition({"event_id": event.event_id})
+
     def test_v1_config_is_versioned_and_immutable(self):
         config = MarketEpisodeLifecycleConfig()
         self.assertEqual((config.version, config.evaluation_cadence_ms,

@@ -38,7 +38,11 @@ import {
 } from "./market-movement-state";
 
 export const MOVEMENT_ENGINE_TICK_MS = 1_000;
-export const MARKET_EPISODE_PERSISTENCE_CONFIG = {
+export type MarketEpisodePersistenceConfig = {
+  version: string;
+  currentSnapshotCadenceMs: number;
+};
+export const DEFAULT_MARKET_EPISODE_PERSISTENCE_CONFIG: Readonly<MarketEpisodePersistenceConfig> = {
   version: "market-episode-persistence-v1",
   currentSnapshotCadenceMs: 30_000,
 } as const;
@@ -86,6 +90,7 @@ export type MovementEngineRuntimeDependencies = {
     }>;
   finalization?: MovementFinalizationConfig;
   movementConfig?: MarketMovementConfig;
+  persistenceConfig?: MarketEpisodePersistenceConfig;
   now?: () => number;
 };
 
@@ -109,6 +114,7 @@ export class MovementEngineRuntime {
   private readonly now: () => number;
   private readonly movementConfig: MarketMovementConfig;
   private readonly finalization: MovementFinalizationConfig;
+  private readonly persistenceConfig: Readonly<MarketEpisodePersistenceConfig>;
   private lastPersistedBoundary: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private active = false;
@@ -142,6 +148,14 @@ export class MovementEngineRuntime {
     this.now = deps.now ?? Date.now;
     this.movementConfig = deps.movementConfig ?? DEFAULT_MARKET_MOVEMENT_CONFIG;
     this.finalization = deps.finalization ?? DEFAULT_MOVEMENT_FINALIZATION_CONFIG;
+    const persistenceConfig = deps.persistenceConfig ?? DEFAULT_MARKET_EPISODE_PERSISTENCE_CONFIG;
+    if (typeof persistenceConfig.version !== "string" ||
+        persistenceConfig.version.trim().length === 0 ||
+        !Number.isSafeInteger(persistenceConfig.currentSnapshotCadenceMs) ||
+        persistenceConfig.currentSnapshotCadenceMs <= 0) {
+      throw new Error("market episode persistence config must have a version and positive cadence");
+    }
+    this.persistenceConfig = Object.freeze({ ...persistenceConfig });
   }
 
   /** Starts (or resumes) periodic evaluation. Safe to call after a lease reacquire. */
@@ -391,7 +405,7 @@ export class MovementEngineRuntime {
     const events = results.flatMap((result) => result.lifecycle.transitions);
     const shouldPersist = events.length > 0 || this.lastPersistedBoundary === null ||
       final.boundaryTime - this.lastPersistedBoundary >=
-        MARKET_EPISODE_PERSISTENCE_CONFIG.currentSnapshotCadenceMs;
+        this.persistenceConfig.currentSnapshotCadenceMs;
     if (!shouldPersist) return;
 
     const state = final.lifecycle.stateSummary;
@@ -415,6 +429,8 @@ export class MovementEngineRuntime {
       lastReceivedAt,
       finalizationConfigVersion: this.finalization.version,
       finalizationGraceMs: this.finalization.graceMs,
+      persistenceConfigVersion: this.persistenceConfig.version,
+      currentSnapshotCadenceMs: this.persistenceConfig.currentSnapshotCadenceMs,
       mostRecentTransition,
     });
     const current: PersistedMarketStateCurrent = {

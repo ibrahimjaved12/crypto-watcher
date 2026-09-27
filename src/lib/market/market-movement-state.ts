@@ -94,6 +94,9 @@ export type PersistedMarketMovementCurrentEvidence = {
    */
   finalizationConfigVersion: string;
   finalizationGraceMs: number;
+  /** Effective application write policy; never part of canonical Python #73 state. */
+  persistenceConfigVersion: string;
+  currentSnapshotCadenceMs: number;
   mostRecentTransition: PersistedMovementTransition | null;
 };
 

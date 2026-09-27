@@ -702,6 +702,13 @@ def process_market_episode_lifecycle(
     return MarketEpisodeLifecycleResult(state, tuple(transitions))
 
 
+def serialize_market_episode_transition(transition: MarketEpisodeTransition) -> dict:
+    """Return the complete lossless JSON-compatible evidence for one transition."""
+    if not isinstance(transition, MarketEpisodeTransition):
+        raise ValueError("transition must be a MarketEpisodeTransition")
+    return _canonical(transition)
+
+
 def serialize_market_episode_lifecycle_state(state: MarketEpisodeLifecycleState) -> dict:
     """Return a strict, JSON-compatible snapshot for deterministic continuation."""
     if not isinstance(state, MarketEpisodeLifecycleState):

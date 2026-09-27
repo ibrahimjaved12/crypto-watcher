@@ -242,10 +242,11 @@ function canonicalLifecycle(universe, boundary, transitions = []) {
 }
 
 function canonicalTransition(boundary) {
+  const universe = buildMarketUniverse(SYMBOLS);
   const scope = {
     lifecycle_algorithm_version: "market-episode-lifecycle-v1",
     lifecycle_config_version: "market-episode-lifecycle-config-v1",
-    universe_id: MARKET_UNIVERSE_ID, universe_version: buildMarketUniverse(SYMBOLS).version,
+    universe_id: universe.id, universe_version: universe.version,
     primary_window_minutes: 5,
     classifier_algorithm_version: "market-state-classifier-v1",
     classifier_config_version: "market-state-classifier-config-v1",
@@ -291,7 +292,7 @@ function canonicalTransition(boundary) {
   };
 }
 
-function createHarness() {
+function createHarness(persistenceConfig) {
   const state = { now: BASE, boundary: BASE, advanced: [], sessionId: crypto.randomUUID() };
   const control = { failRestore: 0, failHistory: 0, failPersist: false,
     failLifecycle: false, rotateDuringLifecycle: false, changeUniverseDuringLifecycle: false,
@@ -358,6 +359,7 @@ function createHarness() {
         control.transitionBoundaries.has(boundary) ? [canonicalTransition(boundary)] : []);
     },
     finalization: { version: "movement-finalization-config-v1:grace-0", graceMs: 0 },
+    persistenceConfig,
     now: () => state.now,
   });
   return { runtime, state, control, calls, persistedEvents, setDurableCurrent };
@@ -380,6 +382,8 @@ test("runtime persists the effective finalization config and receive-time proven
   const evidence = harness.calls.persist[0].current.currentEvidence;
   assert.equal(evidence.finalizationConfigVersion, "movement-finalization-config-v1:grace-0");
   assert.equal(evidence.finalizationGraceMs, 0);
+  assert.equal(evidence.persistenceConfigVersion, "market-episode-persistence-v1");
+  assert.equal(evidence.currentSnapshotCadenceMs, 30_000);
   assert.equal(evidence.timestamps.lastReceivedAt, BASE + 123);
   assert.deepEqual(harness.calls.persist[0].current.lifecycleState,
     { serialization_version: "market-episode-state-v1", opaque_marker: BASE });
@@ -401,6 +405,42 @@ test("transition-free current state follows the application 30-second persistenc
   assert.equal(harness.calls.persist.length, 2);
   assert.equal(harness.calls.persist[1].current.evaluationBoundaryTime, BASE + 30_000);
   assert.deepEqual(harness.calls.persist[1].events, []);
+});
+
+test("alternate application persistence cadence is auditable without changing Python state", async () => {
+  const harness = createHarness({
+    version: "market-episode-persistence-test-v2", currentSnapshotCadenceMs: 10_000,
+  });
+  harness.control.transitionBoundaries.clear();
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.persist.length, 1);
+  harness.state.now = BASE + 5_000;
+  harness.state.boundary = harness.state.now;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.persist.length, 1);
+  harness.state.now = BASE + 10_000;
+  harness.state.boundary = harness.state.now;
+  await harness.runtime.runOnce();
+  assert.equal(harness.calls.persist.length, 2);
+  const current = harness.calls.persist[1].current;
+  assert.equal(current.evaluationBoundaryTime, BASE + 10_000);
+  assert.equal(current.currentEvidence.persistenceConfigVersion,
+    "market-episode-persistence-test-v2");
+  assert.equal(current.currentEvidence.currentSnapshotCadenceMs, 10_000);
+  assert.deepEqual(current.lifecycleState,
+    { serialization_version: "market-episode-state-v1", opaque_marker: BASE + 10_000 });
+  assert.equal("persistenceConfigVersion" in current.lifecycleState, false);
+  assert.equal("currentSnapshotCadenceMs" in current.lifecycleState, false);
+  assert.deepEqual(harness.calls.persist[1].events, []);
+});
+
+test("application persistence config rejects missing versions and invalid cadences", () => {
+  assert.throws(() => createHarness({ version: " ", currentSnapshotCadenceMs: 10_000 }));
+  for (const cadence of [0, -5_000, 1.5, Infinity]) {
+    assert.throws(() => createHarness({
+      version: "market-episode-persistence-test-v2", currentSnapshotCadenceMs: cadence,
+    }));
+  }
 });
 
 test("raw history registers for each completed-minute cutoff and the canonical session", async () => {

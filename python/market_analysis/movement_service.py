@@ -11,9 +11,9 @@ from .api_models import (MovementBoundaryRequest, MovementHistoryRegistrationReq
                          MovementMetricsRequest, MovementClassificationRequest,
                          MovementLifecycleRequest)
 from .market_episode_lifecycle import (
-    _canonical, deserialize_market_episode_lifecycle_state,
+    deserialize_market_episode_lifecycle_state,
     interrupt_market_episode_state_on_restart, process_market_episode_lifecycle,
-    serialize_market_episode_lifecycle_state,
+    serialize_market_episode_lifecycle_state, serialize_market_episode_transition,
 )
 from .movement_classifier import (
     ALGORITHM_VERSION as CLASSIFIER_ALGORITHM_VERSION,
@@ -266,7 +266,8 @@ class MovementBoundaryService:
                         "provider": scope.provider, "exchange": scope.exchange,
                         "price_type": scope.price_type,
                     },
-                    "transitions": [_canonical(event) for event in lifecycle.transitions],
+                    "transitions": [serialize_market_episode_transition(event)
+                                    for event in lifecycle.transitions],
                 }}
 
     @staticmethod

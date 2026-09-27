@@ -469,6 +469,8 @@ test("1m/5m/15m context, universe and timestamps reach the persisted current evi
     lastReceivedAt: BASE + 980,
     finalizationConfigVersion: "movement-finalization-config-v1:grace-2000",
     finalizationGraceMs: 2_000,
+    persistenceConfigVersion: "market-episode-persistence-v1",
+    currentSnapshotCadenceMs: 30_000,
     mostRecentTransition: null,
   });
   assert.equal(evidence.windowsContext.length, 3);
@@ -489,6 +491,8 @@ test("1m/5m/15m context, universe and timestamps reach the persisted current evi
   assert.equal(evidence.timestamps.lastReceivedAt, BASE + 980);
   assert.equal(evidence.finalizationConfigVersion, "movement-finalization-config-v1:grace-2000");
   assert.equal(evidence.finalizationGraceMs, 2_000);
+  assert.equal(evidence.persistenceConfigVersion, "market-episode-persistence-v1");
+  assert.equal(evidence.currentSnapshotCadenceMs, 30_000);
 });
 
 test("current-state exposure maps persisted evidence without leaking credentials", () => {
@@ -504,6 +508,8 @@ test("current-state exposure maps persisted evidence without leaking credentials
     lastReceivedAt: BASE + 980,
     finalizationConfigVersion: "movement-finalization-config-v1:grace-2000",
     finalizationGraceMs: 2_000,
+    persistenceConfigVersion: "market-episode-persistence-v1",
+    currentSnapshotCadenceMs: 30_000,
     mostRecentTransition: {
       transition: "STARTED",
       transitionReason: "confirmed_broad_entry",
@@ -572,6 +578,8 @@ test("diagnostics reflect engine status, counts, timestamps and transition", () 
     lastReceivedAt: BASE + 980,
     finalizationConfigVersion: "movement-finalization-config-v1:grace-2000",
     finalizationGraceMs: 2_000,
+    persistenceConfigVersion: "market-episode-persistence-v1",
+    currentSnapshotCadenceMs: 30_000,
     mostRecentTransition: null,
   });
   const diagnostics = toMovementEngineDiagnostics(
@@ -618,6 +626,8 @@ test("finalization config/grace and receive time are auditable through the contr
     lastReceivedAt: BASE + 980,
     finalizationConfigVersion: "movement-finalization-config-v1:grace-5000",
     finalizationGraceMs: 5_000,
+    persistenceConfigVersion: "market-episode-persistence-v1",
+    currentSnapshotCadenceMs: 30_000,
     mostRecentTransition: null,
   });
   const persisted = {

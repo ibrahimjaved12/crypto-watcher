@@ -62,6 +62,8 @@ export type MovementCurrentEvidenceInput = {
   lastReceivedAt: number | null;
   finalizationConfigVersion: string;
   finalizationGraceMs: number;
+  persistenceConfigVersion: string;
+  currentSnapshotCadenceMs: number;
   mostRecentTransition: PersistedMovementTransition | null;
 };
 
@@ -122,6 +124,8 @@ export function buildMovementCurrentEvidence(
     },
     finalizationConfigVersion: input.finalizationConfigVersion,
     finalizationGraceMs: input.finalizationGraceMs,
+    persistenceConfigVersion: input.persistenceConfigVersion,
+    currentSnapshotCadenceMs: input.currentSnapshotCadenceMs,
     mostRecentTransition: input.mostRecentTransition,
   };
 }
