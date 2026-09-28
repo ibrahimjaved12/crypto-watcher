@@ -177,11 +177,13 @@ presented as equivalent.
 ## Historical evaluation and research
 
 Issue #17's fixed-fixture TA smoke replay remains a calculator check. Issue #35
-Part 1 now provides a separate [causal historical market replay core](historical-replay.md):
+Part 1 provides a separate [causal historical market replay core](historical-replay.md):
 an explicit availability clock feeds canonical five-second movement buckets and
 canonical market-movement evaluations, then exports chronological points for
-the Issue #75 experiments. It does not yet replay the complete setup/outcome
-system. Issue #38 owns portfolio and wallet backtest comparisons.
+the Issue #75 experiments. Part 2 adds a verified, local Binance USD-M daily
+archive adapter that supplies Part 1's explicit input records. Technical
+assessment composition, strategy/setup replay, funding/news/event adapters,
+execution/outcome resolution, and portfolio simulation (#38) remain deferred.
 
 Historical inputs initially include one-minute Binance USDⓈ-M futures candles,
 finer trade or aggregate-trade data for ordering-sensitive periods, funding
