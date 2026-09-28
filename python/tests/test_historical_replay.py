@@ -116,6 +116,18 @@ class HistoricalReplayTests(unittest.TestCase):
         self.assertEqual(outage.points[1].endpoint_buckets[0][1].trade_count, 0)
         self.assertIsNone(outage.points[1].endpoint_buckets[0][1].price)
 
+    def test_explicit_stale_source_excludes_as_source_stale(self):
+        intervals = (
+            HistoricalReplaySourceInterval(SYMBOL, ENGINE_START, OUTPUT - 5_000, "LIVE"),
+            HistoricalReplaySourceInterval(SYMBOL, OUTPUT, OUTPUT, "STALE"),
+            HistoricalReplaySourceInterval(SYMBOL, OUTPUT + 5_000,
+                                           OUTPUT + 15_000, "LIVE"),
+        )
+        stale = run_historical_market_replay(_request(intervals=intervals))
+        self.assertEqual(stale.points[0].source_states, ((SYMBOL, "STALE"),))
+        self.assertIn("SOURCE_STALE",
+                      stale.points[0].movement_evaluation.windows[15].symbols[0].exclusion_reasons)
+
     def test_candle_completion_strict_prior_and_first_seen(self):
         config = MarketMovementConfig(
             version="replay-fixture-config-v1", historical_lookback_ms=10 * 60_000,
@@ -177,7 +189,7 @@ class HistoricalReplayTests(unittest.TestCase):
         self.assertNotIn("WARMING_INSUFFICIENT_LIVE_HISTORY", reasons)
         self.assertIn("INSUFFICIENT_NORMALIZATION_HISTORY", reasons)
         sparse = run_historical_market_replay(_request())
-        self.assertIn("SOURCE_STALE",
+        self.assertIn("STALE_LAST_TRADE",
                       sparse.points[0].movement_evaluation.windows[15].symbols[0].exclusion_reasons)
         self.assertIn("INSUFFICIENT_NORMALIZATION_HISTORY",
                       sparse.points[0].movement_evaluation.windows[15].symbols[0].exclusion_reasons)
