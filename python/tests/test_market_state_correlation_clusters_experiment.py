@@ -279,12 +279,16 @@ class CorrelationClusterExperimentTests(unittest.TestCase):
         symbols = ("S1", "S2", "S3", "S4", "S5")
         points = tuple(_point(i * 5_000,
                               partition="development" if i < 744 else "validation" if i < 756 else "test",
-                              symbols=symbols) for i in range(768))
+                              symbols=symbols,
+                              values=((0.06 if (i // 12) % 2 == 0 else -0.06),) * 5)
+                       for i in range(768))
         prefix = run_market_state_correlation_cluster_experiment(points[:756], CORRELATION_CONFIG_60M)
         full = run_market_state_correlation_cluster_experiment(points, CORRELATION_CONFIG_60M)
         self.assertEqual(prefix.paired_points, full.paired_points[:756])
         self.assertEqual(prefix.summaries["development"], full.summaries["development"])
         self.assertEqual(prefix.summaries["validation"], full.summaries["validation"])
+        self.assertEqual(full.summaries["validation"].model_ready_count, 1)
+        self.assertEqual(full.summaries["validation"].network_stability_comparison_count, 1)
         self.assertEqual(full.summaries["test"].evaluation_count, 12)
 
 
