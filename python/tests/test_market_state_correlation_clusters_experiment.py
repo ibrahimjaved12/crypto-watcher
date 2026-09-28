@@ -219,11 +219,14 @@ class CorrelationClusterExperimentTests(unittest.TestCase):
 
     def test_stability_and_mover_concentration(self):
         self.assertEqual(_jaccard(set(), set()), 1.0)
-        self.assertEqual(_jaccard({1, 2}, {2, 3}), 1 / 3)
+        self.assertEqual(_jaccard({("A", "B"), ("B", "C")},
+                                  {("B", "C"), ("C", "D")}), 1 / 3)
         self.assertEqual(_jaccard(_cluster_pairs((("A",), ("B",))),
                                   _cluster_pairs((("A",), ("B",)))), 1.0)
         self.assertEqual(_jaccard(_cluster_pairs((("A", "B"), ("C",))),
                                   _cluster_pairs((("A", "C"), ("B",)))), 0.0)
+        self.assertEqual(_jaccard(_cluster_pairs((("A", "B", "C"), ("D",))),
+                                  _cluster_pairs((("A", "B"), ("C", "D")))), 1 / 4)
         complete = _state()
         first, next_state = advance_correlation_cluster_diagnostics(
             _evaluation(60 * 60_000), CORRELATION_CONFIG_60M, complete)
@@ -274,6 +277,10 @@ class CorrelationClusterExperimentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             advance_correlation_cluster_diagnostics(
                 _evaluation(60 * 60_000, identity={"movement_config_version": "other"}),
+                CORRELATION_CONFIG_60M, state)
+        with self.assertRaises(ValueError):
+            advance_correlation_cluster_diagnostics(
+                _evaluation(60 * 60_000, identity={"movement_algorithm_version": "other"}),
                 CORRELATION_CONFIG_60M, state)
         self.assertEqual(base.algorithm_version, ALGORITHM_VERSION)
         symbols = ("S1", "S2", "S3", "S4", "S5")
