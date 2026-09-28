@@ -37,7 +37,7 @@ from market_analysis.movement_metrics import MarketMovementConfig, MarketUnivers
 
 
 OUTPUT = int(datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc).timestamp() * 1000)
-SYMBOL = "BTCUSDT"
+SYMBOLS = ("BTCUSDT", "ETHUSDT")
 PARTITIONS = ("development", "validation", "test", "all")
 
 
@@ -64,12 +64,13 @@ def _write_archive(root, relative, rows):
 
 def _request(root, *, partition=None, code_revision=None):
     config = HistoricalReplayConfig(OUTPUT, OUTPUT + 15_000)
-    universe = MarketUniverseInput("research-btc", "v1", (SYMBOL,))
-    for day in required_aggtrade_dates(config):
-        trade_rows = ([1, "100", "1", 1, 1, OUTPUT, "false"],) if day == date(2026, 8, 20) else ()
-        _write_archive(root, daily_aggtrades_relative_path(SYMBOL, day), trade_rows)
-    for day in required_kline_dates(config):
-        _write_archive(root, daily_kline_relative_path(SYMBOL, day), ())
+    universe = MarketUniverseInput("research-two", "v1", SYMBOLS)
+    for symbol in SYMBOLS:
+        for day in required_aggtrade_dates(config):
+            trade_rows = ([1, "100", "1", 1, 1, OUTPUT, "false"],) if day == date(2026, 8, 20) else ()
+            _write_archive(root, daily_aggtrades_relative_path(symbol, day), trade_rows)
+        for day in required_kline_dates(config):
+            _write_archive(root, daily_kline_relative_path(symbol, day), ())
     return batch.HistoricalExperimentBatchRequest(
         root, universe, config,
         partition or ReplayPartitionPlan(OUTPUT + 5_000, OUTPUT + 10_000),
@@ -143,6 +144,8 @@ class HistoricalExperimentBatchTests(unittest.TestCase):
                              movement_config=MarketMovementConfig(version="custom"))
             with self.assertRaisesRegex(ValueError, "canonical default"):
                 replace(canonical, replay_config=custom)
+            with self.assertRaisesRegex(ValueError, "at least two symbols"):
+                replace(canonical, universe=MarketUniverseInput("single", "v1", ("BTCUSDT",)))
 
     def test_one_load_replay_export_and_same_stream_for_all_28(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -162,6 +162,8 @@ class HistoricalExperimentBatchRequest:
         object.__setattr__(self, "archive_root", archive.archive_root)
         if not isinstance(self.partition_plan, ReplayPartitionPlan):
             raise ValueError("partition_plan must be ReplayPartitionPlan")
+        if len(self.universe.symbols) < 2:
+            raise ValueError("fixed suite requires at least two symbols for EXP-75-08")
         if self.replay_config.movement_config != MarketMovementConfig():
             raise ValueError("batch v1 requires canonical default MarketMovementConfig")
         if (self.code_revision is not None

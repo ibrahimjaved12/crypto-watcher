@@ -95,9 +95,10 @@ market replay once, and exports one immutable development/validation/test point
 stream. It passes that same stream and one shared canonical classifier and
 lifecycle configuration to all **28** preregistered runs: three configurations
 each for EXP-75-01, 02, 03, 04A, 04B, 05, 06A, 07, and 08, plus one for
-EXP-75-09. The batch requires the default canonical `MarketMovementConfig()`.
-Runs execute sequentially; HMM training unavailability is retained as a native
-scientific diagnostic. Broken experiment contracts fail the batch.
+EXP-75-09. The batch requires the default canonical `MarketMovementConfig()`
+and at least two configured symbols because EXP-75-08 rejects a one-symbol
+universe. Runs execute sequentially; HMM training unavailability is retained
+as a native scientific diagnostic. Broken experiment contracts fail the batch.
 
 The compact report records archive and replay manifests/diagnostics, suite and
 configuration identities, each experiment's native summaries for development,
