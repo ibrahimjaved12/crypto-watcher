@@ -183,9 +183,10 @@ canonical market-movement evaluations, then exports chronological points for
 the Issue #75 experiments. Part 2 adds a verified, local Binance USD-M daily
 archive adapter that supplies Part 1's explicit input records. Part 3 runs the
 fixed Issue #75 historical experiment suite over one replay and emits a compact,
-reproducible research report. This is comparative market-state evidence; it
-does not promote an algorithm or measure portfolio P&L. Technical-assessment
-composition, strategy/setup replay, funding/news/event adapters,
+reproducible research report. Part 4 acquires the required official Binance
+daily archives into a verified local cache. This is comparative market-state
+evidence; it does not promote an algorithm or measure portfolio P&L.
+Technical-assessment composition, strategy/setup replay, funding/news/event adapters,
 execution/outcome resolution, and portfolio simulation (#38) remain deferred.
 
 Historical inputs initially include one-minute Binance USDⓈ-M futures candles,

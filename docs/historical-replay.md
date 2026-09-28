@@ -136,6 +136,52 @@ sibling and atomic replacement. An existing report requires `--overwrite`.
 The complete suite is fixed; the CLI offers no experiment filtering or
 parameter tuning.
 
+## Part 4: official archive acquisition and cache
+
+`binance_historical_download.py` explicitly fetches the exact daily USD-M
+`aggTrades` and `1m` kline ZIPs required by Part 2 from
+`https://data.binance.vision/`. It uses Part 2's date and path helpers, keeps
+configured symbol order, and does not crawl remote directories. V1 is
+sequential and daily-only, with no monthly or REST fallback.
+
+Each online run fetches the official `.CHECKSUM` first, even for cached ZIPs.
+The downloader reuses a local ZIP when its SHA-256 matches that fresh remote
+digest and repairs any missing or stale local checksum file. When the official
+digest changes, it streams the replacement ZIP into a temporary sibling file,
+checks SHA-256, stages a normalized checksum, then atomically replaces the ZIP
+and checksum in that order. A failed transfer or digest mismatch leaves an old
+ZIP untouched. A crash between the two replacements can leave a mismatched
+pair; the next acquisition repairs it. Part 2 remains the final semantic and
+integrity gate after all files are present, and it leaves checksum-valid but
+malformed archives available for investigation.
+
+V1 uses a 30-second per-request timeout and up to three attempts for transient
+HTTP/transport failures, with fixed one- and two-second retry delays. HTTP 404
+reports a missing required official archive; permanent 4xx errors, malformed
+checksums, and completed ZIP checksum mismatches fail without retry. Download
+results distinguish `DOWNLOADED`, `REUSED`, and `REFRESHED`; byte counts cover
+ZIP body bytes, and per-item attempts count checksum plus ZIP HTTP requests.
+These network mechanics are not scientific identity. **Part 2's verified ZIP
+content hashes continue to define the dataset identity**, independently of
+cache location, retries, or download timing. Parts 2 and 3 still work offline
+against previously cached archives without invoking this tool.
+
+```bash
+python -m market_analysis.binance_historical_download \
+  --archive-root /path/to/binance-public-data \
+  --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT DOGEUSDT \
+  --universe-id research-pilot \
+  --universe-version v1 \
+  --start 2026-08-01T00:00:00Z \
+  --end 2026-08-03T00:00:00Z
+```
+
+The CLI accepts explicit UTC (`Z`) five-second boundaries, uses the canonical
+movement configuration and a 2,000 ms finalization grace by default, and
+prints a compact acquisition summary to stdout. It does not launch the Part 3
+experiment batch; run that command separately when ready to evaluate the
+cached dataset.
+
 Issue #35 still does not include technical-assessment composition, conditional
 setup and outcome replay, funding/event/news adapters, or execution resolution.
 Replay-facing OHLC/range evidence for ATR remains separate under #111;
