@@ -1,4 +1,4 @@
-# Historical market replay — Issue #35 Part 1
+# Historical market replay — Issue #35
 
 This Python replay kernel consumes a caller-supplied, validated Binance USD-M
 trade dataset, completed one-minute movement candles, explicit source-state
@@ -42,10 +42,54 @@ after the checkpoint. No private engine state is serialized. Trade processing,
 late-rejection, source-state, and market-wide eligibility counts remain visible
 in replay diagnostics.
 
-This is the market replay foundation, not complete Issue #35. Historical
-provider adapters, technical-assessment composition, conditional setup and
-outcome replay, funding-event replay, timestamped news, ordering-sensitive
-execution evidence, and more efficient persisted checkpoint adapters are
-deferred. OHLC/range replay for ATR remains separate under #111; portfolio
-backtesting remains under #38. The existing Issue #17 TA smoke replay is
-unchanged.
+## Part 2: verified local Binance USD-M daily archives
+
+`binance_historical_archive.py` builds a Part 1 `HistoricalReplayRequest` from
+locally present **Binance public-data USD-M futures daily** `aggTrades` and
+`1m` kline ZIPs. It derives exact UTC dates from the replay configuration and
+opens only these paths under the supplied `archive_root`:
+
+```text
+data/futures/um/daily/aggTrades/<SYMBOL>/<SYMBOL>-aggTrades-YYYY-MM-DD.zip
+data/futures/um/daily/klines/<SYMBOL>/1m/<SYMBOL>-1m-YYYY-MM-DD.zip
+```
+
+Each ZIP must have a sibling `.zip.CHECKSUM` with one SHA-256 entry naming that
+ZIP. The adapter verifies its bytes before opening it, checks ZIP member paths,
+and parses the single expected CSV member without extraction. Missing ZIPs or
+checksums fail dataset assembly. V1 uses daily packages only: it does not fall
+back to monthly archives, discover symbols from folders, or download files.
+The configured universe order and USD-M perpetual instrument IDs are preserved.
+
+The archive `aggTrades` timestamp is mapped exactly to `event_time_ms`,
+`trade_time_ms`, and `first_seen_at_ms`. This
+`exchange-timestamp-surrogate-v1` policy approximates exchange-time causal
+availability. **The archive does not preserve the original WebSocket event
+time or socket receive time, so archive replay cannot reconstruct historical
+receive latency.** No arbitrary latency is added. Part 1 still finalizes a
+boundary at `t + finalization_grace_ms`. A completed `1m` candle first becomes
+available at its `close_time + 1`, equal to `open_time + 60,000` milliseconds.
+
+Under `verified-archive-coverage-live-v1`, every required package must verify
+before the adapter emits one continuous `LIVE` source interval for each symbol.
+Here `LIVE` means **verified archive coverage for the requested interval**. It
+does not assert that the original historical WebSocket collector was healthy
+at every instant. Missing local packages, quiet trading, aggregate-ID gaps,
+and gaps in genuine archived klines are not converted into `STALE`,
+`RECOVERING`, or `UNAVAILABLE` source evidence. Kline gaps remain unfilled and
+are counted in diagnostics.
+
+The bundle manifest records relative archive paths and verified ZIP SHA-256
+values. Its content SHA-256 hashes the adapter/dataset versions, the two
+policies, and sorted path/hash pairs, independent of the local root path. A
+corrected archive ZIP therefore changes the dataset identity and Part 1 run
+fingerprint. The adapter returns this manifest, factual diagnostics, and a
+ready-to-run `HistoricalReplayRequest`; pass that request directly to
+`run_historical_market_replay`, then optionally export chronological Issue #75
+points with `to_market_state_experiment_points`.
+
+Issue #35 still does not include technical-assessment composition, conditional
+setup and outcome replay, funding/event/news adapters, execution resolution,
+or a batch runner. Replay-facing OHLC/range evidence for ATR remains separate
+under #111; portfolio simulation remains under #38. The existing Issue #17 TA
+smoke replay is unchanged.
