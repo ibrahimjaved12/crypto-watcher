@@ -6,9 +6,10 @@ The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
 **EXP-75-03 Kalman/state-space**, **EXP-75-04A offline PELT**,
 **EXP-75-04B online Bayesian change-point detection**, and
 **EXP-75-05 regression-slope acceleration**, **EXP-75-06A realized-volatility
-normalization**, **EXP-75-07 PCA/common-factor diagnostics**, and **EXP-75-08
-correlation, clustering, and network diagnostics**. EXP-75-06B and EXP-75-09
-through EXP-75-12 remain unimplemented.
+normalization**, **EXP-75-07 PCA/common-factor diagnostics**, **EXP-75-08
+correlation, clustering, and network diagnostics**, and **EXP-75-09 Gaussian HMM
+learned-regime diagnostics**. EXP-75-06B and EXP-75-10 through EXP-75-12 remain
+unimplemented.
 
 ## EXP-75-01 — EWMA aggregate smoothing
 
@@ -304,19 +305,39 @@ through EXP-75-12 remain unimplemented.
 
 ## EXP-75-09 — HMM/learned regimes
 
-- **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** A chronologically trained latent-regime model may provide
-  repeatable segmentation beyond deterministic V1 only if state definitions and
-  performance remain stable on untouched periods.
-- **Input/data prerequisite:** Explicit model, state definitions, chronological
-  training, and #43 leakage/splitting discipline.
-- **Causal/live suitability:** Requires a separate causal training/inference
-  decision; no implementation here.
-- **What changes relative to V1:** Future learned regime labels only.
-- **What remains unchanged:** Canonical V1 event stream remains the comparator.
-- **Evaluation measurements:** Stability, untouched-period behavior, and leakage
-  checks.
-- **Promotion constraint:** No model is promoted from in-sample results.
+- **Status:** `IMPLEMENTED_EXPERIMENT`
+- **Hypothesis:** A deterministic three-state Gaussian hidden Markov model
+  trained only on chronological development-period market-state features may
+  produce stable out-of-sample latent-state segmentation that contains descriptive
+  information beyond deterministic V1 direction/lifecycle states. Usefulness
+  requires reproducible state definitions, acceptable posterior stability,
+  sensible out-of-sample likelihood, and consistent validation/test associations
+  without any future-derived training inputs.
+- **Input/data prerequisite:** At minute-aligned boundaries, use exactly four
+  point-in-time primary 5m features: median normalized movement, material breadth
+  imbalance, dispersion MAD of normalized movement, and median RVOL over every
+  included symbol. An unavailable feature breaks a development training block or
+  resets validation/test filtering. No feature is imputed.
+- **Estimator:** Unsupervised three-state, four-dimensional diagonal Gaussian
+  HMM. Development-only population mean and standard deviation normalize the
+  features. Deterministic initialization and 50 log-space Baum-Welch iterations
+  fit the model; emissions use a fixed `1e-4` variance floor and updated
+  probabilities use a fixed `1e-12` floor. Canonical states are ordered by the
+  learned mean of feature 0 and named LOW/MID/HIGH_MOVEMENT. Training data and
+  frozen model parameters have deterministic SHA-256 fingerprints.
+- **Causal/live suitability:** Development receives no fitted regime output.
+  Validation starts a forward filter from frozen initial probabilities; test may
+  carry the preceding validation posterior across a complete minute boundary.
+  Missing observations reset the filter. No Viterbi or future smoothing is used.
+- **What changes relative to V1:** Research-only latent-state diagnostics.
+  Canonical #71/#72/#73 remains unchanged, with no candidate #72/#73 branch.
+- **Evaluation measurements:** Frozen-model predictive log likelihood, posterior
+  confidence/entropy, HMM × V1 state contingency, per-state descriptive features,
+  HMM and V1 switch counts, and validation/test occupancy total variation.
+  V1 direction and lifecycle are comparison context, never training labels.
+- **Relationship to #43:** EXP-75-09 reuses #43's chronological leakage
+  discipline but is not the supervised trade-selection ML baseline owned by #43.
+  No trading labels, P&L targets, live integration, or automatic promotion exist.
 
 ## EXP-75-10 — Mark-price context
 
