@@ -88,8 +88,55 @@ ready-to-run `HistoricalReplayRequest`; pass that request directly to
 `run_historical_market_replay`, then optionally export chronological Issue #75
 points with `to_market_state_experiment_points`.
 
+## Part 3: fixed historical experiment batch
+
+`historical_experiment_batch.py` loads one verified Part 2 dataset, runs Part 1
+market replay once, and exports one immutable development/validation/test point
+stream. It passes that same stream and one shared canonical classifier and
+lifecycle configuration to all **28** preregistered runs: three configurations
+each for EXP-75-01, 02, 03, 04A, 04B, 05, 06A, 07, and 08, plus one for
+EXP-75-09. The batch requires the default canonical `MarketMovementConfig()`.
+Runs execute sequentially; HMM training unavailability is retained as a native
+scientific diagnostic. Broken experiment contracts fail the batch.
+
+The compact report records archive and replay manifests/diagnostics, suite and
+configuration identities, each experiment's native summaries for development,
+validation, test, and all points, and HMM training diagnostics/model SHA when
+available. It does not store per-point experiment histories or choose a winner.
+An experiment-stream SHA binds replay point IDs to partition labels and cutoffs.
+The batch SHA binds that stream to the dataset, replay, suite, universe, and
+classifier/lifecycle configuration. Run IDs hash the batch SHA with the
+experiment and config identities. Each result SHA hashes the compact native
+summaries and parameters. The report SHA hashes canonical JSON **without**
+the `report_sha256` field; the final JSON then includes that digest. Identical
+inputs produce identical bytes without wall-clock or absolute-path data.
+Optional `code_revision` appears in report metadata and its report SHA, but is
+excluded from the scientific batch identity.
+
+For local archives already present under the Part 2 directory layout:
+
+```bash
+python -m market_analysis.historical_experiment_batch \
+  --archive-root /path/to/binance-public-data \
+  --symbols BTCUSDT ETHUSDT \
+  --universe-id research-top2 \
+  --universe-version v1 \
+  --start 2026-08-01T00:00:00Z \
+  --end 2026-08-08T00:00:00Z \
+  --development-end 2026-08-05T00:00:00Z \
+  --validation-end 2026-08-07T00:00:00Z \
+  --output-json report.json
+```
+
+CLI timestamps must be explicit UTC seconds (`Z`) on five-second boundaries;
+symbol order is preserved. The CLI emits only canonical JSON plus one newline
+to stdout when no file is specified. File output uses an fsynced temporary
+sibling and atomic replacement. An existing report requires `--overwrite`.
+The complete suite is fixed; the CLI offers no experiment filtering or
+parameter tuning.
+
 Issue #35 still does not include technical-assessment composition, conditional
-setup and outcome replay, funding/event/news adapters, execution resolution,
-or a batch runner. Replay-facing OHLC/range evidence for ATR remains separate
-under #111; portfolio simulation remains under #38. The existing Issue #17 TA
-smoke replay is unchanged.
+setup and outcome replay, funding/event/news adapters, or execution resolution.
+Replay-facing OHLC/range evidence for ATR remains separate under #111;
+portfolio simulation remains under #38. The existing Issue #17 TA smoke replay
+is unchanged.
