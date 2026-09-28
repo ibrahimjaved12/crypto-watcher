@@ -6,8 +6,9 @@ The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
 **EXP-75-03 Kalman/state-space**, **EXP-75-04A offline PELT**,
 **EXP-75-04B online Bayesian change-point detection**, and
 **EXP-75-05 regression-slope acceleration**, **EXP-75-06A realized-volatility
-normalization**, and **EXP-75-07 PCA/common-factor diagnostics**. EXP-75-06B
-and EXP-75-08 through EXP-75-12 remain unimplemented.
+normalization**, **EXP-75-07 PCA/common-factor diagnostics**, and **EXP-75-08
+correlation, clustering, and network diagnostics**. EXP-75-06B and EXP-75-09
+through EXP-75-12 remain unimplemented.
 
 ## EXP-75-01 — EWMA aggregate smoothing
 
@@ -268,19 +269,38 @@ and EXP-75-08 through EXP-75-12 remain unimplemented.
 
 ## EXP-75-08 — Correlation/clustering
 
-- **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** Stable correlation clusters derived from aligned completed >=1m
-  returns may identify subgroup-driven moves that simple market-wide breadth treats
-  as broader coordination.
-- **Input/data prerequisite:** Explicit aligned returns, estimator, window, and
-  clustering stability rule.
-- **Causal/live suitability:** Potentially causal with completed aligned inputs.
-  Naive asynchronous tick Pearson correlation is prohibited.
-- **What changes relative to V1:** Future subgroup coordination evidence.
-- **What remains unchanged:** Canonical #71, #72, and #73 semantics.
-- **Evaluation measurements:** Cluster stability, subgroup coverage, and state
-  disagreement.
-- **Promotion constraint:** Asynchronous tick correlation cannot be promoted.
+- **Status:** `IMPLEMENTED_EXPERIMENT`
+- **Hypothesis:** A causal correlation structure estimated from synchronized,
+  non-overlapping 1m returns may identify stable coordinated subgroups that are
+  not fully described by V1 directional breadth or the single common-factor
+  diagnostics of EXP-75-07. Useful evidence requires stable pairwise/network/cluster
+  structure across chronological replay and must not depend on asynchronous tick
+  correlation, future observations, or tuned clustering thresholds.
+- **Input/data prerequisite:** At boundaries divisible by 60,000 ms, use only
+  complete, included, finite canonical #71 1m `current_return` vectors in exact
+  configured-universe order. The fixed 60, 120, and 240-row models use only prior
+  contiguous synchronized rows. An incomplete current row is never appended;
+  prior ready evidence may still be reported before the whole history is cleared.
+- **Estimator:** Population Pearson correlations with prior means, population
+  standard deviations, and covariance divided by the product of the standard
+  deviations. An undirected positive-correlation network includes edges at
+  `rho >= +0.70`. Deterministic agglomerative average-linkage clustering uses
+  distance `1-rho` and cut `0.30`; equal-distance merges choose the
+  lexicographically smallest cluster pair. Network connected components and
+  clusters remain distinct outputs.
+- **Causal/live suitability:** Strict-prior diagnostics are computed before the
+  current aligned row is appended. Non-aligned five-second points are not
+  scheduled. No asynchronous tick correlation estimator is used.
+- **What changes relative to V1:** Diagnostic-only pairwise, network, cluster,
+  stability, and material-mover concentration evidence. There is no candidate
+  #72 classifier or #73 lifecycle branch; canonical V1 advances unchanged.
+- **Evaluation measurements:** Pairwise correlation distribution, network edge
+  density and components, cluster sizes and within-cluster correlation,
+  consecutive compatible edge and co-cluster-pair Jaccard stability, current V1
+  material-mover concentration in prior subgroups, descriptive associations with
+  V1 breadth, and V1 state/episode grouping across chronological partitions.
+  The fixed thresholds and lookbacks are not optimized or ranked. No automatic
+  promotion or financial meaning is assigned to clusters.
 
 ## EXP-75-09 — HMM/learned regimes
 
