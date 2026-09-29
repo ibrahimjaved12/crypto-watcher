@@ -205,7 +205,7 @@ scientific fingerprint excludes it.
 ```bash
 python -m market_analysis.historical_atr_extension \
   --archive-root /path/to/binance-public-data \
-  --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT DOGEUSDT \
+  --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT \
   --universe-id research-pilot \
   --universe-version v1 \
   --start 2026-09-01T00:00:00Z \
@@ -263,7 +263,7 @@ against previously cached archives without invoking this tool.
 ```bash
 python -m market_analysis.binance_historical_download \
   --archive-root /path/to/binance-public-data \
-  --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT DOGEUSDT \
+  --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT \
   --universe-id research-pilot \
   --universe-version v1 \
   --start 2026-08-01T00:00:00Z \
