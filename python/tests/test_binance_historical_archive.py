@@ -1,6 +1,7 @@
 """Generated local-archive fixtures for the Binance USD-M Part 2 adapter."""
 
 import csv
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -14,18 +15,25 @@ from market_analysis.binance_historical_archive import (
     ARCHIVE_FIRST_SEEN_POLICY, ARCHIVE_SOURCE_STATE_POLICY,
     BINANCE_ARCHIVE_ADAPTER_VERSION, BINANCE_ARCHIVE_DATASET_VERSION,
     BinanceArchiveCoverageError, BinanceUSDMArchiveRequest,
-    _AGG_HEADER, _KLINE_HEADER, _agg_row, _archive_rows, _checksum, _kline_row,
+    _AGG_HEADER, _KLINE_HEADER, _agg_row, _archive_rows, _check_ohlc_movement_parity,
+    _checksum, _kline_row,
     daily_aggtrades_checksum_relative_path, daily_aggtrades_relative_path,
     daily_kline_checksum_relative_path, daily_kline_relative_path,
     historical_candle_start_ms, load_binance_usdm_historical_replay_dataset,
     required_aggtrade_dates, required_kline_dates,
 )
+from market_analysis import historical_experiment_batch as batch
 from market_analysis.experiments.market_state_common import validate_experiment_points
+from market_analysis.historical_ohlc_evidence import (
+    BinanceTradeOHLCEvidence, OHLC_AVAILABILITY_BASIS,
+)
 from market_analysis.historical_replay import (
     HistoricalReplayConfig, ReplayPartitionPlan, run_historical_market_replay,
     to_market_state_experiment_points,
 )
 from market_analysis.movement_metrics import MarketMovementConfig, MarketUniverseInput
+from market_analysis.market_episode_lifecycle import MarketEpisodeLifecycleConfig
+from market_analysis.movement_classifier import MarketClassifierConfig
 
 
 SYMBOL = "BTCUSDT"
@@ -271,13 +279,32 @@ class BinanceHistoricalArchiveTests(unittest.TestCase):
             self.assertEqual(_archive_rows(root, relative, _KLINE_HEADER,
                                            _kline_row, day), headerless)
             request = _single_day_bundle(root, klines=(row,))
-            candle = load_binance_usdm_historical_replay_dataset(request).replay_request.candles[0]
+            dataset = load_binance_usdm_historical_replay_dataset(request)
+            candle = dataset.replay_request.candles[0]
+            ohlc = dataset.ohlc_evidence.candles[0]
             self.assertEqual(candle.open_time_ms, opening)
             self.assertEqual(candle.close, Decimal("101"))
             self.assertEqual(candle.volume, Decimal("2"))
             self.assertEqual(candle.quote_volume, Decimal("202"))
             self.assertEqual(candle.first_seen_at_ms, opening + MINUTE)
             self.assertEqual(candle.first_seen_at_ms, int(row[6]) + 1)
+            self.assertEqual((ohlc.open, ohlc.high, ohlc.low, ohlc.close),
+                             tuple(Decimal(value) for value in row[1:5]))
+            self.assertEqual(ohlc.instrument_id, "binance-usdm:BTCUSDT")
+            self.assertEqual(ohlc.availability_basis, OHLC_AVAILABILITY_BASIS)
+            self.assertEqual((ohlc.symbol, ohlc.open_time_ms, ohlc.close,
+                              ohlc.first_seen_at_ms),
+                             (candle.symbol, candle.open_time_ms, candle.close,
+                              candle.first_seen_at_ms))
+            self.assertEqual(dataset.ohlc_evidence.dataset_content_sha256,
+                             dataset.archive_manifest.content_sha256)
+            self.assertEqual(dataset.ohlc_evidence.as_of(
+                SYMBOL, "1m", opening + MINUTE - 5_000).candles, ())
+            self.assertEqual(dataset.ohlc_evidence.as_of(
+                SYMBOL, "1m", opening + MINUTE).candles[-1].candle, ohlc)
+            with self.assertRaisesRegex(ValueError, "disagrees"):
+                _check_ohlc_movement_parity(ohlc,
+                    replace(candle, close=Decimal("100")))
         for index, value in ((0, str(opening + 1)), (0, str(_ms(day=21))),
                              (6, str(opening + MINUTE)), (5, "-1"),
                              (7, "-1"), (2, "98"), (1, "103"), (4, "103")):
@@ -327,6 +354,9 @@ class BinanceHistoricalArchiveTests(unittest.TestCase):
             self.assertEqual(dataset.diagnostics.kline_row_count, 4)
             self.assertEqual(len(dataset.replay_request.trades), 1)
             self.assertEqual(tuple(candle.open_time_ms for candle in dataset.replay_request.candles),
+                             (first_open, first_open + MINUTE,
+                              first_open + 3 * MINUTE))
+            self.assertEqual(tuple(candle.open_time_ms for candle in dataset.ohlc_evidence.candles),
                              (first_open, first_open + MINUTE,
                               first_open + 3 * MINUTE))
             self.assertEqual(dataset.diagnostics.missing_kline_minute_count, 1)
@@ -412,11 +442,28 @@ class BinanceHistoricalArchiveTests(unittest.TestCase):
             self.assertEqual(len(replay.points), 4)
             self.assertEqual(replay.manifest.dataset_content_sha256,
                              dataset.archive_manifest.content_sha256)
+            self.assertEqual(dataset.ohlc_evidence.dataset_content_sha256,
+                             replay.manifest.dataset_content_sha256)
             start = dataset.replay_request.config.output_start_boundary_time_ms
             points = to_market_state_experiment_points(
                 replay, ReplayPartitionPlan(start + 5_000, start + 10_000))
             validate_experiment_points(points)
             self.assertEqual(len(points), len(replay.points))
+            original = batch._suite_manifest(
+                replay, dataset, ReplayPartitionPlan(start + 5_000, start + 10_000),
+                points, MarketClassifierConfig(), MarketEpisodeLifecycleConfig())
+            altered = replace(dataset, ohlc_evidence=BinanceTradeOHLCEvidence(
+                dataset.archive_manifest.dataset_id,
+                dataset.archive_manifest.dataset_version,
+                dataset.archive_manifest.content_sha256,
+                dataset.replay_request.universe.symbols, ()))
+            self.assertNotEqual(dataset.ohlc_evidence.evidence_sha256,
+                                altered.ohlc_evidence.evidence_sha256)
+            self.assertEqual(dataset.replay_request, altered.replay_request)
+            self.assertEqual(run_historical_market_replay(altered.replay_request), replay)
+            self.assertEqual(original, batch._suite_manifest(
+                replay, altered, ReplayPartitionPlan(start + 5_000, start + 10_000),
+                points, MarketClassifierConfig(), MarketEpisodeLifecycleConfig()))
 
 
 if __name__ == "__main__":
