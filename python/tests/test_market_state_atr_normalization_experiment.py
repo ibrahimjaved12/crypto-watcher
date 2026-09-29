@@ -1,6 +1,6 @@
 """Focused EXP-75-06B timing, range, provenance, and identity fixtures."""
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
 import math
 from types import SimpleNamespace
@@ -15,7 +15,9 @@ from market_analysis.experiments.market_state_atr_normalization import (
     _validate_inputs,
 )
 from market_analysis.experiments.market_state_common import MarketStateExperimentPoint
-from market_analysis.historical_atr_extension import _manifest
+from market_analysis.historical_atr_extension import (
+    _candidate_output_sha256, _manifest,
+)
 from market_analysis.historical_experiment_batch import (
     EXPERIMENT_SUITE_V1, experiment_stream_sha256,
 )
@@ -38,6 +40,63 @@ from market_analysis.movement_metrics import (
 MINUTE = 60_000
 SYMBOL = "BTCUSDT"
 DATASET_SHA = "a" * 64
+
+
+@dataclass(frozen=True)
+class _DigestWindow:
+    symbols: tuple
+    breadth: tuple
+    aggregates: tuple
+    other_fields: tuple
+
+
+@dataclass(frozen=True)
+class _DigestEvaluation:
+    windows: tuple
+    metadata: tuple
+
+
+@dataclass(frozen=True)
+class _DigestClassification:
+    windows: tuple
+    metadata: tuple
+
+
+@dataclass(frozen=True)
+class _DigestPoint:
+    evaluation_boundary_time_ms: int
+    partition: str
+    symbol_evidence: tuple
+    candidate_evaluation: _DigestEvaluation
+    candidate_classification: _DigestClassification
+    candidate_lifecycle_state: tuple
+    candidate_transitions: tuple
+
+
+@dataclass(frozen=True)
+class _DigestResult:
+    paired_points: tuple[_DigestPoint, ...]
+
+
+def _digest_result(*, rising_breadth=2, lifecycle_state="inactive"):
+    window = _DigestWindow(
+        symbols=(("BTCUSDT", True, 0.5, "RISING"),),
+        breadth=(rising_breadth, 1.0),
+        aggregates=(("median", 0.5),),
+        other_fields=(("eligible_count", 1),),
+    )
+    return _DigestResult((
+        _DigestPoint(
+            5_000, "development", (),
+            _DigestEvaluation(((1, window),), (("algorithm_version", "atr-v1"),)),
+            _DigestClassification(
+                ((1, (("direction_state", "BROAD_RISE"),
+                      ("outlier_count", 0))),),
+                (("classifier_version", "classifier-v1"),),
+            ),
+            (("state", lifecycle_state),), (),
+        ),
+    ))
 
 
 def _candle(index, *, high="101", low="99", close="100",
@@ -103,6 +162,19 @@ def _point(boundary=31 * MINUTE + 5_000):
 
 
 class ATRRangeEvidenceTests(unittest.TestCase):
+    def test_complete_candidate_output_digest_is_stable_and_covers_breadth(self):
+        first = _digest_result()
+        self.assertEqual(_candidate_output_sha256(first),
+                         _candidate_output_sha256(first))
+        self.assertNotEqual(
+            _candidate_output_sha256(first),
+            _candidate_output_sha256(_digest_result(rising_breadth=3)),
+        )
+        self.assertNotEqual(
+            _candidate_output_sha256(first),
+            _candidate_output_sha256(_digest_result(lifecycle_state="active")),
+        )
+
     def test_true_range_uses_previous_close_across_price_gap(self):
         candles = (
             _candle(0, high="100", low="100"),

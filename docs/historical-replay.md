@@ -190,7 +190,11 @@ The extension has its own suite and report versions. Its scientific fingerprint
 binds dataset ID/version/SHA, OHLC evidence version/SHA and availability basis,
 ordered universe, replay and exported-stream fingerprints, partition cutoffs,
 classifier/lifecycle configurations, and 06A/06B config identities. A separate
-digest binds chronological 06B output evidence. The compact report records
+`candidate_output_sha256` binds the complete chronological 06B output at every
+point: all candidate evaluation windows (including symbol rows, breadth,
+aggregates, and other fields), all classification fields, lifecycle state, and
+transitions. It uses the canonical report serializer and remains a result
+digest separate from the extension input identity. The compact report records
 per-partition availability reasons, ATR and calibrated scales, 06A RMS,
 individual and common-ready coverage, score/breadth/outlier/state differences,
 and lifecycle/onset summaries calculated from each complete chronological

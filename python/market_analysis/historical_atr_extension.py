@@ -386,16 +386,12 @@ def _candidate_output_sha256(atr_result) -> str:
             "boundary": point.evaluation_boundary_time_ms,
             "partition": point.partition,
             "symbol_evidence": point.symbol_evidence,
-            "candidate_scores": tuple(
-                (minute, tuple((item.symbol, item.included, item.normalized_z,
-                                item.direction, item.outlier_candidate)
-                               for item in point.candidate_evaluation.windows[minute].symbols))
-                for minute in WINDOWS
-            ),
-            "candidate_direction_states": tuple(
-                (minute, point.candidate_classification.windows[minute].direction_state)
-                for minute in WINDOWS
-            ),
+            # These immutable canonical values include every evaluation window
+            # (symbols, breadth, aggregates, and metadata), every classification
+            # field, and the complete resulting lifecycle state.
+            "candidate_evaluation": point.candidate_evaluation,
+            "candidate_classification": point.candidate_classification,
+            "candidate_lifecycle_state": point.candidate_lifecycle_state,
             "candidate_transitions": point.candidate_transitions,
         }
         digest.update((_canonical_json(payload) + "\n").encode("utf-8"))
