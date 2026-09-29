@@ -176,6 +176,60 @@ parameter tuning. The CLI flushes archive, replay, coarse boundary, experiment
 unless given a progress callback. Timing and progress stay out of reports and
 all scientific fingerprints.
 
+## EXP-75-06B: separate ATR historical extension
+
+The historical ATR extension loads one verified archive, performs one canonical
+market replay, and exports one partitioned point stream. Its library runner
+accepts those already prepared objects for later shared orchestration. A single
+strict-visibility OHLC cursor supplies 30, 60, and 120-minute ATR-SMA
+configurations; matching 06A configurations run on the same point tuple for
+V1/06A/06B comparisons. The fixed 28-run batch above is unchanged and does not
+include 06B.
+
+The extension has its own suite and report versions. Its scientific fingerprint
+binds dataset ID/version/SHA, OHLC evidence version/SHA and availability basis,
+ordered universe, replay and exported-stream fingerprints, partition cutoffs,
+classifier/lifecycle configurations, and 06A/06B config identities. A separate
+`candidate_output_sha256` binds the complete chronological 06B output at every
+point: all candidate evaluation windows (including symbol rows, breadth,
+aggregates, and other fields), all classification fields, lifecycle state, and
+transitions. It uses the canonical report serializer and remains a result
+digest separate from the extension input identity. The compact report records
+per-partition availability reasons, ATR and calibrated scales, 06A RMS,
+individual and common-ready coverage, score/breadth/outlier/state differences,
+and lifecycle/onset summaries calculated from each complete chronological
+branch. It does not serialize all paired points or rank a candidate.
+Code revision appears in report metadata and the final report SHA, while the
+scientific fingerprint excludes it.
+
+```bash
+python -m market_analysis.historical_atr_extension \
+  --archive-root /path/to/binance-public-data \
+  --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT \
+  --universe-id research-pilot \
+  --universe-version v1 \
+  --start 2026-09-01T00:00:00Z \
+  --end 2026-09-01T12:00:00Z \
+  --development-end 2026-09-01T06:00:00Z \
+  --validation-end 2026-09-01T09:00:00Z \
+  --output-json atr-extension.json
+```
+
+The CLI uses the canonical V1 movement configuration, explicit UTC five-second
+boundaries, and the verified local archive loader. It records the current Git
+HEAD as code revision by default; --code-revision can supply the exact revision
+for a packaged checkout. Existing report files require --overwrite and are
+written atomically. No network acquisition is performed.
+The example uses five symbols because canonical V1 requires at least five
+eligible symbols for market-wide classification.
+
+ATR uses archive candles only when first_seen_at_ms is strictly before the
+evaluation boundary and the candle minute ended strictly before that boundary.
+Archive first-seen time is an exchange completion-time surrogate, not actual
+historical network receipt. 06B may warm from pre-output archive OHLC; 06A
+starts cold at the first output point. One 12-hour pilot and agreement with V1
+cannot establish prediction or trading profitability.
+
 ## Part 4: official archive acquisition and cache
 
 `binance_historical_download.py` explicitly fetches the exact daily USD-M
@@ -209,7 +263,7 @@ against previously cached archives without invoking this tool.
 ```bash
 python -m market_analysis.binance_historical_download \
   --archive-root /path/to/binance-public-data \
-  --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT DOGEUSDT \
+  --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT \
   --universe-id research-pilot \
   --universe-version v1 \
   --start 2026-08-01T00:00:00Z \

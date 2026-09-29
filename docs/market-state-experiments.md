@@ -6,10 +6,10 @@ The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
 **EXP-75-03 Kalman/state-space**, **EXP-75-04A offline PELT**,
 **EXP-75-04B online Bayesian change-point detection**, and
 **EXP-75-05 regression-slope acceleration**, **EXP-75-06A realized-volatility
-normalization**, **EXP-75-07 PCA/common-factor diagnostics**, **EXP-75-08
+normalization**, **EXP-75-06B ATR-SMA normalization**, **EXP-75-07
+PCA/common-factor diagnostics**, **EXP-75-08
 correlation, clustering, and network diagnostics**, and **EXP-75-09 Gaussian HMM
-learned-regime diagnostics**. EXP-75-06B and EXP-75-10 through EXP-75-12 remain
-unimplemented.
+learned-regime diagnostics**. EXP-75-10 through EXP-75-12 remain unimplemented.
 
 ## EXP-75-01 — EWMA aggregate smoothing
 
@@ -227,12 +227,50 @@ unimplemented.
 
 ## EXP-75-06B — ATR / range normalization
 
-- **Status:** `NOT_IMPLEMENTED`
-- **Input/data prerequisite:** ATR requires causal replay inputs containing
-  actual OHLC/range evidence, including high, low, and previous-close semantics.
-  `MarketStateExperimentPoint` contains canonical #71 evaluations, not the raw
-  OHLC sequence required for ATR. High/low must not be inferred from close
-  prices or rolling returns.
+- **Status:** Implemented in the separate historical ATR extension suite. The
+  original 28-run suite and its identities are unchanged.
+- **Frozen hypothesis:** Actual completed Binance USD-M trade-price 1m ranges
+  provide a different causal scale from 06A's close-to-close RMS. The three
+  fixed lookbacks are 30, 60, and 120 valid true ranges. No lookback is tuned
+  or promoted from the pilot.
+- **True range:** For each candle with an eligible immediately preceding minute,
+  TR = max(high-low, abs(high-previous_close), abs(low-previous_close)) in price
+  units. A missing or not-yet-visible previous close makes that TR unavailable;
+  a zero TR is a valid sample. Require the newest expected minute and N
+  consecutive TRs, hence N+1 adjacent available candles. Do not bridge gaps
+  or carry an older ATR across a missing newest minute.
+- **Estimator:** ATR_SMA_N = mean(last N TRs),
+  relative_ATR_N = ATR_SMA_N / latest_eligible_close, and
+  scale_(N,w) = sqrt(pi/8) * relative_ATR_N * sqrt(w) for w=1,5,15.
+  The candidate score is
+  (V1_current_log_return_w - V1_historical_median_w) / scale_(N,w).
+  The fixed sqrt(pi/8) is an ideal-diffusion range calibration assumption,
+  not a fitted constant. The candidate has no V1 MAD multiplier. Its versioned
+  config specifies SMA, divisor, calibration, horizon scaling, 50-digit Decimal
+  division, and strict timing. This is neither Wilder smoothing nor a
+  Parkinson estimator.
+- **Causal timing:** At boundary t, every candle and its preceding close must
+  have first_seen_at_ms < t. The candle whose minute completes exactly at t
+  is excluded. The newest permitted minute end is
+  floor((t-1 ms)/60,000 ms) * 60,000 ms. Pre-output archive candles may warm
+  06B, and ATR history continues across research partitions. An older candle
+  becoming visible later can change later snapshots only.
+- **What changes:** The score, direction/material flags, outliers, breadth,
+  aggregates, classification, and independent episode lifecycle. V1 returns,
+  historical center, thresholds, source-time evidence, included universe,
+  classifier settings, and lifecycle rules are reused. The OHLC evidence stays
+  separate from replay and experiment-point identities.
+- **Availability diagnostics:** Missing latest minute, latest not yet visible,
+  missing adjacent minute, preceding close not yet visible, insufficient
+  history, zero scale, numerical scale failure, and missing V1 numerator/center
+  have separate reasons. Reports include raw and relative ATR, calibrated
+  scales, 06A RMS, coverage and a V1/06A/06B common-ready intersection, score,
+  breadth, outlier and state differences, and full-stream episode/onset
+  comparisons. 06A starts cold at the output interval; 06B can use causal
+  pre-output candles.
+- **Limitation:** Archive first-seen time is an exchange completion-time
+  surrogate, not historical network receipt. V1 agreement or one 12-hour
+  pilot cannot establish prediction or trading profitability.
 
 ## EXP-75-07 — PCA/common factor
 
