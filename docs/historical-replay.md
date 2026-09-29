@@ -94,6 +94,37 @@ ready-to-run `HistoricalReplayRequest`; pass that request directly to
 `run_historical_market_replay`, then optionally export chronological Issue #75
 points with `to_market_state_experiment_points`.
 
+## Auxiliary completed OHLC evidence for later ATR research (#111)
+
+The same verified Part 2 kline load also retains immutable Binance USD-M
+**trade-price** 1m open/high/low/close rows in `dataset.ohlc_evidence`. Each
+finalized row carries its symbol and instrument, exact open/close timestamps,
+Decimal prices, and `first_seen_at_ms = close_time_ms + 1`. The
+`exchange-close-time-surrogate` basis is a deterministic archive replay
+assumption, **not proof of actual historical network receipt**. The collection
+has its own version and SHA-256 over sorted rows and the verified dataset
+identity. Its digest is auxiliary: legacy replay, batch, and experiment hashes
+do not include it.
+
+Use `dataset.ohlc_evidence.as_of(symbol, "1m", t, limit=20)` with `t` taken
+from a replay point's `evaluation_boundary_time_ms` to obtain candles in
+open-time order. The query requires both completion and first-seen availability
+by the point's boundary `t`, without
+adding the movement replay's finalization grace. At 10:05:00, the 10:04
+candle first seen at 10:05:00 is available to this OHLC query; an older
+candle first seen at 10:05:01 is not, even though movement replay may process
+the 10:05:00 boundary at 10:05:02. Canonical #71 historical normalization
+also keeps its separate strict-prior rule and excludes a candle ending at
+`t` from its reference samples.
+
+Each returned candle includes the immediately preceding minute's close when
+that exact minute is present, finalized, and available by `t`. Otherwise it
+reports `MISSING_PRECEDING_MINUTE` or `PRECEDING_NOT_YET_AVAILABLE`; gaps are
+never bridged. An empty query reports `NO_AVAILABLE_CANDLE`. The latest
+candle's timestamps remain visible for a future consumer to assess age, with
+no stale threshold or ATR calculation defined here. The result exposes the
+verified dataset SHA so a consumer can compare it with the replay manifest.
+
 ## Part 3: fixed historical experiment batch
 
 `historical_experiment_batch.py` loads one verified Part 2 dataset, runs Part 1

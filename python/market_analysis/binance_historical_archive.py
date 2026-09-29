@@ -24,6 +24,9 @@ from .historical_replay import (
     HistoricalReplayRequest, HistoricalReplaySourceInterval,
     HistoricalReplayTrade,
 )
+from .historical_ohlc_evidence import (
+    BinanceTradeOHLCEvidence, CompletedTradeOHLCCandle,
+)
 from .movement import MovementBucketEngine
 from .movement_history import MINUTE_MS
 from .movement_metrics import MarketUniverseInput, WINDOWS
@@ -197,6 +200,35 @@ class BinanceHistoricalReplayDataset:
     archive_manifest: BinanceArchiveBundleManifest
     replay_request: HistoricalReplayRequest
     diagnostics: BinanceArchiveDiagnostics
+    ohlc_evidence: BinanceTradeOHLCEvidence
+
+    def __post_init__(self):
+        archive_identity = (
+            self.archive_manifest.dataset_id,
+            self.archive_manifest.dataset_version,
+            self.archive_manifest.content_sha256,
+        )
+        replay_identity = (
+            self.replay_request.dataset.dataset_id,
+            self.replay_request.dataset.dataset_version,
+            self.replay_request.dataset.content_sha256,
+        )
+        ohlc_identity = (
+            self.ohlc_evidence.dataset_id,
+            self.ohlc_evidence.dataset_version,
+            self.ohlc_evidence.dataset_content_sha256,
+        )
+        if ohlc_identity != archive_identity or ohlc_identity != replay_identity:
+            raise ValueError(
+                "OHLC evidence dataset identity must match the archive manifest "
+                "and replay request dataset"
+            )
+        if (self.ohlc_evidence.configured_symbols
+                != self.replay_request.universe.symbols):
+            raise ValueError(
+                "OHLC evidence configured symbols must match replay universe "
+                "symbols in order"
+            )
 
 
 @dataclass(frozen=True)
@@ -378,6 +410,14 @@ def _content_sha256(files: tuple[BinanceArchiveFileIdentity, ...]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _check_ohlc_movement_parity(ohlc: CompletedTradeOHLCCandle,
+                                movement: HistoricalReplayMovementCandle) -> None:
+    if ((ohlc.symbol, ohlc.open_time_ms, ohlc.close, ohlc.first_seen_at_ms)
+            != (movement.symbol, movement.open_time_ms, movement.close,
+                movement.first_seen_at_ms)):
+        raise ValueError("OHLC evidence disagrees with the close-only movement candle")
+
+
 def load_binance_usdm_historical_replay_dataset(
     request: BinanceUSDMArchiveRequest,
 ) -> BinanceHistoricalReplayDataset:
@@ -391,6 +431,7 @@ def load_binance_usdm_historical_replay_dataset(
     files = []
     trades = []
     candles = []
+    ohlc_candles = []
     gap_symbols = []
     missing_minutes = duplicate_trades = trade_rows = kline_rows = 0
     earliest_trade = latest_trade = earliest_kline = latest_kline = None
@@ -450,15 +491,24 @@ def load_binance_usdm_historical_replay_dataset(
         for opening in openings:
             row = kline_by_open[opening]
             if candle_start <= opening <= config.output_end_boundary_time_ms:
-                candles.append(HistoricalReplayMovementCandle(
+                movement = HistoricalReplayMovementCandle(
                     symbol, opening, row.close, row.volume, row.quote_volume,
-                    row.close_time_ms + 1))
+                    row.close_time_ms + 1)
+                ohlc = CompletedTradeOHLCCandle(
+                    symbol, f"binance-usdm:{symbol}", opening, row.close_time_ms,
+                    row.open, row.high, row.low, row.close, row.close_time_ms + 1)
+                _check_ohlc_movement_parity(ohlc, movement)
+                candles.append(movement)
+                ohlc_candles.append(ohlc)
     sorted_files = tuple(sorted(files, key=lambda item: item.relative_path))
     content_sha256 = _content_sha256(sorted_files)
     manifest = BinanceArchiveBundleManifest(
         BINANCE_ARCHIVE_ADAPTER_VERSION, BINANCE_ARCHIVE_DATASET_ID,
         BINANCE_ARCHIVE_DATASET_VERSION, ARCHIVE_FIRST_SEEN_POLICY,
         ARCHIVE_SOURCE_STATE_POLICY, sorted_files, content_sha256)
+    ohlc_evidence = BinanceTradeOHLCEvidence(
+        BINANCE_ARCHIVE_DATASET_ID, BINANCE_ARCHIVE_DATASET_VERSION,
+        content_sha256, request.universe.symbols, tuple(ohlc_candles))
     instruments = tuple(HistoricalReplayInstrument(
         symbol, f"binance-usdm:{symbol}", True) for symbol in request.universe.symbols)
     intervals = tuple(HistoricalReplaySourceInterval(
@@ -474,4 +524,5 @@ def load_binance_usdm_historical_replay_dataset(
         duplicate_trades, missing_minutes, tuple(gap_symbols),
         earliest_trade, latest_trade, earliest_kline, latest_kline,
     )
-    return BinanceHistoricalReplayDataset(manifest, replay_request, diagnostics)
+    return BinanceHistoricalReplayDataset(
+        manifest, replay_request, diagnostics, ohlc_evidence)
