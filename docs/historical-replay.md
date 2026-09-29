@@ -27,6 +27,12 @@ first-seen time. Canonical `build_historical_window_inputs` retains its strict
 prior rule: a candle ending at or after evaluation `t` cannot enter `t`'s
 historical reference distribution. Canonical `calculate_market_movement` then
 produces #71 evidence from the finalized buckets and visible candle history.
+Replay keeps a per-symbol cache of the shared builder's result for one run.
+Reuse requires both an unchanged visible-candle generation and unchanged
+aligned eligible end ranges for 1m, 5m, and 15m under the exact lookback and
+strict-prior rules. Newly visible candles, including late older minutes, and
+lookback or strict-prior transitions cause the shared builder to run again.
+This cache has no wall-clock expiry and does not change replay identity.
 
 A run fingerprint hashes the dataset manifest, fixed universe and instrument
 contract, movement version and parameters, output interval, grace, and replay
@@ -134,7 +140,10 @@ symbol order is preserved. The CLI emits only canonical JSON plus one newline
 to stdout when no file is specified. File output uses an fsynced temporary
 sibling and atomic replacement. An existing report requires `--overwrite`.
 The complete suite is fixed; the CLI offers no experiment filtering or
-parameter tuning.
+parameter tuning. The CLI flushes archive, replay, coarse boundary, experiment
+`N/28`, and elapsed-time progress to stderr. Direct library calls remain quiet
+unless given a progress callback. Timing and progress stay out of reports and
+all scientific fingerprints.
 
 ## Part 4: official archive acquisition and cache
 

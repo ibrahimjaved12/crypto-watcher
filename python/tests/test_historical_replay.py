@@ -3,7 +3,9 @@
 from dataclasses import replace
 from decimal import Decimal
 import unittest
+from unittest.mock import patch
 
+from market_analysis import historical_replay as replay_module
 from market_analysis.experiments.market_state_common import validate_experiment_points
 from market_analysis.historical_replay import (
     HISTORICAL_REPLAY_ALGORITHM_VERSION, HISTORICAL_REPLAY_POLICY_VERSION,
@@ -17,7 +19,9 @@ from market_analysis.movement import (
     BUCKET_INTERVAL_MS, MAX_LAST_TRADE_AGE_MS, WINDOW_BUCKETS,
     MarketObservation, MovementBucketEngine,
 )
-from market_analysis.movement_history import build_historical_window_inputs
+from market_analysis.movement_history import (
+    CompletedMovementCandle, build_historical_window_inputs,
+)
 from market_analysis.movement_metrics import (
     MarketMovementConfig, MarketMovementInput, MarketMovementSymbolInput,
     MarketUniverseInput, WINDOWS, calculate_market_movement,
@@ -69,6 +73,114 @@ def _request(*, symbols=(SYMBOL,), trades=None, candles=(), intervals=None,
 
 
 class HistoricalReplayTests(unittest.TestCase):
+    def test_historical_cache_strict_prior_and_lookback_expiry(self):
+        minute = 60_000
+        config = MarketMovementConfig(
+            historical_lookback_ms=65_000,
+            minimum_historical_coverage_ms=minute)
+        candles = [CompletedMovementCandle(
+            OUTPUT - offset * minute, Decimal(str(110 - offset)),
+            Decimal("2"), Decimal("200")) for offset in (3, 2, 1)]
+        boundaries = (OUTPUT, OUTPUT + 5_000, OUTPUT + 10_000,
+                      OUTPUT + 15_000)
+        expected = tuple(build_historical_window_inputs(candles, boundary, config)
+                         for boundary in boundaries)
+        cache = replay_module._ReplayHistoricalInputCache()
+        with patch.object(replay_module, "build_historical_window_inputs",
+                          wraps=build_historical_window_inputs) as builder:
+            actual = tuple(cache.get(SYMBOL, candles, boundary, config, 0)
+                           for boundary in boundaries)
+            other_symbol = cache.get("ETHUSDT", candles, boundaries[-1], config, 0)
+        self.assertEqual(actual, expected)
+        self.assertEqual(builder.call_count, 4)
+        self.assertIs(actual[2], actual[3])
+        self.assertEqual(other_symbol, actual[-1])
+        self.assertIsNot(other_symbol, actual[-1])
+        self.assertNotEqual(actual[0], actual[1])  # end == OUTPUT enters at +5s
+        self.assertNotEqual(actual[1], actual[2])  # older sample expires at +10s
+
+    def test_historical_cache_visible_generation_and_gap_restoration(self):
+        minute = 60_000
+        config = MarketMovementConfig(
+            historical_lookback_ms=10 * minute,
+            minimum_historical_coverage_ms=minute)
+        def candle(offset, close):
+            return CompletedMovementCandle(
+                OUTPUT - offset * minute, Decimal(str(close)),
+                Decimal("2"), Decimal("200"))
+        visible = [candle(5, 100), candle(4, 101),
+                   candle(2, 103), candle(1, 104)]
+        boundary = OUTPUT + 5_000
+        cache = replay_module._ReplayHistoricalInputCache()
+        with patch.object(replay_module, "build_historical_window_inputs",
+                          wraps=build_historical_window_inputs) as builder:
+            gapped = cache.get(SYMBOL, visible, boundary, config, 4)
+            self.assertIs(gapped, cache.get(SYMBOL, visible, boundary + 5_000,
+                                            config, 4))
+            visible.append(candle(3, 102))  # older minute arrives after newer ones
+            restored = cache.get(SYMBOL, visible, boundary + 10_000, config, 5)
+            self.assertEqual(builder.call_count, 2)
+            self.assertEqual(restored, build_historical_window_inputs(
+                visible, boundary + 10_000, config))
+            self.assertNotEqual(gapped, restored)
+            next_minute = OUTPUT + minute + 5_000
+            before_new = cache.get(SYMBOL, visible, next_minute, config, 5)
+            visible.append(CompletedMovementCandle(
+                OUTPUT, Decimal("106"), Decimal("2"), Decimal("200")))
+            extended = cache.get(SYMBOL, visible, next_minute, config, 6)
+            self.assertEqual(builder.call_count, 4)
+            self.assertEqual(extended, build_historical_window_inputs(
+                visible, next_minute, config))
+            self.assertNotEqual(before_new, extended)
+
+    def test_cached_replay_matches_direct_builder_with_late_candles(self):
+        minute = 60_000
+        end = OUTPUT + minute + 10_000
+        config = MarketMovementConfig(
+            historical_lookback_ms=10 * minute,
+            minimum_historical_coverage_ms=minute)
+        warm_trades = tuple(_trade(
+            boundary, trade_id=index + 1, price=str(100 + index % 4))
+            for index, boundary in enumerate(range(ENGINE_START, end + 1, 15_000)))
+        candles = tuple(_candle(OUTPUT - offset * minute, str(110 - offset))
+                        for offset in (5, 4, 2, 1)) + (
+            _candle(OUTPUT - 3 * minute, "107", first_seen=OUTPUT + 7_000),
+            _candle(OUTPUT, "112", first_seen=OUTPUT + minute),
+        )
+        request = _request(trades=warm_trades, candles=candles,
+                           movement_config=config, end=end)
+        progress = []
+        with patch.object(replay_module, "build_historical_window_inputs",
+                          wraps=build_historical_window_inputs) as builder:
+            optimized = run_historical_market_replay(
+                request, progress_callback=lambda completed, total:
+                progress.append((completed, total)))
+            optimized_builder_calls = builder.call_count
+
+        class DirectBuilder:
+            def get(self, _symbol, visible, boundary, movement_config, _generation):
+                return build_historical_window_inputs(
+                    visible, boundary, movement_config)
+
+        with patch.object(replay_module, "_ReplayHistoricalInputCache", DirectBuilder):
+            direct = run_historical_market_replay(request)
+        self.assertEqual(optimized, direct)
+        self.assertEqual(tuple(point.movement_evaluation for point in optimized.points),
+                         tuple(point.movement_evaluation for point in direct.points))
+        self.assertLess(optimized_builder_calls, len(optimized.points))
+        self.assertEqual(progress[-1], (len(optimized.points), len(optimized.points)))
+        self.assertLessEqual(len(progress), 20)
+
+        changed_history = replace(request, candles=candles[:-2] + candles[-1:])
+        changed_config = replace(request, config=replace(
+            request.config, movement_config=replace(
+                config, historical_lookback_ms=9 * minute)))
+        for changed in (changed_history, changed_config):
+            optimized_changed = run_historical_market_replay(changed)
+            with patch.object(replay_module, "_ReplayHistoricalInputCache", DirectBuilder):
+                direct_changed = run_historical_market_replay(changed)
+            self.assertEqual(optimized_changed, direct_changed)
+
     def test_exact_grace_right_closed_future_and_late_trade(self):
         early = _trade(OUTPUT, first_seen=OUTPUT + 1_999, trade_id=101,
                        price="101")

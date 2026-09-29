@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import time
 from types import MappingProxyType
 from typing import Any, Callable
 
@@ -352,16 +353,34 @@ def _run_report(descriptor, result, batch_run_fingerprint):
 
 def run_historical_experiment_batch(
     request: HistoricalExperimentBatchRequest,
+    *,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> HistoricalExperimentBatchReport:
     """Load once, replay once, export once, then run all 28 configs in order."""
     if not isinstance(request, HistoricalExperimentBatchRequest):
         raise ValueError("request must be HistoricalExperimentBatchRequest")
+    total_started = time.perf_counter() if progress_callback is not None else None
     classifier_config = MarketClassifierConfig()
     lifecycle_config = MarketEpisodeLifecycleConfig()
+    if progress_callback is not None:
+        progress_callback("Archive load: start")
+        stage_started = time.perf_counter()
     archive_dataset = load_binance_usdm_historical_replay_dataset(
         BinanceUSDMArchiveRequest(request.archive_root, request.universe,
                                   request.replay_config))
-    replay_result = run_historical_market_replay(archive_dataset.replay_request)
+    if progress_callback is not None:
+        progress_callback(f"Archive load: complete ({time.perf_counter() - stage_started:.1f}s)")
+        progress_callback("Replay: start")
+        stage_started = time.perf_counter()
+
+        def replay_progress(completed: int, total: int) -> None:
+            progress_callback(
+                f"Replay: {completed}/{total} boundaries ({completed * 100 // total}%)")
+    replay_result = run_historical_market_replay(
+        archive_dataset.replay_request,
+        progress_callback=replay_progress if progress_callback is not None else None)
+    if progress_callback is not None:
+        progress_callback(f"Replay: complete ({time.perf_counter() - stage_started:.1f}s)")
     experiment_points = to_market_state_experiment_points(
         replay_result, request.partition_plan)
     validate_experiment_points(experiment_points)
@@ -369,7 +388,12 @@ def run_historical_experiment_batch(
                                request.partition_plan, experiment_points,
                                classifier_config, lifecycle_config)
     run_reports = []
-    for descriptor in EXPERIMENT_SUITE_V1:
+    for index, descriptor in enumerate(EXPERIMENT_SUITE_V1, start=1):
+        if progress_callback is not None:
+            label = (f"Experiment {index}/{len(EXPERIMENT_SUITE_V1)} "
+                     f"{descriptor.experiment_id} {descriptor.config_version}")
+            progress_callback(f"{label}: start")
+            stage_started = time.perf_counter()
         result = descriptor.runner(
             experiment_points, descriptor.config,
             classifier_config=classifier_config,
@@ -377,14 +401,19 @@ def run_historical_experiment_batch(
         )
         run_reports.append(_run_report(descriptor, result,
                                        manifest.batch_run_fingerprint))
+        if progress_callback is not None:
+            progress_callback(f"{label}: complete ({time.perf_counter() - stage_started:.1f}s)")
         del result
     report = HistoricalExperimentBatchReport(
         manifest, archive_dataset.archive_manifest, archive_dataset.diagnostics,
         replay_result.manifest, replay_result.diagnostics,
         len(run_reports), tuple(run_reports), request.code_revision, "")
-    return replace(report, report_sha256=_sha256(
+    finished = replace(report, report_sha256=_sha256(
         {key: value for key, value in report_json_safe(report).items()
          if key != "report_sha256"}))
+    if progress_callback is not None:
+        progress_callback(f"Batch: complete ({time.perf_counter() - total_started:.1f}s total)")
+    return finished
 
 
 def historical_experiment_report_to_json(report: HistoricalExperimentBatchReport) -> str:
@@ -455,6 +484,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.output_json is not None and args.output_json.exists() and not args.overwrite:
         parser.error("output file already exists; pass --overwrite to replace it")
     try:
+        cli_started = time.perf_counter()
         request = HistoricalExperimentBatchRequest(
             args.archive_root,
             MarketUniverseInput(args.universe_id, args.universe_version,
@@ -465,12 +495,17 @@ def main(argv: list[str] | None = None) -> int:
             ReplayPartitionPlan(args.development_end, args.validation_end),
             args.code_revision,
         )
-        report = run_historical_experiment_batch(request)
+        report = run_historical_experiment_batch(
+            request,
+            progress_callback=lambda message: print(message, file=sys.stderr, flush=True),
+        )
         content = historical_experiment_report_to_json(report)
         if args.output_json is None:
             sys.stdout.write(content + "\n")
         else:
             _write_report(args.output_json, content, overwrite=args.overwrite)
+        print(f"Total: complete ({time.perf_counter() - cli_started:.1f}s)",
+              file=sys.stderr, flush=True)
     except (ValueError, TypeError, ArithmeticError, OSError) as exc:
         print(f"historical experiment batch: {exc}", file=sys.stderr)
         return 1

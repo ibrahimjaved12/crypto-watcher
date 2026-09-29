@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+from typing import Callable
 
 from .movement import (
     BINANCE_USDM, BUCKET_INTERVAL_MS, COLLECTOR_STATES,
@@ -41,6 +42,35 @@ HISTORICAL_REPLAY_POLICY_VERSION = (
 )
 DEFAULT_FINALIZATION_GRACE_MS = 2_000
 _MAX_SAFE_TIMESTAMP = 9_007_199_254_740_991
+
+
+def _eligible_historical_end_ranges(boundary: int, lookback_ms: int):
+    """Describe aligned ends satisfying lookback inclusion and strict-prior use."""
+    earliest = boundary - lookback_ms
+    ranges = []
+    for window in WINDOWS:
+        step = window * MINUTE_MS
+        first = -(-earliest // step) * step
+        last = ((boundary - 1) // step) * step
+        ranges.append((first, last) if first <= last else (None, None))
+    return tuple(ranges)
+
+
+class _ReplayHistoricalInputCache:
+    """Reuse a builder result only within one replay and one visible history."""
+
+    def __init__(self):
+        self._entries = {}
+
+    def get(self, symbol, candles, boundary, config, generation):
+        key = (generation, _eligible_historical_end_ranges(
+            boundary, config.historical_lookback_ms))
+        entry = self._entries.get(symbol)
+        if entry is not None and entry[0] == key:
+            return entry[1]
+        result = build_historical_window_inputs(candles, boundary, config)
+        self._entries[symbol] = (key, result)
+        return result
 
 
 def _timestamp(value, name):
@@ -407,6 +437,8 @@ def _validate_checkpoint(checkpoint, manifest):
 def run_historical_market_replay(
     request: HistoricalReplayRequest,
     checkpoint: HistoricalReplayCheckpoint | None = None,
+    *,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> HistoricalMarketReplayResult:
     """Rebuild from warm-up; skip checkpointed outputs without private engine snapshots."""
     if not isinstance(request, HistoricalReplayRequest):
@@ -421,12 +453,18 @@ def run_historical_market_replay(
     instruments = {instrument.symbol: instrument for instrument in request.instruments}
     source_indexes = {symbol: 0 for symbol in symbols}
     visible_candles = {symbol: [] for symbol in symbols}
+    visible_generations = {symbol: 0 for symbol in symbols}
+    historical_cache = _ReplayHistoricalInputCache()
     pending_trades = {symbol: [] for symbol in symbols}
     trade_index = candle_index = processed_trades = 0
     source_counts = Counter()
     eligible_counts = Counter()
     ineligible_counts = Counter()
     points = []
+    output_boundary_count = ((config.output_end_boundary_time_ms
+                              - config.output_start_boundary_time_ms)
+                             // BUCKET_INTERVAL_MS + 1)
+    reported_progress_step = 0
     for boundary in range(config.engine_start_boundary_time_ms,
                           config.output_end_boundary_time_ms + 1, BUCKET_INTERVAL_MS):
         replay_clock = boundary + config.finalization_grace_ms
@@ -437,6 +475,7 @@ def run_historical_market_replay(
         while candle_index < len(candles) and candles[candle_index].first_seen_at_ms <= replay_clock:
             candle = candles[candle_index]
             visible_candles[candle.symbol].append(candle.canonical())
+            visible_generations[candle.symbol] += 1
             candle_index += 1
         endpoint_buckets = {}
         current_states = {}
@@ -473,8 +512,9 @@ def run_historical_market_replay(
             source_state = current_states[symbol]
             readiness = {window: engine.readiness(boundary, window, source_state)
                          for window in WINDOWS}
-            historical = build_historical_window_inputs(
-                visible_candles[symbol], boundary, config.movement_config)
+            historical = historical_cache.get(
+                symbol, visible_candles[symbol], boundary,
+                config.movement_config, visible_generations[symbol])
             instrument = instruments[symbol]
             movement_symbols[symbol] = MarketMovementSymbolInput(
                 symbol=symbol, instrument_id=instrument.instrument_id,
@@ -490,6 +530,13 @@ def run_historical_market_replay(
             evaluation_boundary_time_ms=boundary, universe=request.universe,
             symbols=movement_symbols, config=config.movement_config,
         ))
+        if progress_callback is not None:
+            completed = ((boundary - config.output_start_boundary_time_ms)
+                         // BUCKET_INTERVAL_MS + 1)
+            step = completed * 20 // output_boundary_count
+            if step > reported_progress_step:
+                progress_callback(completed, output_boundary_count)
+                reported_progress_step = step
         if checkpoint is not None and boundary <= checkpoint.last_emitted_boundary_time_ms:
             continue
         for window in WINDOWS:

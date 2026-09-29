@@ -180,10 +180,27 @@ class HistoricalExperimentBatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             request = _request(Path(folder))
             first = batch.run_historical_experiment_batch(request)
-            second = batch.run_historical_experiment_batch(request)
+            progress = []
+            second = batch.run_historical_experiment_batch(
+                request, progress_callback=progress.append)
             self.assertEqual(first, second)
             content = batch.historical_experiment_report_to_json(first)
             self.assertEqual(content, batch.historical_experiment_report_to_json(second))
+            self.assertEqual(progress[0], "Archive load: start")
+            self.assertTrue(any(message.startswith("Archive load: complete (")
+                                for message in progress))
+            self.assertIn("Replay: start", progress)
+            self.assertIn("Replay: 4/4 boundaries (100%)", progress)
+            self.assertTrue(any(message.startswith("Replay: complete (")
+                                for message in progress))
+            self.assertEqual(sum(message.startswith("Experiment ")
+                                 and message.endswith(": start") for message in progress), 28)
+            self.assertEqual(sum(message.startswith("Experiment ")
+                                 and ": complete (" in message for message in progress), 28)
+            self.assertTrue(any(message.startswith(
+                "Experiment 1/28 EXP-75-01 ") for message in progress))
+            self.assertTrue(progress[-1].startswith("Batch: complete ("))
+            self.assertNotIn("Archive load: start", content)
             self.assertEqual(first.experiment_run_count, 28)
             self.assertEqual(len(first.experiment_runs), 28)
             self.assertTrue(all(tuple(run.summaries) == PARTITIONS
@@ -310,9 +327,28 @@ class HistoricalExperimentBatchTests(unittest.TestCase):
                 raise ValueError("broken contract")
             suite = ((replace(batch.EXPERIMENT_SUITE_V1[0], runner=broken),)
                      + batch.EXPERIMENT_SUITE_V1[1:])
+            progress = []
             with patch.object(batch, "EXPERIMENT_SUITE_V1", suite):
                 with self.assertRaisesRegex(ValueError, "broken contract"):
-                    batch.run_historical_experiment_batch(request)
+                    batch.run_historical_experiment_batch(
+                        request, progress_callback=progress.append)
+            self.assertTrue(any(message.startswith("Experiment 1/28 ")
+                                and message.endswith(": start") for message in progress))
+            self.assertFalse(any(message.startswith("Experiment 1/28 ")
+                                 and ": complete (" in message for message in progress))
+            self.assertFalse(any(message.startswith("Batch: complete (")
+                                 for message in progress))
+
+    def test_failed_archive_load_has_no_success_progress(self):
+        with tempfile.TemporaryDirectory() as folder:
+            request = _request(Path(folder))
+            progress = []
+            with patch.object(batch, "load_binance_usdm_historical_replay_dataset",
+                              side_effect=ValueError("bad archive")):
+                with self.assertRaisesRegex(ValueError, "bad archive"):
+                    batch.run_historical_experiment_batch(
+                        request, progress_callback=progress.append)
+            self.assertEqual(progress, ["Archive load: start"])
 
     def test_serializer_rejects_nonfinite_and_unknown_objects(self):
         for value in (float("nan"), float("inf"), object(), Decimal("NaN")):
@@ -340,10 +376,20 @@ class HistoricalExperimentBatchTests(unittest.TestCase):
             report = batch.run_historical_experiment_batch(_request(root))
             content = batch.historical_experiment_report_to_json(report)
             stdout = io.StringIO()
-            with (patch.object(batch, "run_historical_experiment_batch", return_value=report),
-                  patch("sys.stdout", stdout)):
+            stderr = io.StringIO()
+            def report_with_progress(_request, *, progress_callback):
+                progress_callback("Archive load: start")
+                progress_callback("Replay: 1/1 boundaries (100%)")
+                return report
+            with (patch.object(batch, "run_historical_experiment_batch",
+                               side_effect=report_with_progress),
+                  patch("sys.stdout", stdout), patch("sys.stderr", stderr)):
                 self.assertEqual(batch.main(_cli_args(root)), 0)
             self.assertEqual(stdout.getvalue(), content + "\n")
+            self.assertEqual(stderr.getvalue().splitlines()[:2],
+                             ["Archive load: start", "Replay: 1/1 boundaries (100%)"])
+            self.assertTrue(stderr.getvalue().splitlines()[-1].startswith(
+                "Total: complete ("))
             self.assertEqual(json.loads(stdout.getvalue()), json.loads(content))
             output = root / "report.json"
             with patch.object(batch, "run_historical_experiment_batch", return_value=report):
