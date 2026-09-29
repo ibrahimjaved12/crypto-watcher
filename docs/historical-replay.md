@@ -201,13 +201,13 @@ scientific fingerprint excludes it.
 ```bash
 python -m market_analysis.historical_atr_extension \
   --archive-root /path/to/binance-public-data \
-  --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT XRPUSDT \
-  --universe-id research-top5 \
+  --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT DOGEUSDT \
+  --universe-id research-pilot \
   --universe-version v1 \
-  --start 2026-08-20T00:00:00Z \
-  --end 2026-08-20T12:00:00Z \
-  --development-end 2026-08-20T06:00:00Z \
-  --validation-end 2026-08-20T09:00:00Z \
+  --start 2026-09-01T00:00:00Z \
+  --end 2026-09-01T12:00:00Z \
+  --development-end 2026-09-01T06:00:00Z \
+  --validation-end 2026-09-01T09:00:00Z \
   --output-json atr-extension.json
 ```
 
