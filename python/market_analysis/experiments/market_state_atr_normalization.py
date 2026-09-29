@@ -19,6 +19,8 @@ from ..market_episode_lifecycle import MarketEpisodeLifecycleConfig
 from ..movement_classifier import MarketClassifierConfig
 from ..movement_history import MINUTE_MS
 from ..movement_metrics import (
+    ALGORITHM_VERSION as BASELINE_MOVEMENT_ALGORITHM_VERSION,
+    DEFAULT_CONFIG_VERSION as BASELINE_MOVEMENT_CONFIG_VERSION,
     EXCHANGE, MarketMovementConfig, Metric, PRICE_TYPE, PROVIDER, WINDOWS,
     _aggregates, _breadth, _outliers, WindowAggregates, WindowBreadth,
 )
@@ -422,10 +424,17 @@ def _validate_inputs(points: tuple[MarketStateExperimentPoint, ...],
         raise ValueError("ATR OHLC dataset identity disagrees with replay")
     if (evidence.configured_symbols != replay_manifest.configured_universe
             or evidence.evidence_version != OHLC_EVIDENCE_VERSION
+            or replay_manifest.movement_algorithm_version
+            != BASELINE_MOVEMENT_ALGORITHM_VERSION
+            or replay_manifest.movement_config_version
+            != BASELINE_MOVEMENT_CONFIG_VERSION
             or replay_manifest.provider != PROVIDER
             or replay_manifest.exchange != EXCHANGE
             or replay_manifest.price_type != PRICE_TYPE):
-        raise ValueError("ATR OHLC symbols or trade-price provenance disagree with replay")
+        raise ValueError(
+            "ATR OHLC symbols, canonical movement, or trade-price provenance "
+            "disagree with replay"
+        )
     if (points[0].movement_evaluation.evaluation_boundary_time_ms
             != replay_manifest.output_start_boundary_time_ms
             or points[-1].movement_evaluation.evaluation_boundary_time_ms

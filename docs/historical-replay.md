@@ -201,8 +201,8 @@ scientific fingerprint excludes it.
 ```bash
 python -m market_analysis.historical_atr_extension \
   --archive-root /path/to/binance-public-data \
-  --symbols BTCUSDT ETHUSDT \
-  --universe-id research-top2 \
+  --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT XRPUSDT \
+  --universe-id research-top5 \
   --universe-version v1 \
   --start 2026-08-20T00:00:00Z \
   --end 2026-08-20T12:00:00Z \
@@ -216,6 +216,8 @@ boundaries, and the verified local archive loader. It records the current Git
 HEAD as code revision by default; --code-revision can supply the exact revision
 for a packaged checkout. Existing report files require --overwrite and are
 written atomically. No network acquisition is performed.
+The example uses five symbols because canonical V1 requires at least five
+eligible symbols for market-wide classification.
 
 ATR uses archive candles only when first_seen_at_ms is strictly before the
 evaluation boundary and the candle minute ended strictly before that boundary.

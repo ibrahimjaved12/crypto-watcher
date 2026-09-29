@@ -251,12 +251,15 @@ class ATRRangeEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dataset identity"):
             _validate_inputs((point,), _evidence((), dataset_sha="b" * 64),
                              manifest)
-        with self.assertRaisesRegex(ValueError, "symbols or trade-price provenance"):
+        with self.assertRaisesRegex(ValueError, "provenance"):
             _validate_inputs((point,), _evidence(
                 (), symbols=("ETHUSDT", SYMBOL)), manifest)
-        with self.assertRaisesRegex(ValueError, "symbols or trade-price provenance"):
+        with self.assertRaisesRegex(ValueError, "provenance"):
             _validate_inputs((point,), _evidence(()),
                              replace(manifest, price_type="mark"))
+        with self.assertRaisesRegex(ValueError, "canonical movement"):
+            _validate_inputs((point,), _evidence(()),
+                             replace(manifest, movement_algorithm_version="other"))
 
     def test_extension_identity_tracks_ohlc_without_changing_old_stream(self):
         self.assertEqual(len(EXPERIMENT_SUITE_V1), 28)
