@@ -465,6 +465,34 @@ class BinanceHistoricalArchiveTests(unittest.TestCase):
                 replay, altered, ReplayPartitionPlan(start + 5_000, start + 10_000),
                 points, MarketClassifierConfig(), MarketEpisodeLifecycleConfig()))
 
+    def test_dataset_rejects_mismatched_ohlc_dataset_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            dataset = load_binance_usdm_historical_replay_dataset(
+                _single_day_bundle(Path(folder)))
+            identity_changes = (
+                ("dataset_id", "different-dataset"),
+                ("dataset_version", "different-version"),
+                ("dataset_content_sha256", hashlib.sha256(
+                    b"different-dataset-content").hexdigest()),
+            )
+            for field, value in identity_changes:
+                with self.subTest(field=field):
+                    evidence = replace(dataset.ohlc_evidence, **{field: value})
+                    with self.assertRaisesRegex(ValueError, "dataset identity"):
+                        replace(dataset, ohlc_evidence=evidence)
+
+    def test_dataset_rejects_ohlc_symbols_in_different_order(self):
+        symbols = ("BTCUSDT", "ETHUSDT")
+        with tempfile.TemporaryDirectory() as folder:
+            dataset = load_binance_usdm_historical_replay_dataset(
+                _single_day_bundle(Path(folder), symbols=symbols))
+            evidence = replace(
+                dataset.ohlc_evidence,
+                configured_symbols=tuple(reversed(symbols)),
+            )
+            with self.assertRaisesRegex(ValueError, "symbols in order"):
+                replace(dataset, ohlc_evidence=evidence)
+
 
 if __name__ == "__main__":
     unittest.main()

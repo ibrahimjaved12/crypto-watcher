@@ -202,6 +202,34 @@ class BinanceHistoricalReplayDataset:
     diagnostics: BinanceArchiveDiagnostics
     ohlc_evidence: BinanceTradeOHLCEvidence
 
+    def __post_init__(self):
+        archive_identity = (
+            self.archive_manifest.dataset_id,
+            self.archive_manifest.dataset_version,
+            self.archive_manifest.content_sha256,
+        )
+        replay_identity = (
+            self.replay_request.dataset.dataset_id,
+            self.replay_request.dataset.dataset_version,
+            self.replay_request.dataset.content_sha256,
+        )
+        ohlc_identity = (
+            self.ohlc_evidence.dataset_id,
+            self.ohlc_evidence.dataset_version,
+            self.ohlc_evidence.dataset_content_sha256,
+        )
+        if ohlc_identity != archive_identity or ohlc_identity != replay_identity:
+            raise ValueError(
+                "OHLC evidence dataset identity must match the archive manifest "
+                "and replay request dataset"
+            )
+        if (self.ohlc_evidence.configured_symbols
+                != self.replay_request.universe.symbols):
+            raise ValueError(
+                "OHLC evidence configured symbols must match replay universe "
+                "symbols in order"
+            )
+
 
 @dataclass(frozen=True)
 class _AggRow:
