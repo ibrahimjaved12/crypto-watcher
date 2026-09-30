@@ -9,7 +9,8 @@ The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
 normalization**, **EXP-75-06B ATR-SMA normalization**, **EXP-75-07
 PCA/common-factor diagnostics**, **EXP-75-08
 correlation, clustering, and network diagnostics**, and **EXP-75-09 Gaussian HMM
-learned-regime diagnostics**. EXP-75-10 through EXP-75-12 remain unimplemented.
+learned-regime diagnostics**. EXP-75-10 and EXP-75-11 remain unimplemented;
+EXP-75-12 is implemented as a separate historical extension.
 
 ## EXP-75-01 — EWMA aggregate smoothing
 
@@ -409,15 +410,36 @@ learned-regime diagnostics**. EXP-75-10 through EXP-75-12 remain unimplemented.
 
 ## EXP-75-12 — Taker imbalance
 
-- **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** Aggressor-side notional imbalance may add stable participation
-  information beyond price breadth and RVOL when calculated from correctly
-  timestamped Binance aggressor-side data.
-- **Input/data prerequisite:** Replayable buyer-maker/aggressor-side field.
-- **Causal/live suitability:** Potentially causal after the input is retained and
-  timestamped; collector changes are outside this experiment.
-- **What changes relative to V1:** Future supporting participation evidence.
-- **What remains unchanged:** Canonical movement, classification, and lifecycle
-  semantics.
-- **Evaluation measurements:** Coverage, directional agreement, and stability.
-- **Promotion constraint:** Do not modify the collector in this PR.
+- **Status:** `IMPLEMENTED_EXTENSION`
+- **Scope:** A separate, versioned historical extension over the verified
+  Binance USD-M public daily `aggTrades` archive. The fixed 28-run
+  `EXPERIMENT_SUITE_V1`, its order, manifests, reports, fingerprints, point
+  stream, and hashes are unchanged. Flow never enters V1 state decisions.
+- **Calculation:** For each replay point and symbol, aggregate quote notional
+  `price × quantity` into aggressive buys (`buyer_is_maker == false`) and sells
+  (`true`) using the replay's right-closed `(t − w, t]` windows for exactly
+  1m, 5m, and 15m. Report `B`, `S`, gross, signed net, and `(B − S) / (B + S)`;
+  a covered empty window has `NO_OBSERVED_AGGTRADES` and null imbalance.
+  Positive balanced activity is `ACTIVE` with zero imbalance. Exact Decimal
+  accumulation and 50-digit Decimal division are used.
+- **Replay finalization:** The opt-in sidecar uses the canonical 5-second bucket
+  assignment and replay's inclusive `first_seen_at_ms <= boundary +
+  finalization_grace_ms` rule. Rows assigned to finalized buckets are rejected
+  permanently. Its prefix-indexed buckets cover the replay engine's actual
+  warm-up start through output end. Evidence is built in the archive loader's
+  validated aggTrade pass and records the dataset identity, content SHA,
+  ordered symbols, range, grace, policies, and bucket digest.
+- **Comparison:** The report checks `B + S` against V1
+  `current_notional_volume` for each common symbol/point/window; any mismatch is
+  an evidence-integrity error. It reports active-only median imbalance,
+  buy/sell/balanced sign breadth, pooled notional imbalance, largest active
+  symbol share, coverage, and descriptive same-point direction/breadth
+  comparisons by development, validation, and test partition.
+- **Source limitations:** Archive `first_seen_at_ms` equals its aggTrade
+  timestamp and is only a deterministic availability surrogate. Replay cannot
+  establish original WebSocket delivery latency or collector health. Public
+  aggTrade rows are aggregated records, not underlying fill counts, and the
+  archive schema has no `nq` field to separate RPI quantity. Empty archive
+  buckets do not prove a WebSocket outage. This is neither net long/short
+  positioning nor a directional prediction; it tests no forward returns or
+  trading value. Forward outcomes are deferred to #123.
