@@ -281,6 +281,95 @@ historical network receipt. 06B may warm from pre-output archive OHLC; 06A
 starts cold at the first output point. One 12-hour pilot and agreement with V1
 cannot establish prediction or trading profitability.
 
+## Issue #127: historical mark-versus-trade diagnostic
+
+`historical_mark_trade_extension.py` is a separate, opt-in descriptive
+extension. It reuses the verified trade-price OHLC evidence from #111 and loads
+Binance USD-M daily mark-price 1m klines into a separate evidence path. Mark
+archives use
+`data/futures/um/daily/markPriceKlines/<SYMBOL>/1m/<SYMBOL>-1m-YYYY-MM-DD.zip`
+and a sibling `.zip.CHECKSUM`. The loader verifies each ZIP's bytes before
+parsing. Missing or invalid packages remain unavailable with package statuses
+and reasons; invalid rows, duplicate timestamps, off-grid timestamps, and
+missing valid minutes are reported separately. The report includes each
+expected package, verified checksum, package row issues, and per-symbol
+expected/observed minute counts, coverage ratios, missing-minute ranges, and
+longest gaps. Per-symbol and all-configured-symbol ready coverage is summarized
+for development, validation, test, and all minute points. These are measured
+coverage values; the extension applies no pass threshold.
+Package statuses distinguish `MISSING_PACKAGE`, `MISSING_CHECKSUM`,
+`INVALID_CHECKSUM`, `CHECKSUM_MISMATCH`, `MALFORMED_ROW`,
+`DUPLICATE_MINUTE`, `OFF_GRID_MINUTE`, `MISSING_VALID_MINUTE`,
+`INVALID_ARCHIVE`, or `VERIFIED_COMPLETE`. A checksum proves byte integrity
+only; it does not prove that an archive contains every expected minute.
+
+The requested study interval remains the replay's `--start` through `--end`.
+The manifest records those boundaries and the first/last exact minute-boundary
+points. For the first eligible point it loads the preceding 16 one-minute
+candles: a 15-minute close-to-close return needs the close at `t - 15 minutes`,
+which is the candle opened at `t - 16 minutes`. Warm-up candles support the
+first comparison and are not emitted as additional study points.
+
+The diagnostic emits only where a replay evaluation point is exactly on a UTC
+minute boundary `t`. For each symbol and each fixed horizon `w ∈ {1, 5, 15}`,
+it requires every one-minute candle from open `t - (w + 1) minutes` through
+open `t - 1 minute` for both sources. A candle opened at `u - 1 minute`, with
+`close_time_ms = u - 1`, is eligible at boundary `u` when its source
+availability is no later than `u`. This uses the exchange-close-time-plus-one
+millisecond archive surrogate. It is not an observed network receipt time, and
+the movement replay's two-second finalization grace is not applied here.
+Gaps, duplicate rows, off-grid timestamps, and unavailable source candles are
+never filled, interpolated, or converted into zero prices or returns.
+
+For source closes `M` (mark) and `T` (trade), the report records the endpoint
+closes and times, log returns, endpoint bases, and
+`divergence = log(M(t)/T(t)) - log(M(t-w)/T(t-w))`, equivalently
+`mark_return - trade_return`. Positive divergence means the mark/trade log
+basis widened over the horizon; an unchanged price and zero divergence remain
+valid. Calculations use Decimal logarithms at precision 50. Decimal values are
+serialized as fixed-point strings with trailing fractional zeros removed.
+Candidate points preserve source-specific availability reasons and same-time
+V1 market state as context. Partition summaries describe ready coverage and
+common-ready observations; V1 is a comparator, not ground truth, and mark price
+is a reference price, not an executable price. The report does not create a
+directional classifier, trading signal, or predictive claim.
+
+The extension has independent identities: suite
+`historical-mark-trade-extension-suite-v1`, report
+`historical-mark-trade-extension-report-v1`, algorithm
+`mark-trade-log-basis-divergence-v1`, and config
+`MARK-TRADE-LOG-BASIS-1M-5M-15M-DECIMAL50-v1`. Its manifest binds the ordered
+symbols, requested interval, warm-up, mark source/type/schema/availability,
+verified mark packages and checksums, #111 trade dataset and OHLC evidence,
+V1 replay and point-stream identities, partition cutoffs, and code revision.
+The extension fingerprint and canonical report SHA remain separate from the
+core dataset, replay, point stream, and fixed 28-run experiment identities.
+Historical mark-price methodology can change across periods; reports retain
+dates and package provenance so later #123 candidate periods can be examined
+separately. This point-level diagnostic does not implement the forward-outcome
+evaluation deferred to #123.
+
+The CLI reads local archives by default. Mark archive acquisition is opt-in
+only with `--download-mark-archives`:
+
+```bash
+python -m market_analysis.historical_mark_trade_extension \
+  --archive-root /path/to/binance-public-data \
+  --mark-archive-root /path/to/binance-mark-price \
+  --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT \
+  --universe-id research-pilot \
+  --universe-version v1 \
+  --start 2026-09-01T00:00:00Z \
+  --end 2026-09-01T12:00:00Z \
+  --development-end 2026-09-01T06:00:00Z \
+  --validation-end 2026-09-01T09:00:00Z \
+  --output-json mark-trade-extension.json
+```
+
+Add `--download-mark-archives` only when an explicit archive acquisition is
+intended. No historical coverage or diagnostic usefulness is implied until a
+real-archive pilot is run and its coverage and values are reviewed.
+
 ## Part 4: official archive acquisition and cache
 
 `binance_historical_download.py` explicitly fetches the exact daily USD-M
