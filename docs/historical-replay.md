@@ -424,3 +424,136 @@ setup and outcome replay, funding/event/news adapters, or execution resolution.
 Replay-facing OHLC/range evidence for ATR remains separate under #111;
 portfolio simulation remains under #38. The existing Issue #17 TA smoke replay
 is unchanged.
+
+## EXP-75-11 independent derivatives context
+
+Issue #128 supplies three separate descriptive sidecars. The ordered configured
+universe in the canonical replay manifest is authoritative; the provisional
+five-symbol research universe is not enforced. No source enters the core
+`BinanceHistoricalReplayDataset`, movement, classification, lifecycle, fixed
+28-run suite, replay fingerprint, point stream, batch manifest or experiment
+hashes. These diagnostics add no signals, rankings or #123 forward outcomes.
+
+### Evidence and availability
+
+| Extension | Source / schema | Calculation and availability |
+| --- | --- | --- |
+| `EXP-75-11-OI` | Binance USD-M daily `metrics`, named `create_time`, `symbol`, `sum_open_interest`; optional `sum_open_interest_value` | `ln(current base quantity / exact prior base quantity)` for 5m/15m. Every usable nominal 5m row becomes eligible at `create_time + 5m`. At least 20m prehistory is loaded. |
+| `EXP-75-11-FUNDING` | Binance USD-M monthly `fundingRate`, named `calc_time`, `funding_interval_hours`, `last_funding_rate` | Most recent settled rate / recorded positive interval hours. Eligible at `calc_time + 1ms`; the settlement at exactly `t` cannot affect `t`. Load the preceding calendar month and all study months. |
+| `EXP-75-11-LIQUIDATION` | Tardis grouped `binance-futures/liquidations/YYYY/MM/DD/PERPETUALS.csv.gz`; exactly `exchange,symbol,timestamp,local_timestamp,id,side,price,amount` | Observed `price * provider-normalized amount` sums for exchange-event windows `[t-w,t)`, 1m/5m/15m, gated by exact `local_timestamp_us <= t_ms * 1000`. |
+
+OI and funding availability conventions are versioned replay surrogates, not
+measured publication latency or network receipt. They do not use movement replay
+finalization grace. OI schema normalization is limited to BOM removal, header
+whitespace and case. Known additional ratio fields are accepted but unused;
+alternative aliases and incompatible headers produce `SCHEMA_MISMATCH`. Funding
+`calc_time` must be integer epoch milliseconds. Binance `.CHECKSUM` verification
+is mandatory before parsing: byte integrity does not establish completeness.
+
+OI retains base quantity, optional quote value, source/availability timestamps
+and package identity. Quantities must be finite and positive. Off-grid rows,
+malformed rows, duplicates and missing 5m ranges are reported independently;
+all rows at a duplicate timestamp are unavailable. The current row is the latest
+eligible row, but a missing latest nominal slot makes its projection unavailable:
+older values are retained only as diagnostic metadata. Each 5m/15m endpoint is
+exact; no nearest endpoint, interpolation or gap filling. Quote OI is secondary
+because price also affects it. Positive OI change does not imply new longs or shorts.
+
+Funding rates may be signed or zero; settlement intervals are not assumed to be
+8h. The recorded interval determines `expected_next_calc_time`. At or after
+`expected_next_calc_time + 1ms`, absence of a newer usable event produces
+`EXPECTED_SETTLEMENT_MISSING`, with the old event retained as metadata and
+`funding_per_hour = null`. Source failures remain visible in package diagnostics
+and `source_reason`. This expiry is a replay assumption, bound to the identity.
+No annualization, normalization or activity thresholds are applied.
+
+Liquidation `sell` snapshots represent long liquidations and `buy` represents
+short liquidations. The normalized amount is the provider's CSV quantity; it is
+not an eternal equivalence to a particular raw Binance field. Equal exchange
+timestamps and repeated supplied rows are preserved in archive capture order.
+Rows outside the configured universe are excluded from calculations, but the
+whole compressed file SHA binds them too. Products and pooled sums are exact
+Decimal operations; ratios/logarithms use precision 50. Decimal diagnostic
+outputs use fixed-point strings with trailing fractional zeros removed.
+
+Tardis files partition by **local receipt day**. The compressed-byte SHA is our
+own provenance digest, not a provider checksum. Successful full gzip
+verification and the compatible schema are required. Empty/header-only,
+truncated, unreadable or malformed configured-symbol packages are unavailable;
+a malformed configured row conservatively invalidates that entire day. A valid
+grouped file containing only other symbols still supplies archive-day coverage.
+Disconnect visibility is unavailable in normalized CSV. An available full window
+with no rows is `NO_OBSERVED_LIQUIDATION`: long/short/total are zero and imbalance
+is null, with no epsilon. This means no observed snapshots in that archive,
+not proof of exhaustive exchange liquidation volume or continuous collector health.
+
+Entire window coverage is required. If only a 00:00 UTC free day exists, 1m/5m/15m
+windows first become covered at 00:01/00:05/00:15 respectively. Missing preceding
+days produce unavailable windows and null numeric results. Receipt microseconds
+are never rounded to milliseconds for eligibility. A late receipt cannot change
+an earlier output. Event-time indices narrow queries to their windows before
+applying receipt eligibility; archives are not rescanned at every replay point.
+
+### Library contracts, summaries and identities
+
+Each `historical_{open_interest,funding,liquidation}_extension` module exposes
+its own `Historical…ExtensionRequest`, `Historical…ExtensionPrepared`,
+`prepare_historical_…_extension`, `run_historical_…_extension` (prepared input),
+`run_historical_…_extension_from_archive`, and canonical report serializer.
+Prepared runners allow #123 to reuse one core load/replay. They validate core
+ID/version/content SHA, ordered universe, requested range, exact exported movement
+evaluation objects and partition labels/cutoffs. There is no combined orchestrator.
+
+Each candidate includes same-time matching V1 direction (funding uses primary
+5m). Market summaries expose universe, ready/covered, unavailable, partial coverage
+and denominator counts. OI/funding report positive/negative/zero counts and a ready
+median. Liquidations expose active/no-observation counts, active imbalance sign
+counts, active/covered breadth, exact pooled observed notionals, largest active
+symbol and its pooled share (configured order breaks ties). Unavailable sources
+never become numeric zero. Partition summaries include per-symbol coverage,
+unavailable reasons, and unique OI endpoint-pair or funding settlement counts;
+repeated five-second projections are not independent source observations.
+Liquidation snapshot projection counts explicitly count projections, not unique
+snapshots across overlapping windows.
+
+The three independent manifests bind experiment/suite/report/algorithm/config
+versions, source/schema/evidence versions, availability and coverage rules,
+ordered universe, study and prehistory ranges, package paths and compressed SHA,
+Binance checksum status, evidence SHA, calculation parameters, canonical dataset
+identity, replay fingerprint, experiment-stream SHA, partition cutoffs, movement
+algorithm/config identities, code revision and complete candidate output SHA.
+Each has an extension fingerprint and canonical report SHA. Code revision affects
+the extension fingerprint/report, following existing extension conventions.
+Moving otherwise identical archives between roots does not affect identity.
+
+### Opt-in acquisition and manual real-source validation
+
+Defaults inspect local sidecars only. OI/funding acquisition uses existing Binance
+verified checksum and atomic-download mechanics, without changing core downloader
+planning. Liquidation acquisition can fetch only unauthenticated first-of-month
+Tardis samples. Existing local files on other days are accepted; absent non-free
+days are `FREE_SAMPLE_UNAVAILABLE`, with no authenticated/paid request or API key.
+Keep all archives and reports outside the repository.
+
+No real-source validation was performed for this implementation. The following
+commands are a **manual post-implementation** check of a small recent free sample;
+the core downloader still needs its existing V1 historical lookback. Use the
+project's configured Python environment. From the repository root:
+
+```bash
+export PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
+mkdir -p /tmp/crypto-watcher-128/reports
+common=(--symbols BTCUSDT ETHUSDT --universe-id issue-128-manual --universe-version v1 --start 2026-09-01T00:15:00Z --end 2026-09-01T00:30:00Z)
+partitions=(--development-end 2026-09-01T00:20:00Z --validation-end 2026-09-01T00:25:00Z)
+python3 -m market_analysis.binance_historical_download --archive-root /tmp/crypto-watcher-128/core "${common[@]}"
+python3 -m market_analysis.historical_open_interest_extension --archive-root /tmp/crypto-watcher-128/core --oi-archive-root /tmp/crypto-watcher-128/oi "${common[@]}" "${partitions[@]}" --download-oi-archives --output-json /tmp/crypto-watcher-128/reports/oi.json
+python3 -m market_analysis.historical_funding_extension --archive-root /tmp/crypto-watcher-128/core --funding-archive-root /tmp/crypto-watcher-128/funding "${common[@]}" "${partitions[@]}" --download-funding-archives --output-json /tmp/crypto-watcher-128/reports/funding.json
+python3 -m market_analysis.historical_liquidation_extension --archive-root /tmp/crypto-watcher-128/core --liquidation-archive-root /tmp/crypto-watcher-128/liquidation "${common[@]}" "${partitions[@]}" --download-free-liquidation-samples --output-json /tmp/crypto-watcher-128/reports/liquidation.json
+```
+
+Review package schema/integrity statuses and ready coverage in all three reports.
+The 00:15 start avoids requiring the previous non-free liquidation day. OI may
+load the previous day for warm-up; funding loads August and September. If a real
+header differs from the frozen contract, the package fails explicitly rather
+than guessing. Reports are descriptive evidence and have no universal coverage
+pass threshold. Real-source validation remains required before closing #128.
