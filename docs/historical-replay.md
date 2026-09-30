@@ -147,7 +147,7 @@ queries sum bucket boundaries in `(t − w, t]`.
 The public archive's `buyer_is_maker` flag identifies aggressor side. The buy
 and sell counts are counts of Binance public `aggTrades` archive rows, not
 counts of individual fills, orders, or constituent trades. An aggTrade row can
-aggregate fills sharing a price and taking side over a short interval. Describe
+aggregate fills sharing a price and taking side within 100ms interval. Describe
 the result as archived aggregate taker-side flow.
 
 The public archive schema does not include the API's `nq` field, so this
