@@ -199,8 +199,12 @@ def daily_open_interest_relative_path(symbol: str, day: date):
 
 def _parse_row(row, symbol, day, path, digest):
     timestamp = _time_ms(row["create_time"])
-    if row["symbol"].strip() != symbol or _day(timestamp) != day:
-        raise ValueError("row symbol/day differs from package")
+    day_start = (datetime(day.year, day.month, day.day, tzinfo=timezone.utc) - _EPOCH) // timedelta(milliseconds=1)
+    next_day_boundary = day_start + 86_400_000
+    if (row["symbol"].strip() != symbol
+            or not (day_start <= timestamp < next_day_boundary
+                    or timestamp == next_day_boundary)):
+        raise ValueError("row symbol/time is outside package UTC day and next-day midnight")
     quantity = _number(row["sum_open_interest"], positive=True)
     quote = (_number(row["sum_open_interest_value"]) if "sum_open_interest_value" in row
              else None)

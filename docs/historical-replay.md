@@ -459,6 +459,13 @@ older values are retained only as diagnostic metadata. Each 5m/15m endpoint is
 exact; no nearest endpoint, interpolation or gap filling. Quote OI is secondary
 because price also affects it. Positive OI change does not imply new longs or shorts.
 
+For Binance USD-M metrics archives, accept rows from the package UTC day and an
+aligned row exactly at the following day's 00:00 boundary. This accommodates
+the observed archive layout before 2026-06-25 while keeping the newer layout's
+00:00 row. At the 2026-06-25 transition, if adjacent packages contain distinct
+rows at that same source timestamp, global duplicate handling marks the timestamp
+ambiguous and unavailable. The availability surrogate remains `create_time + 5m`.
+
 Funding rates may be signed or zero; settlement intervals are not assumed to be
 8h. The recorded interval determines `expected_next_calc_time`. At or after
 `expected_next_calc_time + 1ms`, absence of a newer usable event produces
@@ -543,8 +550,8 @@ project's configured Python environment. From the repository root:
 ```bash
 export PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p /tmp/crypto-watcher-128/reports
-common=(--symbols BTCUSDT ETHUSDT --universe-id issue-128-manual --universe-version v1 --start 2026-09-01T00:15:00Z --end 2026-09-01T00:30:00Z)
-partitions=(--development-end 2026-09-01T00:20:00Z --validation-end 2026-09-01T00:25:00Z)
+common=(--symbols BTCUSDT ETHUSDT --universe-id issue-128-manual --universe-version v1 --start 2026-06-01T00:15:00Z --end 2026-06-01T00:30:00Z)
+partitions=(--development-end 2026-06-01T00:20:00Z --validation-end 2026-06-01T00:25:00Z)
 python3 -m market_analysis.binance_historical_download --archive-root /tmp/crypto-watcher-128/core "${common[@]}"
 python3 -m market_analysis.historical_open_interest_extension --archive-root /tmp/crypto-watcher-128/core --oi-archive-root /tmp/crypto-watcher-128/oi "${common[@]}" "${partitions[@]}" --download-oi-archives --output-json /tmp/crypto-watcher-128/reports/oi.json
 python3 -m market_analysis.historical_funding_extension --archive-root /tmp/crypto-watcher-128/core --funding-archive-root /tmp/crypto-watcher-128/funding "${common[@]}" "${partitions[@]}" --download-funding-archives --output-json /tmp/crypto-watcher-128/reports/funding.json
@@ -553,7 +560,9 @@ python3 -m market_analysis.historical_liquidation_extension --archive-root /tmp/
 
 Review package schema/integrity statuses and ready coverage in all three reports.
 The 00:15 start avoids requiring the previous non-free liquidation day. OI may
-load the previous day for warm-up; funding loads August and September. If a real
-header differs from the frozen contract, the package fails explicitly rather
-than guessing. Reports are descriptive evidence and have no universal coverage
-pass threshold. Real-source validation remains required before closing #128.
+load the previous day for warm-up; funding loads May and June. This June study
+date also exercises the pre-change OI archive layout and the free first-of-month
+Tardis sample. If a real header differs from the frozen contract, the package
+fails explicitly rather than guessing. Reports are descriptive evidence and
+have no universal coverage pass threshold. Real-source validation remains
+required before closing #128.

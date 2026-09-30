@@ -82,6 +82,44 @@ def _point(boundary=T, symbols=("BTCUSDT",)):
 
 
 class OpenInterestFixtures(unittest.TestCase):
+    def test_old_layout_accepts_next_day_midnight_observation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            old_day = date(2025, 11, 3)
+            next_midnight = (datetime(2025, 11, 4, tzinfo=timezone.utc)
+                             - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(milliseconds=1)
+            _oi(root, rows=[(next_midnight, "BTCUSDT", "321", "654")], day=old_day)
+
+            evidence = oi.load_binance_usdm_open_interest_evidence(
+                root, ("BTCUSDT",), next_midnight + 5 * MINUTE,
+                next_midnight + 5 * MINUTE)
+
+            observation = evidence.exact("BTCUSDT", next_midnight)
+            self.assertIsNotNone(observation)
+            self.assertEqual(observation.available_at_ms, next_midnight + 5 * MINUTE)
+            self.assertFalse(evidence.packages[0].malformed_rows)
+
+    def test_june_25_layout_transition_marks_midnight_duplicate_ambiguous(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            transition = (datetime(2026, 6, 25, tzinfo=timezone.utc)
+                          - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(milliseconds=1)
+            _oi(root, rows=[(transition, "BTCUSDT", "321", "654")],
+                day=date(2026, 6, 24))
+            _oi(root, rows=[(transition, "BTCUSDT", "322", "655")],
+                day=date(2026, 6, 25))
+
+            evidence = oi.load_binance_usdm_open_interest_evidence(
+                root, ("BTCUSDT",), transition + 5 * MINUTE,
+                transition + 5 * MINUTE)
+
+            self.assertEqual(len(evidence.packages), 2)
+            self.assertIsNone(evidence.exact("BTCUSDT", transition))
+            self.assertEqual(evidence.reason_at("BTCUSDT", transition),
+                             "DUPLICATE_SOURCE_TIMESTAMP")
+            self.assertEqual(evidence.row_issues,
+                             (("BTCUSDT", transition, "DUPLICATE_SOURCE_TIMESTAMP"),))
+
     def test_exact_endpoints_causality_and_no_gap_carry(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
