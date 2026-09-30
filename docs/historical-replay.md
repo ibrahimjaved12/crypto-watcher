@@ -144,14 +144,22 @@ its event time is at or before the boundary and its first-seen time is at most
 inclusive; a row that misses its bucket is rejected permanently. At point `t`,
 queries sum bucket boundaries in `(t − w, t]`.
 
-The public archive's `buyer_is_maker` flag identifies aggressor side. Its rows
-are aggregated trades, not individual fills, and its schema does not expose the
-`nq` field used to separate RPI quantity. AggTrade `first_seen_at_ms` is the
-exchange timestamp surrogate, not measured WebSocket receipt time; the replay
-cannot establish original network latency or collector health. Empty archive
-buckets do not establish an outage. These outputs are contemporaneous
-diagnostics only, not net long/short positions or directional predictions.
-They do not measure forward returns; those belong to #123.
+The public archive's `buyer_is_maker` flag identifies aggressor side. The buy
+and sell counts are counts of Binance public `aggTrades` archive rows, not
+counts of individual fills, orders, or constituent trades. An aggTrade row can
+aggregate fills sharing a price and taking side over a short interval. Describe
+the result as archived aggregate taker-side flow.
+
+The public archive schema does not include the API's `nq` field, so this
+evidence cannot separate RPI quantity from the archived buy/sell quantities.
+An empty observed interval means no aggTrade rows were present in the verified
+archive input; it does not prove that the exchange had no trades or that a live
+collector was healthy. The archive event timestamp used for
+`first_seen_at_ms` is a replay surrogate, not an observed network-receipt
+timestamp. The replay cannot establish original delivery latency or collector
+health. These outputs are contemporaneous diagnostics only, not net long/short
+positions or directional predictions. They do not measure forward returns;
+those belong to #123.
 
 The separate report can be generated from local verified archives with:
 
