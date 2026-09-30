@@ -12,6 +12,18 @@ correlation, clustering, and network diagnostics**, and **EXP-75-09 Gaussian HMM
 learned-regime diagnostics**. EXP-75-10 and EXP-75-11 remain unimplemented;
 EXP-75-12 is implemented as a separate historical extension.
 
+Issue #127's historical mark-versus-trade diagnostic is a separate descriptive
+extension, not another fixed V1 experiment or a change to EXP-75-12. It pairs
+verified #111 trade-price closes with separately verified Binance USD-M mark
+price candles at exact minute-boundary replay points, with contiguous 1m
+coverage required for 1m, 5m, and 15m windows. It reports source availability,
+coverage, log returns, endpoint mark/trade bases, and their divergence alongside
+same-time V1 context. Mark methodology may differ across history, so later #123
+analysis should retain and review date/provenance strata. V1 remains a
+comparator rather than ground truth; mark price is a reference rather than an
+executable price. See the Issue #127 section in `historical-replay.md` for the
+source-time surrogate, gap handling, identities, and CLI.
+
 ## EXP-75-01 — EWMA aggregate smoothing
 
 - **Status:** `IMPLEMENTED_EXPERIMENT`
