@@ -435,11 +435,16 @@ EXP-75-12 is implemented as a separate historical extension.
   buy/sell/balanced sign breadth, pooled notional imbalance, largest active
   symbol share, coverage, and descriptive same-point direction/breadth
   comparisons by development, validation, and test partition.
-- **Source limitations:** Archive `first_seen_at_ms` equals its aggTrade
-  timestamp and is only a deterministic availability surrogate. Replay cannot
-  establish original WebSocket delivery latency or collector health. Public
-  aggTrade rows are aggregated records, not underlying fill counts, and the
-  archive schema has no `nq` field to separate RPI quantity. Empty archive
-  buckets do not prove a WebSocket outage. This is neither net long/short
-  positioning nor a directional prediction; it tests no forward returns or
-  trading value. Forward outcomes are deferred to #123.
+- **Source limitations:** Buy and sell counts are counts of Binance public
+  `aggTrades` archive rows, not counts of individual fills, orders, or
+  constituent trades; a row can aggregate fills sharing a price and taking
+  side over a short interval. Describe the result as archived aggregate
+  taker-side flow. The public archive schema does not include the API's `nq`
+  field, so this evidence cannot separate RPI quantity from archived buy/sell
+  quantities. An empty observed interval means no aggTrade rows were present in
+  the verified archive input; it does not prove that the exchange had no trades
+  or that a live collector was healthy. The archive event timestamp used for
+  `first_seen_at_ms` is a replay surrogate, not an observed network-receipt
+  timestamp. This is neither net long/short positioning nor a directional
+  prediction; it tests no forward returns or trading value. Forward outcomes
+  are deferred to #123.
