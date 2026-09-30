@@ -31,6 +31,13 @@ from market_analysis.historical_replay import (
     HistoricalReplayConfig, ReplayPartitionPlan, run_historical_market_replay,
     to_market_state_experiment_points,
 )
+from market_analysis.historical_taker_flow_evidence import (
+    HistoricalTakerFlowEvidenceBuilder,
+)
+from market_analysis.historical_taker_flow_extension import (
+    HistoricalTakerFlowExtensionPrepared,
+    run_historical_taker_flow_extension,
+)
 from market_analysis.movement_metrics import MarketMovementConfig, MarketUniverseInput
 from market_analysis.market_episode_lifecycle import MarketEpisodeLifecycleConfig
 from market_analysis.movement_classifier import MarketClassifierConfig
@@ -492,6 +499,95 @@ class BinanceHistoricalArchiveTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "symbols in order"):
                 replace(dataset, ohlc_evidence=evidence)
+
+    def test_taker_flow_archive_parity_and_legacy_identity_isolation(self):
+        symbols = ("BTCUSDT", "ETHUSDT")
+        config = _config()
+        day = date(2026, 8, 20)
+        output = config.output_start_boundary_time_ms
+        trades = {}
+        klines = {}
+        for symbol_index, symbol in enumerate(symbols):
+            rows = []
+            aggregate_id = symbol_index * 10_000
+            baseline_maker = "false" if symbol_index == 0 else "true"
+            for boundary in range(config.engine_start_boundary_time_ms,
+                                  config.output_end_boundary_time_ms + 1,
+                                  5_000):
+                aggregate_id += 1
+                rows.append(_agg(boundary, aggregate_id, maker=baseline_maker))
+            for price, maker in (("10", "false"), ("30", "true")):
+                aggregate_id += 1
+                rows.append(_agg(output, aggregate_id, price=price, maker=maker))
+            trades[symbol, day] = tuple(rows)
+            klines[symbol, day] = (_kline(historical_candle_start_ms(config)),)
+
+        with tempfile.TemporaryDirectory() as folder:
+            request = _bundle(
+                Path(folder), config, symbols,
+                trade_rows=trades, kline_rows=klines)
+            suite_before = tuple((item.experiment_id, item.config_version)
+                                 for item in batch.EXPERIMENT_SUITE_V1)
+            self.assertEqual(len(suite_before), 28)
+            legacy_dataset = load_binance_usdm_historical_replay_dataset(request)
+            flow_dataset = load_binance_usdm_historical_replay_dataset(
+                request, include_taker_flow_evidence=True)
+            self.assertIsNone(legacy_dataset.taker_flow_evidence)
+            self.assertIsNotNone(flow_dataset.taker_flow_evidence)
+            self.assertEqual(legacy_dataset.archive_manifest,
+                             flow_dataset.archive_manifest)
+            self.assertEqual(legacy_dataset.replay_request,
+                             flow_dataset.replay_request)
+            legacy_replay = run_historical_market_replay(legacy_dataset.replay_request)
+            flow_replay = run_historical_market_replay(flow_dataset.replay_request)
+            self.assertEqual(legacy_replay, flow_replay)
+            start = config.output_start_boundary_time_ms
+            plan = ReplayPartitionPlan(start + 5_000, start + 10_000)
+            legacy_points = to_market_state_experiment_points(legacy_replay, plan)
+            flow_points = to_market_state_experiment_points(flow_replay, plan)
+            self.assertEqual(legacy_points, flow_points)
+            legacy_suite = batch._suite_manifest(
+                legacy_replay, legacy_dataset, plan, legacy_points,
+                MarketClassifierConfig(), MarketEpisodeLifecycleConfig())
+            flow_suite = batch._suite_manifest(
+                flow_replay, flow_dataset, plan, flow_points,
+                MarketClassifierConfig(), MarketEpisodeLifecycleConfig())
+            self.assertEqual(legacy_suite, flow_suite)
+            self.assertEqual(suite_before, tuple(
+                (item.experiment_id, item.config_version)
+                for item in batch.EXPERIMENT_SUITE_V1))
+            prepared = HistoricalTakerFlowExtensionPrepared(
+                flow_dataset, flow_replay, flow_points, plan)
+            report = run_historical_taker_flow_extension(
+                prepared, code_revision="fixture-revision")
+            for point in report.candidate_points:
+                for window in point.windows:
+                    for metric in window.symbols:
+                        self.assertEqual(metric.parity_status, "MATCH")
+                        self.assertEqual(metric.gross_quote_notional,
+                                         metric.v1_current_notional_volume)
+
+            identity_mismatch = HistoricalTakerFlowEvidenceBuilder(
+                dataset_id="different-dataset", dataset_version="v1",
+                dataset_content_sha256=flow_dataset.archive_manifest.content_sha256,
+                configured_symbols=symbols,
+                engine_start_boundary_time_ms=config.engine_start_boundary_time_ms,
+                output_end_boundary_time_ms=config.output_end_boundary_time_ms,
+                finalization_grace_ms=config.finalization_grace_ms,
+            ).build()
+            with self.assertRaisesRegex(ValueError, "taker flow evidence"):
+                replace(flow_dataset, taker_flow_evidence=identity_mismatch)
+            order_mismatch = HistoricalTakerFlowEvidenceBuilder(
+                dataset_id=flow_dataset.archive_manifest.dataset_id,
+                dataset_version=flow_dataset.archive_manifest.dataset_version,
+                dataset_content_sha256=flow_dataset.archive_manifest.content_sha256,
+                configured_symbols=tuple(reversed(symbols)),
+                engine_start_boundary_time_ms=config.engine_start_boundary_time_ms,
+                output_end_boundary_time_ms=config.output_end_boundary_time_ms,
+                finalization_grace_ms=config.finalization_grace_ms,
+            ).build()
+            with self.assertRaisesRegex(ValueError, "taker flow evidence"):
+                replace(flow_dataset, taker_flow_evidence=order_mismatch)
 
 
 if __name__ == "__main__":

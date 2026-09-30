@@ -125,6 +125,49 @@ candle's timestamps remain visible for a future consumer to assess age, with
 no stale threshold or ATR calculation defined here. The result exposes the
 verified dataset SHA so a consumer can compare it with the replay manifest.
 
+## EXP-75-12 taker-flow evidence sidecar
+
+`load_binance_usdm_historical_replay_dataset(...,
+include_taker_flow_evidence=True)` optionally retains immutable, sparse 5-second
+buy/sell quote-notional buckets and aggTrade row counts during the same
+validated archive pass. The default is off, so the fixed 28-run batch does not
+pay flow aggregation or memory costs. The sidecar digest binds its canonical
+buckets to dataset ID/version/content SHA, ordered symbols, replay engine
+start/output end, bucket rule, aggressor-side mapping, archive availability
+basis, and finalization grace. Prefix sums answer 1m, 5m, and 15m windows
+without rescanning archive history at each point.
+
+Bucket assignment and admission match `MovementBucketEngine`: exact 5-second
+boundaries close the bucket at that boundary, and a row is admitted only when
+its event time is at or before the boundary and its first-seen time is at most
+`boundary + finalization_grace_ms`. Admission at the grace boundary is
+inclusive; a row that misses its bucket is rejected permanently. At point `t`,
+queries sum bucket boundaries in `(t − w, t]`.
+
+The public archive's `buyer_is_maker` flag identifies aggressor side. Its rows
+are aggregated trades, not individual fills, and its schema does not expose the
+`nq` field used to separate RPI quantity. AggTrade `first_seen_at_ms` is the
+exchange timestamp surrogate, not measured WebSocket receipt time; the replay
+cannot establish original network latency or collector health. Empty archive
+buckets do not establish an outage. These outputs are contemporaneous
+diagnostics only, not net long/short positions or directional predictions.
+They do not measure forward returns; those belong to #123.
+
+The separate report can be generated from local verified archives with:
+
+```bash
+python -m market_analysis.historical_taker_flow_extension \
+  --archive-root /path/to/binance-public-data \
+  --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT \
+  --universe-id research-pilot \
+  --universe-version v1 \
+  --start 2026-09-01T00:00:00Z \
+  --end 2026-09-01T12:00:00Z \
+  --development-end 2026-09-01T06:00:00Z \
+  --validation-end 2026-09-01T09:00:00Z \
+  --output-json taker-flow-extension.json
+```
+
 ## Part 3: fixed historical experiment batch
 
 `historical_experiment_batch.py` loads one verified Part 2 dataset, runs Part 1

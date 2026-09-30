@@ -27,6 +27,9 @@ from .historical_replay import (
 from .historical_ohlc_evidence import (
     BinanceTradeOHLCEvidence, CompletedTradeOHLCCandle,
 )
+from .historical_taker_flow_evidence import (
+    HistoricalTakerFlowEvidence, HistoricalTakerFlowEvidenceBuilder,
+)
 from .movement import MovementBucketEngine
 from .movement_history import MINUTE_MS
 from .movement_metrics import MarketUniverseInput, WINDOWS
@@ -201,6 +204,7 @@ class BinanceHistoricalReplayDataset:
     replay_request: HistoricalReplayRequest
     diagnostics: BinanceArchiveDiagnostics
     ohlc_evidence: BinanceTradeOHLCEvidence
+    taker_flow_evidence: HistoricalTakerFlowEvidence | None = None
 
     def __post_init__(self):
         archive_identity = (
@@ -229,6 +233,21 @@ class BinanceHistoricalReplayDataset:
                 "OHLC evidence configured symbols must match replay universe "
                 "symbols in order"
             )
+        flow = self.taker_flow_evidence
+        if flow is not None:
+            if not flow.matches_dataset(*archive_identity,
+                                        self.replay_request.universe.symbols):
+                raise ValueError(
+                    "taker flow evidence dataset identity and ordered symbols "
+                    "must match archive manifest"
+                )
+            config = self.replay_request.config
+            if ((flow.engine_start_boundary_time_ms,
+                 flow.output_end_boundary_time_ms, flow.finalization_grace_ms)
+                    != (config.engine_start_boundary_time_ms,
+                        config.output_end_boundary_time_ms,
+                        config.finalization_grace_ms)):
+                raise ValueError("taker flow evidence replay range or grace mismatch")
 
 
 @dataclass(frozen=True)
@@ -420,10 +439,13 @@ def _check_ohlc_movement_parity(ohlc: CompletedTradeOHLCCandle,
 
 def load_binance_usdm_historical_replay_dataset(
     request: BinanceUSDMArchiveRequest,
+    *, include_taker_flow_evidence: bool = False,
 ) -> BinanceHistoricalReplayDataset:
     """Verify exact daily packages and build an immutable Part 1 request."""
     if not isinstance(request, BinanceUSDMArchiveRequest):
         raise ValueError("request must be BinanceUSDMArchiveRequest")
+    if type(include_taker_flow_evidence) is not bool:
+        raise ValueError("include_taker_flow_evidence must be a boolean")
     config = request.replay_config
     candle_start = historical_candle_start_ms(config)
     trade_dates = required_aggtrade_dates(config)
@@ -435,6 +457,15 @@ def load_binance_usdm_historical_replay_dataset(
     gap_symbols = []
     missing_minutes = duplicate_trades = trade_rows = kline_rows = 0
     earliest_trade = latest_trade = earliest_kline = latest_kline = None
+    flow_builder = (HistoricalTakerFlowEvidenceBuilder(
+        dataset_id=BINANCE_ARCHIVE_DATASET_ID,
+        dataset_version=BINANCE_ARCHIVE_DATASET_VERSION,
+        dataset_content_sha256=None,
+        configured_symbols=request.universe.symbols,
+        engine_start_boundary_time_ms=config.engine_start_boundary_time_ms,
+        output_end_boundary_time_ms=config.output_end_boundary_time_ms,
+        finalization_grace_ms=config.finalization_grace_ms,
+    ) if include_taker_flow_evidence else None)
     for symbol in request.universe.symbols:
         trade_by_id = {}
         kline_by_open = {}
@@ -462,6 +493,10 @@ def load_binance_usdm_historical_replay_dataset(
                             duplicate_trades += 1
                         else:
                             trade_by_id[row.aggregate_trade_id] = row
+                            if flow_builder is not None:
+                                flow_builder.add_trade(
+                                    symbol, row.timestamp_ms, row.timestamp_ms,
+                                    row.price, row.quantity, row.buyer_is_maker)
                 else:
                     kline_rows += len(rows)
                     for row in rows:
@@ -509,6 +544,11 @@ def load_binance_usdm_historical_replay_dataset(
     ohlc_evidence = BinanceTradeOHLCEvidence(
         BINANCE_ARCHIVE_DATASET_ID, BINANCE_ARCHIVE_DATASET_VERSION,
         content_sha256, request.universe.symbols, tuple(ohlc_candles))
+    taker_flow_evidence = (flow_builder.build(
+        dataset_id=BINANCE_ARCHIVE_DATASET_ID,
+        dataset_version=BINANCE_ARCHIVE_DATASET_VERSION,
+        dataset_content_sha256=content_sha256,
+    ) if flow_builder is not None else None)
     instruments = tuple(HistoricalReplayInstrument(
         symbol, f"binance-usdm:{symbol}", True) for symbol in request.universe.symbols)
     intervals = tuple(HistoricalReplaySourceInterval(
@@ -525,4 +565,5 @@ def load_binance_usdm_historical_replay_dataset(
         earliest_trade, latest_trade, earliest_kline, latest_kline,
     )
     return BinanceHistoricalReplayDataset(
-        manifest, replay_request, diagnostics, ohlc_evidence)
+        manifest, replay_request, diagnostics, ohlc_evidence,
+        taker_flow_evidence)
