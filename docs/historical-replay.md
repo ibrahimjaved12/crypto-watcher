@@ -125,6 +125,52 @@ candle's timestamps remain visible for a future consumer to assess age, with
 no stale threshold or ATR calculation defined here. The result exposes the
 verified dataset SHA so a consumer can compare it with the replay manifest.
 
+## Issue #127 mark-price source-coverage audit
+
+`python -m market_analysis.binance_mark_price_coverage` is a separate opt-in
+audit of Binance USD-M daily `markPriceKlines` 1m ZIPs. Its archive tree uses
+`data/futures/um/daily/markPriceKlines/<SYMBOL>/1m/` and each ZIP must have its
+own sibling `.CHECKSUM`. Without `--download`, the CLI inspects local files
+only. With that explicit flag, it may fetch missing or checksum-invalid
+packages from Binance; every downloaded or cached ZIP is checked against its
+checksum before parsing. This path keeps mark-price packages, verification
+results, and the audit manifest separate from trade-price OHLC evidence and
+the base replay dataset.
+
+The command takes an explicit ordered symbol list, a requested output-boundary
+range `[start, end)`, a separate mark archive root, and an output JSON path. It
+audits the requested range plus a 16-minute warm-up. This supplies the close
+from `start - 15 minutes` needed by the later 15-minute close-to-close measure:
+at boundary `t`, the completed one-minute candle with `close_time_ms = t - 1`
+is eligible, using `close_time_ms + 1` as the exchange-close-time availability
+surrogate. The later diagnostic will use aligned minute-boundary points only.
+This surrogate is not an observed network-receipt time. Mark-price candles do
+not use the movement replay's finalization grace.
+
+The versioned audit identity and canonical SHA-256 bind the ordered symbols,
+requested range, effective warm-up, source/type/interval, schema and coverage
+rules, availability convention, verified package names and checksums, tool
+configuration version, and code revision. The report separately lists package
+presence and status, checksum verification, parse errors, duplicate and
+off-grid timestamps, observed unique candles, missing-minute ranges, longest
+gaps, shared exact-minute coverage, and per-symbol and shared contiguous-ready
+coverage for 1m, 5m, and 15m horizons. It reports measured coverage without a
+universal pass threshold. Missing packages and candles remain missing; they
+never become zero prices or returns. This report is source coverage only; the
+mark-versus-trade diagnostic remains a later phase of #127.
+
+After candidate date ranges are frozen, run the local-only audit with the
+chosen dates and archive/output paths, for example:
+
+```bash
+python -m market_analysis.binance_mark_price_coverage \
+  --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT \
+  --start 2026-09-01T00:00:00Z \
+  --end 2026-09-02T00:00:00Z \
+  --archive-root /path/to/binance-mark-price-archives \
+  --output /path/to/mark-price-coverage.json
+```
+
 ## EXP-75-12 taker-flow evidence sidecar
 
 `load_binance_usdm_historical_replay_dataset(...,
