@@ -254,7 +254,7 @@ class HistoricalMarkTradeDiagnosticTests(unittest.TestCase):
             start_open = BASE - 2 * MINUTE
             trade_index.pop(("BTCUSDT", start_open))
             missing_trade_endpoint = _symbol_window_output(
-                "BTCUSDT", 1, BASE, mark_index | {
+                "BTCUSDT", 1, BASE, mark, mark_index | {
                     (item.symbol, item.open_time_ms): item for item in mark.candles
                 }, trade_index, _v1_symbol())
             self.assertTrue(any(reason.source == "TRADE"
