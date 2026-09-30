@@ -9,8 +9,8 @@ The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
 normalization**, **EXP-75-06B ATR-SMA normalization**, **EXP-75-07
 PCA/common-factor diagnostics**, **EXP-75-08
 correlation, clustering, and network diagnostics**, and **EXP-75-09 Gaussian HMM
-learned-regime diagnostics**. EXP-75-10 and EXP-75-11 remain unimplemented;
-EXP-75-12 is implemented as a separate historical extension.
+learned-regime diagnostics**. EXP-75-10 remains unimplemented in the fixed suite;
+EXP-75-11 and EXP-75-12 are implemented as separate historical extensions.
 
 Issue #127's historical mark-versus-trade diagnostic is a separate descriptive
 extension, not another fixed V1 experiment or a change to EXP-75-12. It pairs
@@ -406,19 +406,33 @@ source-time surrogate, gap handling, identities, and CLI.
 
 ## EXP-75-11 — OI/funding/liquidations
 
-- **Status:** `NOT_IMPLEMENTED`
-- **Hypothesis:** Point-in-time leverage, funding, and liquidation context may
-  distinguish superficially similar price/breadth events, but should initially
-  remain supporting evidence rather than a direct broad-state trigger.
-- **Input/data prerequisite:** Replayable point-in-time data for each family.
-- **Causal/live suitability:** Supporting context only until each data family is
-  independently versioned.
-- **What changes relative to V1:** Future supporting evidence, one data family per
-  experiment/version.
-- **What remains unchanged:** V1 broad-state triggers and lifecycle rules.
-- **Evaluation measurements:** Context separation and data-quality coverage.
-- **Promotion constraint:** OI, funding, and liquidations remain separate future
-  experiments.
+- **Status:** `IMPLEMENTED_EXTENSION` as three independent supporting diagnostics:
+  `EXP-75-11-OI`, `EXP-75-11-FUNDING`, and `EXP-75-11-LIQUIDATION`.
+- **Ownership:** Separate evidence modules and prepared-data library runners use
+  the exact exported canonical replay points and ordered configured universe.
+  Each has its own evidence SHA, algorithm/config versions, candidate output SHA,
+  extension fingerprint and report SHA. No five-symbol restriction applies.
+- **OI:** Verified daily Binance metrics; base-quantity log changes using exact
+  5m/15m endpoints, conservative `create_time + 5m` availability, at least 20m
+  prehistory, and no carry through a missing current nominal slot. Positive OI
+  change does not identify new longs or shorts.
+- **Funding:** Verified monthly settled events, preceding-calendar-month history,
+  `calc_time + 1ms` completion surrogate, rate divided by the recorded positive
+  interval hours. Missing expected next settlement invalidates the carried rate.
+- **Liquidations:** Tardis provider-normalized snapshots, local receipt timestamps
+  in microseconds, exact observed `price * amount` totals in 1m/5m/15m event-time
+  windows, full archive-day coverage, and explicit unavailable/no-observation
+  states. Opt-in acquisition supports unauthenticated first-of-month samples only.
+- **Summaries:** Partial symbol coverage is allowed. Ready denominators and unique
+  OI endpoint-pair / funding settlement counts distinguish repeated projections
+  from independent source observations.
+- **Scope:** Descriptive same-time V1 direction context only. Core dataset, V1
+  movement/classification/lifecycle, existing fingerprints and fixed 28 experiments
+  retain their existing definitions. No predictions, signals, thresholds, rankings,
+  forward outcomes, live collection or automatic promotion.
+- **Validation:** Generated archive fixtures cover the frozen schema/causality
+  contracts. Real-source validation is a separate user-run step before #128 closes;
+  incompatible real schemas fail explicitly. See [historical replay](historical-replay.md#exp-75-11-independent-derivatives-context).
 
 ## EXP-75-12 — Taker imbalance
 
