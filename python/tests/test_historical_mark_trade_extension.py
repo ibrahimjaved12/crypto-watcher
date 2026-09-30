@@ -3,7 +3,7 @@
 import csv
 from dataclasses import replace
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import hashlib
 import io
 from pathlib import Path
@@ -203,14 +203,16 @@ class HistoricalMarkTradeDiagnosticTests(unittest.TestCase):
                 _trade_index(), _v1_symbol())
             self.assertEqual(positive.status, "READY")
             self.assertGreater(Decimal(positive.divergence), 0)
-            self.assertLessEqual(abs(
-                Decimal(positive.divergence)
-                - (Decimal(positive.mark_return) - Decimal(positive.trade_return))),
-                Decimal("1e-47"))
-            self.assertLessEqual(abs(
-                Decimal(positive.divergence)
-                - (Decimal(positive.basis_at_end) - Decimal(positive.basis_at_start))),
-                Decimal("1e-47"))
+            with localcontext() as context:
+                context.prec = 50
+                return_difference = (Decimal(positive.mark_return)
+                                     - Decimal(positive.trade_return))
+                basis_difference = (Decimal(positive.basis_at_end)
+                                    - Decimal(positive.basis_at_start))
+            self.assertLessEqual(abs(Decimal(positive.divergence)
+                                     - return_difference), Decimal("1e-47"))
+            self.assertLessEqual(abs(Decimal(positive.divergence)
+                                     - basis_difference), Decimal("1e-47"))
 
             _write_universe(root, btc_prices={start_open: "110", end_open: "100"})
             negative_mark = _load(root)
@@ -232,13 +234,15 @@ class HistoricalMarkTradeDiagnosticTests(unittest.TestCase):
     def test_missing_endpoint_and_interior_minutes_report_source_specific_reasons(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            _write_universe(root)
+            end_open = BASE - MINUTE
+            interior_open = BASE - 3 * MINUTE
+            rows = [_mark_row(opening) for opening in _expected_opens()
+                    if opening not in (end_open, interior_open)]
+            _write_universe(root, btc_rows=rows)
             mark = _load(root)
             mark_index = {(item.symbol, item.open_time_ms): item
                           for item in mark.candles}
             trade_index = _trade_index()
-            end_open = BASE - MINUTE
-            mark_index.pop(("BTCUSDT", end_open))
             missing_mark_endpoint = _symbol_window_output(
                 "BTCUSDT", 1, BASE, mark, mark_index, trade_index, _v1_symbol())
             self.assertEqual(missing_mark_endpoint.status, "UNAVAILABLE")
@@ -258,8 +262,6 @@ class HistoricalMarkTradeDiagnosticTests(unittest.TestCase):
                                 and reason.reason == "TRADE_MISSING_MINUTE"
                                 for reason in missing_trade_endpoint.reasons))
 
-            interior_open = BASE - 3 * MINUTE
-            mark_index.pop(("BTCUSDT", interior_open), None)
             interior = _symbol_window_output(
                 "BTCUSDT", 5, BASE, mark, mark_index, trade_index, _v1_symbol())
             self.assertTrue(any(reason.source == "MARK"
@@ -360,13 +362,15 @@ class HistoricalMarkTradeDiagnosticTests(unittest.TestCase):
                 diagnostic_changed = _extension_manifest(prepared, "f" * 64,
                                                          "fixture-revision")
                 reordered = replace(mark, configured_symbols=tuple(reversed(SYMBOLS)))
-                order_prepared = replace(prepared, mark_evidence=reordered)
+                order_prepared = SimpleNamespace(
+                    **{**vars(prepared), "mark_evidence": reordered})
                 order_changed = _extension_manifest(order_prepared, "e" * 64,
                                                     "fixture-revision")
                 package = replace(mark.packages[0], archive_sha256="f" * 64)
                 package_changed_mark = replace(
                     mark, packages=(package,) + mark.packages[1:])
-                package_prepared = replace(prepared, mark_evidence=package_changed_mark)
+                package_prepared = SimpleNamespace(
+                    **{**vars(prepared), "mark_evidence": package_changed_mark})
                 package_changed = _extension_manifest(package_prepared, "e" * 64,
                                                       "fixture-revision")
                 with patch("market_analysis.historical_mark_trade_extension.MARK_TRADE_CONFIG_VERSION",
