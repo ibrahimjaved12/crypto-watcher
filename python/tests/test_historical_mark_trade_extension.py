@@ -304,14 +304,21 @@ class HistoricalMarkTradeDiagnosticTests(unittest.TestCase):
             self.assertEqual(one_minute.mark_valid_candle_open_times_ms[-1], BASE)
             self.assertEqual(one_minute.mark_valid_candle_close_times_ms[-1], BASE + MINUTE - 1)
 
-            expected = (BASE - 2 * MINUTE, BASE - MINUTE)
+            late_open = BASE - MINUTE
             late_trade = _trade_index(first_seen_by_open={
-                expected[0]: expected[0] + MINUTE + 2_001,
+                late_open: BASE + 2_000,
             })
             unavailable = _symbol_window_output(
                 "BTCUSDT", 1, BASE, mark, mark_index, late_trade, _v1_symbol())
             self.assertTrue(any(reason.reason == "TRADE_CANDLE_NOT_AVAILABLE"
                                 for reason in unavailable.reasons))
+            self.assertEqual(unavailable.status, "UNAVAILABLE")
+            now_visible = _symbol_window_output(
+                "BTCUSDT", 5, BASE + MINUTE, mark, mark_index,
+                late_trade, _v1_symbol())
+            self.assertEqual(now_visible.status, "READY")
+            self.assertIn(late_open, now_visible.trade_valid_candle_open_times_ms)
+            self.assertEqual(now_visible.reasons, ())
 
     def test_common_ready_summary_and_extension_identity_changes_are_separate(self):
         with tempfile.TemporaryDirectory() as temporary:

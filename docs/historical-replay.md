@@ -315,7 +315,10 @@ minute boundary `t`. For each symbol and each fixed horizon `w ∈ {1, 5, 15}`,
 it requires every one-minute candle from open `t - (w + 1) minutes` through
 open `t - 1 minute` for both sources. A candle opened at `u - 1 minute`, with
 `close_time_ms = u - 1`, is eligible at boundary `u` when its source
-availability is no later than `u`. This uses the exchange-close-time-plus-one
+availability is no later than `u`. At each evaluation boundary `t`, every
+candle in the window is checked with `close_time_ms < t` and
+`first_seen_at_ms <= t`; an older candle that arrived late becomes usable once
+it is visible at `t`. This uses the exchange-close-time-plus-one
 millisecond archive surrogate. It is not an observed network receipt time, and
 the movement replay's two-second finalization grace is not applied here.
 Gaps, duplicate rows, off-grid timestamps, and unavailable source candles are

@@ -367,7 +367,7 @@ def _v1_context(window) -> V1MarketStateContext:
 
 
 def _source_candle_checks(source: str, symbol: str, open_times: tuple[int, ...],
-                          *, mark_evidence: BinanceMarkPriceEvidence,
+                          boundary: int, *, mark_evidence: BinanceMarkPriceEvidence,
                           mark_index: Mapping[tuple[str, int], object],
                           trade_index: Mapping[tuple[str, int], CompletedTradeOHLCCandle]):
     candles = []
@@ -381,7 +381,6 @@ def _source_candle_checks(source: str, symbol: str, open_times: tuple[int, ...],
                       if source == "MARK" else "TRADE_MISSING_MINUTE")
             reasons.append(MarkTradeUnavailableReason(source, opening, reason))
             continue
-        boundary = opening + MINUTE_MS
         if (candle.close_time_ms >= boundary
                 or candle.first_seen_at_ms > boundary):
             reasons.append(MarkTradeUnavailableReason(
@@ -402,10 +401,10 @@ def _symbol_window_output(symbol: str, window_minutes: int, boundary: int,
     expected = tuple(range(boundary - (window_minutes + 1) * MINUTE_MS,
                            boundary, MINUTE_MS))
     mark_candles, mark_times, mark_reasons = _source_candle_checks(
-        "MARK", symbol, expected, mark_evidence=mark_evidence,
+        "MARK", symbol, expected, boundary, mark_evidence=mark_evidence,
         mark_index=mark_index, trade_index=trade_index)
     trade_candles, trade_times, trade_reasons = _source_candle_checks(
-        "TRADE", symbol, expected, mark_evidence=mark_evidence,
+        "TRADE", symbol, expected, boundary, mark_evidence=mark_evidence,
         mark_index=mark_index, trade_index=trade_index)
     reasons = mark_reasons + trade_reasons
     ready = not reasons and len(mark_candles) == len(expected) == len(trade_candles)
