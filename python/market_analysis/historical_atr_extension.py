@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 import hashlib
 import math
 from pathlib import Path
@@ -394,8 +394,56 @@ def _candidate_output_sha256(atr_result) -> str:
             "candidate_lifecycle_state": point.candidate_lifecycle_state,
             "candidate_transitions": point.candidate_transitions,
         }
-        digest.update((_canonical_json(payload) + "\n").encode("utf-8"))
+        digest.update((_canonical_json(_atr_json_safe(payload)) + "\n").encode("utf-8"))
     return digest.hexdigest()
+
+
+def _atr_json_safe(value):
+    """Encode ATR dataclasses without losing non-string mapping keys.
+
+    String-key mappings retain the normal report object form. A mapping with
+    non-string keys becomes an ordered list of key/value records, so the real
+    integer-keyed movement windows remain distinct and stable in hashes/JSON.
+    """
+    if is_dataclass(value) and not isinstance(value, type):
+        return {item.name: _atr_json_safe(getattr(value, item.name))
+                for item in fields(value)}
+    if isinstance(value, Mapping):
+        if all(isinstance(key, str) for key in value):
+            return {key: _atr_json_safe(value[key]) for key in sorted(value)}
+        entries = [(_atr_mapping_key_json(key), _atr_json_safe(item))
+                   for key, item in value.items()]
+        entries.sort(key=lambda entry: _atr_mapping_order_key(entry[0]))
+        return [[key, item] for key, item in entries]
+    if isinstance(value, (tuple, list)):
+        return [_atr_json_safe(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        items = [_atr_json_safe(item) for item in value]
+        return sorted(items, key=_canonical_json)
+    return report_json_safe(value)
+
+
+def _atr_mapping_key_json(key):
+    """Keep uncommon non-JSON mapping-key types explicit and distinguishable."""
+    if key is None or type(key) in (str, bool, int, float):
+        return report_json_safe(key)
+    if is_dataclass(key) and not isinstance(key, type):
+        type_name = f"{type(key).__module__}.{type(key).__qualname__}"
+    else:
+        type_name = f"{type(key).__module__}.{type(key).__qualname__}"
+    return {"key_type": type_name, "key_value": _atr_json_safe(key)}
+
+
+def _atr_mapping_order_key(key):
+    if type(key) is int:
+        return 0, key
+    return 1, _canonical_json(key)
+
+
+def _atr_sha256(value) -> str:
+    return hashlib.sha256(
+        _canonical_json(_atr_json_safe(value)).encode("utf-8")
+    ).hexdigest()
 
 
 def _manifest(prepared, classifier_config, lifecycle_config, output_sha):
@@ -487,7 +535,7 @@ def run_historical_atr_extension(
             payload["experiment_id"], ATR_ALGORITHM_VERSION,
             atr_config.version, payload["config_parameters"],
             REALIZED_VOLATILITY_ALGORITHM_VERSION, rv_config.version, output_sha,
-            atr_summaries, rv_summaries, three_way, _sha256(payload),
+            atr_summaries, rv_summaries, three_way, _atr_sha256(payload),
         ))
         atr_results[index] = None
         del rv_result, atr_result
@@ -498,8 +546,9 @@ def run_historical_atr_extension(
         prepared.replay_result.diagnostics, tuple(run_reports),
         code_revision, WARMUP_ASYMMETRY, "",
     )
-    return replace(report, report_sha256=_sha256({
-        key: value for key, value in report_json_safe(report).items()
+    report_value = _atr_json_safe(report)
+    return replace(report, report_sha256=_atr_sha256({
+        key: value for key, value in report_value.items()
         if key != "report_sha256"
     }))
 
@@ -518,7 +567,12 @@ def historical_atr_extension_report_to_json(
 ) -> str:
     if not isinstance(report, HistoricalATRExtensionReport):
         raise ValueError("report must be HistoricalATRExtensionReport")
-    return _canonical_json(report)
+    report_value = _atr_json_safe(report)
+    expected = _atr_sha256({key: value for key, value in report_value.items()
+                            if key != "report_sha256"})
+    if report.report_sha256 != expected:
+        raise ValueError("ATR extension report digest does not match canonical output")
+    return _canonical_json(report_value)
 
 
 def _current_code_revision() -> str:
