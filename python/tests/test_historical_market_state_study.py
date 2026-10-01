@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from market_analysis import historical_study_123_manifest as study
+from market_analysis import historical_market_state_study as study
 from market_analysis.binance_historical_archive import (
     ARCHIVE_FIRST_SEEN_POLICY, ARCHIVE_SOURCE_STATE_POLICY,
     BINANCE_ARCHIVE_ADAPTER_VERSION, BINANCE_ARCHIVE_DATASET_ID,
@@ -114,7 +114,7 @@ class StudySelectionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.bins = study.calendar_bins()
         cls.records = synthetic_calendar()
-        cls.manifest = study.build_study123_manifest(cls.records)
+        cls.manifest = study.build_historical_market_state_study_manifest(cls.records)
 
     def test_exact_calendar_partition(self):
         self.assertEqual((study.CALENDAR_END - study.CALENDAR_START).days + 1, 974)
@@ -132,9 +132,13 @@ class StudySelectionTests(unittest.TestCase):
                 study.calendar_bins()
 
     def test_fixed_weekday_hash_examples_and_order_invariance(self):
-        expected = {0: date(2024, 1, 22), 1: date(2024, 2, 13), 29: date(2026, 8, 4)}
+        expected = {0: date(2024, 1, 1), 1: date(2024, 2, 6), 29: date(2026, 8, 25)}
         periods = self.manifest.selected_periods
         self.assertEqual(periods, study.select_study_periods(reversed(self.records)))
+        for evidence in self.manifest.selection_evidence:
+            self.assertEqual(len(evidence.attempted_dates), 1)
+            self.assertEqual(evidence.attempted_dates[0].state, "ELIGIBLE")
+            self.assertEqual(evidence.selected_date, evidence.attempted_dates[0].utc_date)
         for period in periods:
             self.assertEqual(period.target_weekday, period.source_bin_index % 7)
             self.assertEqual(period.selected_weekday, period.target_weekday)
@@ -145,23 +149,44 @@ class StudySelectionTests(unittest.TestCase):
         for index, day in expected.items():
             self.assertEqual(periods[index].utc_date, day)
 
-    def test_cyclic_fallback_same_digest_and_no_eligible_dates(self):
+    def test_first_ineligible_candidate_then_fallback_and_no_eligible_dates(self):
         first = self.bins[0]
+        target_candidates = study._rotated_candidates(first, first.target_weekday)
+        second_candidates = study._rotated_candidates(first, (first.target_weekday + 1) % 7)
+        records = tuple(ineligible(item) if item.utc_date == target_candidates[0] else item
+                        for item in self.records)
+        first_try = study.select_study_date(first, records)
+        self.assertEqual(first_try.selection_evidence.attempted_dates[0].utc_date,
+                         target_candidates[0])
+        self.assertEqual(first_try.selection_evidence.attempted_dates[0].state, "INELIGIBLE")
+        self.assertEqual(first_try.selection_evidence.attempted_dates[1].utc_date,
+                         target_candidates[1])
+        self.assertEqual(first_try.selection_evidence.attempted_dates[1].state, "ELIGIBLE")
+
         records = tuple(ineligible(item) if item.utc_date in first.dates
                         and item.utc_date.weekday() == first.target_weekday else item
                         for item in self.records)
         result = study.select_study_date(first, records)
         self.assertEqual(result.fallback_distance, 1)
         self.assertEqual(result.core_eligibility.utc_date.weekday(), 1)
-        candidates = tuple(day for day in first.dates if day.weekday() == 1)
-        seed = int.from_bytes(hashlib.sha256(b"crypto-watcher:study-123-v1:0").digest(), "big")
-        self.assertEqual(result.core_eligibility.utc_date, candidates[seed % len(candidates)])
-        wrapped_bin = self.bins[6]  # Sunday -> Monday.
-        wrapped_records = tuple(ineligible(item) if item.utc_date in wrapped_bin.dates
-                                and item.utc_date.weekday() == 6 else item for item in self.records)
-        wrapped = study.select_study_date(wrapped_bin, wrapped_records)
-        self.assertEqual(wrapped.fallback_distance, 1)
-        self.assertEqual(wrapped.core_eligibility.utc_date.weekday(), 0)
+        self.assertEqual(result.core_eligibility.utc_date, second_candidates[0])
+        self.assertEqual(result.selection_evidence.considered_weekdays, (0, 1))
+        self.assertEqual(tuple(item.utc_date for item in result.selection_evidence.attempted_dates),
+                         (*target_candidates, second_candidates[0]))
+        self.assertTrue(all(item.state == "INELIGIBLE"
+                            for item in result.selection_evidence.attempted_dates[:-1]))
+
+        # Bin 29 starts at the final candidate and wraps to the calendar list's first.
+        wrap_bin = self.bins[29]
+        rotated = study._rotated_candidates(wrap_bin, wrap_bin.target_weekday)
+        self.assertGreater(study._selection_seed(wrap_bin.bin_index)
+                           % len(study._weekday_candidates(wrap_bin, wrap_bin.target_weekday)), 0)
+        wrap_records = tuple(ineligible(item) if item.utc_date in rotated[:-1] else item
+                             for item in self.records)
+        wrapped = study.select_study_date(wrap_bin, wrap_records)
+        self.assertEqual(wrapped.core_eligibility.utc_date, rotated[-1])
+        self.assertEqual(tuple(item.utc_date for item in wrapped.selection_evidence.attempted_dates),
+                         rotated)
         none = tuple(ineligible(item) if item.utc_date in first.dates else item for item in self.records)
         with self.assertRaises(study.NoEligibleStudyDateError) as caught:
             study.select_study_date(first, none)
@@ -169,24 +194,30 @@ class StudySelectionTests(unittest.TestCase):
 
     def test_unverified_target_and_fallback_dates_block_final_selection(self):
         first = self.bins[0]
-        unknown = next(day for day in first.dates if day.weekday() == 0)
+        first_candidate = study._rotated_candidates(first, first.target_weekday)[0]
         records = tuple(study.CoreDateEligibility(item.utc_date, "UNVERIFIED", study.LOCAL_ARCHIVE_MISSING)
-                        if item.utc_date == unknown else item for item in self.records)
+                        if item.utc_date == first_candidate else item for item in self.records)
         with self.assertRaises(study.UnresolvedStudySelectionError) as caught:
             study.select_study_date(first, records)
-        self.assertEqual(caught.exception.unresolved_dates, (unknown,))
+        self.assertEqual(caught.exception.unresolved_dates, (first_candidate,))
+        self.assertEqual(caught.exception.unresolved_date, first_candidate)
         self.assertEqual(caught.exception.weekday, 0)
+        with self.assertRaises(study.UnresolvedStudySelectionError) as caught:
+            study.select_study_date(first, ())
+        self.assertEqual(caught.exception.unresolved_date, first_candidate)
+        # The later candidate is cached and eligible, but cannot bypass the first unknown.
+        later_cached = tuple(item for item in self.records if item.utc_date != first_candidate)
         with self.assertRaises(study.UnresolvedStudySelectionError):
-            study.select_study_date(first, ())  # absent eligibility is unresolved, never skipped.
-        tuesday = next(day for day in first.dates if day.weekday() == 1)
+            study.select_study_date(first, later_cached)
+        fallback_first = study._rotated_candidates(first, (first.target_weekday + 1) % 7)[0]
         fallback = tuple(ineligible(item) if item.utc_date in first.dates and item.utc_date.weekday() == 0
                          else study.CoreDateEligibility(item.utc_date, "UNVERIFIED",
                                                        study.LOCAL_ARCHIVE_INVALID_OR_NEEDS_REACQUISITION)
-                         if item.utc_date == tuesday else item for item in self.records)
+                         if item.utc_date == fallback_first else item for item in self.records)
         with self.assertRaises(study.UnresolvedStudySelectionError) as caught:
             study.select_study_date(first, fallback)
         self.assertEqual(caught.exception.weekday, 1)
-        self.assertEqual(caught.exception.unresolved_dates, (tuesday,))
+        self.assertEqual(caught.exception.unresolved_dates, (fallback_first,))
 
     def test_unconsidered_weekday_can_remain_unverified(self):
         first = self.bins[0]
@@ -194,7 +225,7 @@ class StudySelectionTests(unittest.TestCase):
                         if item.utc_date in first.dates and item.utc_date.weekday() != 0
                         else item for item in self.records)
         self.assertEqual(study.select_study_date(first, records).core_eligibility.utc_date,
-                         date(2024, 1, 22))
+                         date(2024, 1, 1))
 
     def test_study_phases_and_exact_midnight_boundaries(self):
         periods = self.manifest.selected_periods
@@ -218,36 +249,50 @@ class StudySelectionTests(unittest.TestCase):
 
     def test_manifest_and_report_identity_are_canonical_and_immutable(self):
         manifest = self.manifest
-        reordered = study.build_study123_manifest(reversed(self.records))
-        self.assertEqual(study.study123_manifest_json(manifest), study.study123_manifest_json(reordered))
-        payload = json.loads(study.study123_manifest_json(manifest))
+        reordered = study.build_historical_market_state_study_manifest(reversed(self.records))
+        self.assertEqual(study.historical_market_state_study_manifest_json(manifest), study.historical_market_state_study_manifest_json(reordered))
+        payload = json.loads(study.historical_market_state_study_manifest_json(manifest))
         digest = payload.pop("manifest_sha256")
         self.assertEqual(digest, _sha256(payload))
         self.assertNotEqual(digest, _sha256({**payload, "manifest_sha256": digest}))
         self.assertEqual(payload["calendar_start"], "2024-01-01")
         self.assertEqual(payload["secondary_horizons_minutes"], [1, 5, 15, 30, 60])
-        text = study.study123_manifest_json(manifest)
+        text = study.historical_market_state_study_manifest_json(manifest)
         for forbidden in ("archive_root", "code_revision", "generated_at", "wall_time", "machine_name"):
             self.assertNotIn(forbidden, text)
-        a = study.Study123EligibilityReport(self.records)
-        b = study.Study123EligibilityReport(tuple(reversed(self.records)))
-        self.assertEqual(study.study123_eligibility_report_json(a), study.study123_eligibility_report_json(b))
-        report = json.loads(study.study123_eligibility_report_json(a))
+        a = study.HistoricalStudyEligibilityReport(self.records)
+        b = study.HistoricalStudyEligibilityReport(tuple(reversed(self.records)))
+        self.assertEqual(study.historical_study_eligibility_report_json(a), study.historical_study_eligibility_report_json(b))
+        report = json.loads(study.historical_study_eligibility_report_json(a))
         self.assertEqual(report.pop("report_sha256"), _sha256(report))
         with self.assertRaises(FrozenInstanceError):
             manifest.study_version = "changed"
         with self.assertRaises(FrozenInstanceError):
             self.records[0].state = "INELIGIBLE"
+        self.assertNotIn("eligibility_records", payload)
+        self.assertEqual(len(a.eligibility_records), 974)
         with self.assertRaises(ValueError):
-            study.build_study123_manifest((*self.records, self.records[0]))
+            study.HistoricalStudyEligibilityReport((*self.records, self.records[0]))
 
-    def test_scientific_changes_change_hash_and_frozen_design_rejects_overrides(self):
-        changed_records = tuple(ineligible(item) if item.utc_date == date(2024, 1, 22)
-                                else item for item in self.records)
-        changed = study.build_study123_manifest(changed_records)
-        self.assertNotEqual(changed.selected_periods[0].utc_date, self.manifest.selected_periods[0].utc_date)
-        self.assertNotEqual(changed.manifest_sha256, self.manifest.manifest_sha256)
-        payload = json.loads(study.study123_manifest_json(self.manifest))
+    def test_only_finalized_selection_path_affects_scientific_manifest(self):
+        bin_zero = self.bins[0]
+        ordered = study._rotated_candidates(bin_zero, bin_zero.target_weekday)
+        unconsidered_date = ordered[1]
+        unrelated_change = tuple(ineligible(item) if item.utc_date == unconsidered_date else item
+                                 for item in self.records)
+        changed_unconsidered = study.build_historical_market_state_study_manifest(unrelated_change)
+        self.assertEqual(changed_unconsidered.selected_periods, self.manifest.selected_periods)
+        self.assertEqual(changed_unconsidered.selection_evidence, self.manifest.selection_evidence)
+        self.assertEqual(study.historical_market_state_study_manifest_json(changed_unconsidered),
+                         study.historical_market_state_study_manifest_json(self.manifest))
+        self.assertEqual(changed_unconsidered.manifest_sha256, self.manifest.manifest_sha256)
+
+        considered_change = tuple(ineligible(item) if item.utc_date == ordered[0] else item
+                                  for item in self.records)
+        changed_considered = study.build_historical_market_state_study_manifest(considered_change)
+        self.assertNotEqual(changed_considered.selection_evidence[0], self.manifest.selection_evidence[0])
+        self.assertNotEqual(changed_considered.manifest_sha256, self.manifest.manifest_sha256)
+        payload = json.loads(study.historical_market_state_study_manifest_json(self.manifest))
         payload.pop("manifest_sha256")
         for field_name in ("universe", "primary_hypotheses", "selected_periods"):
             altered = json.loads(json.dumps(payload))
@@ -259,7 +304,7 @@ class StudySelectionTests(unittest.TestCase):
                 altered[field_name][0]["utc_date"] = "2024-01-29"
             self.assertNotEqual(_sha256(payload), _sha256(altered))
         overrides = (
-            {"study_version": "study-123-v2"}, {"calendar_end": date(2026, 9, 1)},
+            {"study_version": "historical-market-state-study-v2"}, {"calendar_end": date(2026, 9, 1)},
             {"universe": MarketUniverseInput(study.UNIVERSE_ID, "v1", study.ORDERED_SYMBOLS[::-1])},
             {"development_period_count": 11}, {"bin_count": 29},
             {"selected_periods": self.manifest.selected_periods[::-1]},
@@ -273,7 +318,7 @@ class StudySelectionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     replace(self.manifest, **override)
         before = suite_scientific_identity()
-        study.build_study123_manifest(self.records)
+        study.build_historical_market_state_study_manifest(self.records)
         self.assertEqual(suite_scientific_identity(), before)
         self.assertEqual(len(EXPERIMENT_SUITE_V1), 28)
 
@@ -307,6 +352,22 @@ class StudySelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(study.PRIMARY_HYPOTHESES[0], primary_horizon_minutes=None)
 
+    def test_semantic_domain_versions_and_seed_namespace(self):
+        self.assertEqual(study.STUDY_VERSION, "historical-market-state-study-v1")
+        self.assertEqual(study.SELECTION_POLICY_VERSION, "historical-market-state-selection-v2")
+        self.assertEqual(study.CORE_ELIGIBILITY_POLICY_VERSION,
+                         "historical-market-state-core-eligibility-v1")
+        self.assertEqual(study.ELIGIBILITY_REPORT_VERSION,
+                         "historical-market-state-eligibility-report-v1")
+        self.assertEqual(study.SECONDARY_HORIZON_POLICY_VERSION,
+                         "historical-market-state-secondary-horizons-v1")
+        self.assertEqual(study.UNIVERSE_ID, "historical-market-state-core5")
+        self.assertNotIn("123", study.STUDY_VERSION + study.SELECTION_POLICY_VERSION
+                         + study.CORE_ELIGIBILITY_POLICY_VERSION + study.ELIGIBILITY_REPORT_VERSION
+                         + study.SECONDARY_HORIZON_POLICY_VERSION + study.UNIVERSE_ID)
+        self.assertEqual(study._selection_seed(0), int.from_bytes(hashlib.sha256(
+            b"crypto-watcher:historical-market-state-study-v1:0").digest(), "big"))
+
     def test_eligibility_states_and_coverage_provenance_must_agree(self):
         record = self.records[0]
         for values in ({"state": "INELIGIBLE", "reason_code": study.CORE_KLINE_GAP},
@@ -324,8 +385,8 @@ class StudySelectionTests(unittest.TestCase):
                 record.provenance.archive_manifest, archive_files=()))
         with self.assertRaises(ValueError):
             replace(record.provenance, symbol_coverage=record.provenance.symbol_coverage[::-1])
-        payload = json.loads(study.study123_eligibility_report_json(
-            study.Study123EligibilityReport((record,))))["eligibility_records"][0]
+        payload = json.loads(study.historical_study_eligibility_report_json(
+            study.HistoricalStudyEligibilityReport((record,))))["eligibility_records"][0]
         digest = payload.pop("eligibility_sha256")
         self.assertEqual(digest, _sha256(payload))
         provenance = payload["provenance"]
@@ -401,7 +462,7 @@ class LocalCoreEligibilityTests(unittest.TestCase):
                 self.assertEqual((record.state, record.reason_code), ("UNVERIFIED", study.LOCAL_ARCHIVE_MISSING))
                 self.assertIn(f"{relative}{suffix}", record.missing_local_paths)
                 self.assertIsNone(record.provenance)
-                self.assertNotIn(local, study.study123_eligibility_report_json(study.Study123EligibilityReport((record,))))
+                self.assertNotIn(local, study.historical_study_eligibility_report_json(study.HistoricalStudyEligibilityReport((record,))))
 
     def test_local_checksum_zip_or_schema_corruption_remains_unverified(self):
         relative = daily_aggtrades_relative_path("BTCUSDT", required_aggtrade_dates(self.config)[0])
@@ -434,5 +495,5 @@ class LocalCoreEligibilityTests(unittest.TestCase):
         self.assertEqual(first.eligibility_sha256, second.eligibility_sha256)
         records = tuple(first if item.utc_date == self.day else item for item in synthetic_calendar())
         reordered = tuple(second if item.utc_date == self.day else item for item in reversed(synthetic_calendar()))
-        self.assertEqual(study.build_study123_manifest(records).manifest_sha256,
-                         study.build_study123_manifest(reordered).manifest_sha256)
+        self.assertEqual(study.build_historical_market_state_study_manifest(records).manifest_sha256,
+                         study.build_historical_market_state_study_manifest(reordered).manifest_sha256)

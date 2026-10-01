@@ -1,4 +1,4 @@
-"""Frozen study-123-v1 design, local core eligibility and outcome-blind selection.
+"""Frozen historical market-state study design and outcome-blind selection.
 
 This contract performs no acquisition, replay, candidate execution or outcome
 evaluation. Study phases span independent UTC days, not ReplayPartitionPlan's
@@ -6,9 +6,10 @@ partitions inside one replay stream. Scientific hashes exclude local roots,
 generation times and code revisions; later reports bind code separately.
 
 Use verify_local_core_date for acquisition-independent verification, preserve
-the records in Study123EligibilityReport, then call build_study123_manifest once
-the considered weekday sets are resolved. The JSON helpers return canonical
-text for callers to save/freeze; this module writes no artifacts itself.
+the records in HistoricalStudyEligibilityReport, then call
+build_historical_market_state_study_manifest. The manifest retains only the
+resolved selection paths. The JSON helpers return canonical text for callers
+to save/freeze; this module writes no artifacts itself.
 """
 
 from __future__ import annotations
@@ -34,11 +35,11 @@ from .historical_replay import HistoricalReplayConfig
 from .movement_metrics import MarketMovementConfig, MarketUniverseInput
 
 
-STUDY_VERSION = "study-123-v1"
-SELECTION_POLICY_VERSION = "study-123-selection-v1"
-CORE_ELIGIBILITY_POLICY_VERSION = "study-123-core-eligibility-v1"
-ELIGIBILITY_REPORT_VERSION = "study-123-eligibility-report-v1"
-SECONDARY_HORIZON_POLICY_VERSION = "study-123-secondary-horizons-v1"
+STUDY_VERSION = "historical-market-state-study-v1"
+SELECTION_POLICY_VERSION = "historical-market-state-selection-v2"
+CORE_ELIGIBILITY_POLICY_VERSION = "historical-market-state-core-eligibility-v1"
+ELIGIBILITY_REPORT_VERSION = "historical-market-state-eligibility-report-v1"
+SECONDARY_HORIZON_POLICY_VERSION = "historical-market-state-secondary-horizons-v1"
 SECONDARY_HORIZONS_MINUTES = (1, 5, 15, 30, 60)
 CALENDAR_START = date(2024, 1, 1)
 CALENDAR_END = date(2026, 8, 31)
@@ -47,7 +48,7 @@ DEVELOPMENT_PERIOD_COUNT = 10
 VALIDATION_PERIOD_COUNT = 8
 TEST_PERIOD_COUNT = 12
 ORDERED_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT")
-UNIVERSE_ID = "study-123-core5"
+UNIVERSE_ID = "historical-market-state-core5"
 UNIVERSE_VERSION = "v1"
 MINUTE_MS = 60_000
 DAY_MS = 86_400_000
@@ -105,7 +106,7 @@ def _required_paths(config: HistoricalReplayConfig) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True)
-class StudyCalendarBin:
+class HistoricalStudyCalendarBin:
     bin_index: int
     start_date: date
     end_date: date
@@ -129,13 +130,13 @@ class StudyCalendarBin:
                      for i in range((self.end_date - self.start_date).days + 1))
 
 
-def calendar_bins() -> tuple[StudyCalendarBin, ...]:
+def calendar_bins() -> tuple[HistoricalStudyCalendarBin, ...]:
     count = (CALENDAR_END - CALENDAR_START).days + 1
     if (CALENDAR_START > CALENDAR_END or count != 974 or BIN_COUNT != 30
             or (DEVELOPMENT_PERIOD_COUNT, VALIDATION_PERIOD_COUNT, TEST_PERIOD_COUNT)
             != (10, 8, 12)):
         raise ValueError("inconsistent frozen study calendar/counts")
-    bins = tuple(StudyCalendarBin(
+    bins = tuple(HistoricalStudyCalendarBin(
         i, CALENDAR_START + timedelta(days=i * count // BIN_COUNT),
         CALENDAR_START + timedelta(days=(i + 1) * count // BIN_COUNT - 1), i % 7)
         for i in range(BIN_COUNT))
@@ -324,24 +325,49 @@ def verify_local_core_date(utc_date: date, archive_root: Path | str) -> CoreDate
                                CORE_KLINE_GAP if has_gaps else ELIGIBLE_CORE_DATA, provenance)
 
 
-def _eligibility_records(records) -> tuple[CoreDateEligibility, ...]:
+def _eligibility_by_date(records) -> dict[date, CoreDateEligibility]:
     by_date = {}
     for record in records:
         if not isinstance(record, CoreDateEligibility) or record.utc_date in by_date:
             raise ValueError("eligibility records must have unique study UTC dates")
         by_date[record.utc_date] = record
+    return by_date
+
+
+def _eligibility_report_records(records) -> tuple[CoreDateEligibility, ...]:
+    by_date = _eligibility_by_date(records)
     return tuple(by_date.get(day) or CoreDateEligibility(
         day, "UNVERIFIED", ELIGIBILITY_NOT_PROVIDED)
         for item in calendar_bins() for day in item.dates)
 
 
+def _selection_seed(bin_index: int) -> int:
+    seed_text = f"crypto-watcher:historical-market-state-study-v1:{bin_index}"
+    return int.from_bytes(hashlib.sha256(seed_text.encode("ascii")).digest(), "big")
+
+
+def _weekday_candidates(calendar_bin: HistoricalStudyCalendarBin,
+                        weekday: int) -> tuple[date, ...]:
+    return tuple(day for day in calendar_bin.dates if day.weekday() == weekday)
+
+
+def _rotated_candidates(calendar_bin: HistoricalStudyCalendarBin,
+                        weekday: int) -> tuple[date, ...]:
+    candidates = _weekday_candidates(calendar_bin, weekday)
+    if not candidates:
+        return ()
+    index = _selection_seed(calendar_bin.bin_index) % len(candidates)
+    return candidates[index:] + candidates[:index]
+
+
 class UnresolvedStudySelectionError(ValueError):
-    def __init__(self, bin_index: int, weekday: int, unresolved_dates: tuple[date, ...]):
+    def __init__(self, bin_index: int, weekday: int, unresolved_date: date):
         self.bin_index = bin_index
         self.weekday = weekday
-        self.unresolved_dates = unresolved_dates
-        super().__init__(f"bin {bin_index} weekday {weekday} requires verification: "
-                         + ", ".join(day.isoformat() for day in unresolved_dates))
+        self.unresolved_date = unresolved_date
+        self.unresolved_dates = (unresolved_date,)
+        super().__init__(f"bin {bin_index} weekday {weekday} candidate "
+                         f"{unresolved_date.isoformat()} requires verification")
 
 
 class NoEligibleStudyDateError(ValueError):
@@ -351,38 +377,126 @@ class NoEligibleStudyDateError(ValueError):
 
 
 @dataclass(frozen=True)
-class StudyDateSelection:
-    calendar_bin: StudyCalendarBin
-    core_eligibility: CoreDateEligibility
-    fallback_distance: int
+class HistoricalStudySelectionAttempt:
+    eligibility: CoreDateEligibility
+    eligibility_sha256: str = field(init=False)
 
     def __post_init__(self):
-        if (not isinstance(self.calendar_bin, StudyCalendarBin)
+        if (not isinstance(self.eligibility, CoreDateEligibility)
+                or self.eligibility.state not in ("ELIGIBLE", "INELIGIBLE")):
+            raise ValueError("finalized selection attempts require resolved eligibility")
+        object.__setattr__(self, "eligibility_sha256", self.eligibility.eligibility_sha256)
+
+    @property
+    def utc_date(self) -> date:
+        return self.eligibility.utc_date
+
+    @property
+    def state(self) -> EligibilityState:
+        return self.eligibility.state
+
+
+@dataclass(frozen=True)
+class HistoricalStudyDateSelectionEvidence:
+    bin_index: int
+    target_weekday: int
+    considered_weekdays: tuple[int, ...]
+    attempted_dates: tuple[HistoricalStudySelectionAttempt, ...]
+    selected_date: date
+    fallback_distance: int
+    selection_policy_version: str = SELECTION_POLICY_VERSION
+
+    def __post_init__(self):
+        object.__setattr__(self, "considered_weekdays", tuple(self.considered_weekdays))
+        object.__setattr__(self, "attempted_dates", tuple(self.attempted_dates))
+        calendar_bin = calendar_bins()[self.bin_index] if _integer(self.bin_index) and self.bin_index < BIN_COUNT else None
+        if (calendar_bin is None or type(self.target_weekday) is not int
+                or self.target_weekday != calendar_bin.target_weekday
+                or self.selection_policy_version != SELECTION_POLICY_VERSION
+                or not _integer(self.fallback_distance) or self.fallback_distance > 6
+                or self.considered_weekdays != tuple(
+                    (self.target_weekday + distance) % 7
+                    for distance in range(self.fallback_distance + 1))
+                or any(type(item) is not int for item in self.considered_weekdays)
+                or not self.attempted_dates
+                or any(not isinstance(item, HistoricalStudySelectionAttempt)
+                       for item in self.attempted_dates)):
+            raise ValueError("invalid finalized study selection evidence")
+
+        attempts_at = 0
+        for distance, weekday in enumerate(self.considered_weekdays):
+            candidates = _rotated_candidates(calendar_bin, weekday)
+            weekday_attempts = []
+            while attempts_at < len(self.attempted_dates):
+                attempt = self.attempted_dates[attempts_at]
+                if attempt.utc_date.weekday() != weekday:
+                    break
+                if len(weekday_attempts) >= len(candidates):
+                    raise ValueError("selection evidence repeats a weekday candidate")
+                if attempt.utc_date != candidates[len(weekday_attempts)]:
+                    raise ValueError("selection evidence skipped deterministic candidate order")
+                weekday_attempts.append(attempt)
+                attempts_at += 1
+            if not weekday_attempts:
+                raise ValueError("each considered weekday must contain a finalized attempt")
+            if distance < self.fallback_distance:
+                if (len(weekday_attempts) != len(candidates)
+                        or any(item.state != "INELIGIBLE" for item in weekday_attempts)):
+                    raise ValueError("weekday fallback requires every earlier candidate ineligible")
+            elif (weekday_attempts[-1].utc_date != self.selected_date
+                    or weekday_attempts[-1].state != "ELIGIBLE"
+                    or any(item.state != "INELIGIBLE" for item in weekday_attempts[:-1])):
+                raise ValueError("selection must stop at its first eligible candidate")
+        if attempts_at != len(self.attempted_dates):
+            raise ValueError("selection evidence contains attempts outside its considered weekdays")
+
+
+@dataclass(frozen=True)
+class HistoricalStudyDateSelection:
+    calendar_bin: HistoricalStudyCalendarBin
+    core_eligibility: CoreDateEligibility
+    fallback_distance: int
+    selection_evidence: HistoricalStudyDateSelectionEvidence
+
+    def __post_init__(self):
+        if (not isinstance(self.calendar_bin, HistoricalStudyCalendarBin)
                 or not isinstance(self.core_eligibility, CoreDateEligibility)
+                or not isinstance(self.selection_evidence, HistoricalStudyDateSelectionEvidence)
                 or self.core_eligibility.state != "ELIGIBLE"
                 or self.core_eligibility.utc_date not in self.calendar_bin.dates
+                or self.selection_evidence.bin_index != self.calendar_bin.bin_index
+                or self.selection_evidence.selected_date != self.core_eligibility.utc_date
+                or self.selection_evidence.fallback_distance != self.fallback_distance
+                or self.selection_evidence.attempted_dates[-1].eligibility_sha256
+                != self.core_eligibility.eligibility_sha256
                 or not _integer(self.fallback_distance) or self.fallback_distance > 6
                 or self.core_eligibility.utc_date.weekday()
                 != (self.calendar_bin.target_weekday + self.fallback_distance) % 7):
             raise ValueError("invalid finalized study date selection")
 
 
-def select_study_date(calendar_bin: StudyCalendarBin, records) -> StudyDateSelection:
-    if not isinstance(calendar_bin, StudyCalendarBin):
-        raise ValueError("calendar_bin must be StudyCalendarBin")
-    by_date = {item.utc_date: item for item in _eligibility_records(records)}
-    digest = hashlib.sha256(
-        f"crypto-watcher:study-123-v1:{calendar_bin.bin_index}".encode("ascii")).digest()
-    seed = int.from_bytes(digest, "big")
+def select_study_date(calendar_bin: HistoricalStudyCalendarBin, records) -> HistoricalStudyDateSelection:
+    if not isinstance(calendar_bin, HistoricalStudyCalendarBin):
+        raise ValueError("calendar_bin must be HistoricalStudyCalendarBin")
+    by_date = _eligibility_by_date(records)
+    prior_attempts = []
     for distance in range(7):
         weekday = (calendar_bin.target_weekday + distance) % 7
-        considered = tuple(by_date[day] for day in calendar_bin.dates if day.weekday() == weekday)
-        unresolved = tuple(item.utc_date for item in considered if item.state == "UNVERIFIED")
-        if unresolved:
-            raise UnresolvedStudySelectionError(calendar_bin.bin_index, weekday, unresolved)
-        eligible = tuple(item for item in considered if item.state == "ELIGIBLE")
-        if eligible:
-            return StudyDateSelection(calendar_bin, eligible[seed % len(eligible)], distance)
+        attempted = []
+        for day in _rotated_candidates(calendar_bin, weekday):
+            eligibility = by_date.get(day)
+            if eligibility is None or eligibility.state == "UNVERIFIED":
+                raise UnresolvedStudySelectionError(calendar_bin.bin_index, weekday, day)
+            attempted.append(HistoricalStudySelectionAttempt(eligibility))
+            if eligibility.state == "ELIGIBLE":
+                evidence = HistoricalStudyDateSelectionEvidence(
+                    calendar_bin.bin_index, calendar_bin.target_weekday,
+                    tuple((calendar_bin.target_weekday + offset) % 7
+                          for offset in range(distance + 1)),
+                    tuple((*prior_attempts, *attempted)),
+                    day, distance)
+                return HistoricalStudyDateSelection(calendar_bin, eligibility, distance, evidence)
+        prior_attempts.extend(attempted)
     raise NoEligibleStudyDateError(calendar_bin.bin_index)
 
 
@@ -395,7 +509,7 @@ def _phase(index: int) -> StudyPhase:
 
 
 @dataclass(frozen=True)
-class Study123Period:
+class HistoricalStudyPeriod:
     study_period_index: int
     source_bin_index: int
     bin_start_date: date
@@ -413,7 +527,7 @@ class Study123Period:
     def __post_init__(self):
         if not _integer(self.study_period_index) or self.study_period_index >= BIN_COUNT:
             raise ValueError("invalid chronological study index")
-        item = StudyCalendarBin(self.source_bin_index, self.bin_start_date,
+        item = HistoricalStudyCalendarBin(self.source_bin_index, self.bin_start_date,
                                 self.bin_end_date, self.target_weekday)
         config = study_replay_config(self.utc_date)
         if (self.utc_date not in item.dates or self.phase != _phase(self.study_period_index)
@@ -431,10 +545,10 @@ class Study123Period:
             raise ValueError("invalid chronological study period/phase/boundaries")
 
 
-def assign_study_phases(selections) -> tuple[Study123Period, ...]:
+def assign_study_phases(selections) -> tuple[HistoricalStudyPeriod, ...]:
     selections = tuple(selections)
     if (len(selections) != BIN_COUNT
-            or any(not isinstance(item, StudyDateSelection) for item in selections)
+            or any(not isinstance(item, HistoricalStudyDateSelection) for item in selections)
             or {item.calendar_bin.bin_index for item in selections} != set(range(BIN_COUNT))
             or len({item.core_eligibility.utc_date for item in selections}) != BIN_COUNT):
         raise ValueError("exactly 30 unique eligible dates/source bins are required")
@@ -443,7 +557,7 @@ def assign_study_phases(selections) -> tuple[Study123Period, ...]:
     for index, item in enumerate(ordered):
         day, source = item.core_eligibility.utc_date, item.calendar_bin
         config = study_replay_config(day)
-        periods.append(Study123Period(
+        periods.append(HistoricalStudyPeriod(
             index, source.bin_index, source.start_date, source.end_date, day, _phase(index),
             config.output_start_boundary_time_ms, config.output_end_boundary_time_ms,
             source.target_weekday, day.weekday(), item.fallback_distance,
@@ -451,9 +565,20 @@ def assign_study_phases(selections) -> tuple[Study123Period, ...]:
     return tuple(periods)
 
 
-def select_study_periods(records) -> tuple[Study123Period, ...]:
-    normalized = _eligibility_records(records)
-    return assign_study_phases(select_study_date(item, normalized) for item in calendar_bins())
+def select_study_periods(records) -> tuple[HistoricalStudyPeriod, ...]:
+    by_date = _eligibility_by_date(records)
+    return assign_study_phases(
+        select_study_date(item, by_date.values()) for item in calendar_bins())
+
+
+def _selections_from_evidence(evidence_records):
+    selections = []
+    for evidence in evidence_records:
+        calendar_bin = calendar_bins()[evidence.bin_index]
+        selected = evidence.attempted_dates[-1].eligibility
+        selections.append(HistoricalStudyDateSelection(
+            calendar_bin, selected, evidence.fallback_distance, evidence))
+    return tuple(selections)
 
 
 @dataclass(frozen=True)
@@ -514,7 +639,7 @@ PRIMARY_HYPOTHESES = (
 
 
 @dataclass(frozen=True)
-class Study123EligibilityReport:
+class HistoricalStudyEligibilityReport:
     eligibility_records: tuple[CoreDateEligibility, ...]
     study_version: str = STUDY_VERSION
     report_version: str = ELIGIBILITY_REPORT_VERSION
@@ -525,14 +650,14 @@ class Study123EligibilityReport:
         if (self.study_version != STUDY_VERSION or self.report_version != ELIGIBILITY_REPORT_VERSION
                 or self.eligibility_policy_version != CORE_ELIGIBILITY_POLICY_VERSION):
             raise ValueError("unsupported eligibility report version")
-        object.__setattr__(self, "eligibility_records", _eligibility_records(self.eligibility_records))
+        object.__setattr__(self, "eligibility_records", _eligibility_report_records(self.eligibility_records))
         object.__setattr__(self, "report_sha256", _sha256(_content(self, "report_sha256")))
 
 
 @dataclass(frozen=True)
-class Study123Manifest:
-    selected_periods: tuple[Study123Period, ...]
-    eligibility_records: tuple[CoreDateEligibility, ...]
+class HistoricalMarketStateStudyManifest:
+    selected_periods: tuple[HistoricalStudyPeriod, ...]
+    selection_evidence: tuple[HistoricalStudyDateSelectionEvidence, ...]
     study_version: str = STUDY_VERSION
     selection_policy_version: str = SELECTION_POLICY_VERSION
     eligibility_policy_version: str = CORE_ELIGIBILITY_POLICY_VERSION
@@ -549,9 +674,9 @@ class Study123Manifest:
     manifest_sha256: str = field(init=False)
 
     def __post_init__(self):
-        for name in ("selected_periods", "primary_hypotheses", "secondary_horizons_minutes"):
+        for name in ("selected_periods", "selection_evidence", "primary_hypotheses",
+                     "secondary_horizons_minutes"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
-        object.__setattr__(self, "eligibility_records", _eligibility_records(self.eligibility_records))
         if ((self.study_version, self.selection_policy_version, self.eligibility_policy_version,
              self.calendar_start, self.calendar_end, self.universe, self.bin_count,
              self.development_period_count, self.validation_period_count, self.test_period_count,
@@ -564,29 +689,37 @@ class Study123Manifest:
                     "bin_count", "development_period_count", "validation_period_count", "test_period_count"))
                 or any(type(value) is not int for value in self.secondary_horizons_minutes)
                 or type(self.calendar_start) is not date or type(self.calendar_end) is not date):
-            raise ValueError("manifest differs from frozen study-123-v1 design")
+            raise ValueError("manifest differs from the frozen historical market-state study")
         if (any(not isinstance(item, PrimaryHypothesis) for item in self.primary_hypotheses)
                 or len({item.family_id for item in self.primary_hypotheses}) != len(self.primary_hypotheses)
                 or self.primary_hypotheses != PRIMARY_HYPOTHESES):
             raise ValueError("manifest must retain the exact frozen primary hypothesis registry")
-        expected = select_study_periods(self.eligibility_records)
+        if (len(self.selection_evidence) != BIN_COUNT
+                or any(not isinstance(item, HistoricalStudyDateSelectionEvidence)
+                       for item in self.selection_evidence)
+                or tuple(item.bin_index for item in self.selection_evidence) != tuple(range(BIN_COUNT))):
+            raise ValueError("manifest requires one ordered finalized selection path per calendar bin")
+        expected = assign_study_phases(_selections_from_evidence(self.selection_evidence))
         if self.selected_periods != expected:
-            raise ValueError("periods must follow resolved weekday/hash selection and chronological phases")
+            raise ValueError("periods must agree with selection evidence and chronological phases")
         object.__setattr__(self, "manifest_sha256", _sha256(_content(self, "manifest_sha256")))
 
 
-def build_study123_manifest(records) -> Study123Manifest:
-    normalized = _eligibility_records(records)
-    return Study123Manifest(select_study_periods(normalized), normalized)
+def build_historical_market_state_study_manifest(records) -> HistoricalMarketStateStudyManifest:
+    by_date = _eligibility_by_date(records)
+    selections = tuple(select_study_date(item, by_date.values()) for item in calendar_bins())
+    return HistoricalMarketStateStudyManifest(
+        assign_study_phases(selections),
+        tuple(item.selection_evidence for item in selections))
 
 
-def study123_manifest_json(manifest: Study123Manifest) -> str:
-    if not isinstance(manifest, Study123Manifest):
-        raise ValueError("manifest must be Study123Manifest")
+def historical_market_state_study_manifest_json(manifest: HistoricalMarketStateStudyManifest) -> str:
+    if not isinstance(manifest, HistoricalMarketStateStudyManifest):
+        raise ValueError("manifest must be HistoricalMarketStateStudyManifest")
     return _canonical_json(manifest)
 
 
-def study123_eligibility_report_json(report: Study123EligibilityReport) -> str:
-    if not isinstance(report, Study123EligibilityReport):
-        raise ValueError("report must be Study123EligibilityReport")
+def historical_study_eligibility_report_json(report: HistoricalStudyEligibilityReport) -> str:
+    if not isinstance(report, HistoricalStudyEligibilityReport):
+        raise ValueError("report must be HistoricalStudyEligibilityReport")
     return _canonical_json(report)
