@@ -184,8 +184,20 @@ the Issue #75 experiments. Part 2 adds a verified, local Binance USD-M daily
 archive adapter that supplies Part 1's explicit input records. Part 3 runs the
 fixed Issue #75 historical experiment suite over one replay and emits a compact,
 reproducible research report. Part 4 acquires the required official Binance
-daily archives into a verified local cache. This is comparative market-state
-evidence; it does not promote an algorithm or measure portfolio P&L.
+daily archives into a verified local cache. This is comparative market-state evidence; it does not promote an algorithm or
+measure portfolio P&L. Issue #123 extends that work across multiple historical
+periods and adds forward-information screening: it asks whether causally available
+candidate evidence provides method-appropriate information about subsequent market
+behavior beyond the unchanged V1 state. That screening is upstream of strategy
+construction; it is not itself a trade, win-rate, or profitability claim.
+
+A #75 candidate can therefore be useful without being a standalone directional
+predictor. Normalization, change-detection, coordination, mark/trade, taker-flow,
+open-interest, funding, and liquidation evidence may instead improve the state
+representation consumed by later predictive rules. Promotion requires explicit
+review of versioned untouched-period evidence; no candidate is adopted merely
+because it was implemented or resembled V1 on a pilot.
+
 Technical-assessment composition, strategy/setup replay, funding/news/event adapters,
 execution/outcome resolution, and portfolio simulation (#38) remain deferred.
 
