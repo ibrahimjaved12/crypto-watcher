@@ -9,6 +9,7 @@ import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from market_analysis.binance_historical_archive import (
@@ -21,7 +22,9 @@ from market_analysis.binance_historical_archive import (
     daily_kline_checksum_relative_path, daily_kline_relative_path,
     historical_candle_start_ms, load_binance_usdm_historical_replay_dataset,
     required_aggtrade_dates, required_kline_dates,
+    verify_binance_usdm_historical_core_archives,
 )
+from market_analysis import binance_historical_archive as archive_adapter
 from market_analysis import historical_experiment_batch as batch
 from market_analysis.experiments.market_state_common import validate_experiment_points
 from market_analysis.historical_ohlc_evidence import (
@@ -353,9 +356,14 @@ class BinanceHistoricalArchiveTests(unittest.TestCase):
             first_open = historical_candle_start_ms(config)
             rows = (_kline(first_open), _kline(first_open + MINUTE),
                     _kline(first_open + 3 * MINUTE), _kline(first_open))
-            request = _single_day_bundle(root, trades=(_agg(_ms()), _agg(_ms())),
-                                         klines=rows)
+            request = _single_day_bundle(
+                root, trades=(_agg(_ms()), _agg(_ms(), price="60000.10")),
+                klines=rows)
             dataset = load_binance_usdm_historical_replay_dataset(request)
+            compact = verify_binance_usdm_historical_core_archives(request)
+            self.assertEqual(compact.archive_manifest, dataset.archive_manifest)
+            self.assertEqual(compact.ohlc_evidence, dataset.ohlc_evidence)
+            self.assertTrue(compact.raw_replayable_trade_evidence_present)
             self.assertEqual(dataset.diagnostics.duplicate_aggtrade_count, 1)
             self.assertEqual(dataset.diagnostics.aggtrade_row_count, 2)
             self.assertEqual(dataset.diagnostics.kline_row_count, 4)
@@ -372,12 +380,22 @@ class BinanceHistoricalArchiveTests(unittest.TestCase):
             _write_archive(root, relative, (_agg(_ms()), _agg(_ms(), price="60000.2")))
             with self.assertRaisesRegex(ValueError, "conflicting aggTrade ID"):
                 load_binance_usdm_historical_replay_dataset(request)
+            with self.assertRaisesRegex(ValueError, "conflicting aggTrade ID"):
+                verify_binance_usdm_historical_core_archives(request)
             _write_archive(root, relative, (_agg(_ms()),))
             relative = daily_kline_relative_path(SYMBOL, day)
             _write_archive(root, relative, (_kline(first_open),
                                             _kline(first_open, close="100")))
             with self.assertRaisesRegex(ValueError, "conflicting kline open"):
                 load_binance_usdm_historical_replay_dataset(request)
+
+    def test_core_verifier_consumes_streaming_rows_not_materializing_wrapper(self):
+        with tempfile.TemporaryDirectory() as folder:
+            request = _single_day_bundle(Path(folder))
+            with patch.object(archive_adapter, "_archive_rows",
+                              side_effect=AssertionError("materializing parser used")):
+                result = verify_binance_usdm_historical_core_archives(request)
+            self.assertTrue(result.raw_replayable_trade_evidence_present)
 
     def test_full_daily_rows_are_filtered_to_replay_contract(self):
         with tempfile.TemporaryDirectory() as folder:

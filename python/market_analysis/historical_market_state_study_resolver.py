@@ -15,7 +15,7 @@ from typing import Callable
 from . import historical_market_state_study as study
 from .binance_historical_download import (
     BinanceHistoricalDownloadRequest,
-    acquire_binance_usdm_historical_archives,
+    acquire_binance_usdm_historical_archive_files,
 )
 from .historical_experiment_batch import _write_report
 
@@ -160,10 +160,8 @@ def resolve_study(
             request = BinanceHistoricalDownloadRequest(
                 Path(archive_root).expanduser(), study.study_universe(),
                 study.study_replay_config(candidate_date))
-            acquisition = acquire_binance_usdm_historical_archives(request)
-            finalized = study.core_date_eligibility_from_verified_dataset(
-                candidate_date, acquisition.dataset)
-            del acquisition
+            acquire_binance_usdm_historical_archive_files(request)
+            finalized = study.verify_local_core_date(candidate_date, archive_root)
             finalized = _checked_candidate_record(candidate_date, finalized)
             if finalized.state not in ("ELIGIBLE", "INELIGIBLE"):
                 raise ValueError("verified dataset did not produce finalized eligibility")

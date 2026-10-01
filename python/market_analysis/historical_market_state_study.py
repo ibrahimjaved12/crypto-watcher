@@ -26,14 +26,16 @@ from .binance_historical_archive import (
     BINANCE_ARCHIVE_ADAPTER_VERSION, BINANCE_ARCHIVE_DATASET_ID,
     BINANCE_ARCHIVE_DATASET_VERSION,
     BinanceArchiveBundleManifest, BinanceArchiveCoverageError, BinanceArchiveFileIdentity,
+    BinanceHistoricalCoreArchiveEvidence,
     BinanceHistoricalReplayDataset, _content_sha256,
     BinanceUSDMArchiveRequest, daily_aggtrades_relative_path,
     daily_kline_relative_path, historical_candle_start_ms,
-    load_binance_usdm_historical_replay_dataset, required_aggtrade_dates,
-    required_kline_dates,
+    required_aggtrade_dates, required_kline_dates,
+    verify_binance_usdm_historical_core_archives,
 )
 from .historical_experiment_batch import _canonical_json, _sha256
 from .historical_replay import HistoricalReplayConfig
+from .historical_ohlc_evidence import BinanceTradeOHLCEvidence
 from .movement_metrics import MarketMovementConfig, MarketUniverseInput
 
 
@@ -287,15 +289,46 @@ def core_date_eligibility_from_verified_dataset(
     if not isinstance(dataset, BinanceHistoricalReplayDataset):
         raise ValueError("dataset must be a verified BinanceHistoricalReplayDataset")
     if (dataset.replay_request.universe != study_universe()
-            or dataset.replay_request.config != config
-            or dataset.archive_manifest.content_sha256
-            != _content_sha256(dataset.archive_manifest.archive_files)):
+            or dataset.replay_request.config != config):
         raise ValueError("verified dataset does not match the canonical study date and universe")
+    return _core_date_eligibility_from_verified_evidence(
+        utc_date, config, dataset.archive_manifest, dataset.ohlc_evidence)
+
+
+def core_date_eligibility_from_verified_core_archives(
+    utc_date: date, evidence: BinanceHistoricalCoreArchiveEvidence,
+) -> CoreDateEligibility:
+    """Apply frozen eligibility to compact, verified archive evidence only."""
+    config = study_replay_config(utc_date)
+    if not isinstance(evidence, BinanceHistoricalCoreArchiveEvidence):
+        raise ValueError("evidence must be verified Binance historical core archives")
+    if not evidence.raw_replayable_trade_evidence_present:
+        raise ValueError("verified core archives lack replayable trade evidence")
+    return _core_date_eligibility_from_verified_evidence(
+        utc_date, config, evidence.archive_manifest, evidence.ohlc_evidence)
+
+
+def _core_date_eligibility_from_verified_evidence(
+    utc_date: date, config: HistoricalReplayConfig,
+    archive_manifest: BinanceArchiveBundleManifest,
+    ohlc_evidence: BinanceTradeOHLCEvidence,
+) -> CoreDateEligibility:
+    if (config != study_replay_config(utc_date)
+            or not isinstance(archive_manifest, BinanceArchiveBundleManifest)
+            or not isinstance(ohlc_evidence, BinanceTradeOHLCEvidence)
+            or archive_manifest.content_sha256
+            != _content_sha256(archive_manifest.archive_files)
+            or (ohlc_evidence.dataset_id, ohlc_evidence.dataset_version,
+                ohlc_evidence.dataset_content_sha256,
+                ohlc_evidence.configured_symbols)
+            != (archive_manifest.dataset_id, archive_manifest.dataset_version,
+                archive_manifest.content_sha256, ORDERED_SYMBOLS)):
+        raise ValueError("verified evidence does not match the canonical study date and universe")
 
     start = historical_candle_start_ms(config)
     end = config.output_end_boundary_time_ms
     by_symbol = {symbol: set() for symbol in ORDERED_SYMBOLS}
-    for candle in dataset.ohlc_evidence.candles:
+    for candle in ohlc_evidence.candles:
         if (start <= candle.open_time_ms < end and candle.close_time_ms < end
                 and candle.first_seen_at_ms <= end):
             by_symbol[candle.symbol].add(candle.open_time_ms)
@@ -313,8 +346,8 @@ def core_date_eligibility_from_verified_dataset(
         if gap_start is not None:
             gaps.append(KlineGapRange(gap_start, end))
         coverage.append(SymbolCoreCandleCoverage(symbol, len(observed), tuple(gaps)))
-    provenance = CoreDateProvenance(config, dataset.archive_manifest,
-                                    dataset.ohlc_evidence.evidence_sha256,
+    provenance = CoreDateProvenance(config, archive_manifest,
+                                    ohlc_evidence.evidence_sha256,
                                     start, end, tuple(coverage))
     has_gaps = any(item.gaps for item in coverage)
     return CoreDateEligibility(utc_date, "INELIGIBLE" if has_gaps else "ELIGIBLE",
@@ -322,18 +355,18 @@ def core_date_eligibility_from_verified_dataset(
 
 
 def verify_local_core_date(utc_date: date, archive_root: Path | str) -> CoreDateEligibility:
-    """Verify cached core input only; individual aggTrade ZIPs may be empty.
+    """Verify cached core input with streamed aggTrades; daily ZIPs may be empty.
 
     All loader/cache failures remain UNVERIFIED. Only verified missing expected
     candle minutes establish scientific ineligibility. No raw exception text is
     serialized, since OS errors may contain absolute paths/environment details.
-    The existing loader's requirement for raw replayable trade evidence across
-    the dataset is retained; no additional aggTrade timestamp-gap rule is added.
+    The existing raw replayable trade-evidence requirement is retained; no
+    additional aggTrade timestamp-gap rule is added.
     """
     config = study_replay_config(utc_date)
     request = BinanceUSDMArchiveRequest(archive_root, study_universe(), config)
     try:
-        dataset = load_binance_usdm_historical_replay_dataset(request)
+        evidence = verify_binance_usdm_historical_core_archives(request)
     except BinanceArchiveCoverageError:
         missing = tuple(path for relative in _required_paths(config)
                         for path in (relative, f"{relative}.CHECKSUM")
@@ -343,7 +376,7 @@ def verify_local_core_date(utc_date: date, archive_root: Path | str) -> CoreDate
     except (ValueError, OSError):
         return CoreDateEligibility(utc_date, "UNVERIFIED",
                                    LOCAL_ARCHIVE_INVALID_OR_NEEDS_REACQUISITION)
-    return core_date_eligibility_from_verified_dataset(utc_date, dataset)
+    return core_date_eligibility_from_verified_core_archives(utc_date, evidence)
 
 
 def _eligibility_by_date(records) -> dict[date, CoreDateEligibility]:

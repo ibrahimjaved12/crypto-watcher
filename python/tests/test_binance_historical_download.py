@@ -107,6 +107,18 @@ def _acquire(request, transport, sleeps=None):
 
 
 class BinanceHistoricalDownloadTests(unittest.TestCase):
+    def test_download_only_api_does_not_build_replay_dataset(self):
+        with tempfile.TemporaryDirectory() as folder:
+            request = _request(Path(folder))
+            transport = _FakeTransport(_responses(request))
+            with patch.object(download, "load_binance_usdm_historical_replay_dataset",
+                              side_effect=AssertionError("replay dataset must not be built")):
+                result = download.acquire_binance_usdm_historical_archive_files(
+                    request, _transport=transport, _sleeper=lambda _: None)
+            self.assertEqual(result.requested_item_count, 2)
+            self.assertEqual(result.downloaded_count, 2)
+            self.assertEqual(len(result.items), 2)
+
     def test_plan_exact_part2_paths_order_and_official_urls(self):
         with tempfile.TemporaryDirectory() as folder:
             output = int(datetime(2026, 9, 1, 0, 10, tzinfo=timezone.utc).timestamp() * 1000)

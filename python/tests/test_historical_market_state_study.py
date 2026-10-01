@@ -15,13 +15,15 @@ from unittest.mock import patch
 import zipfile
 
 from market_analysis import historical_market_state_study as study
+from market_analysis import binance_historical_archive as archive_adapter
 from market_analysis.binance_historical_archive import (
     ARCHIVE_FIRST_SEEN_POLICY, ARCHIVE_SOURCE_STATE_POLICY,
     BINANCE_ARCHIVE_ADAPTER_VERSION, BINANCE_ARCHIVE_DATASET_ID,
     BINANCE_ARCHIVE_DATASET_VERSION, BinanceArchiveBundleManifest,
-    BinanceArchiveFileIdentity, _content_sha256,
+    BinanceArchiveFileIdentity, BinanceUSDMArchiveRequest, _content_sha256,
     daily_aggtrades_relative_path, daily_kline_relative_path,
-    historical_candle_start_ms, required_aggtrade_dates, required_kline_dates,
+    historical_candle_start_ms, load_binance_usdm_historical_replay_dataset,
+    required_aggtrade_dates, required_kline_dates,
 )
 from market_analysis.historical_experiment_batch import (
     EXPERIMENT_SUITE_V1, HistoricalExperimentSuiteEntry, _parameters, _sha256,
@@ -464,20 +466,37 @@ class LocalCoreEligibilityTests(unittest.TestCase):
         shutil.copytree(self.root, root, dirs_exist_ok=True)
 
     def test_valid_canonical_archive_no_network_replay_or_trade_gap_rule(self):
+        request = BinanceUSDMArchiveRequest(
+            self.root, study.study_universe(), self.config)
+        dataset = load_binance_usdm_historical_replay_dataset(request)
+        direct = study.core_date_eligibility_from_verified_dataset(self.day, dataset)
         with patch("socket.create_connection", side_effect=AssertionError("network forbidden")), \
                 patch("urllib.request.urlopen", side_effect=AssertionError("download forbidden")), \
                 patch("market_analysis.historical_replay.run_historical_market_replay",
                       side_effect=AssertionError("replay forbidden")), \
-                patch.object(study, "core_date_eligibility_from_verified_dataset",
-                             wraps=study.core_date_eligibility_from_verified_dataset) as helper:
+                patch.object(archive_adapter,
+                             "load_binance_usdm_historical_replay_dataset",
+                             side_effect=AssertionError("full replay loader used")), \
+                patch.object(study, "core_date_eligibility_from_verified_core_archives",
+                             wraps=study.core_date_eligibility_from_verified_core_archives) as helper:
             record = study.verify_local_core_date(self.day, self.root)
             helper.assert_called_once()
-            dataset = helper.call_args.args[1]
-            direct = study.core_date_eligibility_from_verified_dataset(self.day, dataset)
             with self.assertRaises(ValueError):
                 study.core_date_eligibility_from_verified_dataset(
                     self.day + timedelta(days=1), dataset)
         self.assertEqual(record, direct)
+        self.assertEqual(record.eligibility_sha256, direct.eligibility_sha256)
+        self.assertEqual(record.provenance.provenance_sha256,
+                         direct.provenance.provenance_sha256)
+        self.assertEqual(record.provenance.archive_manifest, dataset.archive_manifest)
+        self.assertEqual(record.provenance.archive_manifest.content_sha256,
+                         dataset.archive_manifest.content_sha256)
+        self.assertEqual(record.provenance.ohlc_evidence_sha256,
+                         dataset.ohlc_evidence.evidence_sha256)
+        self.assertEqual(record.provenance.symbol_coverage,
+                         direct.provenance.symbol_coverage)
+        self.assertLess(dataset.diagnostics.aggtrade_row_count,
+                        dataset.diagnostics.aggtrade_archive_count)
         self.assertEqual((record.state, record.reason_code), ("ELIGIBLE", study.ELIGIBLE_CORE_DATA))
         self.assertEqual(record.provenance.replay_config.movement_config, MarketMovementConfig())
         expected = (self.config.output_end_boundary_time_ms - historical_candle_start_ms(self.config)) // MINUTE
@@ -498,6 +517,11 @@ class LocalCoreEligibilityTests(unittest.TestCase):
                               kline_rows(self.config, package_day, (opening,)), KLINE_HEADER)
                 record = study.verify_local_core_date(self.day, root)
                 self.assertEqual((record.state, record.reason_code), ("INELIGIBLE", study.CORE_KLINE_GAP))
+                dataset = load_binance_usdm_historical_replay_dataset(
+                    BinanceUSDMArchiveRequest(root, study.study_universe(), self.config))
+                self.assertEqual(
+                    record,
+                    study.core_date_eligibility_from_verified_dataset(self.day, dataset))
                 self.assertEqual(record.provenance.symbol_coverage[0].gaps,
                                  (study.KlineGapRange(opening, opening + MINUTE),))
                 self.assertFalse(any(item.gaps for item in record.provenance.symbol_coverage[1:]))
@@ -535,6 +559,51 @@ class LocalCoreEligibilityTests(unittest.TestCase):
                                  ("UNVERIFIED", study.LOCAL_ARCHIVE_INVALID_OR_NEEDS_REACQUISITION))
                 self.assertIsNone(record.provenance)
                 self.assertNotIn(local, str(record))
+
+    def test_duplicate_kline_and_aggtrade_rows_preserve_full_loader_eligibility(self):
+        with tempfile.TemporaryDirectory() as local:
+            root = Path(local)
+            self.copy_fixture(root)
+            kline_day = required_kline_dates(self.config)[0]
+            same_kline_rows = list(kline_rows(self.config, kline_day))
+            same_kline_rows.append(same_kline_rows[0])
+            write_archive(root, daily_kline_relative_path("BTCUSDT", kline_day),
+                          same_kline_rows, KLINE_HEADER)
+            trade_path = daily_aggtrades_relative_path("BTCUSDT", self.day)
+            duplicate_trade = ("1", "100", "1", "1", "1",
+                               str(self.config.output_start_boundary_time_ms), "false")
+            write_archive(root, trade_path, (duplicate_trade, duplicate_trade), AGG_HEADER)
+
+            request = BinanceUSDMArchiveRequest(
+                root, study.study_universe(), self.config)
+            dataset = load_binance_usdm_historical_replay_dataset(request)
+            full_record = study.core_date_eligibility_from_verified_dataset(self.day, dataset)
+            with patch.object(archive_adapter,
+                              "load_binance_usdm_historical_replay_dataset",
+                              side_effect=AssertionError("full replay loader used")):
+                compact_record = study.verify_local_core_date(self.day, root)
+            self.assertEqual(compact_record, full_record)
+            self.assertEqual(compact_record.provenance.ohlc_evidence_sha256,
+                             dataset.ohlc_evidence.evidence_sha256)
+
+    def test_no_raw_replayable_trade_evidence_remains_unverified(self):
+        with tempfile.TemporaryDirectory() as local:
+            root = Path(local)
+            self.copy_fixture(root)
+            for symbol in study.ORDERED_SYMBOLS:
+                for package_day in required_aggtrade_dates(self.config):
+                    write_archive(root,
+                                  daily_aggtrades_relative_path(symbol, package_day),
+                                  (), AGG_HEADER)
+            request = BinanceUSDMArchiveRequest(
+                root, study.study_universe(), self.config)
+            with self.assertRaisesRegex(ValueError,
+                                        "dataset lacks raw replayable trade evidence"):
+                load_binance_usdm_historical_replay_dataset(request)
+            record = study.verify_local_core_date(self.day, root)
+            self.assertEqual((record.state, record.reason_code), (
+                "UNVERIFIED", study.LOCAL_ARCHIVE_INVALID_OR_NEEDS_REACQUISITION))
+            self.assertIsNone(record.provenance)
 
     def test_local_root_independence_of_eligibility_and_manifest(self):
         first = study.verify_local_core_date(self.day, self.root)
