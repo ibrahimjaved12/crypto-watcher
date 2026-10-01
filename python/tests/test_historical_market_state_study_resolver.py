@@ -93,7 +93,7 @@ class ResolverTests(unittest.TestCase):
             self.assertIs(result, manifest)
             self.assertEqual(build.call_count, 2)
             verify.assert_called_once_with(candidate, "/unused/archive")
-            self.assertEqual(write.call_count, 1)
+            self.assertEqual(write.call_count, 2)  # eligibility checkpoint + final manifest
             self.assertEqual(len(result.selected_periods), 30)
             self.assertEqual(tuple(item.phase for item in result.selected_periods),
                              ("development",) * 10 + ("validation",) * 8 + ("test",) * 12)
@@ -122,7 +122,7 @@ class ResolverTests(unittest.TestCase):
                 call(candidates[0], "/unused/archive"),
                 call(candidates[1], "/unused/archive"),
             ])
-            self.assertEqual(write.call_count, 2)
+            self.assertEqual(write.call_count, 3)  # two eligibility checkpoints + manifest
             saved = study.parse_historical_study_eligibility_report_json(
                 (Path(temporary) / resolver.ELIGIBILITY_REPORT_FILENAME).read_text())
             states = {item.utc_date: item.state for item in saved.eligibility_records}
