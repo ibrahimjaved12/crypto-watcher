@@ -273,11 +273,13 @@ class CoreDateEligibility:
 
 
 def verify_local_core_date(utc_date: date, archive_root: Path | str) -> CoreDateEligibility:
-    """Verify cached core input only; an empty verified aggTrade ZIP is valid.
+    """Verify cached core input only; individual aggTrade ZIPs may be empty.
 
     All loader/cache failures remain UNVERIFIED. Only verified missing expected
     candle minutes establish scientific ineligibility. No raw exception text is
     serialized, since OS errors may contain absolute paths/environment details.
+    The existing loader's requirement for raw replayable trade evidence across
+    the dataset is retained; no additional aggTrade timestamp-gap rule is added.
     """
     config = study_replay_config(utc_date)
     request = BinanceUSDMArchiveRequest(archive_root, study_universe(), config)

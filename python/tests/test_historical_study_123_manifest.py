@@ -333,10 +333,13 @@ class LocalCoreEligibilityTests(unittest.TestCase):
         cls.config = study.study_replay_config(cls.day)
         # Default V1 genuinely needs seven days plus its preceding endpoint.
         # The generated fixture contains only that range (~58k compact rows).
-        # Every required aggTrade package is verified but intentionally empty.
+        # One source trade per symbol; all other daily packages are empty.
+        # A nearly day-long interval without aggTrade rows is not a data gap.
         for symbol in study.ORDERED_SYMBOLS:
             for package_day in required_aggtrade_dates(cls.config):
-                write_archive(cls.root, daily_aggtrades_relative_path(symbol, package_day), (), AGG_HEADER)
+                trades = (("1", "100", "1", "1", "1",
+                           str(cls.config.output_start_boundary_time_ms), "false"),) if package_day == cls.day else ()
+                write_archive(cls.root, daily_aggtrades_relative_path(symbol, package_day), trades, AGG_HEADER)
             for package_day in required_kline_dates(cls.config):
                 write_archive(cls.root, daily_kline_relative_path(symbol, package_day),
                               kline_rows(cls.config, package_day), KLINE_HEADER)
