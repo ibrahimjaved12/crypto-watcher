@@ -8,22 +8,26 @@ depends on a browser timer or a per-user engine.
 
 ```text
 #26 aggTrade (one shared WebSocket)
-  -> #70 synchronized five-second buckets (memory only)
-  -> #71 pure metrics
-  -> #72 structured classification
-  -> #73 episode lifecycle
+  -> bounded collector transport and explicit evaluation boundary
+  -> shared Python #70 buckets/state
+  -> shared Python #71 metrics
+  -> shared Python #72 classification
+  -> shared Python #73 episode lifecycle
+  -> TypeScript validation and persistence
   -> bounded `market_state_current` (operational DB)
 ```
 
 Accepted, validated `aggTrade` observations remain in a bounded collector transport buffer and are
-sent with each explicit finalization boundary to the authenticated Python movement endpoint. The
-Python service invokes the shared pure `market_analysis.movement` engine and retains its buckets
-for canonical Python #71 evaluation and Python #72 classification. TypeScript transports both
-results to the existing #73 lifecycle, which remains a temporary TypeScript consumer pending
-its own correction ticket.
-TypeScript owns WebSocket ingestion, boundary scheduling, transport, and persistence. No additional
-WebSocket, raw tick persistence, or per-five-second append-only stream
-is created. #26 completed-candle bootstrap/recovery is unchanged.
+sent with each explicit evaluation boundary to the authenticated Python movement endpoint. The
+shared Python `market_analysis.movement` package owns the canonical deterministic #70 bucket/state,
+#71 metrics, #72 classification, and #73 lifecycle calculations for live operation and replay.
+For lifecycle calculation, TypeScript sends the explicit previous lifecycle state and inputs;
+Python returns the versioned canonical results. TypeScript orders boundary requests, validates those
+results, and owns operational persistence. The FastAPI endpoint adapts requests to the shared Python
+package; it does not implement the formulas. No TypeScript analytical fallback is active. TypeScript
+also owns WebSocket ingestion, boundary scheduling, and transport. No additional WebSocket, raw tick
+persistence, or per-five-second append-only stream is created. #26 completed-candle bootstrap/recovery
+is unchanged.
 
 Each finalized bucket retains its provider/instrument/price type and the last real trade's exchange
 event/trade times plus its local receive time (`lastRealReceivedAt`); carry-forward buckets preserve
