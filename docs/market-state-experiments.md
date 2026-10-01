@@ -419,17 +419,31 @@ source-time surrogate, gap handling, identities, and CLI.
 
 ## EXP-75-10 — Mark-price context
 
-- **Status:** `NOT_IMPLEMENTED`
+- **Status:** `IMPLEMENTED_EXTENSION` via Issue #127 as a separate historical,
+  descriptive mark-versus-trade diagnostic.
+- **Suite boundary:** EXP-75-10 is not part of the immutable fixed 28-run
+  `EXPERIMENT_SUITE_V1`; suite membership and identities remain unchanged.
 - **Hypothesis:** Explicit mark-price/trade-price divergence may identify stressed
   derivatives conditions not visible in trade-price movement state alone.
-- **Input/data prerequisite:** Point-in-time mark price and canonical trade-price
-  series.
-- **Causal/live suitability:** Supporting context only; mark price must never be
-  silently substituted for the canonical trade-price series.
-- **What changes relative to V1:** Future supporting mark-price evidence.
-- **What remains unchanged:** Canonical trade-price movement and lifecycle rules.
-- **Evaluation measurements:** Divergence incidence and event-context usefulness.
-- **Promotion constraint:** Any use must retain both explicit price types.
+- **Input/data:** The extension pairs verified #111 trade-price closes with
+  separately verified Binance USD-M mark-price 1m candles at exact
+  minute-boundary points. It reports source availability, coverage, returns,
+  endpoint bases, and divergence; gaps and unavailable candles are not filled.
+- **Causal/provenance limits:** Availability uses the exchange-close-time-plus-1ms
+  archive surrogate, not an observed network-receipt timestamp. The movement
+  replay's finalization grace is not applied. Mark methodology can vary across
+  historical periods, so date and package-provenance strata must be retained.
+- **Role relative to V1:** V1 remains trade-price based. Mark price is supporting
+  reference evidence and is never silently substituted for canonical trade
+  price. The extension is descriptive and does not add a live signal or
+  predictive claim.
+- **What remains unchanged:** The original fixed 28-run suite, its identities,
+  and canonical trade-price movement and lifecycle rules.
+- **Evaluation measurements:** Divergence incidence and event-context
+  comparisons alongside same-time V1 context. Issue #123 owns broader
+  multi-period robustness and incremental forward-information evaluation.
+- **Promotion constraint:** Any later use must retain both explicit price types
+  and the extension's source availability and provenance limitations.
 
 ## EXP-75-11 — OI/funding/liquidations
 
