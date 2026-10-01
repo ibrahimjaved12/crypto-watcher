@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
 import hashlib
+import json
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -25,6 +26,7 @@ from .binance_historical_archive import (
     BINANCE_ARCHIVE_ADAPTER_VERSION, BINANCE_ARCHIVE_DATASET_ID,
     BINANCE_ARCHIVE_DATASET_VERSION,
     BinanceArchiveBundleManifest, BinanceArchiveCoverageError, BinanceArchiveFileIdentity,
+    BinanceHistoricalReplayDataset, _content_sha256,
     BinanceUSDMArchiveRequest, daily_aggtrades_relative_path,
     daily_kline_relative_path, historical_candle_start_ms,
     load_binance_usdm_historical_replay_dataset, required_aggtrade_dates,
@@ -273,28 +275,22 @@ class CoreDateEligibility:
         object.__setattr__(self, "eligibility_sha256", _sha256(_content(self, "eligibility_sha256")))
 
 
-def verify_local_core_date(utc_date: date, archive_root: Path | str) -> CoreDateEligibility:
-    """Verify cached core input only; individual aggTrade ZIPs may be empty.
+def core_date_eligibility_from_verified_dataset(
+    utc_date: date, dataset: BinanceHistoricalReplayDataset,
+) -> CoreDateEligibility:
+    """Apply the frozen core eligibility rule to an already verified dataset.
 
-    All loader/cache failures remain UNVERIFIED. Only verified missing expected
-    candle minutes establish scientific ineligibility. No raw exception text is
-    serialized, since OS errors may contain absolute paths/environment details.
-    The existing loader's requirement for raw replayable trade evidence across
-    the dataset is retained; no additional aggTrade timestamp-gap rule is added.
+    This helper performs no acquisition or replay. Its caller must supply the
+    canonical study date's verified Binance USD-M trade dataset.
     """
     config = study_replay_config(utc_date)
-    request = BinanceUSDMArchiveRequest(archive_root, study_universe(), config)
-    try:
-        dataset = load_binance_usdm_historical_replay_dataset(request)
-    except BinanceArchiveCoverageError:
-        missing = tuple(path for relative in _required_paths(config)
-                        for path in (relative, f"{relative}.CHECKSUM")
-                        if not request.archive_root.joinpath(*PurePosixPath(path).parts).is_file())
-        return CoreDateEligibility(utc_date, "UNVERIFIED", LOCAL_ARCHIVE_MISSING,
-                                   missing_local_paths=missing)
-    except (ValueError, OSError):
-        return CoreDateEligibility(utc_date, "UNVERIFIED",
-                                   LOCAL_ARCHIVE_INVALID_OR_NEEDS_REACQUISITION)
+    if not isinstance(dataset, BinanceHistoricalReplayDataset):
+        raise ValueError("dataset must be a verified BinanceHistoricalReplayDataset")
+    if (dataset.replay_request.universe != study_universe()
+            or dataset.replay_request.config != config
+            or dataset.archive_manifest.content_sha256
+            != _content_sha256(dataset.archive_manifest.archive_files)):
+        raise ValueError("verified dataset does not match the canonical study date and universe")
 
     start = historical_candle_start_ms(config)
     end = config.output_end_boundary_time_ms
@@ -323,6 +319,31 @@ def verify_local_core_date(utc_date: date, archive_root: Path | str) -> CoreDate
     has_gaps = any(item.gaps for item in coverage)
     return CoreDateEligibility(utc_date, "INELIGIBLE" if has_gaps else "ELIGIBLE",
                                CORE_KLINE_GAP if has_gaps else ELIGIBLE_CORE_DATA, provenance)
+
+
+def verify_local_core_date(utc_date: date, archive_root: Path | str) -> CoreDateEligibility:
+    """Verify cached core input only; individual aggTrade ZIPs may be empty.
+
+    All loader/cache failures remain UNVERIFIED. Only verified missing expected
+    candle minutes establish scientific ineligibility. No raw exception text is
+    serialized, since OS errors may contain absolute paths/environment details.
+    The existing loader's requirement for raw replayable trade evidence across
+    the dataset is retained; no additional aggTrade timestamp-gap rule is added.
+    """
+    config = study_replay_config(utc_date)
+    request = BinanceUSDMArchiveRequest(archive_root, study_universe(), config)
+    try:
+        dataset = load_binance_usdm_historical_replay_dataset(request)
+    except BinanceArchiveCoverageError:
+        missing = tuple(path for relative in _required_paths(config)
+                        for path in (relative, f"{relative}.CHECKSUM")
+                        if not request.archive_root.joinpath(*PurePosixPath(path).parts).is_file())
+        return CoreDateEligibility(utc_date, "UNVERIFIED", LOCAL_ARCHIVE_MISSING,
+                                   missing_local_paths=missing)
+    except (ValueError, OSError):
+        return CoreDateEligibility(utc_date, "UNVERIFIED",
+                                   LOCAL_ARCHIVE_INVALID_OR_NEEDS_REACQUISITION)
+    return core_date_eligibility_from_verified_dataset(utc_date, dataset)
 
 
 def _eligibility_by_date(records) -> dict[date, CoreDateEligibility]:
@@ -723,3 +744,153 @@ def historical_study_eligibility_report_json(report: HistoricalStudyEligibilityR
     if not isinstance(report, HistoricalStudyEligibilityReport):
         raise ValueError("report must be HistoricalStudyEligibilityReport")
     return _canonical_json(report)
+
+
+def _strict_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value):
+    raise ValueError(f"invalid JSON numeric constant: {value}")
+
+
+def _json_object(value, expected_fields, label):
+    if not isinstance(value, dict) or set(value) != set(expected_fields):
+        raise ValueError(f"invalid {label} fields")
+    return value
+
+
+def _json_date(value, label):
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be an ISO UTC date")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an ISO UTC date") from exc
+    if parsed.isoformat() != value:
+        raise ValueError(f"{label} must use canonical YYYY-MM-DD form")
+    return parsed
+
+
+def _parse_replay_config(value) -> HistoricalReplayConfig:
+    value = _json_object(value, (
+        "output_start_boundary_time_ms", "output_end_boundary_time_ms",
+        "finalization_grace_ms", "movement_config"), "replay config")
+    movement_fields = tuple(item.name for item in fields(MarketMovementConfig))
+    movement = MarketMovementConfig(**_json_object(
+        value["movement_config"], movement_fields, "movement config"))
+    return HistoricalReplayConfig(
+        value["output_start_boundary_time_ms"],
+        value["output_end_boundary_time_ms"],
+        value["finalization_grace_ms"], movement)
+
+
+def _parse_archive_manifest(value) -> BinanceArchiveBundleManifest:
+    value = _json_object(value, (
+        "adapter_version", "dataset_id", "dataset_version", "first_seen_policy",
+        "source_state_policy", "archive_files", "content_sha256"), "archive manifest")
+    if not isinstance(value["archive_files"], list):
+        raise ValueError("archive manifest files must be an array")
+    files = []
+    for item in value["archive_files"]:
+        item = _json_object(item, (
+            "relative_path", "data_type", "symbol", "utc_date", "sha256"),
+            "archive file identity")
+        files.append(BinanceArchiveFileIdentity(
+            item["relative_path"], item["data_type"], item["symbol"],
+            _json_date(item["utc_date"], "archive file date"), item["sha256"]))
+    files = tuple(files)
+    manifest = BinanceArchiveBundleManifest(
+        value["adapter_version"], value["dataset_id"], value["dataset_version"],
+        value["first_seen_policy"], value["source_state_policy"], files,
+        value["content_sha256"])
+    if (not _digest(manifest.content_sha256)
+            or manifest.content_sha256 != _content_sha256(files)):
+        raise ValueError("archive manifest content SHA-256 mismatch")
+    return manifest
+
+
+def _parse_core_provenance(value) -> CoreDateProvenance:
+    value = _json_object(value, (
+        "replay_config", "archive_manifest", "ohlc_evidence_sha256",
+        "candle_start_open_time_ms", "candle_end_open_time_ms_exclusive",
+        "symbol_coverage", "eligibility_policy_version", "provenance_sha256"),
+        "core provenance")
+    if not isinstance(value["symbol_coverage"], list):
+        raise ValueError("symbol coverage must be an array")
+    coverage = []
+    for item in value["symbol_coverage"]:
+        item = _json_object(item, ("symbol", "observed_minute_count", "gaps"),
+                            "symbol coverage")
+        if not isinstance(item["gaps"], list):
+            raise ValueError("candle gaps must be an array")
+        gaps = []
+        for gap in item["gaps"]:
+            gap = _json_object(gap, (
+                "start_open_time_ms", "end_open_time_ms_exclusive"), "candle gap")
+            gaps.append(KlineGapRange(
+                gap["start_open_time_ms"], gap["end_open_time_ms_exclusive"]))
+        coverage.append(SymbolCoreCandleCoverage(
+            item["symbol"], item["observed_minute_count"], tuple(gaps)))
+    provenance = CoreDateProvenance(
+        _parse_replay_config(value["replay_config"]),
+        _parse_archive_manifest(value["archive_manifest"]),
+        value["ohlc_evidence_sha256"], value["candle_start_open_time_ms"],
+        value["candle_end_open_time_ms_exclusive"], tuple(coverage),
+        value["eligibility_policy_version"])
+    if value["provenance_sha256"] != provenance.provenance_sha256:
+        raise ValueError("core provenance SHA-256 mismatch")
+    return provenance
+
+
+def _parse_eligibility_record(value) -> CoreDateEligibility:
+    value = _json_object(value, (
+        "utc_date", "state", "reason_code", "provenance", "missing_local_paths",
+        "eligibility_sha256"), "eligibility record")
+    if not isinstance(value["missing_local_paths"], list):
+        raise ValueError("missing local paths must be an array")
+    provenance = (None if value["provenance"] is None
+                  else _parse_core_provenance(value["provenance"]))
+    record = CoreDateEligibility(
+        _json_date(value["utc_date"], "eligibility date"), value["state"],
+        value["reason_code"], provenance, tuple(value["missing_local_paths"]))
+    if value["eligibility_sha256"] != record.eligibility_sha256:
+        raise ValueError("eligibility record SHA-256 mismatch")
+    return record
+
+
+def parse_historical_study_eligibility_report_json(
+    content: str,
+) -> HistoricalStudyEligibilityReport:
+    """Load and validate the versioned operational eligibility snapshot."""
+    if not isinstance(content, str):
+        raise ValueError("eligibility report content must be text")
+    try:
+        payload = json.loads(
+            content, object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("invalid eligibility report JSON") from exc
+    payload = _json_object(payload, (
+        "eligibility_records", "study_version", "report_version",
+        "eligibility_policy_version", "report_sha256"), "eligibility report")
+    if not isinstance(payload["eligibility_records"], list):
+        raise ValueError("eligibility records must be an array")
+    records = tuple(_parse_eligibility_record(item)
+                    for item in payload["eligibility_records"])
+    expected_dates = tuple(day for calendar_bin in calendar_bins()
+                           for day in calendar_bin.dates)
+    if (len(records) != len(expected_dates)
+            or {item.utc_date for item in records} != set(expected_dates)):
+        raise ValueError("eligibility report must contain the full frozen study calendar")
+    report = HistoricalStudyEligibilityReport(
+        records, payload["study_version"], payload["report_version"],
+        payload["eligibility_policy_version"])
+    if payload["report_sha256"] != report.report_sha256:
+        raise ValueError("eligibility report SHA-256 mismatch")
+    return report

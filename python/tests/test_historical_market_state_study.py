@@ -393,6 +393,48 @@ class StudySelectionTests(unittest.TestCase):
         digest = provenance.pop("provenance_sha256")
         self.assertEqual(digest, _sha256(provenance))
 
+    def test_eligibility_report_parser_roundtrip_and_rejects_tampering(self):
+        record = self.records[0]
+        report = study.HistoricalStudyEligibilityReport((record,))
+        content = study.historical_study_eligibility_report_json(report)
+        parsed = study.parse_historical_study_eligibility_report_json(content)
+        self.assertEqual(parsed, report)
+        self.assertEqual(study.historical_study_eligibility_report_json(parsed), content)
+
+        def reverse_keys(value):
+            if isinstance(value, dict):
+                return {key: reverse_keys(item)
+                        for key, item in reversed(tuple(value.items()))}
+            if isinstance(value, list):
+                return [reverse_keys(item) for item in value]
+            return value
+
+        reordered = json.dumps(reverse_keys(json.loads(content)))
+        self.assertEqual(
+            study.parse_historical_study_eligibility_report_json(reordered).report_sha256,
+            report.report_sha256)
+
+        for mutation in (
+            lambda payload: payload.__setitem__("report_sha256", "0" * 64),
+            lambda payload: payload["eligibility_records"][0].__setitem__(
+                "eligibility_sha256", "0" * 64),
+            lambda payload: payload["eligibility_records"][0]["provenance"].__setitem__(
+                "provenance_sha256", "0" * 64),
+            lambda payload: payload["eligibility_records"][0]["provenance"][
+                "archive_manifest"].__setitem__("content_sha256", "0" * 64),
+            lambda payload: payload.__setitem__("study_version", "unsupported"),
+        ):
+            altered = json.loads(content)
+            mutation(altered)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                study.parse_historical_study_eligibility_report_json(
+                    json.dumps(altered))
+
+        altered = json.loads(content)
+        del altered["eligibility_records"][0]["provenance"]["symbol_coverage"][0]["gaps"]
+        with self.assertRaises(ValueError):
+            study.parse_historical_study_eligibility_report_json(json.dumps(altered))
+
 
 class LocalCoreEligibilityTests(unittest.TestCase):
     @classmethod
@@ -425,8 +467,17 @@ class LocalCoreEligibilityTests(unittest.TestCase):
         with patch("socket.create_connection", side_effect=AssertionError("network forbidden")), \
                 patch("urllib.request.urlopen", side_effect=AssertionError("download forbidden")), \
                 patch("market_analysis.historical_replay.run_historical_market_replay",
-                      side_effect=AssertionError("replay forbidden")):
+                      side_effect=AssertionError("replay forbidden")), \
+                patch.object(study, "core_date_eligibility_from_verified_dataset",
+                             wraps=study.core_date_eligibility_from_verified_dataset) as helper:
             record = study.verify_local_core_date(self.day, self.root)
+            helper.assert_called_once()
+            dataset = helper.call_args.args[1]
+            direct = study.core_date_eligibility_from_verified_dataset(self.day, dataset)
+            with self.assertRaises(ValueError):
+                study.core_date_eligibility_from_verified_dataset(
+                    self.day + timedelta(days=1), dataset)
+        self.assertEqual(record, direct)
         self.assertEqual((record.state, record.reason_code), ("ELIGIBLE", study.ELIGIBLE_CORE_DATA))
         self.assertEqual(record.provenance.replay_config.movement_config, MarketMovementConfig())
         expected = (self.config.output_end_boundary_time_ms - historical_candle_start_ms(self.config)) // MINUTE
