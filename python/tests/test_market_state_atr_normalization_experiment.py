@@ -2,7 +2,10 @@
 
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
+import json
 import math
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -12,11 +15,17 @@ from market_analysis.experiments.market_state_atr_normalization import (
     ATR_MISSING_LATEST_MINUTE, ATR_PREVIOUS_CLOSE_NOT_YET_AVAILABLE,
     ATR_ZERO_SCALE, ATR_NUMERATOR_UNAVAILABLE, _ATRVisibilityCursor,
     _atr_metrics, _candidate_symbol, _scale,
+    run_market_state_atr_normalization_suite,
     _validate_inputs,
 )
 from market_analysis.experiments.market_state_common import MarketStateExperimentPoint
 from market_analysis.historical_atr_extension import (
-    _candidate_output_sha256, _manifest,
+    HistoricalATRExtensionPrepared, _candidate_output_sha256, _manifest,
+    _atr_json_safe,
+    historical_atr_extension_report_to_json, run_historical_atr_extension,
+)
+from market_analysis.binance_historical_archive import (
+    BinanceUSDMArchiveRequest, load_binance_usdm_historical_replay_dataset,
 )
 from market_analysis.historical_experiment_batch import (
     EXPERIMENT_SUITE_V1, experiment_stream_sha256,
@@ -26,6 +35,7 @@ from market_analysis.historical_ohlc_evidence import (
 )
 from market_analysis.historical_replay import (
     HistoricalReplayRunManifest, ReplayPartitionPlan,
+    run_historical_market_replay, to_market_state_experiment_points,
 )
 from market_analysis.market_episode_lifecycle import MarketEpisodeLifecycleConfig
 from market_analysis.movement_classifier import (
@@ -35,6 +45,7 @@ from market_analysis.movement_metrics import (
     ALGORITHM_VERSION, DEFAULT_CONFIG_VERSION, MarketMovementEvaluation,
     Metric, SymbolMovementResult, WINDOWS,
 )
+from test_historical_experiment_batch import _request as _archive_request
 
 
 MINUTE = 60_000
@@ -174,6 +185,56 @@ class ATRRangeEvidenceTests(unittest.TestCase):
             _candidate_output_sha256(first),
             _candidate_output_sha256(_digest_result(lifecycle_state="active")),
         )
+
+    def test_real_movement_windows_hash_and_complete_atr_report_serialize(self):
+        with tempfile.TemporaryDirectory() as folder:
+            request = _archive_request(Path(folder))
+            archive_request = BinanceUSDMArchiveRequest(
+                request.archive_root, request.universe, request.replay_config)
+            archive = load_binance_usdm_historical_replay_dataset(archive_request)
+            replay = run_historical_market_replay(archive.replay_request)
+            points = to_market_state_experiment_points(replay, request.partition_plan)
+            prepared = HistoricalATRExtensionPrepared(
+                archive, replay, points, request.partition_plan)
+
+            result, = run_market_state_atr_normalization_suite(
+                points, archive.ohlc_evidence, replay.manifest,
+                configurations=(ATR_CONFIG_30M,))
+            self.assertIsInstance(result.paired_points[0].candidate_evaluation,
+                                  MarketMovementEvaluation)
+            self.assertEqual(tuple(result.paired_points[0].candidate_evaluation.windows),
+                             WINDOWS)
+            canonical_evaluation = _atr_json_safe(
+                result.paired_points[0].candidate_evaluation)
+            self.assertEqual([pair[0] for pair in canonical_evaluation["windows"]],
+                             list(WINDOWS))
+            digest = _candidate_output_sha256(result)
+            self.assertEqual(len(digest), 64)
+            self.assertEqual(digest, _candidate_output_sha256(replace(result)))
+
+            first_point = result.paired_points[0]
+            first_window = first_point.candidate_evaluation.windows[1]
+            changed_row = replace(first_window.symbols[0],
+                                  material_rising=not first_window.symbols[0].material_rising)
+            changed_window = replace(first_window,
+                                     symbols=(changed_row, *first_window.symbols[1:]))
+            changed_evaluation = replace(
+                first_point.candidate_evaluation,
+                windows={**first_point.candidate_evaluation.windows,
+                         1: changed_window})
+            changed_point = replace(first_point,
+                                    candidate_evaluation=changed_evaluation)
+            changed_result = replace(
+                result, paired_points=(changed_point, *result.paired_points[1:]))
+            self.assertNotEqual(digest, _candidate_output_sha256(changed_result))
+
+            report = run_historical_atr_extension(prepared, code_revision="fixture")
+            encoded = historical_atr_extension_report_to_json(report)
+            decoded = json.loads(encoded)
+            self.assertEqual(decoded["report_sha256"], report.report_sha256)
+            self.assertEqual(len(decoded["runs"]), 3)
+            self.assertTrue(all(len(run["candidate_output_sha256"]) == 64
+                                for run in decoded["runs"]))
 
     def test_true_range_uses_previous_close_across_price_gap(self):
         candles = (
