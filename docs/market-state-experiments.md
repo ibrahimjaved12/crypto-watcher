@@ -12,6 +12,33 @@ correlation, clustering, and network diagnostics**, and **EXP-75-09 Gaussian HMM
 learned-regime diagnostics**. EXP-75-10 remains unimplemented in the fixed suite;
 EXP-75-11 and EXP-75-12 are implemented as separate historical extensions.
 
+
+
+## Research role and promotion boundary
+
+These experiments are upstream evidence for the project's larger detection-and-prediction
+pipeline. An individual candidate does **not** need to be a standalone directional
+predictor to be useful. A method may instead improve normalization, state stability,
+structural-change detection, market coordination, or flow/leverage context that later
+helps distinguish what is likely to happen next when combined with V1/current-state
+evidence.
+
+Implementation in this registry does not imply adoption. A candidate may be promoted
+into the canonical market-state or downstream predictive pipeline only after a
+versioned multi-period study on untouched data demonstrates **method-appropriate
+incremental value** beyond the unchanged V1 baseline. Issue #123 owns that comparative
+robustness and forward-information evaluation.
+
+The primary predictive-information question is therefore not universally "did this
+candidate independently predict the next candle?" It is whether causally available
+candidate evidence at time `t` changes the distribution of later returns, direction,
+breadth, volatility, persistence, weakening, reversal, or another method-appropriate
+outcome beyond what V1 already explains.
+
+No study result automatically promotes a method. Any claim that an evidence
+combination is an actionable trade setup additionally requires the versioned strategy,
+event-order, execution, cost, and backtest evaluation owned by #31/#32/#38.
+
 Issue #127's historical mark-versus-trade diagnostic is a separate descriptive
 extension, not another fixed V1 experiment or a change to EXP-75-12. It pairs
 verified #111 trade-price closes with separately verified Binance USD-M mark
