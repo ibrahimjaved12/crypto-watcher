@@ -23,7 +23,9 @@ from market_analysis.binance_historical_archive import (
     daily_aggtrades_relative_path, daily_kline_relative_path,
     historical_candle_start_ms, required_aggtrade_dates, required_kline_dates,
 )
-from market_analysis.historical_experiment_batch import EXPERIMENT_SUITE_V1, _sha256
+from market_analysis.historical_experiment_batch import (
+    EXPERIMENT_SUITE_V1, HistoricalExperimentSuiteEntry, _parameters, _sha256,
+)
 from market_analysis.movement_metrics import MarketMovementConfig, MarketUniverseInput
 
 
@@ -74,6 +76,13 @@ def ineligible(record):
 @lru_cache(maxsize=1)
 def synthetic_calendar():
     return tuple(synthetic_eligible(day) for item in study.calendar_bins() for day in item.dates)
+
+
+def suite_scientific_identity():
+    # Match the existing batch manifest's scientific entries, excluding runners.
+    return _sha256(tuple(HistoricalExperimentSuiteEntry(
+        item.experiment_id, item.algorithm_version, item.config_version, _parameters(item.config))
+        for item in EXPERIMENT_SUITE_V1))
 
 
 def write_archive(root, relative, rows, header):
@@ -263,9 +272,9 @@ class StudySelectionTests(unittest.TestCase):
             with self.subTest(override=tuple(override)):
                 with self.assertRaises(ValueError):
                     replace(self.manifest, **override)
-        before = _sha256(EXPERIMENT_SUITE_V1)
+        before = suite_scientific_identity()
         study.build_study123_manifest(self.records)
-        self.assertEqual(_sha256(EXPERIMENT_SUITE_V1), before)
+        self.assertEqual(suite_scientific_identity(), before)
         self.assertEqual(len(EXPERIMENT_SUITE_V1), 28)
 
     def test_exact_frozen_primary_registry(self):
