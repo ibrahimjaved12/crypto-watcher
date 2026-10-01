@@ -292,28 +292,41 @@ def _acquire_item(request, item, transport, sleeper):
         checksum_attempts + zip_attempts)
 
 
-def acquire_binance_usdm_historical_archives(
+def acquire_binance_usdm_historical_archive_files(
     request: BinanceHistoricalDownloadRequest,
     *,
     _transport=None,
     _sleeper=None,
-) -> BinanceHistoricalAcquisitionResult:
-    """Refresh official checksums, reuse or replace ZIPs, validate with Part 2."""
+) -> BinanceHistoricalDownloadResult:
+    """Acquire verified archive files without constructing a replay dataset."""
     if not isinstance(request, BinanceHistoricalDownloadRequest):
         raise ValueError("request must be BinanceHistoricalDownloadRequest")
     transport = _UrllibTransport() if _transport is None else _transport
     sleeper = time.sleep if _sleeper is None else _sleeper
     plan = plan_binance_usdm_historical_download(request)
     results = tuple(_acquire_item(request, item, transport, sleeper) for item in plan)
-    dataset = load_binance_usdm_historical_replay_dataset(
-        BinanceUSDMArchiveRequest(request.archive_root, request.universe,
-                                  request.replay_config))
-    download = BinanceHistoricalDownloadResult(
+    return BinanceHistoricalDownloadResult(
         BINANCE_ARCHIVE_DOWNLOAD_VERSION, len(plan),
         sum(item.status == "DOWNLOADED" for item in results),
         sum(item.status == "REUSED" for item in results),
         sum(item.status == "REFRESHED" for item in results),
         sum(item.bytes_downloaded for item in results), results)
+
+
+def acquire_binance_usdm_historical_archives(
+    request: BinanceHistoricalDownloadRequest,
+    *,
+    _transport=None,
+    _sleeper=None,
+) -> BinanceHistoricalAcquisitionResult:
+    """Acquire official files, then validate them through the full replay loader."""
+    if not isinstance(request, BinanceHistoricalDownloadRequest):
+        raise ValueError("request must be BinanceHistoricalDownloadRequest")
+    download = acquire_binance_usdm_historical_archive_files(
+        request, _transport=_transport, _sleeper=_sleeper)
+    dataset = load_binance_usdm_historical_replay_dataset(
+        BinanceUSDMArchiveRequest(request.archive_root, request.universe,
+                                  request.replay_config))
     return BinanceHistoricalAcquisitionResult(download, dataset)
 
 

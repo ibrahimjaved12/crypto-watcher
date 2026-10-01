@@ -10,6 +10,8 @@ from unittest.mock import Mock, call, patch
 
 from market_analysis import historical_market_state_study as study
 from market_analysis import historical_market_state_study_resolver as resolver
+from market_analysis import binance_historical_archive as archive_adapter
+from market_analysis import binance_historical_download as download_adapter
 from market_analysis.binance_historical_archive import (
     ARCHIVE_FIRST_SEEN_POLICY, ARCHIVE_SOURCE_STATE_POLICY,
     BINANCE_ARCHIVE_ADAPTER_VERSION, BINANCE_ARCHIVE_DATASET_ID,
@@ -86,7 +88,7 @@ class ResolverTests(unittest.TestCase):
                               side_effect=[unresolved(utc_date=candidate), manifest]) as build, \
                     patch.object(study, "verify_local_core_date",
                                  return_value=finalized_record(candidate)) as verify, \
-                    patch.object(resolver, "acquire_binance_usdm_historical_archives",
+                    patch.object(resolver, "acquire_binance_usdm_historical_archive_files",
                                  side_effect=AssertionError("network must not be used")), \
                     patch.object(resolver, "_write_report", wraps=resolver._write_report) as write:
                 result = resolver.resolve_study("/unused/archive", output_dir, emit=lambda _: None)
@@ -114,7 +116,7 @@ class ResolverTests(unittest.TestCase):
                     patch.object(study, "verify_local_core_date", side_effect=[
                         finalized_record(candidates[0], state="INELIGIBLE"),
                         finalized_record(candidates[1])]) as verify, \
-                    patch.object(resolver, "acquire_binance_usdm_historical_archives",
+                    patch.object(resolver, "acquire_binance_usdm_historical_archive_files",
                                  side_effect=AssertionError("network must not be used")), \
                     patch.object(resolver, "_write_report", wraps=resolver._write_report) as write:
                 resolver.resolve_study("/unused/archive", temporary, emit=outputs.append)
@@ -131,32 +133,33 @@ class ResolverTests(unittest.TestCase):
             self.assertTrue(any("INELIGIBLE (CORE_KLINE_GAP)" in line for line in outputs))
             self.assertTrue(any("selector advancing deterministically" in line for line in outputs))
 
-    def test_unverified_local_candidate_acquires_once_and_reuses_acquired_dataset(self):
+    def test_unverified_candidate_downloads_only_then_reverifies_locally(self):
         manifest = finalized_manifest()
         candidate = manifest.selection_evidence[0].attempted_dates[0].utc_date
-        dataset = object()
-        acquired = type("Acquisition", (), {"dataset": dataset})()
         request = Mock()
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(study, "build_historical_market_state_study_manifest",
                               side_effect=[unresolved(utc_date=candidate), manifest]), \
-                    patch.object(study, "verify_local_core_date",
-                                 return_value=unverified_record(candidate)) as verify, \
+                    patch.object(study, "verify_local_core_date", side_effect=[
+                        unverified_record(candidate), finalized_record(candidate)]) as verify, \
                     patch.object(resolver, "BinanceHistoricalDownloadRequest",
                                  return_value=request) as request_type, \
-                    patch.object(resolver, "acquire_binance_usdm_historical_archives",
-                                 return_value=acquired) as acquire, \
+                    patch.object(resolver, "acquire_binance_usdm_historical_archive_files",
+                                 return_value=Mock()) as acquire, \
+                    patch.object(download_adapter,
+                                 "acquire_binance_usdm_historical_archives",
+                                 side_effect=AssertionError("full acquisition API used")), \
                     patch.object(study, "core_date_eligibility_from_verified_dataset",
-                                 return_value=finalized_record(candidate)) as classify, \
-                    patch.object(study, "load_binance_usdm_historical_replay_dataset",
-                                 side_effect=AssertionError("acquired dataset must not be loaded again")) as load:
+                                 side_effect=AssertionError("full replay helper must not be used")), \
+                    patch.object(archive_adapter,
+                                 "load_binance_usdm_historical_replay_dataset",
+                                 side_effect=AssertionError("full replay loader must not be used")):
                 resolver.resolve_study("/archive", temporary, emit=lambda _: None)
-            verify.assert_called_once_with(candidate, "/archive")
+            self.assertEqual(verify.call_args_list, [
+                call(candidate, "/archive"), call(candidate, "/archive")])
             request_type.assert_called_once_with(
                 Path("/archive"), study.study_universe(), study.study_replay_config(candidate))
             acquire.assert_called_once_with(request)
-            classify.assert_called_once_with(candidate, dataset)
-            load.assert_not_called()
             saved = study.parse_historical_study_eligibility_report_json(
                 (Path(temporary) / resolver.ELIGIBILITY_REPORT_FILENAME).read_text())
             self.assertEqual({item.utc_date: item.state for item in saved.eligibility_records}[candidate],
@@ -170,7 +173,7 @@ class ResolverTests(unittest.TestCase):
                               side_effect=unresolved(utc_date=candidate)) as build, \
                     patch.object(study, "verify_local_core_date",
                                  return_value=unverified_record(candidate)) as verify, \
-                    patch.object(resolver, "acquire_binance_usdm_historical_archives",
+                    patch.object(resolver, "acquire_binance_usdm_historical_archive_files",
                                  side_effect=OSError("simulated offline")) as acquire:
                 with self.assertRaisesRegex(resolver.StudyResolutionError,
                                             "candidate remains UNVERIFIED"):
@@ -185,12 +188,35 @@ class ResolverTests(unittest.TestCase):
             self.assertNotIn("/archive", (Path(temporary)
                                            / resolver.ELIGIBILITY_REPORT_FILENAME).read_text())
 
+    def test_post_download_invalid_archive_remains_unverified_and_stops(self):
+        candidate = finalized_manifest().selection_evidence[0].attempted_dates[0].utc_date
+        request = Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(study, "build_historical_market_state_study_manifest",
+                              side_effect=unresolved(utc_date=candidate)) as build, \
+                    patch.object(study, "verify_local_core_date", side_effect=[
+                        unverified_record(candidate), unverified_record(candidate)]) as verify, \
+                    patch.object(resolver, "BinanceHistoricalDownloadRequest",
+                                 return_value=request), \
+                    patch.object(resolver, "acquire_binance_usdm_historical_archive_files",
+                                 return_value=Mock()) as acquire:
+                with self.assertRaisesRegex(resolver.StudyResolutionError,
+                                            "candidate remains UNVERIFIED"):
+                    resolver.resolve_study("/archive", temporary, emit=lambda _: None)
+            self.assertEqual(build.call_count, 1)
+            self.assertEqual(verify.call_count, 2)
+            acquire.assert_called_once_with(request)
+            saved = study.parse_historical_study_eligibility_report_json(
+                (Path(temporary) / resolver.ELIGIBILITY_REPORT_FILENAME).read_text())
+            self.assertEqual({item.utc_date: item.state for item in saved.eligibility_records}[candidate],
+                             "UNVERIFIED")
+
     def test_no_eligible_date_error_fails_without_inventing_a_selection(self):
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(study, "build_historical_market_state_study_manifest",
                               side_effect=study.NoEligibleStudyDateError(7)), \
                     patch.object(study, "verify_local_core_date") as verify, \
-                    patch.object(resolver, "acquire_binance_usdm_historical_archives") as acquire:
+                    patch.object(resolver, "acquire_binance_usdm_historical_archive_files") as acquire:
                 with self.assertRaisesRegex(resolver.StudyResolutionError,
                                             "no eligible core date"):
                     resolver.resolve_study("/archive", temporary, emit=lambda _: None)
@@ -209,7 +235,7 @@ class ResolverTests(unittest.TestCase):
                                            unresolved(1, utc_date=second)]), \
                     patch.object(study, "verify_local_core_date", side_effect=[
                         finalized_record(first), unverified_record(second)]), \
-                    patch.object(resolver, "acquire_binance_usdm_historical_archives",
+                    patch.object(resolver, "acquire_binance_usdm_historical_archive_files",
                                  side_effect=OSError("simulated interruption")):
                 with self.assertRaises(resolver.StudyResolutionError):
                     resolver.resolve_study("/archive", interrupted_dir, emit=lambda _: None)
@@ -218,7 +244,7 @@ class ResolverTests(unittest.TestCase):
                               side_effect=[unresolved(1, utc_date=second), manifest]), \
                     patch.object(study, "verify_local_core_date",
                                  return_value=finalized_record(second)) as verify, \
-                    patch.object(resolver, "acquire_binance_usdm_historical_archives",
+                    patch.object(resolver, "acquire_binance_usdm_historical_archive_files",
                                  side_effect=AssertionError("saved eligible prefix must not reacquire")):
                 resolver.resolve_study("/archive", interrupted_dir, emit=lambda _: None)
             verify.assert_called_once_with(second, "/archive")
@@ -228,7 +254,7 @@ class ResolverTests(unittest.TestCase):
                                            unresolved(1, utc_date=second), manifest]), \
                     patch.object(study, "verify_local_core_date", side_effect=[
                         finalized_record(first), finalized_record(second)]), \
-                    patch.object(resolver, "acquire_binance_usdm_historical_archives",
+                    patch.object(resolver, "acquire_binance_usdm_historical_archive_files",
                                  side_effect=AssertionError("local candidates must not download")):
                 resolver.resolve_study("/archive", uninterrupted_dir, emit=lambda _: None)
             self.assertEqual(

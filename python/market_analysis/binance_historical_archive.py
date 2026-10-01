@@ -16,6 +16,8 @@ import io
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
+import sqlite3
+import tempfile
 import zipfile
 
 from .historical_replay import (
@@ -251,6 +253,29 @@ class BinanceHistoricalReplayDataset:
 
 
 @dataclass(frozen=True)
+class BinanceHistoricalCoreArchiveEvidence:
+    """Verified archive facts needed for study eligibility, without replay rows."""
+
+    archive_manifest: BinanceArchiveBundleManifest
+    ohlc_evidence: BinanceTradeOHLCEvidence
+    raw_replayable_trade_evidence_present: bool
+
+    def __post_init__(self):
+        if (not isinstance(self.archive_manifest, BinanceArchiveBundleManifest)
+                or not isinstance(self.ohlc_evidence, BinanceTradeOHLCEvidence)
+                or self.raw_replayable_trade_evidence_present is not True):
+            raise ValueError("core archive evidence requires verified replayable trade data")
+        manifest = self.archive_manifest
+        evidence = self.ohlc_evidence
+        if (manifest.content_sha256 != _content_sha256(manifest.archive_files)
+                or (evidence.dataset_id, evidence.dataset_version,
+                    evidence.dataset_content_sha256)
+                != (manifest.dataset_id, manifest.dataset_version,
+                    manifest.content_sha256)):
+            raise ValueError("core archive evidence identities must match verified packages")
+
+
+@dataclass(frozen=True)
 class _AggRow:
     aggregate_trade_id: int
     price: Decimal
@@ -380,8 +405,10 @@ def _checksum(root: Path, relative: PurePosixPath, symbol: str,
     return actual
 
 
-def _archive_rows(root: Path, relative: PurePosixPath, schema: tuple[set[str], ...],
-                  parser, utc_date: date) -> tuple:
+def _iter_archive_rows(root: Path, relative: PurePosixPath,
+                       schema: tuple[set[str], ...], parser,
+                       utc_date: date):
+    """Yield validated CSV rows without retaining a complete archive in memory."""
     archive = root.joinpath(*relative.parts)
     try:
         with zipfile.ZipFile(archive) as bundle:
@@ -400,20 +427,24 @@ def _archive_rows(root: Path, relative: PurePosixPath, schema: tuple[set[str], .
             with bundle.open(csv_members[0]) as raw:
                 with io.TextIOWrapper(raw, encoding="utf-8-sig", newline="") as text_stream:
                     reader = csv.reader(text_stream, strict=True)
-                    rows = []
                     try:
                         for number, row in enumerate(reader, start=1):
                             if number == 1 and _is_header(row, schema):
                                 continue
                             try:
-                                rows.append(parser(row, utc_date))
+                                yield parser(row, utc_date)
                             except ValueError as exc:
                                 raise ValueError(f"{relative} CSV row {number}: {exc}") from exc
                     except (csv.Error, UnicodeError) as exc:
                         raise ValueError(f"{relative} CSV row {reader.line_num}: {exc}") from exc
-                    return tuple(rows)
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         raise ValueError(f"invalid ZIP archive {relative}: {exc}") from exc
+
+
+def _archive_rows(root: Path, relative: PurePosixPath, schema: tuple[set[str], ...],
+                  parser, utc_date: date) -> tuple:
+    """Materializing compatibility wrapper for replay callers."""
+    return tuple(_iter_archive_rows(root, relative, schema, parser, utc_date))
 
 
 def _content_sha256(files: tuple[BinanceArchiveFileIdentity, ...]) -> str:
@@ -567,3 +598,153 @@ def load_binance_usdm_historical_replay_dataset(
     return BinanceHistoricalReplayDataset(
         manifest, replay_request, diagnostics, ohlc_evidence,
         taker_flow_evidence)
+
+
+def _decimal_identity(value: Decimal) -> str:
+    """Canonical exact Decimal identity, without applying context rounding."""
+    sign, digits, exponent = value.as_tuple()
+    digits = list(digits)
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    return f"{sign}:{''.join(str(digit) for digit in digits)}:{exponent}"
+
+
+def _agg_identity(row: _AggRow) -> bytes:
+    # Decimal spellings such as 1.0 and 1.00 compare equal in _AggRow; retain
+    # that behavior while storing only a compact canonical identity on disk.
+    identity = [
+        _decimal_identity(row.price), _decimal_identity(row.quantity),
+        row.first_trade_id, row.last_trade_id, row.timestamp_ms,
+        row.buyer_is_maker,
+    ]
+    return json.dumps(identity, separators=(",", ":"),
+                      ensure_ascii=True).encode("ascii")
+
+
+class _AggTradeDuplicateIndex:
+    """Disk-backed exact duplicate index with a bounded SQLite page cache."""
+
+    def __enter__(self):
+        self._temporary = tempfile.TemporaryDirectory(prefix="binance-core-verify-")
+        try:
+            self._connection = sqlite3.connect(
+                Path(self._temporary.name) / "aggregate-identities.sqlite3")
+            self._connection.execute("PRAGMA journal_mode=OFF")
+            self._connection.execute("PRAGMA synchronous=OFF")
+            self._connection.execute("PRAGMA temp_store=FILE")
+            self._connection.execute("PRAGMA cache_size=-8192")
+            self._connection.execute(
+                "CREATE TABLE aggregate_trade_ids ("
+                "symbol TEXT NOT NULL, aggregate_trade_id TEXT NOT NULL, "
+                "identity BLOB NOT NULL, "
+                "PRIMARY KEY (symbol, aggregate_trade_id)) WITHOUT ROWID")
+        except sqlite3.Error as exc:
+            self.__exit__(None, None, None)
+            raise ValueError("unable to prepare compact aggTrade identity index") from exc
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            connection.close()
+        temporary = getattr(self, "_temporary", None)
+        if temporary is not None:
+            temporary.cleanup()
+
+    def add(self, symbol: str, row: _AggRow) -> None:
+        identity = _agg_identity(row)
+        key = (symbol, str(row.aggregate_trade_id))
+        try:
+            result = self._connection.execute(
+                "INSERT OR IGNORE INTO aggregate_trade_ids "
+                "(symbol, aggregate_trade_id, identity) VALUES (?, ?, ?)",
+                (*key, identity))
+            if result.rowcount == 0:
+                previous = self._connection.execute(
+                    "SELECT identity FROM aggregate_trade_ids "
+                    "WHERE symbol = ? AND aggregate_trade_id = ?", key).fetchone()
+                if previous is None:
+                    raise ValueError("aggTrade identity index lost a duplicate row")
+                if previous[0] != identity:
+                    raise ValueError(
+                        f"conflicting aggTrade ID {row.aggregate_trade_id} for {symbol}")
+        except sqlite3.Error as exc:
+            raise ValueError("unable to verify compact aggTrade identities") from exc
+
+    def commit(self) -> None:
+        try:
+            self._connection.commit()
+        except sqlite3.Error as exc:
+            raise ValueError("unable to commit compact aggTrade identity index") from exc
+
+
+def verify_binance_usdm_historical_core_archives(
+    request: BinanceUSDMArchiveRequest,
+) -> BinanceHistoricalCoreArchiveEvidence:
+    """Verify core archives with streamed aggTrades and no replay materialization."""
+    if not isinstance(request, BinanceUSDMArchiveRequest):
+        raise ValueError("request must be BinanceUSDMArchiveRequest")
+    config = request.replay_config
+    candle_start = historical_candle_start_ms(config)
+    trade_dates = required_aggtrade_dates(config)
+    kline_dates = required_kline_dates(config)
+    files = []
+    ohlc_candles = []
+    raw_replayable_trade_evidence_present = False
+
+    with _AggTradeDuplicateIndex() as duplicate_index:
+        for symbol in request.universe.symbols:
+            kline_by_open = {}
+            for family, dates, path_builder, schema, parser in (
+                ("aggTrades", trade_dates, daily_aggtrades_relative_path,
+                 _AGG_HEADER, _agg_row),
+                ("klines/1m", kline_dates, daily_kline_relative_path,
+                 _KLINE_HEADER, _kline_row),
+            ):
+                for day in dates:
+                    relative = path_builder(symbol, day)
+                    sha256 = _checksum(request.archive_root, relative, symbol,
+                                       family, day)
+                    files.append(BinanceArchiveFileIdentity(
+                        relative.as_posix(), family, symbol, day, sha256))
+                    for row in _iter_archive_rows(
+                            request.archive_root, relative, schema, parser, day):
+                        if family == "aggTrades":
+                            duplicate_index.add(symbol, row)
+                            if (MovementBucketEngine._bucket_boundary(row.timestamp_ms)
+                                    >= config.engine_start_boundary_time_ms
+                                    and row.timestamp_ms
+                                    <= config.output_end_boundary_time_ms):
+                                raw_replayable_trade_evidence_present = True
+                        else:
+                            prior = kline_by_open.get(row.open_time_ms)
+                            if prior is not None and prior != row:
+                                raise ValueError(
+                                    f"conflicting kline open {row.open_time_ms} for {symbol}")
+                            kline_by_open[row.open_time_ms] = row
+                    if family == "aggTrades":
+                        duplicate_index.commit()
+
+            for opening in sorted(kline_by_open):
+                row = kline_by_open[opening]
+                if candle_start <= opening <= config.output_end_boundary_time_ms:
+                    ohlc_candles.append(CompletedTradeOHLCCandle(
+                        symbol, f"binance-usdm:{symbol}", opening,
+                        row.close_time_ms, row.open, row.high, row.low, row.close,
+                        row.close_time_ms + 1))
+
+    if not raw_replayable_trade_evidence_present:
+        raise ValueError("dataset lacks raw replayable trade evidence")
+
+    sorted_files = tuple(sorted(files, key=lambda item: item.relative_path))
+    content_sha256 = _content_sha256(sorted_files)
+    manifest = BinanceArchiveBundleManifest(
+        BINANCE_ARCHIVE_ADAPTER_VERSION, BINANCE_ARCHIVE_DATASET_ID,
+        BINANCE_ARCHIVE_DATASET_VERSION, ARCHIVE_FIRST_SEEN_POLICY,
+        ARCHIVE_SOURCE_STATE_POLICY, sorted_files, content_sha256)
+    ohlc_evidence = BinanceTradeOHLCEvidence(
+        BINANCE_ARCHIVE_DATASET_ID, BINANCE_ARCHIVE_DATASET_VERSION,
+        content_sha256, request.universe.symbols, tuple(ohlc_candles))
+    return BinanceHistoricalCoreArchiveEvidence(
+        manifest, ohlc_evidence, raw_replayable_trade_evidence_present)
