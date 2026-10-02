@@ -132,9 +132,14 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             canonical_replay_result=SimpleNamespace(
                 manifest=SimpleNamespace(configured_universe=("BTCUSDT",))),
             experiment_points=(), canonical_v1_branch_by_boundary=branch)
+        clock = {"now": 0}
         runner = Mock(return_value=SimpleNamespace())
         second_runner = Mock(return_value=SimpleNamespace())
-        bocpd_runner = Mock(return_value=SimpleNamespace())
+        def run_bocpd(*args, **kwargs):
+            clock["now"] += 10
+            return SimpleNamespace()
+
+        bocpd_runner = Mock(side_effect=run_bocpd)
         descriptors = (
             SimpleNamespace(experiment_id="EXP-75-09", algorithm_version="hmm-v1",
                             config_version="hmm-config"),
@@ -152,6 +157,35 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             for name in SOURCE_NAMES
         }
         bundle = SimpleNamespace(records=(), native_summaries={}, result_sha256="c" * 64)
+
+        class TimedRecords:
+            def __iter__(self):
+                clock["now"] += 30
+                return iter(())
+
+            def __len__(self):
+                return 0
+
+        class TimedBundle:
+            records = TimedRecords()
+
+            @property
+            def native_summaries(self):
+                clock["now"] += 40
+                return {}
+
+            @property
+            def result_sha256(self):
+                clock["now"] += 50
+                return "d" * 64
+
+        timed_bundle = TimedBundle()
+
+        def adapt_result(period, descriptor, result):
+            if descriptor.experiment_id == "EXP-75-04B":
+                clock["now"] += 20
+                return timed_bundle
+            return bundle
         extension_parts = (
             ("HistoricalMarkTradeExtensionPrepared",
              "build_historical_study_mark_trade_points", "_mark_summaries"),
@@ -164,11 +198,10 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
         )
         extension_preparers = []
         extension_builders = []
-        ticks = iter(range(1000))
         runtime_metrics = execution.StudyPeriodRuntimeMetrics()
         with ExitStack() as stack:
             stack.enter_context(patch.object(
-                execution.time, "perf_counter_ns", side_effect=lambda: next(ticks)))
+                execution.time, "perf_counter_ns", side_effect=lambda: clock["now"]))
             stack.enter_context(patch.object(execution, "EXPERIMENT_SUITE_V1", descriptors))
             stack.enter_context(patch.object(
                 execution, "_hmm_study_evidence", return_value=((), {}, None, None)))
@@ -181,7 +214,7 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             stack.enter_context(patch.object(
                 execution, "_taker_summaries", return_value={"development": {}}))
             stack.enter_context(patch.object(
-                execution, "adapt_candidate_result", return_value=bundle))
+                execution, "adapt_candidate_result", side_effect=adapt_result))
             for prepared_name, builder_name, summary_name in extension_parts:
                 preparer = Mock(return_value=object())
                 builder = Mock(return_value=())
@@ -206,7 +239,7 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
         taker.assert_called_once()
         timings = runtime_metrics.report_timings()
         self.assertGreater(timings["core_experiment_seconds"], 0)
-        self.assertGreater(timings["bocpd_seconds"], 0)
+        self.assertEqual(runtime_metrics.elapsed_ns_by_field["bocpd_seconds"], 150)
         self.assertGreater(timings["atr_06b_seconds"], 0)
         self.assertGreater(timings["taker_flow_seconds"], 0)
         for field in ("mark_trade_seconds", "open_interest_seconds",

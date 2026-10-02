@@ -1040,16 +1040,16 @@ def _candidate_execution(prepared_period, supplementary, hmm_model,
                     points, descriptor.config, classifier_config=classifier_config,
                     lifecycle_config=lifecycle_config,
                     canonical_branch_by_boundary=canonical_branch_by_boundary)
-            bundle = _record_candidate_bundle(period, descriptor, result)
-            records.extend(bundle.records)
-            native_summaries.append({
-                "experiment_id": descriptor.experiment_id,
-                "algorithm_version": descriptor.algorithm_version,
-                "config_version": descriptor.config_version,
-                "summary": bundle.native_summaries,
-                "result_sha256": bundle.result_sha256,
-                "evidence_record_count": len(bundle.records),
-            })
+                bundle = _record_candidate_bundle(period, descriptor, result)
+                records.extend(bundle.records)
+                native_summaries.append({
+                    "experiment_id": descriptor.experiment_id,
+                    "algorithm_version": descriptor.algorithm_version,
+                    "config_version": descriptor.config_version,
+                    "summary": bundle.native_summaries,
+                    "result_sha256": bundle.result_sha256,
+                    "evidence_record_count": len(bundle.records),
+                })
     finally:
         if runtime_metrics is not None:
             runtime_metrics.record_elapsed_ns(
