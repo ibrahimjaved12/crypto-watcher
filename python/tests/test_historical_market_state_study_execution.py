@@ -1,9 +1,10 @@
 """Generated governance and identity fixtures for Part-B execution."""
 
+from contextlib import ExitStack
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from datetime import date
 import json
 import unittest
 from unittest.mock import Mock, patch
@@ -33,6 +34,25 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
     def setUpClass(cls):
         cls.manifest = parse_historical_market_state_study_manifest_json(
             MANIFEST_PATH.read_text(encoding="utf-8"))
+
+    def _coverage_fixture(self, folder, revision):
+        ordered = [{"study_period_index": item.study_period_index,
+                    "utc_date": item.utc_date.isoformat(), "phase": item.phase}
+                   for item in self.manifest.selected_periods]
+        coverage = {
+            "coverage_version": EXTENSION_COVERAGE_VERSION,
+            "study_version": self.manifest.study_version,
+            "study_manifest_sha256": self.manifest.manifest_sha256,
+            "ordered_periods": ordered,
+            "source_identities": execution.report_json_safe(SOURCE_IDENTITIES),
+            "tool_config_version": TOOL_CONFIG_VERSION,
+            "code_revision": revision,
+            "periods": ordered,
+        }
+        coverage["coverage_manifest_sha256"] = execution._digest(coverage)
+        path = Path(folder) / "coverage.json"
+        path.write_text(_canonical(coverage), encoding="utf-8")
+        return path, coverage
 
     def test_default_phase_and_first_three_frozen_development_dates(self):
         selected = select_execution_periods(self.manifest, period_limit=3)
@@ -78,7 +98,11 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             "core": {"archive_content_sha256": content_sha},
         }
         prepared_marker = object()
-        with patch.object(execution, "load_binance_usdm_historical_replay_dataset",
+        ticks = iter(range(1000))
+        runtime_metrics = execution.StudyPeriodRuntimeMetrics()
+        with patch.object(execution.time, "perf_counter_ns",
+                          side_effect=lambda: next(ticks)), patch.object(
+                execution, "load_binance_usdm_historical_replay_dataset",
                           return_value=dataset) as loader, patch.object(
                 execution, "run_historical_market_replay", return_value=replay) as runner, patch.object(
                 execution, "_frozen_eligibility", return_value=eligibility), patch.object(
@@ -87,8 +111,8 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                 execution, "PreparedHistoricalMarketStatePeriod",
                 return_value=prepared_marker) as prepared_type:
             prepared, frozen, _, _ = execution._prepare_study_period(
-                self.manifest,
-                {"periods": [coverage_period]}, period, Path("/local/core"), "fixture-rev")
+                self.manifest, {"periods": [coverage_period]}, period,
+                Path("/local/core"), "fixture-rev", runtime_metrics=runtime_metrics)
 
         self.assertIs(prepared, prepared_marker)
         self.assertIs(frozen, coverage_period)
@@ -96,6 +120,9 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 1)
         self.assertIs(runner.call_args.args[0], dataset.replay_request)
         prepared_type.assert_called_once()
+        self.assertGreater(runtime_metrics.report_timings()["core_archive_load_seconds"], 0)
+        self.assertGreater(runtime_metrics.report_timings()["canonical_replay_seconds"], 0)
+        self.assertGreater(runtime_metrics.report_timings()["v1_preparation_seconds"], 0)
 
     def test_candidate_dispatch_reuses_shared_branch_and_atr_once(self):
         period = self.manifest.selected_periods[0]
@@ -105,8 +132,21 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             canonical_replay_result=SimpleNamespace(
                 manifest=SimpleNamespace(configured_universe=("BTCUSDT",))),
             experiment_points=(), canonical_v1_branch_by_boundary=branch)
+        clock = {"now": 0}
         runner = Mock(return_value=SimpleNamespace())
         second_runner = Mock(return_value=SimpleNamespace())
+        def run_bocpd(*args, **kwargs):
+            clock["now"] += 10
+            return SimpleNamespace()
+
+        def timed_mock(return_value=()):
+            def run_timed_work(*args, **kwargs):
+                clock["now"] += 1
+                return return_value
+
+            return Mock(side_effect=run_timed_work)
+
+        bocpd_runner = Mock(side_effect=run_bocpd)
         descriptors = (
             SimpleNamespace(experiment_id="EXP-75-09", algorithm_version="hmm-v1",
                             config_version="hmm-config"),
@@ -114,27 +154,242 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                             config_version="ewma-config", config=object(), runner=runner),
             SimpleNamespace(experiment_id="EXP-75-02", algorithm_version="cusum-v1",
                             config_version="cusum-config", config=object(), runner=second_runner),
+            SimpleNamespace(experiment_id="EXP-75-04B", algorithm_version="bocpd-v1",
+                            config_version="bocpd-config", config=object(),
+                            runner=bocpd_runner),
         )
         supplementary = {
-            name: {"evidence": None, "coverage": {"coverage_state": "UNAVAILABLE"},
+            name: {"evidence": object(), "coverage": {"coverage_state": "FULL"},
                    "root": Path("/local/source")}
             for name in SOURCE_NAMES
         }
         bundle = SimpleNamespace(records=(), native_summaries={}, result_sha256="c" * 64)
-        with patch.object(execution, "EXPERIMENT_SUITE_V1", descriptors), patch.object(
-                execution, "_hmm_study_evidence", return_value=((), {}, None, None)), patch.object(
-                execution, "run_market_state_atr_normalization_suite", return_value=()) as atr, patch.object(
-                execution, "build_historical_study_taker_flow_points", return_value=()), patch.object(
-                execution, "_taker_summaries", return_value={"development": {}}), patch.object(
-                execution, "adapt_candidate_result", return_value=bundle):
-            execution._candidate_execution(prepared, supplementary, None)
+
+        class TimedRecords:
+            def __iter__(self):
+                clock["now"] += 30
+                return iter(())
+
+            def __len__(self):
+                return 0
+
+        class TimedBundle:
+            records = TimedRecords()
+
+            @property
+            def native_summaries(self):
+                clock["now"] += 40
+                return {}
+
+            @property
+            def result_sha256(self):
+                clock["now"] += 50
+                return "d" * 64
+
+        timed_bundle = TimedBundle()
+
+        def adapt_result(period, descriptor, result):
+            if descriptor.experiment_id == "EXP-75-04B":
+                clock["now"] += 20
+                return timed_bundle
+            return bundle
+        extension_parts = (
+            ("HistoricalMarkTradeExtensionPrepared",
+             "build_historical_study_mark_trade_points", "_mark_summaries"),
+            ("HistoricalOpenInterestExtensionPrepared",
+             "build_historical_study_open_interest_points", "_oi_summaries"),
+            ("HistoricalFundingExtensionPrepared",
+             "build_historical_study_funding_points", "_funding_summaries"),
+            ("HistoricalLiquidationExtensionPrepared",
+             "build_historical_study_liquidation_points", "_liquidation_summaries"),
+        )
+        extension_preparers = []
+        extension_builders = []
+        runtime_metrics = execution.StudyPeriodRuntimeMetrics()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(
+                execution.time, "perf_counter_ns", side_effect=lambda: clock["now"]))
+            stack.enter_context(patch.object(execution, "EXPERIMENT_SUITE_V1", descriptors))
+            stack.enter_context(patch.object(
+                execution, "_hmm_study_evidence", return_value=((), {}, None, None)))
+            atr = timed_mock()
+            stack.enter_context(patch.object(
+                execution, "run_market_state_atr_normalization_suite", atr))
+            taker = timed_mock()
+            stack.enter_context(patch.object(
+                execution, "build_historical_study_taker_flow_points", taker))
+            stack.enter_context(patch.object(
+                execution, "_taker_summaries", return_value={"development": {}}))
+            stack.enter_context(patch.object(
+                execution, "adapt_candidate_result", side_effect=adapt_result))
+            for prepared_name, builder_name, summary_name in extension_parts:
+                preparer = Mock(return_value=object())
+                builder = timed_mock()
+                extension_preparers.append(preparer)
+                extension_builders.append(builder)
+                stack.enter_context(patch.object(execution, prepared_name, preparer))
+                stack.enter_context(patch.object(execution, builder_name, builder))
+                stack.enter_context(patch.object(
+                    execution, summary_name, return_value={"development": {}}))
+            execution._candidate_execution(
+                prepared, supplementary, None, runtime_metrics=runtime_metrics)
 
         self.assertEqual(runner.call_count, 1)
         self.assertEqual(second_runner.call_count, 1)
+        self.assertEqual(bocpd_runner.call_count, 1)
+        self.assertTrue(all(item.call_count == 1 for item in extension_preparers))
+        self.assertTrue(all(item.call_count == 1 for item in extension_builders))
         self.assertIs(runner.call_args.kwargs["canonical_branch_by_boundary"], branch)
         self.assertIs(second_runner.call_args.kwargs["canonical_branch_by_boundary"], branch)
         atr.assert_called_once()
         self.assertIs(atr.call_args.kwargs["canonical_branch_by_boundary"], branch)
+        taker.assert_called_once()
+        timings = runtime_metrics.report_timings()
+        self.assertGreater(timings["core_experiment_seconds"], 0)
+        self.assertEqual(runtime_metrics.elapsed_ns_by_field["bocpd_seconds"], 150)
+        self.assertGreater(timings["atr_06b_seconds"], 0)
+        self.assertGreater(timings["taker_flow_seconds"], 0)
+        for field in ("mark_trade_seconds", "open_interest_seconds",
+                      "funding_seconds", "liquidation_seconds"):
+            self.assertGreater(timings[field], 0)
+
+    def test_execute_period_times_source_and_outcome_paths_once(self):
+        period = self.manifest.selected_periods[0]
+        revision = "runtime-path-fixture"
+        source_coverage = {name: {"coverage_state": "FULL"} for name in SOURCE_NAMES}
+        supplementary = {
+            name: {"coverage": source_coverage[name], "evidence": object(),
+                   "root": Path("/generated/source")}
+            for name in SOURCE_NAMES
+        }
+        taker_evidence = SimpleNamespace(
+            schema_version="schema-v1", algorithm_version="flow-v1",
+            dataset_content_sha256="a" * 64, configured_symbols=("BTCUSDT",),
+            engine_start_boundary_time_ms=0, output_end_boundary_time_ms=60_000,
+            bucket_interval_ms=5_000, bucket_rule="boundary-v1", side_mapping="side-v1",
+            availability_basis="archive-surrogate", finalization_grace_ms=0,
+            evidence_sha256="b" * 64)
+        dataset = SimpleNamespace(
+            archive_manifest=SimpleNamespace(content_sha256="c" * 64, archive_files=()),
+            diagnostics={}, taker_flow_evidence=taker_evidence)
+        replay = SimpleNamespace(
+            manifest=SimpleNamespace(run_fingerprint="generated-replay",
+                                     configured_universe=("BTCUSDT",)),
+            diagnostics={})
+        prepared = SimpleNamespace(
+            period=period, archive_dataset=dataset, canonical_replay_result=replay,
+            experiment_points=(), core_eligibility_sha256="d" * 64)
+        forward = SimpleNamespace(
+            evidence_version="forward-v1", evidence_sha256="e" * 64,
+            source_dataset_content_sha256="f" * 64)
+        coverage = {"coverage_manifest_sha256": "1" * 64,
+                    "periods": (), "sources": source_coverage}
+        safe_report_json = execution.report_json_safe
+
+        def report_json_safe(value):
+            if isinstance(value, SimpleNamespace):
+                return {name: report_json_safe(item)
+                        for name, item in vars(value).items()}
+            return safe_report_json(value)
+
+        ticks = iter(range(1000))
+        runtime_metrics = execution.StudyPeriodRuntimeMetrics()
+        with patch.object(execution.time, "perf_counter_ns",
+                          side_effect=lambda: next(ticks)), patch.object(
+                execution, "report_json_safe", side_effect=report_json_safe), patch.object(
+                execution, "_prepare_study_period",
+                return_value=(prepared, {"sources": source_coverage}, (), {})), patch.object(
+                execution, "_load_source_evidence", return_value=supplementary) as source_load, patch.object(
+                execution, "_candidate_execution",
+                return_value=((), (), (), {}, None, None)) as candidates, patch.object(
+                execution, "_label_price_evidence", return_value=forward) as label, patch.object(
+                execution, "_continuous_and_event_outcomes",
+                return_value=((), (), ())) as outcomes:
+            report = execution._execute_period(
+                self.manifest, coverage, period, Path("/generated/core"), {},
+                revision, None, runtime_metrics=runtime_metrics)
+
+        source_load.assert_called_once()
+        candidates.assert_called_once_with(
+            prepared, supplementary, None, runtime_metrics=runtime_metrics)
+        label.assert_called_once_with(dataset, Path("/generated/core"), period)
+        outcomes.assert_called_once_with(forward, (), {}, period)
+        self.assertEqual(report["period"]["study_period_index"],
+                         period.study_period_index)
+        timings = runtime_metrics.report_timings()
+        for field in ("supplementary_source_load_seconds",
+                      "forward_label_evidence_seconds", "forward_outcomes_seconds"):
+            self.assertGreater(timings[field], 0)
+
+    def test_runtime_report_is_a_durable_sidecar_to_identical_period_artifact(self):
+        revision = "runtime-fixture-revision"
+        executed = []
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            coverage_path, coverage = self._coverage_fixture(root, revision)
+
+            def execute_once(manifest, frozen_coverage, period, archive, roots,
+                             code_revision, hmm_model, runtime_metrics=None):
+                executed.append(period.study_period_index)
+                if runtime_metrics is not None:
+                    for name in execution.RUNTIME_MEASURED_FIELDS:
+                        if name not in ("period_total_seconds",
+                                        "period_artifact_write_seconds"):
+                            runtime_metrics.record_elapsed_ns(name, 1_000_000)
+                payload = {
+                    "execution_version": EXECUTION_VERSION,
+                    "study_version": self.manifest.study_version,
+                    "study_manifest_sha256": manifest.manifest_sha256,
+                    "extension_coverage_manifest_sha256": (
+                        frozen_coverage["coverage_manifest_sha256"]),
+                    "code_revision": code_revision,
+                    "period": execution.report_json_safe(period),
+                }
+                return json.loads(execution._artifact_json(payload, "report_sha256"))
+
+            ticks = iter(range(1000))
+            runtime_path = root / "runtime.jsonl"
+            with patch.object(execution.time, "perf_counter_ns",
+                              side_effect=lambda: next(ticks)), patch.object(
+                    execution, "_execute_period", side_effect=execute_once) as execute:
+                off = execution.execute_study_periods(
+                    self.manifest, coverage_path, root / "core", root / "off",
+                    phase="development", period_limit=1, code_revision=revision)
+                on = execution.execute_study_periods(
+                    self.manifest, coverage_path, root / "core", root / "on",
+                    phase="development", period_limit=1, code_revision=revision,
+                    runtime_report_path=runtime_path)
+
+            self.assertEqual(execute.call_count, 2)
+            self.assertEqual(executed, [0, 0])
+            self.assertEqual(off[0].read_bytes(), on[0].read_bytes())
+            scientific_text = on[0].read_text(encoding="utf-8")
+            scientific = json.loads(scientific_text)
+            self.assertNotIn(str(runtime_path), scientific_text)
+            self.assertEqual(scientific["report_sha256"],
+                             execution._verify_hashed_payload(
+                                 scientific, "report_sha256", "period report"))
+
+            lines = runtime_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            runtime = json.loads(lines[0])
+            self.assertEqual(runtime["runtime_report_version"],
+                             "historical-market-state-runtime-v1")
+            self.assertEqual(runtime["execution_status"], "EXECUTED")
+            self.assertEqual(runtime["study_manifest_sha256"],
+                             self.manifest.manifest_sha256)
+            self.assertEqual(runtime["extension_coverage_manifest_sha256"],
+                             coverage["coverage_manifest_sha256"])
+            self.assertEqual(runtime["period_report_filename"], on[0].name)
+            self.assertEqual(runtime["period_report_sha256"], scientific["report_sha256"])
+            self.assertEqual(runtime["artifact_size_bytes"], on[0].stat().st_size)
+            self.assertTrue(set(execution.RUNTIME_REPORT_TIMING_FIELDS).issubset(runtime))
+            self.assertGreater(runtime["period_total_seconds"], 0)
+            self.assertGreater(runtime["period_artifact_write_seconds"], 0)
+            self.assertAlmostEqual(
+                runtime["all_extensions_seconds"],
+                runtime["supplementary_source_load_seconds"]
+                + sum(runtime[name] for name in execution.RUNTIME_EXTENSION_FIELDS))
 
     def test_coverage_only_freeze_binds_ordered_dates_and_semantic_sources(self):
         core = {
@@ -350,7 +605,21 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                     self.manifest, coverage_path, root / "core", root / "output",
                     period_limit=1, code_revision=revision)
                 self.assertEqual(first, second)
+                runtime_path = root / "runtime.jsonl"
+                resumed = execution.execute_study_periods(
+                    self.manifest, coverage_path, root / "core", root / "output",
+                    period_limit=1, code_revision=revision,
+                    runtime_report_path=runtime_path)
                 execute.assert_called_once()
+                self.assertEqual(resumed, first)
+                skipped = json.loads(runtime_path.read_text(encoding="utf-8"))
+                self.assertEqual(skipped["execution_status"],
+                                 "SKIPPED_EXISTING_ARTIFACT")
+                self.assertEqual(skipped["artifact_size_bytes"], first[0].stat().st_size)
+                self.assertEqual(skipped["period_report_sha256"],
+                                 report_payload["report_sha256"])
+                self.assertTrue(set(execution.RUNTIME_REPORT_TIMING_FIELDS).isdisjoint(
+                    skipped))
                 first[0].write_text("{}", encoding="utf-8")
                 with self.assertRaises(ValueError):
                     execution.execute_study_periods(

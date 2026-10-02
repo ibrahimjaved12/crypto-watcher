@@ -9,7 +9,8 @@ flags; execution is local-only and requires a matching frozen coverage report.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 import hashlib
 import json
@@ -17,6 +18,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
+import time
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Mapping
 
@@ -135,9 +137,73 @@ HMM_DEVELOPMENT_MODEL_VERSION = "historical-market-state-hmm-development-model-v
 TOOL_CONFIG_VERSION = "historical-market-state-study-part-b-tool-v1"
 PERIOD_REPORT_SCHEMA_VERSION = "historical-market-state-study-period-report-v1"
 EXECUTION_INDEX_VERSION = "historical-market-state-execution-index-v1"
+RUNTIME_REPORT_VERSION = "historical-market-state-runtime-v1"
 HMM_MODEL_FILENAME = "historical-market-state-study-v1-hmm-model.json"
 EXECUTION_INDEX_FILENAME = "historical-market-state-study-v1-execution-index.json"
 PERIOD_DIRECTORY = "periods"
+
+RUNTIME_MEASURED_FIELDS = (
+    "core_archive_load_seconds",
+    "canonical_replay_seconds",
+    "v1_preparation_seconds",
+    "supplementary_source_load_seconds",
+    "forward_label_evidence_seconds",
+    "forward_outcomes_seconds",
+    "core_experiment_seconds",
+    "bocpd_seconds",
+    "atr_06b_seconds",
+    "taker_flow_seconds",
+    "mark_trade_seconds",
+    "open_interest_seconds",
+    "funding_seconds",
+    "liquidation_seconds",
+    "period_total_seconds",
+    "period_artifact_write_seconds",
+)
+RUNTIME_EXTENSION_FIELDS = (
+    "atr_06b_seconds", "taker_flow_seconds", "mark_trade_seconds",
+    "open_interest_seconds", "funding_seconds", "liquidation_seconds",
+)
+RUNTIME_REPORT_TIMING_FIELDS = (*RUNTIME_MEASURED_FIELDS, "all_extensions_seconds")
+
+
+@dataclass
+class StudyPeriodRuntimeMetrics:
+    """Optional operational elapsed-time collector, kept outside study artifacts."""
+
+    elapsed_ns_by_field: dict[str, int] = field(default_factory=dict)
+
+    @contextmanager
+    def measure(self, field_name: str):
+        if field_name not in RUNTIME_MEASURED_FIELDS:
+            raise ValueError(f"unknown study runtime timing field: {field_name}")
+        started = time.perf_counter_ns()
+        try:
+            yield
+        finally:
+            self.record_elapsed_ns(field_name, time.perf_counter_ns() - started)
+
+    def record_elapsed_ns(self, field_name: str, elapsed_ns: int) -> None:
+        if field_name not in RUNTIME_MEASURED_FIELDS or elapsed_ns < 0:
+            raise ValueError("invalid study runtime measurement")
+        self.elapsed_ns_by_field[field_name] = (
+            self.elapsed_ns_by_field.get(field_name, 0) + elapsed_ns)
+
+    def report_timings(self) -> dict[str, float]:
+        result = {
+            name: self.elapsed_ns_by_field.get(name, 0) / 1_000_000_000
+            for name in RUNTIME_MEASURED_FIELDS
+        }
+        result["all_extensions_seconds"] = (
+            result["supplementary_source_load_seconds"]
+            + sum(result[name] for name in RUNTIME_EXTENSION_FIELDS))
+        return result
+
+
+def _runtime_measure(metrics: StudyPeriodRuntimeMetrics | None,
+                     field_name: str | None):
+    return (metrics.measure(field_name)
+            if metrics is not None and field_name is not None else nullcontext())
 
 SOURCE_IDENTITIES = {
     "core": {
@@ -938,7 +1004,8 @@ def _record_candidate_bundle(period, descriptor, result):
     return bundle
 
 
-def _candidate_execution(prepared_period, supplementary, hmm_model):
+def _candidate_execution(prepared_period, supplementary, hmm_model,
+                         runtime_metrics: StudyPeriodRuntimeMetrics | None = None):
     period = prepared_period.period
     dataset = prepared_period.archive_dataset
     replay = prepared_period.canonical_replay_result
@@ -951,64 +1018,75 @@ def _candidate_execution(prepared_period, supplementary, hmm_model):
         "algorithm_version": item.algorithm_version,
         "config_version": item.config_version,
     } for item in EXPERIMENT_SUITE_V1)
-    hmm_records, hmm_summary, hmm_block, hmm_model_sha = _hmm_study_evidence(
-        period, points, hmm_model)
-    records.extend(hmm_records)
-    native_summaries.append({
-        "experiment_id": "EXP-75-09", "algorithm_version": HMM_ALGORITHM_VERSION,
-        "config_version": HMM_CONFIG_V1.version, "summary": hmm_summary,
-        "result_sha256": _digest(hmm_records if hmm_records else hmm_block),
-    })
     classifier_config = MarketClassifierConfig()
     lifecycle_config = MarketEpisodeLifecycleConfig()
-    for descriptor in EXPERIMENT_SUITE_V1:
-        if descriptor.experiment_id == "EXP-75-09":
-            continue
-        result = descriptor.runner(
-            points, descriptor.config, classifier_config=classifier_config,
-            lifecycle_config=lifecycle_config,
-            canonical_branch_by_boundary=canonical_branch_by_boundary)
-        bundle = _record_candidate_bundle(period, descriptor, result)
-        records.extend(bundle.records)
+    core_started_ns = time.perf_counter_ns() if runtime_metrics is not None else None
+    try:
+        hmm_records, hmm_summary, hmm_block, hmm_model_sha = _hmm_study_evidence(
+            period, points, hmm_model)
+        records.extend(hmm_records)
         native_summaries.append({
-            "experiment_id": descriptor.experiment_id,
-            "algorithm_version": descriptor.algorithm_version,
-            "config_version": descriptor.config_version,
-            "summary": bundle.native_summaries,
-            "result_sha256": bundle.result_sha256,
-            "evidence_record_count": len(bundle.records),
+            "experiment_id": "EXP-75-09", "algorithm_version": HMM_ALGORITHM_VERSION,
+            "config_version": HMM_CONFIG_V1.version, "summary": hmm_summary,
+            "result_sha256": _digest(hmm_records if hmm_records else hmm_block),
         })
+        for descriptor in EXPERIMENT_SUITE_V1:
+            if descriptor.experiment_id == "EXP-75-09":
+                continue
+            bocpd_field = ("bocpd_seconds"
+                           if descriptor.experiment_id == "EXP-75-04B" else None)
+            with _runtime_measure(runtime_metrics, bocpd_field):
+                result = descriptor.runner(
+                    points, descriptor.config, classifier_config=classifier_config,
+                    lifecycle_config=lifecycle_config,
+                    canonical_branch_by_boundary=canonical_branch_by_boundary)
+                bundle = _record_candidate_bundle(period, descriptor, result)
+                records.extend(bundle.records)
+                native_summaries.append({
+                    "experiment_id": descriptor.experiment_id,
+                    "algorithm_version": descriptor.algorithm_version,
+                    "config_version": descriptor.config_version,
+                    "summary": bundle.native_summaries,
+                    "result_sha256": bundle.result_sha256,
+                    "evidence_record_count": len(bundle.records),
+                })
+    finally:
+        if runtime_metrics is not None:
+            runtime_metrics.record_elapsed_ns(
+                "core_experiment_seconds", time.perf_counter_ns() - core_started_ns)
 
     # ATR 06B shares one suite pass; the same result supplies native summaries
     # and compact candidate evidence for each preregistered ATR configuration.
-    atr_results = run_market_state_atr_normalization_suite(
-        points, dataset.ohlc_evidence, replay.manifest,
-        classifier_config=classifier_config, lifecycle_config=lifecycle_config,
-        canonical_branch_by_boundary=canonical_branch_by_boundary)
-    for result in atr_results:
-        descriptor = SimpleNamespace(
-            experiment_id="EXP-75-06B", algorithm_version=ATR_ALGORITHM_VERSION,
-            config_version=result.atr_config.version)
-        bundle = adapt_candidate_result(period, descriptor, result)
-        records.extend(bundle.records)
-        native_summaries.append({
-            "experiment_id": "EXP-75-06B", "algorithm_version": ATR_ALGORITHM_VERSION,
-            "config_version": result.atr_config.version,
-            "summary": bundle.native_summaries,
-            "result_sha256": bundle.result_sha256,
-            "evidence_record_count": len(bundle.records),
-        })
-    del atr_results
+    with _runtime_measure(runtime_metrics, "atr_06b_seconds"):
+        atr_results = run_market_state_atr_normalization_suite(
+            points, dataset.ohlc_evidence, replay.manifest,
+            classifier_config=classifier_config, lifecycle_config=lifecycle_config,
+            canonical_branch_by_boundary=canonical_branch_by_boundary)
+        for result in atr_results:
+            descriptor = SimpleNamespace(
+                experiment_id="EXP-75-06B", algorithm_version=ATR_ALGORITHM_VERSION,
+                config_version=result.atr_config.version)
+            bundle = adapt_candidate_result(period, descriptor, result)
+            records.extend(bundle.records)
+            native_summaries.append({
+                "experiment_id": "EXP-75-06B", "algorithm_version": ATR_ALGORITHM_VERSION,
+                "config_version": result.atr_config.version,
+                "summary": bundle.native_summaries,
+                "result_sha256": bundle.result_sha256,
+                "evidence_record_count": len(bundle.records),
+            })
+        del atr_results
 
     # Build existing extension Prepared contracts around the same dataset,
     # replay and uniform-phase point stream; no from-archive helper is called.
     symbols = replay.manifest.configured_universe
-    taker_points = build_historical_study_taker_flow_points(
-        dataset, replay, points, period.phase)
-    taker_summary = _taker_summaries(taker_points, symbols)
-    _append_extension_records(records, native_summaries, period, "EXP-75-12",
-                              TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
-                              taker_points, taker_summary[period.phase])
+    with _runtime_measure(runtime_metrics, "taker_flow_seconds"):
+        taker_points = build_historical_study_taker_flow_points(
+            dataset, replay, points, period.phase)
+        taker_summary = _taker_summaries(taker_points, symbols)
+        _append_extension_records(records, native_summaries, period, "EXP-75-12",
+                                  TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
+                                  taker_points, taker_summary[period.phase])
 
     extension_specs = (
         ("mark_trade", "EXP-75-10", MARK_TRADE_ALGORITHM_VERSION,
@@ -1031,39 +1109,40 @@ def _candidate_execution(prepared_period, supplementary, hmm_model):
     extension_reports = {}
     for (name, experiment_id, algorithm, config, prepared_type, evidence_field,
          root_field, builder, summarize) in extension_specs:
-        source = supplementary.get(name)
-        source_coverage = source["coverage"]
-        if source["evidence"] is None:
+        with _runtime_measure(runtime_metrics, f"{name}_seconds"):
+            source = supplementary.get(name)
+            source_coverage = source["coverage"]
+            if source["evidence"] is None:
+                extension_reports[name] = {
+                    "execution_status": "COVERAGE_UNAVAILABLE",
+                    "coverage_state": source_coverage["coverage_state"],
+                    "source_coverage_sha256": _digest(source_coverage),
+                }
+                native_summaries.append({
+                    "experiment_id": experiment_id, "algorithm_version": algorithm,
+                    "config_version": config, "summary": source_coverage,
+                    "result_sha256": _digest(source_coverage),
+                })
+                continue
+            kwargs = {
+                "archive_dataset": dataset, "replay_result": replay,
+                "experiment_points": points, "partition_plan": None,
+                "study_phase": period.phase,
+                evidence_field: source["evidence"],
+                root_field: source["root"],
+            }
+            prepared = prepared_type(**kwargs)
+            candidate_points = builder(prepared)
+            summary = summarize(candidate_points, symbols)[period.phase]
             extension_reports[name] = {
-                "execution_status": "COVERAGE_UNAVAILABLE",
+                "execution_status": "EXECUTED",
                 "coverage_state": source_coverage["coverage_state"],
                 "source_coverage_sha256": _digest(source_coverage),
+                "candidate_output_sha256": _digest(candidate_points),
+                "native_summary": summary,
             }
-            native_summaries.append({
-                "experiment_id": experiment_id, "algorithm_version": algorithm,
-                "config_version": config, "summary": source_coverage,
-                "result_sha256": _digest(source_coverage),
-            })
-            continue
-        kwargs = {
-            "archive_dataset": dataset, "replay_result": replay,
-            "experiment_points": points, "partition_plan": None,
-            "study_phase": period.phase,
-            evidence_field: source["evidence"],
-            root_field: source["root"],
-        }
-        prepared = prepared_type(**kwargs)
-        candidate_points = builder(prepared)
-        summary = summarize(candidate_points, symbols)[period.phase]
-        extension_reports[name] = {
-            "execution_status": "EXECUTED",
-            "coverage_state": source_coverage["coverage_state"],
-            "source_coverage_sha256": _digest(source_coverage),
-            "candidate_output_sha256": _digest(candidate_points),
-            "native_summary": summary,
-        }
-        _append_extension_records(records, native_summaries, period, experiment_id,
-                                  algorithm, config, candidate_points, summary)
+            _append_extension_records(records, native_summaries, period, experiment_id,
+                                      algorithm, config, candidate_points, summary)
 
     return (tuple(records), tuple(native_summaries), fixed_identities,
             extension_reports, hmm_block, hmm_model_sha)
@@ -1240,12 +1319,14 @@ def _continuous_and_event_outcomes(evidence, candidate_records, v1_state_by_boun
     return continuous, tuple(event_outcomes), tuple(state_outcomes)
 
 
-def _prepare_study_period(manifest, coverage, period, archive_root, code_revision):
+def _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
+                          runtime_metrics: StudyPeriodRuntimeMetrics | None = None):
     """Load and replay core evidence once, then freeze shared V1 study context."""
     config = study_replay_config(period.utc_date)
-    dataset = load_binance_usdm_historical_replay_dataset(
-        BinanceUSDMArchiveRequest(archive_root, study_universe(), config),
-        include_taker_flow_evidence=True)
+    with _runtime_measure(runtime_metrics, "core_archive_load_seconds"):
+        dataset = load_binance_usdm_historical_replay_dataset(
+            BinanceUSDMArchiveRequest(archive_root, study_universe(), config),
+            include_taker_flow_evidence=True)
     eligibility = _frozen_eligibility(manifest, period)
     expected_archive = eligibility.provenance.archive_manifest
     if (dataset.archive_manifest.content_sha256 != expected_archive.content_sha256
@@ -1258,10 +1339,12 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
             or frozen_coverage["core"]["archive_content_sha256"]
             != dataset.archive_manifest.content_sha256):
         raise ValueError("frozen coverage does not match verified core packages for this date")
-    replay = run_historical_market_replay(dataset.replay_request)
-    points = _study_experiment_points(replay, period)
-    v1_records, v1_state_by_boundary, canonical_branch_by_boundary = (
-        _build_v1_evidence(period, replay.points))
+    with _runtime_measure(runtime_metrics, "canonical_replay_seconds"):
+        replay = run_historical_market_replay(dataset.replay_request)
+    with _runtime_measure(runtime_metrics, "v1_preparation_seconds"):
+        points = _study_experiment_points(replay, period)
+        v1_records, v1_state_by_boundary, canonical_branch_by_boundary = (
+            _build_v1_evidence(period, replay.points))
     prepared_period = PreparedHistoricalMarketStatePeriod(
         period, dataset, replay, points, canonical_branch_by_boundary,
         manifest.manifest_sha256, eligibility.eligibility_sha256, code_revision)
@@ -1270,30 +1353,42 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
 
 def _execute_period(
     manifest, coverage, period, archive_root, roots, code_revision,
-    hmm_model,
+    hmm_model, runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
 ):
-    prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
-        _prepare_study_period(manifest, coverage, period, archive_root, code_revision))
+    if runtime_metrics is None:
+        prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
+            _prepare_study_period(manifest, coverage, period, archive_root, code_revision))
+    else:
+        prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
+            _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
+                                  runtime_metrics=runtime_metrics))
     dataset = prepared_period.archive_dataset
     replay = prepared_period.canonical_replay_result
     points = prepared_period.experiment_points
     taker_evidence = dataset.taker_flow_evidence
     if taker_evidence is None:
         raise ValueError("the shared core load did not provide EXP-75-12 taker-flow evidence")
-    supplementary = _load_source_evidence(period, roots)
+    with _runtime_measure(runtime_metrics, "supplementary_source_load_seconds"):
+        supplementary = _load_source_evidence(period, roots)
     if _canonical({name: item["coverage"] for name, item in supplementary.items()}) != _canonical(
             frozen_coverage["sources"]):
         raise StudyArtifactConflictError(
             "supplementary source packages changed since coverage was frozen")
 
-    extension_results = _candidate_execution(
-        prepared_period, supplementary, hmm_model)
+    if runtime_metrics is None:
+        extension_results = _candidate_execution(
+            prepared_period, supplementary, hmm_model)
+    else:
+        extension_results = _candidate_execution(
+            prepared_period, supplementary, hmm_model, runtime_metrics=runtime_metrics)
     (candidate_records, native_summaries, fixed_identities,
      extension_reports, hmm_block, hmm_model_sha) = extension_results
     candidate_records = tuple((*candidate_records, *v1_records))
-    forward_evidence = _label_price_evidence(dataset, archive_root, period)
-    continuous, events, state_outcomes = _continuous_and_event_outcomes(
-        forward_evidence, candidate_records, v1_state_by_boundary, period)
+    with _runtime_measure(runtime_metrics, "forward_label_evidence_seconds"):
+        forward_evidence = _label_price_evidence(dataset, archive_root, period)
+    with _runtime_measure(runtime_metrics, "forward_outcomes_seconds"):
+        continuous, events, state_outcomes = _continuous_and_event_outcomes(
+            forward_evidence, candidate_records, v1_state_by_boundary, period)
     continuous_state_labels = tuple(item for item in state_outcomes
                                     if item["experiment_id"] == "CONTINUOUS_GRID")
     event_state_labels = tuple(item for item in state_outcomes
@@ -1400,6 +1495,40 @@ def _update_execution_index(output_dir, manifest, coverage, code_revision):
     _replace_atomic(output_dir / EXECUTION_INDEX_FILENAME, content)
 
 
+def _runtime_report_record(manifest, coverage, period, code_revision, status,
+                           report_path, report_sha256, metrics=None):
+    record = {
+        "runtime_report_version": RUNTIME_REPORT_VERSION,
+        "study_version": STUDY_VERSION,
+        "study_manifest_sha256": manifest.manifest_sha256,
+        "extension_coverage_manifest_sha256": coverage["coverage_manifest_sha256"],
+        "code_revision": code_revision,
+        "study_period_index": period.study_period_index,
+        "utc_date": period.utc_date.isoformat(),
+        "phase": period.phase,
+        "execution_status": status,
+        "period_report_filename": report_path.name,
+        "period_report_sha256": report_sha256,
+        "artifact_size_bytes": report_path.stat().st_size,
+    }
+    if status == "EXECUTED":
+        if metrics is None:
+            raise ValueError("executed runtime records require measured period timings")
+        record.update(metrics.report_timings())
+    elif status != "SKIPPED_EXISTING_ARTIFACT":
+        raise ValueError("unknown runtime period execution status")
+    return record
+
+
+def _append_runtime_report(path: Path, record: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(_canonical(record))
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def execute_study_periods(
     manifest: HistoricalMarketStateStudyManifest,
     coverage_path: Path | str,
@@ -1414,6 +1543,7 @@ def execute_study_periods(
     funding_archive_root: Path | str | None = None,
     liquidation_archive_root: Path | str | None = None,
     hmm_model_path: Path | str | None = None,
+    runtime_report_path: Path | str | None = None,
 ) -> tuple[Path, ...]:
     """Resume deterministic period outputs using only frozen local evidence."""
     selected = select_execution_periods(
@@ -1425,6 +1555,20 @@ def execute_study_periods(
     output = Path(output_dir).expanduser().resolve()
     period_dir = output / PERIOD_DIRECTORY
     period_dir.mkdir(parents=True, exist_ok=True)
+    runtime_report = (Path(runtime_report_path).expanduser().resolve()
+                      if runtime_report_path is not None else None)
+    if runtime_report is not None:
+        protected_paths = {
+            Path(coverage_path).expanduser().resolve(),
+            (output / EXECUTION_INDEX_FILENAME).resolve(),
+        }
+        protected_paths.update(
+            (period_dir / _period_filename(item)).resolve()
+            for item in _manifest_periods(manifest))
+        protected_paths.add(
+            Path(hmm_model_path or (output / HMM_MODEL_FILENAME)).expanduser().resolve())
+        if runtime_report in protected_paths:
+            raise ValueError("runtime report path conflicts with a scientific study artifact")
     archive = Path(archive_root).expanduser().resolve()
     roots = {
         "mark_trade": Path(mark_archive_root or archive).expanduser().resolve(),
@@ -1443,13 +1587,44 @@ def execute_study_periods(
     for period in selected:
         path = period_dir / _period_filename(period)
         if path.exists():
-            _verify_existing_period(path, manifest, coverage, period, code_revision)
+            report_sha = _verify_existing_period(
+                path, manifest, coverage, period, code_revision)
             written_or_skipped.append(path)
+            if runtime_report is not None:
+                _append_runtime_report(runtime_report, _runtime_report_record(
+                    manifest, coverage, period, code_revision,
+                    "SKIPPED_EXISTING_ARTIFACT", path, report_sha))
             _update_execution_index(output, manifest, coverage, code_revision)
             continue
-        payload = _execute_period(manifest, coverage, period, archive, roots,
-                                  code_revision, hmm_model)
-        _write_atomic_new(path, _canonical(payload))
+        runtime_metrics = (StudyPeriodRuntimeMetrics()
+                           if runtime_report is not None else None)
+        period_started_ns = (time.perf_counter_ns()
+                             if runtime_metrics is not None else None)
+        if runtime_metrics is None:
+            payload = _execute_period(manifest, coverage, period, archive, roots,
+                                      code_revision, hmm_model)
+        else:
+            payload = _execute_period(manifest, coverage, period, archive, roots,
+                                      code_revision, hmm_model,
+                                      runtime_metrics=runtime_metrics)
+        if runtime_metrics is not None:
+            artifact_write_started_ns = time.perf_counter_ns()
+        content = _canonical(payload)
+        _write_atomic_new(path, content)
+        if runtime_metrics is not None:
+            finalized_at_ns = time.perf_counter_ns()
+            runtime_metrics.record_elapsed_ns(
+                "period_artifact_write_seconds",
+                finalized_at_ns - artifact_write_started_ns)
+            runtime_metrics.record_elapsed_ns(
+                "period_total_seconds", finalized_at_ns - period_started_ns)
+            report_sha = _verify_hashed_payload(payload, "report_sha256", "period report")
+        else:
+            report_sha = payload["report_sha256"]
+        if runtime_report is not None:
+            _append_runtime_report(runtime_report, _runtime_report_record(
+                manifest, coverage, period, code_revision, "EXECUTED", path,
+                report_sha, runtime_metrics))
         _update_execution_index(output, manifest, coverage, code_revision)
         written_or_skipped.append(path)
     return tuple(written_or_skipped)
@@ -1591,6 +1766,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     execute.add_argument("--funding-archive-root", type=Path)
     execute.add_argument("--liquidation-archive-root", type=Path)
     execute.add_argument("--hmm-model", type=Path)
+    execute.add_argument("--runtime-report", type=Path,
+                         help="append operational per-period timings to JSONL")
 
     freeze = commands.add_parser("freeze-hmm", help="fit/freeze HMM from all ten dev blocks")
     freeze.add_argument("--study-manifest", type=Path, required=True)
@@ -1626,6 +1803,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Coverage SHA-256: {artifact['coverage_manifest_sha256']}")
             return 0
         if args.command == "execute":
+            if (args.runtime_report is not None
+                    and args.runtime_report.expanduser().resolve()
+                    == args.study_manifest.expanduser().resolve()):
+                raise ValueError("runtime report path conflicts with the study manifest")
             results = execute_study_periods(
                 manifest, args.coverage_manifest, args.archive_root, args.output_dir,
                 phase=args.phase, period_limit=args.period_limit,
@@ -1634,7 +1815,8 @@ def main(argv: list[str] | None = None) -> int:
                 open_interest_archive_root=args.open_interest_archive_root,
                 funding_archive_root=args.funding_archive_root,
                 liquidation_archive_root=args.liquidation_archive_root,
-                hmm_model_path=args.hmm_model)
+                hmm_model_path=args.hmm_model,
+                runtime_report_path=args.runtime_report)
             for path in results:
                 print(path)
             return 0
