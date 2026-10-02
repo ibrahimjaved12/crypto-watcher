@@ -221,7 +221,7 @@ class ATRRangeEvidenceTests(unittest.TestCase):
             for result, cached_result in zip(results, cached_results):
                 self.assertEqual(_atr_json_safe(result), _atr_json_safe(cached_result))
             result = next(item for item in results
-                          if item.config.version == ATR_CONFIG_30M.version)
+                          if item.atr_config.version == ATR_CONFIG_30M.version)
             self.assertIsInstance(result.paired_points[0].candidate_evaluation,
                                   MarketMovementEvaluation)
             self.assertEqual(tuple(result.paired_points[0].candidate_evaluation.windows),

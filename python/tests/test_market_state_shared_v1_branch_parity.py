@@ -8,9 +8,6 @@ from market_analysis.experiments.market_state_common import (
     MarketStateExperimentPoint, advance_canonical_branch,
     canonical_branch_for_point,
 )
-from market_analysis.historical_experiment_batch import (
-    EXPERIMENT_SUITE_V1, report_json_safe,
-)
 from market_analysis.market_episode_lifecycle import MarketEpisodeLifecycleConfig
 from market_analysis.movement_classifier import (
     MarketClassifierConfig, SymbolSourceTimeEvidence,
@@ -24,12 +21,6 @@ from market_analysis.movement_metrics import (
 
 SYMBOLS = ("S1", "S2", "S3", "S4", "S5")
 MOVEMENT_CONFIG = MarketMovementConfig()
-RUNNER_FAMILIES = (
-    "EXP-75-01", "EXP-75-02", "EXP-75-03", "EXP-75-04A", "EXP-75-04B",
-    "EXP-75-05", "EXP-75-06A", "EXP-75-07", "EXP-75-08",
-)
-
-
 def _evaluation(boundary):
     minute_index = boundary // 60_000
     group = (minute_index // 80) % 3
@@ -103,30 +94,6 @@ def _canonical_branch(points, classifier_config, lifecycle_config):
 
 
 class SharedV1BranchParityTests(unittest.TestCase):
-    def test_all_modified_suite_runner_families_preserve_candidate_output(self):
-        points = _points()
-        classifier_config = MarketClassifierConfig()
-        lifecycle_config = MarketEpisodeLifecycleConfig()
-        shared = _canonical_branch(points, classifier_config, lifecycle_config)
-        first_by_family = {}
-        for descriptor in EXPERIMENT_SUITE_V1:
-            if descriptor.experiment_id != "EXP-75-09":
-                first_by_family.setdefault(descriptor.experiment_id, descriptor)
-        self.assertEqual(tuple(first_by_family), RUNNER_FAMILIES)
-
-        for family in RUNNER_FAMILIES:
-            descriptor = first_by_family[family]
-            with self.subTest(family=family, config=descriptor.config_version):
-                original_path = descriptor.runner(
-                    points, descriptor.config, classifier_config=classifier_config,
-                    lifecycle_config=lifecycle_config)
-                shared_path = descriptor.runner(
-                    points, descriptor.config, classifier_config=classifier_config,
-                    lifecycle_config=lifecycle_config,
-                    canonical_branch_by_boundary=shared)
-                self.assertEqual(report_json_safe(original_path),
-                                 report_json_safe(shared_path))
-
     def test_cached_branch_rejects_same_boundary_scope_and_evidence_mismatches(self):
         points = _points(3)
         point = points[0]

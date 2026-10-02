@@ -212,8 +212,7 @@ class HistoricalExperimentBatchTests(unittest.TestCase):
                         points, descriptor.config, classifier_config=classifier,
                         lifecycle_config=lifecycle,
                         canonical_branch_by_boundary=shared)
-                    self.assertEqual(batch.report_json_safe(original),
-                                     batch.report_json_safe(cached))
+                    self.assertEqual(original, cached)
 
     def test_end_to_end_report_repeated_run_and_compact_summaries(self):
         with tempfile.TemporaryDirectory() as folder:
