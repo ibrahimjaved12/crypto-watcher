@@ -610,19 +610,29 @@ rejected.
 After the coverage artifact is frozen, the first-three-development engineering
 smoke command can collect operational timing data in a separate JSONL sidecar.
 The sidecar does not enter the scientific period artifacts or their hashes.
-Use a fresh smoke output directory and runtime report path to record three
-executed periods instead of resume skips:
+For split-root coverage, keep `CORE_ROOT`, `BINANCE_SUPP_ROOT`,
+`LIQUIDATION_ROOT`, and `CODE_REV` set to the same roots and code revision used
+when coverage was frozen. Use a fresh smoke output directory, runtime report,
+and resource report path to record three executed periods instead of resume
+skips:
 
 ```bash
 SMOKE_OUTPUT_DIR="$OUTPUT_ROOT/runtime-smoke"
 RUNTIME_REPORT="$OUTPUT_ROOT/runtime-smoke.jsonl"
-/usr/bin/time -v python3 -m market_analysis.historical_market_state_study_execution execute \
+RESOURCE_REPORT="$OUTPUT_ROOT/historical-market-state-study-v1-smoke-resource.txt"
+/usr/bin/time -v -o "$RESOURCE_REPORT" \
+python3 -m market_analysis.historical_market_state_study_execution execute \
   --study-manifest research/historical-market-state-study-v1/selection/historical-market-state-study-v1-manifest.json \
   --coverage-manifest "$OUTPUT_ROOT/historical-market-state-study-v1-extension-coverage.json" \
-  --archive-root "$ARCHIVE_ROOT" \
+  --archive-root "$CORE_ROOT" \
+  --mark-archive-root "$BINANCE_SUPP_ROOT" \
+  --open-interest-archive-root "$BINANCE_SUPP_ROOT" \
+  --funding-archive-root "$BINANCE_SUPP_ROOT" \
+  --liquidation-archive-root "$LIQUIDATION_ROOT" \
   --output-dir "$SMOKE_OUTPUT_DIR" \
   --phase development \
   --period-limit 3 \
+  --code-revision "$CODE_REV" \
   --runtime-report "$RUNTIME_REPORT"
 ```
 
