@@ -25,7 +25,7 @@ from ..movement_metrics import (
     _aggregates, _breadth, _outliers, WindowAggregates, WindowBreadth,
 )
 from .market_state_common import (
-    MarketStateExperimentPoint, advance_canonical_branch,
+    MarketStateExperimentPoint, advance_canonical_branch, canonical_branch_for_point,
     selected_points_for_partition, validate_experiment_points,
 )
 from .market_state_realized_vol_normalization import (
@@ -460,6 +460,7 @@ def run_market_state_atr_normalization_suite(
     classifier_config: MarketClassifierConfig | None = None,
     lifecycle_config: MarketEpisodeLifecycleConfig | None = None,
     configurations: tuple[ATRNormalizationConfig, ...] = ATR_CONFIGURATIONS,
+    canonical_branch_by_boundary: Mapping[int, tuple] | None = None,
 ) -> tuple[MarketStateATRExperimentResult, ...]:
     """Share one strict-visibility cursor across all fixed ATR lookbacks."""
     points = tuple(points)
@@ -490,9 +491,9 @@ def run_market_state_atr_normalization_suite(
                 cached = _calibrated_snapshot(history)
                 scale_cache[symbol] = cached
             snapshots[symbol] = cached
-        baseline_classification, baseline_result = advance_canonical_branch(
+        baseline_classification, baseline_result = canonical_branch_for_point(
             evaluation, point.source_time_evidence, baseline_state,
-            classifier_config, lifecycle_config)
+            classifier_config, lifecycle_config, canonical_branch_by_boundary)
         for config in configurations:
             candidate, symbol_evidence = _transform(evaluation, config, snapshots)
             candidate_classification, candidate_result = advance_canonical_branch(

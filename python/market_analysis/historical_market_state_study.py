@@ -927,3 +927,101 @@ def parse_historical_study_eligibility_report_json(
     if payload["report_sha256"] != report.report_sha256:
         raise ValueError("eligibility report SHA-256 mismatch")
     return report
+
+
+def _parse_study_selection_evidence(value) -> HistoricalStudyDateSelectionEvidence:
+    value = _json_object(value, (
+        "bin_index", "target_weekday", "considered_weekdays", "attempted_dates",
+        "selected_date", "fallback_distance", "selection_policy_version"),
+        "study selection evidence")
+    if (not isinstance(value["considered_weekdays"], list)
+            or not isinstance(value["attempted_dates"], list)):
+        raise ValueError("selection evidence arrays must be JSON arrays")
+    attempts = []
+    for item in value["attempted_dates"]:
+        item = _json_object(item, ("eligibility", "eligibility_sha256"),
+                            "selection attempt")
+        attempt = HistoricalStudySelectionAttempt(
+            _parse_eligibility_record(item["eligibility"]))
+        if item["eligibility_sha256"] != attempt.eligibility_sha256:
+            raise ValueError("selection attempt eligibility SHA-256 mismatch")
+        attempts.append(attempt)
+    return HistoricalStudyDateSelectionEvidence(
+        value["bin_index"], value["target_weekday"],
+        tuple(value["considered_weekdays"]), tuple(attempts),
+        _json_date(value["selected_date"], "selected date"),
+        value["fallback_distance"], value["selection_policy_version"])
+
+
+def _parse_study_period(value) -> HistoricalStudyPeriod:
+    value = _json_object(value, (
+        "study_period_index", "source_bin_index", "bin_start_date", "bin_end_date",
+        "utc_date", "phase", "start_boundary_time_ms", "end_boundary_time_ms",
+        "target_weekday", "selected_weekday", "fallback_distance",
+        "weekday_fallback_needed", "core_eligibility_sha256"), "study period")
+    return HistoricalStudyPeriod(
+        value["study_period_index"], value["source_bin_index"],
+        _json_date(value["bin_start_date"], "bin start date"),
+        _json_date(value["bin_end_date"], "bin end date"),
+        _json_date(value["utc_date"], "study UTC date"), value["phase"],
+        value["start_boundary_time_ms"], value["end_boundary_time_ms"],
+        value["target_weekday"], value["selected_weekday"],
+        value["fallback_distance"], value["weekday_fallback_needed"],
+        value["core_eligibility_sha256"])
+
+
+def parse_historical_market_state_study_manifest_json(
+    content: str,
+) -> HistoricalMarketStateStudyManifest:
+    """Strictly load a frozen, outcome-blind study manifest.
+
+    This parser reconstructs and validates every nested eligibility and archive
+    provenance identity. It never performs selection or archive acquisition.
+    """
+    if not isinstance(content, str):
+        raise ValueError("study manifest content must be text")
+    try:
+        payload = json.loads(
+            content, object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("invalid historical study manifest JSON") from exc
+    payload = _json_object(payload, (
+        "selected_periods", "selection_evidence", "study_version",
+        "selection_policy_version", "eligibility_policy_version", "calendar_start",
+        "calendar_end", "universe", "bin_count", "development_period_count",
+        "validation_period_count", "test_period_count", "primary_hypotheses",
+        "secondary_horizon_policy_version", "secondary_horizons_minutes",
+        "manifest_sha256"), "study manifest")
+    if any(not isinstance(payload[name], list) for name in (
+            "selected_periods", "selection_evidence", "primary_hypotheses",
+            "secondary_horizons_minutes")):
+        raise ValueError("manifest collections must be JSON arrays")
+    universe = _json_object(payload["universe"], ("id", "version", "symbols"),
+                            "study universe")
+    if not isinstance(universe["symbols"], list):
+        raise ValueError("universe symbols must be a JSON array")
+    hypotheses = []
+    for item in payload["primary_hypotheses"]:
+        item = _json_object(item, (
+            "family_id", "display_name", "causal_forward_test",
+            "primary_horizon_minutes", "primary_outcome_id", "research_question"),
+            "primary hypothesis")
+        hypotheses.append(PrimaryHypothesis(**item))
+    manifest = HistoricalMarketStateStudyManifest(
+        tuple(_parse_study_period(item) for item in payload["selected_periods"]),
+        tuple(_parse_study_selection_evidence(item)
+              for item in payload["selection_evidence"]),
+        payload["study_version"], payload["selection_policy_version"],
+        payload["eligibility_policy_version"],
+        _json_date(payload["calendar_start"], "calendar start"),
+        _json_date(payload["calendar_end"], "calendar end"),
+        MarketUniverseInput(universe["id"], universe["version"],
+                            tuple(universe["symbols"])),
+        payload["bin_count"], payload["development_period_count"],
+        payload["validation_period_count"], payload["test_period_count"],
+        tuple(hypotheses), payload["secondary_horizon_policy_version"],
+        tuple(payload["secondary_horizons_minutes"]))
+    if payload["manifest_sha256"] != manifest.manifest_sha256:
+        raise ValueError("study manifest SHA-256 mismatch")
+    return manifest

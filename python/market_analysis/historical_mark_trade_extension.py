@@ -146,14 +146,19 @@ class HistoricalMarkTradeExtensionPrepared:
     archive_dataset: BinanceHistoricalReplayDataset
     replay_result: HistoricalMarketReplayResult
     experiment_points: tuple
-    partition_plan: ReplayPartitionPlan
+    partition_plan: ReplayPartitionPlan | None
     mark_evidence: BinanceMarkPriceEvidence
     mark_archive_root: Path
+    study_phase: str | None = None
 
     def __post_init__(self):
         if (not isinstance(self.archive_dataset, BinanceHistoricalReplayDataset)
                 or not isinstance(self.replay_result, HistoricalMarketReplayResult)
-                or not isinstance(self.partition_plan, ReplayPartitionPlan)
+                or ((self.partition_plan is None) == (self.study_phase is None))
+                or (self.partition_plan is not None
+                    and not isinstance(self.partition_plan, ReplayPartitionPlan))
+                or (self.study_phase is not None
+                    and self.study_phase not in ("development", "validation", "test"))
                 or not isinstance(self.mark_evidence, BinanceMarkPriceEvidence)):
             raise ValueError("mark/trade extension preparation has invalid contract types")
         object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
@@ -622,6 +627,13 @@ def _extension_manifest(prepared, candidate_sha: str, code_revision: str):
     identity = {key: value for key, value in report_json_safe(manifest).items()
                 if key != "extension_run_fingerprint"}
     return replace(manifest, extension_run_fingerprint=_sha256(identity))
+
+
+def build_historical_study_mark_trade_points(prepared: HistoricalMarkTradeExtensionPrepared):
+    """Run mark/trade over an already prepared uniform-phase study day."""
+    from .historical_market_state_candidate_evidence import validate_study_phase_prepared
+    validate_study_phase_prepared(prepared)
+    return _build_candidate_points(prepared)
 
 
 def run_historical_mark_trade_extension(

@@ -118,6 +118,64 @@ class HMMFeatureRow:
 
 
 @dataclass(frozen=True)
+class HMMDevelopmentTrainingBlock:
+    """Outcome-blind HMM feature evidence for one frozen development day."""
+
+    study_period_index: int
+    utc_date: str
+    start_boundary_time_ms: int
+    end_boundary_time_ms: int
+    movement_scope: tuple
+    feature_blocks: tuple[tuple[HMMFeatureRow, ...], ...]
+    unavailable_row_count: int
+    block_sha256: str = ""
+
+    def __post_init__(self):
+        feature_blocks = tuple(tuple(block) for block in self.feature_blocks)
+        if (type(self.study_period_index) is not int or self.study_period_index < 0
+                or not isinstance(self.utc_date, str) or not self.utc_date
+                or type(self.start_boundary_time_ms) is not int
+                or type(self.end_boundary_time_ms) is not int
+                or self.end_boundary_time_ms - self.start_boundary_time_ms != 86_400_000
+                or self.start_boundary_time_ms % HMM_SAMPLE_INTERVAL_MS
+                or self.end_boundary_time_ms % HMM_SAMPLE_INTERVAL_MS
+                or not self.movement_scope
+                or any(not block or any(not isinstance(row, HMMFeatureRow) for row in block)
+                       for block in feature_blocks)
+                or type(self.unavailable_row_count) is not int
+                or self.unavailable_row_count < 0):
+            raise ValueError("invalid frozen HMM development day block")
+        previous = None
+        for block in feature_blocks:
+            if any(right.evaluation_boundary_time_ms != left.evaluation_boundary_time_ms
+                   + HMM_SAMPLE_INTERVAL_MS for left, right in zip(block, block[1:])):
+                raise ValueError("HMM feature sub-blocks must be contiguous")
+            if previous is not None and block[0].evaluation_boundary_time_ms <= previous:
+                raise ValueError("HMM feature sub-blocks must be chronological")
+            previous = block[-1].evaluation_boundary_time_ms
+        payload = {
+            "study_period_index": self.study_period_index,
+            "utc_date": self.utc_date,
+            "start_boundary_time_ms": self.start_boundary_time_ms,
+            "end_boundary_time_ms": self.end_boundary_time_ms,
+            "movement_scope": self.movement_scope,
+            "feature_blocks": tuple(tuple((row.evaluation_boundary_time_ms,
+                                             tuple(value.hex() for value in row.values))
+                                            for row in block)
+                                     for block in feature_blocks),
+            "unavailable_row_count": self.unavailable_row_count,
+        }
+        fingerprint = hashlib.sha256(json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True).encode("ascii")).hexdigest()
+        if self.block_sha256 and self.block_sha256 != fingerprint:
+            raise ValueError("HMM development block SHA-256 mismatch")
+        object.__setattr__(self, "feature_blocks", feature_blocks)
+        object.__setattr__(self, "movement_scope", tuple(self.movement_scope))
+        object.__setattr__(self, "block_sha256", fingerprint)
+
+
+@dataclass(frozen=True)
 class HMMTrainingDiagnostics:
     status: str
     reason: str | None
@@ -575,6 +633,113 @@ def train_hmm_regime_model(
         feature_rows.append(_extract_feature_row(evaluation))
     blocks, unavailable_count = _development_blocks(points, feature_rows)
     return _train_from_blocks(blocks, unavailable_count, scope or (), config)
+
+
+def extract_hmm_development_training_block(
+    period, points: Iterable[MarketStateExperimentPoint],
+) -> HMMDevelopmentTrainingBlock:
+    """Extract one frozen development day's features without joining days."""
+    if (getattr(period, "phase", None) != "development"
+            or type(getattr(period, "study_period_index", None)) is not int
+            or getattr(period, "utc_date", None) is None
+            or type(getattr(period, "start_boundary_time_ms", None)) is not int
+            or type(getattr(period, "end_boundary_time_ms", None)) is not int):
+        raise ValueError("HMM development extraction requires a frozen development period")
+    points = tuple(points)
+    if (len(points) != (period.end_boundary_time_ms - period.start_boundary_time_ms) // 5_000 + 1
+            or not points):
+        raise ValueError("HMM development period must contain its full canonical 5-second stream")
+    scope = None
+    rows = []
+    blocks = []
+    unavailable_count = 0
+    previous_boundary = None
+    for point in points:
+        if not isinstance(point, MarketStateExperimentPoint):
+            raise ValueError("HMM development stream contains an invalid point")
+        boundary = point.movement_evaluation.evaluation_boundary_time_ms
+        if (point.partition != "development"
+                or (previous_boundary is None and boundary != period.start_boundary_time_ms)
+                or (previous_boundary is not None and boundary != previous_boundary + 5_000)):
+            raise ValueError("HMM development stream must be one full uniform-phase day")
+        previous_boundary = boundary
+        _validate_baseline(point.movement_evaluation)
+        current_scope = _scope(point.movement_evaluation)
+        if scope is None:
+            scope = current_scope
+        elif current_scope != scope:
+            raise ValueError("HMM development periods must use identical movement scope")
+        if boundary >= period.end_boundary_time_ms or boundary % HMM_SAMPLE_INTERVAL_MS:
+            continue
+        feature = _extract_feature_row(point.movement_evaluation)
+        if feature is None:
+            unavailable_count += 1
+            if rows:
+                blocks.append(tuple(rows))
+                rows = []
+        else:
+            if rows and boundary != rows[-1].evaluation_boundary_time_ms + HMM_SAMPLE_INTERVAL_MS:
+                blocks.append(tuple(rows))
+                rows = []
+            rows.append(feature)
+    if previous_boundary != period.end_boundary_time_ms:
+        raise ValueError("HMM development stream does not reach the frozen period end")
+    if rows:
+        blocks.append(tuple(rows))
+    return HMMDevelopmentTrainingBlock(
+        period.study_period_index, period.utc_date.isoformat(),
+        period.start_boundary_time_ms, period.end_boundary_time_ms,
+        scope or (), tuple(blocks), unavailable_count)
+
+
+def train_hmm_regime_model_from_feature_blocks(
+    feature_blocks: Iterable[Iterable[HMMFeatureRow]],
+    movement_scope: tuple,
+    unavailable_row_count: int = 0,
+    config: HMMRegimeConfig = HMM_CONFIG_V1,
+) -> tuple[HMMTrainingDiagnostics, GaussianHMMModelArtifact | None]:
+    """Fit the existing Gaussian HMM math over independent chronological blocks."""
+    blocks = tuple(tuple(block) for block in feature_blocks)
+    if (not isinstance(config, HMMRegimeConfig)
+            or type(unavailable_row_count) is not int or unavailable_row_count < 0
+            or not movement_scope or any(not block for block in blocks)
+            or any(not isinstance(row, HMMFeatureRow) for block in blocks for row in block)):
+        raise ValueError("invalid multi-block HMM training request")
+    previous = None
+    for block in blocks:
+        if any(right.evaluation_boundary_time_ms != left.evaluation_boundary_time_ms
+               + HMM_SAMPLE_INTERVAL_MS for left, right in zip(block, block[1:])):
+            raise ValueError("HMM training blocks must be contiguous internally")
+        if previous is not None and block[0].evaluation_boundary_time_ms <= previous:
+            raise ValueError("HMM training blocks must be in chronological order")
+        previous = block[-1].evaluation_boundary_time_ms
+    return _train_from_blocks(blocks, unavailable_row_count,
+                              tuple(movement_scope), config)
+
+
+def train_hmm_regime_model_from_blocks(
+    development_blocks: Iterable[HMMDevelopmentTrainingBlock],
+    config: HMMRegimeConfig = HMM_CONFIG_V1,
+) -> tuple[HMMTrainingDiagnostics, GaussianHMMModelArtifact | None]:
+    """Train on separate frozen development days; never bridge calendar gaps."""
+    blocks = tuple(development_blocks)
+    if (not blocks or any(not isinstance(item, HMMDevelopmentTrainingBlock)
+                          for item in blocks)
+            or tuple(item.study_period_index for item in blocks)
+            != tuple(sorted(item.study_period_index for item in blocks))
+            or len({item.study_period_index for item in blocks}) != len(blocks)
+            or tuple(item.utc_date for item in blocks)
+            != tuple(sorted(item.utc_date for item in blocks))
+            or len({item.utc_date for item in blocks}) != len(blocks)):
+        raise ValueError("HMM input must be unique chronological development-period blocks")
+    scope = blocks[0].movement_scope
+    if any(item.movement_scope != scope for item in blocks):
+        raise ValueError("HMM development periods must share one movement/universe scope")
+    feature_blocks = tuple(feature_block for period in blocks
+                           for feature_block in period.feature_blocks)
+    return train_hmm_regime_model_from_feature_blocks(
+        feature_blocks, scope,
+        sum(item.unavailable_row_count for item in blocks), config)
 
 
 @dataclass(frozen=True)

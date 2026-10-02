@@ -115,6 +115,30 @@ def advance_canonical_branch(
     return classification, lifecycle
 
 
+def canonical_branch_for_point(
+    evaluation: MarketMovementEvaluation,
+    source_time_evidence: tuple[SymbolSourceTimeEvidence, ...],
+    previous_state: MarketEpisodeLifecycleState | None,
+    classifier_config: MarketClassifierConfig,
+    lifecycle_config: MarketEpisodeLifecycleConfig,
+    precomputed_by_boundary: Mapping[int, tuple] | None = None,
+) -> tuple[MarketClassificationEvaluation, MarketEpisodeLifecycleResult]:
+    """Reuse a study's shared V1 branch, or preserve the legacy calculation path."""
+    if precomputed_by_boundary is None:
+        return advance_canonical_branch(
+            evaluation, source_time_evidence, previous_state,
+            classifier_config, lifecycle_config)
+    boundary = evaluation.evaluation_boundary_time_ms
+    result = precomputed_by_boundary.get(boundary)
+    if (not isinstance(result, tuple) or len(result) != 2
+            or not isinstance(result[0], MarketClassificationEvaluation)
+            or not isinstance(result[1], MarketEpisodeLifecycleResult)
+            or result[0].evaluation_boundary_time_ms != boundary
+            or result[1].next_state.last_evaluation_boundary_time_ms != boundary):
+        raise ValueError("precomputed V1 branch does not cover this evaluation boundary")
+    return result
+
+
 def validate_experiment_points(points: Iterable[MarketStateExperimentPoint]) -> None:
     """Require ordered development → validation → test 5-second points."""
     last_boundary = None

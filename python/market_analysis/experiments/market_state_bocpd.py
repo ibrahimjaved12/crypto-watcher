@@ -27,6 +27,7 @@ from .market_state_common import (
     ExperimentPartition,
     MarketStateExperimentPoint,
     advance_canonical_branch,
+    canonical_branch_for_point,
     directional_onset_count,
     episode_count,
     episode_spans,
@@ -710,6 +711,7 @@ def run_market_state_bocpd_experiment(
     *,
     classifier_config: MarketClassifierConfig | None = None,
     lifecycle_config: MarketEpisodeLifecycleConfig | None = None,
+    canonical_branch_by_boundary: Mapping[int, tuple] | None = None,
 ) -> MarketStateBOCPDExperimentResult:
     """Run one exact BOCPD stream beside one unchanged canonical V1 branch."""
     if not isinstance(config, BOCPDConfig):
@@ -728,12 +730,13 @@ def run_market_state_bocpd_experiment(
     results = []
     for point in points:
         evaluation = point.movement_evaluation
-        classification, lifecycle = advance_canonical_branch(
+        classification, lifecycle = canonical_branch_for_point(
             evaluation,
             point.source_time_evidence,
             baseline_state,
             classifier_config,
             lifecycle_config,
+            canonical_branch_by_boundary,
         )
         observation, bocpd_state = transform_market_movement_with_bocpd(
             evaluation, config, bocpd_state,

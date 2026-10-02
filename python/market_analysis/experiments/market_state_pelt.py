@@ -19,6 +19,7 @@ from .market_state_common import (
     ExperimentPartition,
     MarketStateExperimentPoint,
     advance_canonical_branch,
+    canonical_branch_for_point,
     directional_onset_count,
     episode_count,
     episode_spans,
@@ -548,6 +549,7 @@ def run_market_state_pelt_experiment(
     *,
     classifier_config: MarketClassifierConfig | None = None,
     lifecycle_config: MarketEpisodeLifecycleConfig | None = None,
+    canonical_branch_by_boundary: Mapping[int, tuple] | None = None,
 ) -> MarketStatePELTExperimentResult:
     """Run one canonical V1 branch and four independent offline PELT views."""
     if not isinstance(config, PELTConfig):
@@ -564,12 +566,13 @@ def run_market_state_pelt_experiment(
     baseline_points = []
     for point in points:
         evaluation = point.movement_evaluation
-        classification, lifecycle = advance_canonical_branch(
+        classification, lifecycle = canonical_branch_for_point(
             evaluation,
             point.source_time_evidence,
             baseline_state,
             classifier_config,
             lifecycle_config,
+            canonical_branch_by_boundary,
         )
         baseline_points.append(PELTBaselinePoint(
             evaluation_boundary_time_ms=evaluation.evaluation_boundary_time_ms,

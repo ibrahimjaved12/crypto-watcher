@@ -25,6 +25,7 @@ from .market_state_common import (
     ExperimentPartition,
     MarketStateExperimentPoint,
     advance_canonical_branch,
+    canonical_branch_for_point,
     directional_onset_count,
     episode_count,
     episode_spans,
@@ -742,6 +743,7 @@ def run_market_state_pca_common_factor_experiment(
     *,
     classifier_config: MarketClassifierConfig | None = None,
     lifecycle_config: MarketEpisodeLifecycleConfig | None = None,
+    canonical_branch_by_boundary: Mapping[int, tuple] | None = None,
 ) -> MarketStatePCACommonFactorExperimentResult:
     """Run one canonical V1 branch while collecting separate PCA diagnostics."""
     if not isinstance(config, PCACommonFactorConfig):
@@ -764,9 +766,9 @@ def run_market_state_pca_common_factor_experiment(
             evaluation, config, pca_state, previous_scheduled)
         if evidence.status != PCA_NOT_SCHEDULED:
             previous_scheduled = evidence
-        classification, lifecycle = advance_canonical_branch(
+        classification, lifecycle = canonical_branch_for_point(
             evaluation, point.source_time_evidence, baseline_state,
-            classifier_config, lifecycle_config)
+            classifier_config, lifecycle_config, canonical_branch_by_boundary)
         paired.append(PairedMarketStatePCACommonFactorPoint(
             evaluation.evaluation_boundary_time_ms, point.partition, evaluation,
             classification, lifecycle.next_state, lifecycle.transitions,

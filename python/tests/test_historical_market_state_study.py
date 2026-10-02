@@ -276,6 +276,29 @@ class StudySelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             study.HistoricalStudyEligibilityReport((*self.records, self.records[0]))
 
+    def test_strict_parser_loads_frozen_manifest_and_rejects_tampering(self):
+        path = (Path(__file__).parents[2] / "research" /
+                "historical-market-state-study-v1" / "selection" /
+                "historical-market-state-study-v1-manifest.json")
+        content = path.read_text(encoding="utf-8")
+        manifest = study.parse_historical_market_state_study_manifest_json(content)
+        self.assertEqual(
+            manifest.manifest_sha256,
+            "7f863cb6e6d3a39c46f109ba65c1617eb0aef894bb7dff74a6b393b24dc714f9")
+        self.assertEqual(len(manifest.selected_periods), 30)
+        self.assertEqual(tuple(item.phase for item in manifest.selected_periods),
+                         ("development",) * 10 + ("validation",) * 8 + ("test",) * 12)
+        self.assertEqual(
+            study.historical_market_state_study_manifest_json(manifest),
+            content.strip())
+        payload = json.loads(content)
+        payload["selected_periods"][0]["utc_date"] = "2024-01-02"
+        with self.assertRaises(ValueError):
+            study.parse_historical_market_state_study_manifest_json(json.dumps(payload))
+        with self.assertRaises(ValueError):
+            study.parse_historical_market_state_study_manifest_json(
+                content.replace("{", '{"study_version":"duplicate",', 1))
+
     def test_only_finalized_selection_path_affects_scientific_manifest(self):
         bin_zero = self.bins[0]
         ordered = study._rotated_candidates(bin_zero, bin_zero.target_weekday)

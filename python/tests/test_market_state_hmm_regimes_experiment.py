@@ -12,12 +12,13 @@ from market_analysis.experiments.market_state_hmm_regimes import (
     HMM_INSUFFICIENT_TRAINING_ROWS, HMM_INSUFFICIENT_TRAINING_TRANSITIONS,
     HMM_NOT_SCHEDULED, HMM_READY, HMM_STATE_NAMES, HMM_TRAINING_PARTITION,
     HMM_TRAINING_ZERO_VARIANCE, HMM_VARIANCE_FLOOR,
-    HMMFeatureRow, HMMFilterState, HMMRegimeConfig, HMMTrainingDiagnostics,
+    HMMDevelopmentTrainingBlock, HMMFeatureRow, HMMFilterState, HMMRegimeConfig, HMMTrainingDiagnostics,
     _canonicalize, _development_blocks, _extract_feature_row, _filter_observation,
     _gaussian_log_density, _logsumexp, _occupancy_tv, _standardize_blocks,
     _summary, _train_from_blocks, _training_fingerprint,
     advance_hmm_regime_filter, run_market_state_hmm_experiment,
-    train_hmm_regime_model,
+    train_hmm_regime_model, train_hmm_regime_model_from_blocks,
+    train_hmm_regime_model_from_feature_blocks,
 )
 from market_analysis.movement_classifier import SymbolSourceTimeEvidence
 from market_analysis.movement_metrics import (
@@ -236,6 +237,46 @@ class GaussianHMMMathTests(unittest.TestCase):
             replace(first, emission_variances=((0.0,) * 4,) + first.emission_variances[1:])
         with self.assertRaises(ValueError):
             replace(first, pi=(0.0, 0.0, 1.0))
+
+    def test_multiblock_training_reuses_math_and_never_bridges_days(self):
+        study_points = _replay_points()
+        legacy_diagnostics, legacy_model = train_hmm_regime_model(study_points)
+        feature_rows = tuple(_extract_feature_row(point.movement_evaluation)
+                             for point in study_points)
+        one_day_features, unavailable_count = _development_blocks(
+            study_points, feature_rows)
+        one_day = HMMDevelopmentTrainingBlock(
+            0, "2024-01-01", 0, 86_400_000, SCOPE,
+            one_day_features, unavailable_count)
+        block_diagnostics, block_model = train_hmm_regime_model_from_blocks((one_day,))
+        self.assertEqual((block_diagnostics, block_model),
+                         (legacy_diagnostics, legacy_model))
+
+        feature_blocks = _synthetic_blocks()
+        expected_diagnostics, expected_model = _train_from_blocks(
+            feature_blocks, 0, SCOPE, HMM_CONFIG_V1)
+        actual_diagnostics, actual_model = train_hmm_regime_model_from_feature_blocks(
+            feature_blocks, SCOPE, 0, HMM_CONFIG_V1)
+        self.assertEqual((actual_diagnostics, actual_model),
+                         (expected_diagnostics, expected_model))
+
+        day = 86_400_000
+        first = HMMDevelopmentTrainingBlock(
+            0, "1970-01-01", 0, day, SCOPE, (feature_blocks[0],), 0)
+        second_start = 3 * day
+        second_rows = tuple(HMMFeatureRow(row.evaluation_boundary_time_ms + second_start,
+                                          row.values)
+                            for row in feature_blocks[1])
+        second = HMMDevelopmentTrainingBlock(
+            1, "1970-01-04", second_start, 4 * day, SCOPE, (second_rows,), 0)
+        diagnostics, model = train_hmm_regime_model_from_blocks(
+            (first, second), HMM_CONFIG_V1)
+        self.assertEqual(diagnostics.block_count, 2)
+        self.assertEqual(diagnostics.transition_count,
+                         sum(len(block) - 1 for block in feature_blocks))
+        self.assertIsNotNone(model)
+        with self.assertRaises(ValueError):
+            train_hmm_regime_model_from_blocks((second, first), HMM_CONFIG_V1)
 
 
 class GaussianHMMReplayTests(unittest.TestCase):

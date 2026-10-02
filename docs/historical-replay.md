@@ -566,3 +566,87 @@ Tardis sample. If a real header differs from the frozen contract, the package
 fails explicitly rather than guessing. Reports are descriptive evidence and
 have no universal coverage pass threshold. Real-source validation remains
 required before closing #128.
+
+## Frozen market-state study Part B
+
+The Part-B driver consumes the checked-in selection manifest at
+`research/historical-market-state-study-v1/selection/historical-market-state-study-v1-manifest.json`.
+It validates the manifest SHA and does not rerun selection. A study period uses
+one verified core dataset load and one canonical replay; the resulting uniform
+period-phase points and precomputed V1 classifier/lifecycle branch are shared
+with the fixed `EXPERIMENT_SUITE_V1` candidate runners, ATR 06B, and supplementary
+extensions. The original 28 experiment identities remain unchanged.
+
+First freeze supplementary source coverage. The default operation reads local
+archives only and records verified package/checksum identities, native source
+statuses, and per-period/per-symbol coverage. It does not run candidates or
+forward labels. Network acquisition is available only through explicit
+`--download-*` flags on `coverage`. Keep coverage and execution reports outside
+the repository; use the same code revision and archive roots for both steps.
+
+From the repository root, set `ARCHIVE_ROOT` to the existing verified Binance
+USD-M archive root and `OUTPUT_ROOT` to a private output directory, then run:
+
+```bash
+export PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
+ARCHIVE_ROOT="/path/to/verified-binance-usdm-archives"
+OUTPUT_ROOT="/path/to/private-historical-market-state-output"
+mkdir -p "$OUTPUT_ROOT"
+python3 -m market_analysis.historical_market_state_study_execution coverage \
+  --study-manifest research/historical-market-state-study-v1/selection/historical-market-state-study-v1-manifest.json \
+  --archive-root "$ARCHIVE_ROOT" \
+  --output-json "$OUTPUT_ROOT/historical-market-state-study-v1-extension-coverage.json"
+```
+
+If mark-price, open-interest, funding, or liquidation archives live under
+separate roots, pass their corresponding `--*-archive-root` options to coverage
+and execution. A missing or invalid source remains explicit in the frozen
+coverage artifact; it does not replace a study date or become zero activity.
+Execution refuses coverage from another manifest, source identity, or code
+revision. Period artifacts are written atomically beneath `periods/`; identical
+finalized periods are verified and skipped on resume, while conflicts are
+rejected.
+
+After the coverage artifact is frozen, the first-three-development engineering
+smoke command is:
+
+```bash
+python3 -m market_analysis.historical_market_state_study_execution execute \
+  --study-manifest research/historical-market-state-study-v1/selection/historical-market-state-study-v1-manifest.json \
+  --coverage-manifest "$OUTPUT_ROOT/historical-market-state-study-v1-extension-coverage.json" \
+  --archive-root "$ARCHIVE_ROOT" \
+  --output-dir "$OUTPUT_ROOT" \
+  --phase development \
+  --period-limit 3
+```
+
+That limit selects the first three frozen development dates and does not create
+a new sample. Run the development phase without `--period-limit` to complete
+all ten periods before `freeze-hmm`; validation requires that frozen
+development-only HMM artifact, and test additionally requires an explicit
+`--allow-test` acknowledgement. Part B stores descriptive native candidate
+evidence and candidate-independent trade-price outcomes only. It does not
+perform Part-C nomination, validation decisions, regression, bootstrap,
+multiple-testing adjustment, scoring, promotion, or evidence classification.
+
+Forward prices use the latest completed trade-price one-minute candle with
+`close_time_ms < t` and `first_seen_at_ms <= t`; event times remain on their
+actual five-second boundary. The endpoint must be exactly `h` minute candles
+after the start anchor or that symbol's return is unavailable. The frozen
+unannualized return is `ln(P(t+h) / P(t))`; market return is its median across
+available symbols, positive breadth is `count(r > 0) / available_symbol_count`,
+realized volatility is `sqrt(sum(q²))` over the complete adjacent one-minute
+path without demeaning or annualizing, and cross-sectional dispersion is the
+unscaled median absolute deviation around the median return. Missing endpoints
+and missing realized-volatility path minutes remain explicit unavailable
+outcomes. Future label-tail candles are loaded separately and never enter
+candidate replay or V1 state.
+
+Continuous outcomes use the non-overlapping UTC grids (1,896 decision/horizon
+keys per complete day). CUSUM, BOCPD, HMM, and V1 events retain their exact
+causal onset; later events remain in the report and are marked by
+horizon-specific confirmatory independence. PELT evidence is retrospective and
+never receives forward labels. Secondary V1 state paths are censored whenever
+their terminal point is outside the selected day's replay interval; an
+evaluable path with no reversal records `CENSORED_NO_REVERSAL`, while gaps in
+the V1 path make the reversal label unavailable.
