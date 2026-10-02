@@ -608,16 +608,22 @@ finalized periods are verified and skipped on resume, while conflicts are
 rejected.
 
 After the coverage artifact is frozen, the first-three-development engineering
-smoke command is:
+smoke command can collect operational timing data in a separate JSONL sidecar.
+The sidecar does not enter the scientific period artifacts or their hashes.
+Use a fresh smoke output directory and runtime report path to record three
+executed periods instead of resume skips:
 
 ```bash
-python3 -m market_analysis.historical_market_state_study_execution execute \
+SMOKE_OUTPUT_DIR="$OUTPUT_ROOT/runtime-smoke"
+RUNTIME_REPORT="$OUTPUT_ROOT/runtime-smoke.jsonl"
+/usr/bin/time -v python3 -m market_analysis.historical_market_state_study_execution execute \
   --study-manifest research/historical-market-state-study-v1/selection/historical-market-state-study-v1-manifest.json \
   --coverage-manifest "$OUTPUT_ROOT/historical-market-state-study-v1-extension-coverage.json" \
   --archive-root "$ARCHIVE_ROOT" \
-  --output-dir "$OUTPUT_ROOT" \
+  --output-dir "$SMOKE_OUTPUT_DIR" \
   --phase development \
-  --period-limit 3
+  --period-limit 3 \
+  --runtime-report "$RUNTIME_REPORT"
 ```
 
 That limit selects the first three frozen development dates and does not create
