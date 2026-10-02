@@ -20,6 +20,7 @@ from ..movement_metrics import (
 from .market_state_common import (
     EXPERIMENT_EVALUATION_INTERVAL_MS, ExperimentPartition, MarketStateExperimentPoint,
     advance_canonical_branch, directional_onset_count, episode_count, episode_spans,
+    canonical_branch_for_point,
     observed_points_for_partition, selected_points_for_partition,
     short_lived_episode_count, transition_counts, validate_experiment_points,
 )
@@ -747,6 +748,7 @@ def run_market_state_correlation_cluster_experiment(
     *,
     classifier_config: MarketClassifierConfig | None = None,
     lifecycle_config: MarketEpisodeLifecycleConfig | None = None,
+    canonical_branch_by_boundary: Mapping[int, tuple] | None = None,
 ) -> MarketStateCorrelationClusterExperimentResult:
     """Advance one canonical #72/#73 branch and independent correlation evidence."""
     if not isinstance(config, CorrelationClusterConfig):
@@ -769,9 +771,9 @@ def run_market_state_correlation_cluster_experiment(
             evaluation, config, correlation_state, previous_scheduled)
         if evidence.status != CORRELATION_NOT_SCHEDULED:
             previous_scheduled = evidence
-        classification, lifecycle = advance_canonical_branch(
+        classification, lifecycle = canonical_branch_for_point(
             evaluation, point.source_time_evidence, baseline_state,
-            classifier_config, lifecycle_config)
+            classifier_config, lifecycle_config, canonical_branch_by_boundary)
         paired.append(PairedMarketStateCorrelationClusterPoint(
             evaluation.evaluation_boundary_time_ms, point.partition, evaluation,
             classification, lifecycle.next_state, lifecycle.transitions,

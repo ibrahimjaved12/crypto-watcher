@@ -23,6 +23,7 @@ from .market_state_common import (
     ExperimentPartition,
     MarketStateExperimentPoint,
     advance_canonical_branch,
+    canonical_branch_for_point,
     directional_onset_count,
     episode_count,
     episode_spans,
@@ -526,6 +527,7 @@ def run_market_state_kalman_experiment(
     *,
     classifier_config: MarketClassifierConfig | None = None,
     lifecycle_config: MarketEpisodeLifecycleConfig | None = None,
+    canonical_branch_by_boundary: Mapping[int, tuple] | None = None,
 ) -> MarketStateKalmanExperimentResult:
     """Run unchanged canonical baseline beside one Kalman candidate stream."""
     if not isinstance(config, KalmanConfig):
@@ -544,12 +546,13 @@ def run_market_state_kalman_experiment(
     paired = []
     for point in points:
         evaluation = point.movement_evaluation
-        baseline_classification, baseline_result = advance_canonical_branch(
+        baseline_classification, baseline_result = canonical_branch_for_point(
             evaluation,
             point.source_time_evidence,
             baseline_state,
             classifier_config,
             lifecycle_config,
+            canonical_branch_by_boundary,
         )
         candidate_evaluation, observation, kalman_state = transform_market_movement_with_kalman(
             evaluation, config, kalman_state)

@@ -21,6 +21,7 @@ from .market_state_common import (
     ExperimentPartition,
     MarketStateExperimentPoint,
     advance_canonical_branch,
+    canonical_branch_for_point,
     directional_onset_count,
     episode_count,
     episode_spans,
@@ -584,6 +585,7 @@ def run_market_state_regression_acceleration_experiment(
     *,
     classifier_config: MarketClassifierConfig | None = None,
     lifecycle_config: MarketEpisodeLifecycleConfig | None = None,
+    canonical_branch_by_boundary: Mapping[int, tuple] | None = None,
 ) -> MarketStateRegressionAccelerationExperimentResult:
     """Run independent canonical #72/#73 branches over explicit replay points."""
     if not isinstance(config, RegressionAccelerationConfig):
@@ -604,9 +606,9 @@ def run_market_state_regression_acceleration_experiment(
         evaluation = point.movement_evaluation
         candidate, regression_state = transform_market_movement_with_regression_acceleration(
             evaluation, config, regression_state)
-        baseline_classification, baseline_result = advance_canonical_branch(
+        baseline_classification, baseline_result = canonical_branch_for_point(
             evaluation, point.source_time_evidence, baseline_state,
-            classifier_config, lifecycle_config)
+            classifier_config, lifecycle_config, canonical_branch_by_boundary)
         candidate_classification, candidate_result = advance_canonical_branch(
             candidate, point.source_time_evidence, candidate_lifecycle_state,
             classifier_config, lifecycle_config)

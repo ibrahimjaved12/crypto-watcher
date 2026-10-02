@@ -113,12 +113,17 @@ class HistoricalTakerFlowExtensionPrepared:
     archive_dataset: BinanceHistoricalReplayDataset
     replay_result: HistoricalMarketReplayResult
     experiment_points: tuple
-    partition_plan: ReplayPartitionPlan
+    partition_plan: ReplayPartitionPlan | None
+    study_phase: str | None = None
 
     def __post_init__(self):
         if (not isinstance(self.archive_dataset, BinanceHistoricalReplayDataset)
                 or not isinstance(self.replay_result, HistoricalMarketReplayResult)
-                or not isinstance(self.partition_plan, ReplayPartitionPlan)):
+                or ((self.partition_plan is None) == (self.study_phase is None))
+                or (self.partition_plan is not None
+                    and not isinstance(self.partition_plan, ReplayPartitionPlan))
+                or (self.study_phase is not None
+                    and self.study_phase not in ("development", "validation", "test"))):
             raise ValueError("taker flow preparation has invalid contract types")
         object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
 
@@ -612,6 +617,19 @@ def run_historical_taker_flow_extension(
         if key != "report_sha256"
     })
     return replace(report, report_sha256=report_sha)
+
+
+def build_historical_study_taker_flow_points(
+    archive_dataset, replay_result, experiment_points, study_phase: str,
+):
+    """Reuse the core-loaded taker evidence and one canonical study replay."""
+    prepared = HistoricalTakerFlowExtensionPrepared(
+        archive_dataset, replay_result, tuple(experiment_points), None, study_phase)
+    from .historical_market_state_candidate_evidence import validate_study_phase_prepared
+    validate_study_phase_prepared(prepared)
+    if archive_dataset.taker_flow_evidence is None:
+        raise ValueError("the canonical study core load must include taker-flow evidence")
+    return _build_candidate_points(prepared)
 
 
 def run_historical_taker_flow_extension_from_archive(

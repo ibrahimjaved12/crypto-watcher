@@ -31,6 +31,7 @@ from market_analysis.historical_replay import (
     HistoricalReplayConfig, ReplayPartitionPlan, run_historical_market_replay,
     to_market_state_experiment_points,
 )
+from market_analysis.experiments.market_state_common import advance_canonical_branch
 from market_analysis.market_episode_lifecycle import MarketEpisodeLifecycleConfig
 from market_analysis.movement_classifier import MarketClassifierConfig
 from market_analysis.movement_metrics import MarketMovementConfig, MarketUniverseInput
@@ -175,6 +176,43 @@ class HistoricalExperimentBatchTests(unittest.TestCase):
             self.assertTrue(all(item[0] is seen[0][0] for item in seen))
             self.assertTrue(all(item[1] is seen[0][1] for item in seen))
             self.assertTrue(all(item[2] is seen[0][2] for item in seen))
+
+    def test_cached_v1_branch_preserves_every_modified_runner_family(self):
+        with tempfile.TemporaryDirectory() as folder:
+            request = _request(Path(folder))
+            archive_request = BinanceUSDMArchiveRequest(
+                request.archive_root, request.universe, request.replay_config)
+            dataset = load_binance_usdm_historical_replay_dataset(archive_request)
+            replay = run_historical_market_replay(dataset.replay_request)
+            points = to_market_state_experiment_points(replay, request.partition_plan)
+            classifier = MarketClassifierConfig()
+            lifecycle = MarketEpisodeLifecycleConfig()
+            shared, previous = {}, None
+            for point in points:
+                branch = advance_canonical_branch(
+                    point.movement_evaluation, point.source_time_evidence,
+                    previous, classifier, lifecycle)
+                shared[point.movement_evaluation.evaluation_boundary_time_ms] = branch
+                previous = branch[1].next_state
+
+            families = {}
+            for descriptor in batch.EXPERIMENT_SUITE_V1:
+                if descriptor.experiment_id != "EXP-75-09":
+                    families.setdefault(descriptor.experiment_id, descriptor)
+            self.assertEqual(tuple(families), (
+                "EXP-75-01", "EXP-75-02", "EXP-75-03", "EXP-75-04A",
+                "EXP-75-04B", "EXP-75-05", "EXP-75-06A", "EXP-75-07",
+                "EXP-75-08"))
+            for experiment_id, descriptor in families.items():
+                with self.subTest(experiment_id=experiment_id):
+                    original = descriptor.runner(
+                        points, descriptor.config, classifier_config=classifier,
+                        lifecycle_config=lifecycle)
+                    cached = descriptor.runner(
+                        points, descriptor.config, classifier_config=classifier,
+                        lifecycle_config=lifecycle,
+                        canonical_branch_by_boundary=shared)
+                    self.assertEqual(original, cached)
 
     def test_end_to_end_report_repeated_run_and_compact_summaries(self):
         with tempfile.TemporaryDirectory() as folder:

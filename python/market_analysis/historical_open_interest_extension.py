@@ -104,14 +104,19 @@ class HistoricalOpenInterestExtensionPrepared:
     archive_dataset: BinanceHistoricalReplayDataset
     replay_result: HistoricalMarketReplayResult
     experiment_points: tuple
-    partition_plan: ReplayPartitionPlan
+    partition_plan: ReplayPartitionPlan | None
     oi_evidence: BinanceOpenInterestEvidence
     oi_archive_root: Path
+    study_phase: str | None = None
 
     def __post_init__(self):
         if (not isinstance(self.archive_dataset, BinanceHistoricalReplayDataset)
                 or not isinstance(self.replay_result, HistoricalMarketReplayResult)
-                or not isinstance(self.partition_plan, ReplayPartitionPlan)
+                or ((self.partition_plan is None) == (self.study_phase is None))
+                or (self.partition_plan is not None
+                    and not isinstance(self.partition_plan, ReplayPartitionPlan))
+                or (self.study_phase is not None
+                    and self.study_phase not in ("development", "validation", "test"))
                 or not isinstance(self.oi_evidence, BinanceOpenInterestEvidence)):
             raise ValueError("invalid prepared extension contract")
         object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
@@ -274,7 +279,7 @@ def _partition_summaries(points, symbols):
         for minutes in OI_WINDOWS_MINUTES:
             rows = [row for p in selected for window in p.windows
                     if window["window_minutes"] == minutes for row in window["symbols"]]
-            ready = [r for r in rows if r["status"] in ("READY", "NO_OBSERVED_LIQUIDATION")]
+            ready = [r for r in rows if r["status"] == "READY"]
             per_symbol = []
             for symbol in symbols:
                 projected = [r for r in rows if r["symbol"] == symbol]
@@ -312,6 +317,13 @@ def _source_coverage(evidence):
             "checksum_verified_package_count": sum(p.symbol == symbol and p.checksum_verified for p in evidence.packages),
             "usable_source_row_count": sum(r.symbol == symbol for r in evidence.rows)}
             for symbol in evidence.configured_symbols),})
+
+
+def build_historical_study_open_interest_points(prepared):
+    """Run OI context over an already prepared uniform-phase study day."""
+    from .historical_market_state_candidate_evidence import validate_study_phase_prepared
+    validate_study_phase_prepared(prepared)
+    return _build_candidate_points(prepared)
 
 
 def run_historical_open_interest_extension(prepared, *, code_revision):

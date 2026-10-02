@@ -32,6 +32,7 @@ from .market_state_common import (
     ExperimentPartition,
     MarketStateExperimentPoint,
     advance_canonical_branch,
+    canonical_branch_for_point,
     directional_onset_count,
     episode_count,
     episode_spans,
@@ -647,6 +648,7 @@ def run_market_state_realized_vol_normalization_experiment(
     *,
     classifier_config: MarketClassifierConfig | None = None,
     lifecycle_config: MarketEpisodeLifecycleConfig | None = None,
+    canonical_branch_by_boundary: Mapping[int, tuple] | None = None,
 ) -> MarketStateRealizedVolatilityExperimentResult:
     """Compare V1 with an independent causal RV candidate through #72/#73."""
     if not isinstance(config, RealizedVolatilityNormalizationConfig):
@@ -669,9 +671,9 @@ def run_market_state_realized_vol_normalization_experiment(
         prior = _prior_histories(rv_state, evaluation, config)
         candidate, next_rv_state = transform_market_movement_with_realized_vol_normalization(
             evaluation, config, rv_state)
-        baseline_classification, baseline_result = advance_canonical_branch(
+        baseline_classification, baseline_result = canonical_branch_for_point(
             evaluation, point.source_time_evidence, baseline_state,
-            classifier_config, lifecycle_config)
+            classifier_config, lifecycle_config, canonical_branch_by_boundary)
         candidate_classification, candidate_result = advance_canonical_branch(
             candidate, point.source_time_evidence, candidate_lifecycle_state,
             classifier_config, lifecycle_config)

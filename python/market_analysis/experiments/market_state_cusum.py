@@ -23,6 +23,7 @@ from .market_state_common import (
     ExperimentPartition,
     MarketStateExperimentPoint,
     advance_canonical_branch,
+    canonical_branch_for_point,
     branch_transitions,
     directional_onset_count,
     episode_count,
@@ -478,6 +479,7 @@ def run_market_state_cusum_experiment(
     *,
     classifier_config: MarketClassifierConfig | None = None,
     lifecycle_config: MarketEpisodeLifecycleConfig | None = None,
+    canonical_branch_by_boundary: Mapping[int, tuple] | None = None,
 ) -> MarketStateCUSUMExperimentResult:
     """Run an unchanged canonical baseline beside one independent CUSUM detector."""
     if not isinstance(config, CUSUMConfig):
@@ -495,9 +497,9 @@ def run_market_state_cusum_experiment(
     results = []
     for point in points:
         evaluation = point.movement_evaluation
-        baseline_classification, baseline_result = advance_canonical_branch(
+        baseline_classification, baseline_result = canonical_branch_for_point(
             evaluation, point.source_time_evidence, baseline_state,
-            classifier_config, lifecycle_config)
+            classifier_config, lifecycle_config, canonical_branch_by_boundary)
         observation, cusum_state = transform_market_movement_with_cusum(
             evaluation, config, cusum_state)
         results.append(CUSUMExperimentPoint(
