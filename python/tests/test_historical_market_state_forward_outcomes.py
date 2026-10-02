@@ -36,7 +36,8 @@ def evidence(*, omit=(), symbols=("AAAUSDT", "BBBUSDT", "CCCUSDT"),
                 continue
             close = (100 + symbol_index * 10) * (1 + offset * .01)
             rows.append(candle(symbol, opening, close))
-    return TradePriceForwardEvidence(symbols, tuple(rows), SOURCE_SHA, start, end)
+    return TradePriceForwardEvidence(
+        symbols, tuple(rows), SOURCE_SHA, start - MINUTE, end)
 
 
 class ForwardOutcomeTests(unittest.TestCase):

@@ -273,7 +273,7 @@ class GaussianHMMMathTests(unittest.TestCase):
             (first, second), HMM_CONFIG_V1)
         self.assertEqual(diagnostics.block_count, 2)
         self.assertEqual(diagnostics.transition_count,
-                         sum(len(block) - 1 for block in feature_blocks))
+                         sum(len(block) - 1 for block in feature_blocks[:2]))
         self.assertIsNotNone(model)
         with self.assertRaises(ValueError):
             train_hmm_regime_model_from_blocks((second, first), HMM_CONFIG_V1)
