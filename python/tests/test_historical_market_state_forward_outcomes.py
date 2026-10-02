@@ -22,7 +22,7 @@ SOURCE_SHA = "a" * 64
 def candle(symbol, opening, close):
     price = Decimal(str(close))
     return CompletedTradeOHLCCandle(
-        symbol, f"BINANCE_USDM:{symbol}", opening, opening + MINUTE - 1,
+        symbol, f"binance-usdm:{symbol}", opening, opening + MINUTE - 1,
         price, price, price, price, opening + MINUTE)
 
 
