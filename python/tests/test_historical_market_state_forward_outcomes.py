@@ -79,7 +79,7 @@ class ForwardOutcomeTests(unittest.TestCase):
         self.assertEqual(outcome.per_symbol[0].unavailable_reason, END_PRICE_UNAVAILABLE)
         source = evidence(omit=(("AAAUSDT", decision + MINUTE),),
                           symbols=("AAAUSDT",))
-        outcome = evaluate_forward_outcome(source, decision, 2)
+        outcome = evaluate_forward_outcome(source, decision, 5)
         self.assertEqual(outcome.per_symbol[0].realized_volatility_unavailable_reason,
                          INCOMPLETE_FUTURE_MINUTE_PATH)
 

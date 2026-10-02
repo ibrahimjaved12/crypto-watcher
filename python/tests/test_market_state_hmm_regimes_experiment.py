@@ -269,14 +269,20 @@ class GaussianHMMMathTests(unittest.TestCase):
                             for row in feature_blocks[1])
         second = HMMDevelopmentTrainingBlock(
             1, "1970-01-04", second_start, 4 * day, SCOPE, (second_rows,), 0)
+        third_start = 6 * day
+        third_rows = tuple(HMMFeatureRow(row.evaluation_boundary_time_ms + third_start,
+                                         row.values)
+                           for row in feature_blocks[2])
+        third = HMMDevelopmentTrainingBlock(
+            2, "1970-01-07", third_start, 7 * day, SCOPE, (third_rows,), 0)
         diagnostics, model = train_hmm_regime_model_from_blocks(
-            (first, second), HMM_CONFIG_V1)
-        self.assertEqual(diagnostics.block_count, 2)
+            (first, second, third), HMM_CONFIG_V1)
+        self.assertEqual(diagnostics.block_count, 3)
         self.assertEqual(diagnostics.transition_count,
-                         sum(len(block) - 1 for block in feature_blocks[:2]))
+                         sum(len(block) - 1 for block in feature_blocks))
         self.assertIsNotNone(model)
         with self.assertRaises(ValueError):
-            train_hmm_regime_model_from_blocks((second, first), HMM_CONFIG_V1)
+            train_hmm_regime_model_from_blocks((second, first, third), HMM_CONFIG_V1)
 
 
 class GaussianHMMReplayTests(unittest.TestCase):
