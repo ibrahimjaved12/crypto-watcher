@@ -139,6 +139,13 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             clock["now"] += 10
             return SimpleNamespace()
 
+        def timed_mock(return_value=()):
+            def run_timed_work(*args, **kwargs):
+                clock["now"] += 1
+                return return_value
+
+            return Mock(side_effect=run_timed_work)
+
         bocpd_runner = Mock(side_effect=run_bocpd)
         descriptors = (
             SimpleNamespace(experiment_id="EXP-75-09", algorithm_version="hmm-v1",
@@ -205,10 +212,10 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             stack.enter_context(patch.object(execution, "EXPERIMENT_SUITE_V1", descriptors))
             stack.enter_context(patch.object(
                 execution, "_hmm_study_evidence", return_value=((), {}, None, None)))
-            atr = Mock(return_value=())
+            atr = timed_mock()
             stack.enter_context(patch.object(
                 execution, "run_market_state_atr_normalization_suite", atr))
-            taker = Mock(return_value=())
+            taker = timed_mock()
             stack.enter_context(patch.object(
                 execution, "build_historical_study_taker_flow_points", taker))
             stack.enter_context(patch.object(
@@ -217,7 +224,7 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                 execution, "adapt_candidate_result", side_effect=adapt_result))
             for prepared_name, builder_name, summary_name in extension_parts:
                 preparer = Mock(return_value=object())
-                builder = Mock(return_value=())
+                builder = timed_mock()
                 extension_preparers.append(preparer)
                 extension_builders.append(builder)
                 stack.enter_context(patch.object(execution, prepared_name, preparer))
