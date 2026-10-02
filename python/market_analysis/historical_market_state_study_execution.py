@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 import json
 import os
@@ -130,7 +130,7 @@ from .movement_history import MINUTE_MS
 
 
 EXECUTION_VERSION = "historical-market-state-execution-v1"
-EXTENSION_COVERAGE_VERSION = "historical-market-state-extension-coverage-v1"
+EXTENSION_COVERAGE_VERSION = "historical-market-state-extension-coverage-v2"
 HMM_DEVELOPMENT_MODEL_VERSION = "historical-market-state-hmm-development-model-v1"
 TOOL_CONFIG_VERSION = "historical-market-state-study-part-b-tool-v1"
 PERIOD_REPORT_SCHEMA_VERSION = "historical-market-state-study-period-report-v1"
@@ -396,7 +396,67 @@ def _package_name(package):
     return ""
 
 
-def _package_summary(package):
+_SOURCE_PACKAGE_STATUSES = {
+    "mark_trade": {
+        "VERIFIED_COMPLETE", "MALFORMED_ROW", "DUPLICATE_MINUTE",
+        "OFF_GRID_MINUTE", "MISSING_VALID_MINUTE",
+    },
+    "open_interest": {
+        "VERIFIED", "MALFORMED_ROW", "DUPLICATE_SOURCE_TIMESTAMP",
+        "OFF_GRID_TIMESTAMP",
+    },
+    "funding": {
+        "VERIFIED", "MALFORMED_ROW", "DUPLICATE_SOURCE_TIMESTAMP",
+        "OFF_GRID_TIMESTAMP",
+    },
+    # This provider exposes one shared receipt-day package for all symbols.
+    # A malformed day is rejected wholesale by its native evidence loader.
+    "liquidation": {"ARCHIVE_DAY_AVAILABLE"},
+}
+_SOURCE_PARTIAL_STATUSES = {
+    "mark_trade": {"MALFORMED_ROW", "DUPLICATE_MINUTE", "OFF_GRID_MINUTE",
+                   "MISSING_VALID_MINUTE"},
+    "open_interest": {"MALFORMED_ROW", "DUPLICATE_SOURCE_TIMESTAMP",
+                      "OFF_GRID_TIMESTAMP"},
+    "funding": {"MALFORMED_ROW", "DUPLICATE_SOURCE_TIMESTAMP",
+                "OFF_GRID_TIMESTAMP"},
+    "liquidation": set(),
+}
+_NO_OBSERVATION_STATES = {
+    "mark_trade": "NO_OBSERVED_MARK_PRICE",
+    "open_interest": "NO_OBSERVED_OPEN_INTEREST",
+    "funding": "NO_OBSERVED_FUNDING",
+    "liquidation": "NO_OBSERVED_LIQUIDATION",
+}
+
+
+def _package_evidence_row_count(package, source_kind: str, evidence_rows):
+    symbol = getattr(package, "symbol", None)
+    path = (getattr(package, "relative_archive_path", None)
+            or getattr(package, "relative_path", None))
+    if source_kind == "mark_trade":
+        day = getattr(package, "utc_date", None)
+        if isinstance(day, str):
+            try:
+                day = date.fromisoformat(day)
+            except ValueError:
+                return 0
+        return sum(
+            getattr(row, "symbol", None) == symbol
+            and datetime.fromtimestamp(row.open_time_ms / 1000, timezone.utc).date() == day
+            for row in evidence_rows
+            if type(getattr(row, "open_time_ms", None)) is int)
+    if path is None:
+        return 0
+    return sum((source_kind == "liquidation"
+                or getattr(row, "symbol", None) == symbol)
+               and getattr(row, "package_relative_path", None) == path
+               for row in evidence_rows)
+
+
+def _package_summary(package, source_kind: str, evidence_rows=()):
+    if source_kind not in _SOURCE_PACKAGE_STATUSES:
+        raise ValueError(f"unknown supplementary source kind: {source_kind}")
     name = _package_name(package)
     if not name or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts:
         raise ValueError("source package identity must be a safe relative name")
@@ -409,11 +469,35 @@ def _package_summary(package):
     checksum_verified = getattr(package, "checksum_verified", None)
     status = getattr(package, "status", "UNKNOWN")
     archive_present = getattr(package, "archive_present", False)
-    valid = (checksum_verified is True
-             or checksum_verified is None and status == "ARCHIVE_DAY_AVAILABLE")
+    native_statuses = {status, *(item for item in statuses if isinstance(item, str))}
+    known_statuses = _SOURCE_PACKAGE_STATUSES[source_kind]
+    if source_kind == "liquidation":
+        digest = (getattr(package, "compressed_sha256", None)
+                  or getattr(package, "sha256", None))
+        digest_valid = (isinstance(digest, str) and len(digest) == 64
+                        and all(character in "0123456789abcdef" for character in digest))
+        valid = (status == "ARCHIVE_DAY_AVAILABLE" and archive_present is True
+                 and digest_valid and not malformed)
+    else:
+        digest = (getattr(package, "archive_sha256", None)
+                  or getattr(package, "sha256", None)
+                  or getattr(package, "compressed_sha256", None))
+        digest_valid = (isinstance(digest, str) and len(digest) == 64
+                        and all(character in "0123456789abcdef" for character in digest))
+        valid = (checksum_verified is True and digest_valid
+                 and status in known_statuses
+                 and native_statuses <= known_statuses)
+    usable_row_count = _package_evidence_row_count(package, source_kind, evidence_rows)
+    if (valid and source_kind != "liquidation"
+            and native_statuses & _SOURCE_PARTIAL_STATUSES[source_kind]
+            and usable_row_count == 0):
+        valid = False
     issue_count = len(malformed) + len(duplicates) + len(off_grid) + len(missing)
+    if valid and native_statuses & _SOURCE_PARTIAL_STATUSES[source_kind] and not issue_count:
+        issue_count = 1
     return {
         "package_name": name,
+        "symbol": getattr(package, "symbol", None),
         "utc_date": (getattr(package, "utc_date", None)
                      or getattr(package, "utc_day", None)),
         "status": status,
@@ -422,11 +506,10 @@ def _package_summary(package):
         "checksum_present": getattr(package, "checksum_present", None),
         "checksum_verified": checksum_verified,
         "package_valid": valid,
-        "sha256": (getattr(package, "archive_sha256", None)
-                   or getattr(package, "sha256", None)
-                   or getattr(package, "compressed_sha256", None)),
+        "sha256": digest,
         "row_count": getattr(package, "row_count", None),
         "valid_row_count": getattr(package, "valid_row_count", None),
+        "usable_evidence_row_count": usable_row_count,
         "malformed_row_count": len(malformed),
         "duplicate_timestamp_count": len(duplicates),
         "off_grid_timestamp_count": len(off_grid),
@@ -437,12 +520,17 @@ def _package_summary(package):
     }
 
 
-def _source_coverage_summary(evidence, error_type: str | None = None):
+def _source_coverage_summary(evidence, error_type: str | None = None, *,
+                             source_kind: str):
+    if source_kind not in _SOURCE_PACKAGE_STATUSES:
+        raise ValueError(f"unknown supplementary source kind: {source_kind}")
     if evidence is None:
         return {"coverage_state": "UNAVAILABLE", "exception_type": error_type,
                 "expected_package_count": None, "checksum_verified_package_count": 0,
                 "packages": (), "per_symbol": ()}
-    packages = tuple(_package_summary(item) for item in getattr(evidence, "packages", ()))
+    rows = tuple(getattr(evidence, "rows", ()) or getattr(evidence, "candles", ()))
+    packages = tuple(_package_summary(item, source_kind, rows)
+                     for item in getattr(evidence, "packages", ()))
     expected = len(packages)
     valid_count = sum(item["package_valid"] for item in packages)
     issue_count = sum(item["issue_count"] for item in packages)
@@ -453,24 +541,24 @@ def _source_coverage_summary(evidence, error_type: str | None = None):
     else:
         state = "UNAVAILABLE"
     symbols = tuple(getattr(evidence, "configured_symbols", ()))
-    rows = tuple(getattr(evidence, "rows", ()) or getattr(evidence, "candles", ()))
     per_symbol = []
     for symbol in symbols:
-        selected = tuple(item for item in packages
-                         if item["package_name"].split("/")[-1].startswith(symbol)
-                         or symbol in item["package_name"].split("/"))
+        selected = (packages if source_kind == "liquidation" else
+                    tuple(item for item in packages if item["symbol"] == symbol))
         row_count = sum(getattr(row, "symbol", None) == symbol for row in rows)
+        symbol_coverage = (
+            "FULL" if selected and all(item["package_valid"] and not item["issue_count"]
+                                        for item in selected)
+            else "PARTIAL" if any(item["package_valid"] for item in selected)
+            else "UNAVAILABLE")
         symbol_state = ("OBSERVED" if row_count else
-                        "NO_OBSERVED_LIQUIDATION" if state == "FULL" else "UNAVAILABLE")
+                        _NO_OBSERVATION_STATES[source_kind]
+                        if symbol_coverage == "FULL" else "UNAVAILABLE")
         per_symbol.append({
             "symbol": symbol,
             "expected_package_count": len(selected),
             "verified_package_count": sum(item["package_valid"] for item in selected),
-            "coverage_state": ("FULL" if selected and all(item["package_valid"]
-                                                             and not item["issue_count"]
-                                                             for item in selected)
-                               else "PARTIAL" if any(item["package_valid"] for item in selected)
-                               else "UNAVAILABLE"),
+            "coverage_state": symbol_coverage,
             "observed_row_count": row_count,
             "observation_state": symbol_state,
             "native_package_statuses": tuple(
@@ -608,10 +696,11 @@ def _load_supplementary_sources(period, roots, downloads):
     for name, loader in loaders.items():
         try:
             evidence[name] = loader()
-            coverage[name] = _source_coverage_summary(evidence[name])
+            coverage[name] = _source_coverage_summary(evidence[name], source_kind=name)
         except (OSError, ValueError, RuntimeError) as exc:
             evidence[name] = None
-            coverage[name] = _source_coverage_summary(None, type(exc).__name__)
+            coverage[name] = _source_coverage_summary(
+                None, type(exc).__name__, source_kind=name)
     return evidence, coverage
 
 

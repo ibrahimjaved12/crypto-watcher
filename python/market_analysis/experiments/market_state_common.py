@@ -8,6 +8,7 @@ from statistics import median
 from typing import Iterable, Literal
 
 from ..market_episode_lifecycle import (
+    ALGORITHM_VERSION as LIFECYCLE_ALGORITHM_VERSION,
     MarketEpisodeLifecycleConfig,
     MarketEpisodeLifecycleResult,
     MarketEpisodeLifecycleState,
@@ -23,7 +24,12 @@ from ..movement_classifier import (
     SymbolSourceTimeEvidence,
     classify_market_movement,
 )
-from ..movement_metrics import MarketMovementEvaluation, WINDOWS
+from ..movement_metrics import (
+    ALGORITHM_VERSION as MOVEMENT_ALGORITHM_VERSION,
+    DEFAULT_CONFIG_VERSION as MOVEMENT_CONFIG_VERSION,
+    MarketMovementEvaluation,
+    WINDOWS,
+)
 
 
 ExperimentPartition = Literal["development", "validation", "test"]
@@ -136,7 +142,92 @@ def canonical_branch_for_point(
             or result[0].evaluation_boundary_time_ms != boundary
             or result[1].next_state.last_evaluation_boundary_time_ms != boundary):
         raise ValueError("precomputed V1 branch does not cover this evaluation boundary")
-    return result
+    classification, lifecycle = result
+    evidence = tuple(source_time_evidence)
+    identity_matches = (
+        evaluation.algorithm_version == MOVEMENT_ALGORITHM_VERSION
+        and evaluation.config_version == MOVEMENT_CONFIG_VERSION
+        and classification.classifier_algorithm_version == CLASSIFIER_ALGORITHM_VERSION
+        and classification.classifier_config_version == classifier_config.version
+        and classification.classifier_config == classifier_config
+        and classification.movement_algorithm_version == evaluation.algorithm_version
+        and classification.movement_config_version == evaluation.config_version
+        and classification.universe_id == evaluation.universe_id
+        and classification.universe_version == evaluation.universe_version
+        and classification.provider == evaluation.provider
+        and classification.exchange == evaluation.exchange
+        and classification.price_type == evaluation.price_type
+        and classification.primary_window_minutes == 5
+        and tuple(evaluation.configured_universe)
+        == tuple(item.symbol for item in evidence)
+        and set(classification.windows) == set(WINDOWS)
+    )
+    if identity_matches:
+        for minute in WINDOWS:
+            classified = classification.windows[minute]
+            snapshot = evaluation.windows.get(minute)
+            if (snapshot is None
+                    or classified.window_minutes != minute
+                    or classified.evaluation_boundary_time_ms != boundary
+                    or classified.movement_snapshot != snapshot
+                    or classified.movement_algorithm_version != evaluation.algorithm_version
+                    or classified.movement_config_version != evaluation.config_version
+                    or classified.universe_id != evaluation.universe_id
+                    or classified.universe_version != evaluation.universe_version
+                    or tuple(classified.configured_universe)
+                    != tuple(evaluation.configured_universe)
+                    or classified.provider != evaluation.provider
+                    or classified.exchange != evaluation.exchange
+                    or classified.price_type != evaluation.price_type
+                    or classified.classifier_algorithm_version != CLASSIFIER_ALGORITHM_VERSION
+                    or classified.classifier_config_version != classifier_config.version
+                    or tuple(classified.source_time_evidence) != evidence):
+                identity_matches = False
+                break
+    state = lifecycle.next_state
+    scope = state.scope
+    if identity_matches:
+        identity_matches = (
+            state.lifecycle_algorithm_version == LIFECYCLE_ALGORITHM_VERSION
+            and state.lifecycle_config_version == lifecycle_config.version
+            and state.lifecycle_config == lifecycle_config
+            and scope.lifecycle_algorithm_version == LIFECYCLE_ALGORITHM_VERSION
+            and scope.lifecycle_config_version == lifecycle_config.version
+            and scope.universe_id == evaluation.universe_id
+            and scope.universe_version == evaluation.universe_version
+            and scope.primary_window_minutes == classification.primary_window_minutes
+            and scope.classifier_algorithm_version == CLASSIFIER_ALGORITHM_VERSION
+            and scope.classifier_config_version == classifier_config.version
+            and scope.movement_algorithm_version == evaluation.algorithm_version
+            and scope.movement_config_version == evaluation.config_version
+            and scope.provider == evaluation.provider
+            and scope.exchange == evaluation.exchange
+            and scope.price_type == evaluation.price_type
+        )
+    expected_prior = _prior_confirmed_direction(previous_state, evaluation, classifier_config)
+    if identity_matches:
+        identity_matches = all(
+            classification.windows[minute].prior_confirmed_episode_direction
+            == (expected_prior if minute == 5 else None)
+            for minute in WINDOWS)
+    if identity_matches:
+        try:
+            if previous_state is None:
+                identity_matches = boundary == min(precomputed_by_boundary)
+            else:
+                previous_boundary = previous_state.last_evaluation_boundary_time_ms
+                previous = precomputed_by_boundary.get(previous_boundary)
+                identity_matches = (
+                    previous_boundary + EXPERIMENT_EVALUATION_INTERVAL_MS == boundary
+                    and isinstance(previous, tuple) and len(previous) == 2
+                    and isinstance(previous[1], MarketEpisodeLifecycleResult)
+                    and previous[1].next_state == previous_state
+                )
+        except (TypeError, ValueError):
+            identity_matches = False
+    if not identity_matches:
+        raise ValueError("precomputed V1 branch identity or predecessor does not match point")
+    return classification, lifecycle
 
 
 def validate_experiment_points(points: Iterable[MarketStateExperimentPoint]) -> None:

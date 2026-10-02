@@ -3,6 +3,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from datetime import date
 import json
 import unittest
 from unittest.mock import Mock, patch
@@ -17,6 +18,7 @@ from market_analysis.historical_market_state_study_execution import (
     load_and_validate_coverage, select_execution_periods,
     freeze_study_hmm_model, validate_hmm_development_cohort,
 )
+from market_analysis.historical_liquidation_evidence import daily_liquidation_relative_path
 import market_analysis.historical_market_state_study_execution as execution
 
 
@@ -177,43 +179,137 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
 
     def test_no_observed_liquidation_is_distinct_from_unavailable_archive(self):
         package = SimpleNamespace(
-            relative_path="BTCUSDT/2024-01-01.zip", status="ARCHIVE_DAY_AVAILABLE",
-            archive_present=True, row_count=0)
+            utc_day=date(2024, 1, 1),
+            relative_path=daily_liquidation_relative_path(date(2024, 1, 1)).as_posix(),
+            status="ARCHIVE_DAY_AVAILABLE", archive_present=True,
+            compressed_sha256="a" * 64, row_count=1)
         evidence = SimpleNamespace(
-            packages=(package,), configured_symbols=("BTCUSDT",), rows=())
+            packages=(package,), configured_symbols=("BTCUSDT", "ETHUSDT"),
+            rows=(SimpleNamespace(symbol="BTCUSDT"),))
 
-        no_observations = _source_coverage_summary(evidence)
-        unavailable = _source_coverage_summary(None, "FileNotFoundError")
+        shared = _source_coverage_summary(evidence, source_kind="liquidation")
+        unavailable_package = SimpleNamespace(
+            utc_day=date(2024, 1, 1),
+            relative_path=daily_liquidation_relative_path(date(2024, 1, 1)).as_posix(),
+            status="INVALID_ARCHIVE", archive_present=True,
+            compressed_sha256="b" * 64, row_count=0)
+        unavailable = _source_coverage_summary(SimpleNamespace(
+            packages=(unavailable_package,), configured_symbols=("BTCUSDT", "ETHUSDT"),
+            rows=()), source_kind="liquidation")
+        loader_error = _source_coverage_summary(
+            None, "FileNotFoundError", source_kind="liquidation")
 
-        self.assertEqual(no_observations["coverage_state"], "FULL")
-        self.assertEqual(no_observations["per_symbol"][0]["observation_state"],
+        self.assertEqual(shared["coverage_state"], "FULL")
+        self.assertEqual(tuple(item["coverage_state"] for item in shared["per_symbol"]),
+                         ("FULL", "FULL"))
+        self.assertEqual(tuple(item["observed_row_count"] for item in shared["per_symbol"]),
+                         (1, 0))
+        self.assertEqual(shared["per_symbol"][1]["observation_state"],
                          "NO_OBSERVED_LIQUIDATION")
         self.assertEqual(unavailable["coverage_state"], "UNAVAILABLE")
-        self.assertEqual(unavailable["per_symbol"], ())
+        self.assertEqual(tuple(item["observation_state"] for item in unavailable["per_symbol"]),
+                         ("UNAVAILABLE", "UNAVAILABLE"))
+        self.assertEqual(loader_error["per_symbol"], ())
 
-    def test_package_coverage_preserves_full_partial_and_integrity_failure(self):
+    def test_package_coverage_uses_source_native_status_and_row_issues(self):
         verified = SimpleNamespace(
-            relative_path="BTCUSDT/verified.zip", status="CHECKSUM_VERIFIED",
+            symbol="BTCUSDT", relative_path="BTCUSDT/verified.zip", status="VERIFIED",
             archive_present=True, checksum_present=True, checksum_verified=True,
             sha256="a" * 64, row_count=2, valid_row_count=2)
         missing = SimpleNamespace(
-            relative_path="BTCUSDT/missing.zip", status="MISSING_PACKAGE",
+            symbol="BTCUSDT", relative_path="BTCUSDT/missing.zip", status="MISSING_PACKAGE",
             archive_present=False, checksum_present=False, checksum_verified=False)
         bad_checksum = SimpleNamespace(
-            relative_path="BTCUSDT/bad.zip", status="CHECKSUM_MISMATCH",
+            symbol="BTCUSDT", relative_path="BTCUSDT/bad.zip", status="CHECKSUM_MISMATCH",
             archive_present=True, checksum_present=True, checksum_verified=False)
         full = _source_coverage_summary(SimpleNamespace(
-            packages=(verified,), configured_symbols=("BTCUSDT",), rows=()))
+            packages=(verified,), configured_symbols=("BTCUSDT",), rows=()),
+            source_kind="open_interest")
         partial = _source_coverage_summary(SimpleNamespace(
-            packages=(verified, missing), configured_symbols=("BTCUSDT",), rows=()))
+            packages=(verified, missing), configured_symbols=("BTCUSDT",), rows=()),
+            source_kind="open_interest")
         invalid = _source_coverage_summary(SimpleNamespace(
-            packages=(bad_checksum,), configured_symbols=("BTCUSDT",), rows=()))
+            packages=(bad_checksum,), configured_symbols=("BTCUSDT",), rows=()),
+            source_kind="open_interest")
 
         self.assertEqual(full["coverage_state"], "FULL")
         self.assertEqual(partial["coverage_state"], "PARTIAL")
         self.assertEqual(partial["packages"][1]["status"], "MISSING_PACKAGE")
         self.assertEqual(invalid["coverage_state"], "UNAVAILABLE")
         self.assertEqual(invalid["packages"][0]["status"], "CHECKSUM_MISMATCH")
+
+        for source_kind in ("mark_trade", "open_interest", "funding"):
+            for native_status in ("SCHEMA_MISMATCH", "INVALID_ARCHIVE"):
+                bad_native_package = SimpleNamespace(
+                    symbol="BTCUSDT", relative_path=f"BTCUSDT/{native_status}.zip",
+                    status=native_status, archive_present=True, checksum_present=True,
+                    checksum_verified=True, sha256="c" * 64, row_count=2)
+                bad_native = _source_coverage_summary(SimpleNamespace(
+                    packages=(bad_native_package,), configured_symbols=("BTCUSDT",), rows=()),
+                    source_kind=source_kind)
+                self.assertEqual(bad_native["coverage_state"], "UNAVAILABLE")
+                self.assertFalse(bad_native["packages"][0]["package_valid"])
+
+        malformed_only = SimpleNamespace(
+            symbol="BTCUSDT", relative_path="BTCUSDT/malformed-only.zip",
+            status="MALFORMED_ROW", archive_present=True, checksum_present=True,
+            checksum_verified=True, sha256="e" * 64, row_count=1,
+            malformed_rows=("row 1 is invalid",))
+        malformed_only_summary = _source_coverage_summary(SimpleNamespace(
+            packages=(malformed_only,), configured_symbols=("BTCUSDT",), rows=()),
+            source_kind="open_interest")
+        self.assertEqual(malformed_only_summary["coverage_state"], "UNAVAILABLE")
+        self.assertFalse(malformed_only_summary["packages"][0]["package_valid"])
+
+        partial_rows = SimpleNamespace(
+            symbol="BTCUSDT", relative_path="BTCUSDT/partial.zip", status="VERIFIED",
+            archive_present=True, checksum_present=True, checksum_verified=True,
+            sha256="d" * 64, row_count=1, missing_ranges=((1, 2, 1),))
+        partial_observations = _source_coverage_summary(SimpleNamespace(
+            packages=(partial_rows,), configured_symbols=("BTCUSDT",), rows=()),
+            source_kind="open_interest")
+        self.assertEqual(partial_observations["coverage_state"], "PARTIAL")
+
+        partial_mark_package = SimpleNamespace(
+            symbol="BTCUSDT", utc_date=date(1970, 1, 1),
+            relative_archive_path="BTCUSDT/mark.zip", status="MISSING_VALID_MINUTE",
+            statuses=("MISSING_VALID_MINUTE",), archive_present=True,
+            checksum_present=True, checksum_verified=True, archive_sha256="f" * 64,
+            row_count=3, valid_row_count=1, missing_minute_ranges=((60_000, 120_000, 2),))
+        partial_mark = _source_coverage_summary(SimpleNamespace(
+            packages=(partial_mark_package,), configured_symbols=("BTCUSDT",),
+            candles=(SimpleNamespace(symbol="BTCUSDT", open_time_ms=0),)),
+            source_kind="mark_trade")
+        self.assertEqual(partial_mark["coverage_state"], "PARTIAL")
+        self.assertEqual(partial_mark["per_symbol"][0]["observation_state"], "OBSERVED")
+
+    def test_zero_observation_labels_are_source_specific(self):
+        cases = (
+            ("mark_trade", SimpleNamespace(
+                symbol="BTCUSDT", utc_date=date(1970, 1, 1),
+                relative_archive_path="BTCUSDT/mark.zip",
+                status="VERIFIED_COMPLETE", statuses=("VERIFIED_COMPLETE",),
+                archive_present=True, checksum_present=True, checksum_verified=True,
+                archive_sha256="a" * 64)),
+            ("open_interest", SimpleNamespace(
+                symbol="BTCUSDT", relative_path="BTCUSDT/oi.zip", status="VERIFIED",
+                archive_present=True, checksum_present=True, checksum_verified=True,
+                sha256="b" * 64)),
+            ("funding", SimpleNamespace(
+                symbol="BTCUSDT", relative_path="BTCUSDT/funding.zip", status="VERIFIED",
+                archive_present=True, checksum_present=True, checksum_verified=True,
+                sha256="c" * 64)),
+        )
+        for source_kind, package in cases:
+            with self.subTest(source_kind=source_kind):
+                summary = _source_coverage_summary(SimpleNamespace(
+                    packages=(package,), configured_symbols=("BTCUSDT",), rows=()),
+                    source_kind=source_kind)
+                self.assertEqual(summary["coverage_state"], "FULL")
+                self.assertNotEqual(summary["per_symbol"][0]["observation_state"],
+                                    "NO_OBSERVED_LIQUIDATION")
+                self.assertEqual(summary["per_symbol"][0]["observation_state"],
+                                 execution._NO_OBSERVATION_STATES[source_kind])
 
     def test_period_resume_skips_valid_report_and_rejects_corruption(self):
         revision = "fixture-revision"

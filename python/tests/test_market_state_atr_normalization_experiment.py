@@ -18,7 +18,9 @@ from market_analysis.experiments.market_state_atr_normalization import (
     run_market_state_atr_normalization_suite,
     _validate_inputs,
 )
-from market_analysis.experiments.market_state_common import MarketStateExperimentPoint
+from market_analysis.experiments.market_state_common import (
+    MarketStateExperimentPoint, advance_canonical_branch,
+)
 from market_analysis.historical_atr_extension import (
     HistoricalATRExtensionPrepared, _candidate_output_sha256, _manifest,
     _atr_json_safe,
@@ -172,6 +174,19 @@ def _point(boundary=31 * MINUTE + 5_000):
     )
 
 
+def _canonical_branch(points):
+    classifier = MarketClassifierConfig()
+    lifecycle = MarketEpisodeLifecycleConfig()
+    result, previous = {}, None
+    for point in points:
+        branch = advance_canonical_branch(
+            point.movement_evaluation, point.source_time_evidence,
+            previous, classifier, lifecycle)
+        result[point.movement_evaluation.evaluation_boundary_time_ms] = branch
+        previous = branch[1].next_state
+    return result
+
+
 class ATRRangeEvidenceTests(unittest.TestCase):
     def test_complete_candidate_output_digest_is_stable_and_covers_breadth(self):
         first = _digest_result()
@@ -197,9 +212,16 @@ class ATRRangeEvidenceTests(unittest.TestCase):
             prepared = HistoricalATRExtensionPrepared(
                 archive, replay, points, request.partition_plan)
 
-            result, = run_market_state_atr_normalization_suite(
+            results = run_market_state_atr_normalization_suite(
+                points, archive.ohlc_evidence, replay.manifest)
+            cached_results = run_market_state_atr_normalization_suite(
                 points, archive.ohlc_evidence, replay.manifest,
-                configurations=(ATR_CONFIG_30M,))
+                canonical_branch_by_boundary=_canonical_branch(points))
+            self.assertEqual(len(results), len(cached_results))
+            for result, cached_result in zip(results, cached_results):
+                self.assertEqual(_atr_json_safe(result), _atr_json_safe(cached_result))
+            result = next(item for item in results
+                          if item.config.version == ATR_CONFIG_30M.version)
             self.assertIsInstance(result.paired_points[0].candidate_evaluation,
                                   MarketMovementEvaluation)
             self.assertEqual(tuple(result.paired_points[0].candidate_evaluation.windows),

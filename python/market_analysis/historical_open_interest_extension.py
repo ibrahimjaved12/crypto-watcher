@@ -279,7 +279,7 @@ def _partition_summaries(points, symbols):
         for minutes in OI_WINDOWS_MINUTES:
             rows = [row for p in selected for window in p.windows
                     if window["window_minutes"] == minutes for row in window["symbols"]]
-            ready = [r for r in rows if r["status"] in ("READY", "NO_OBSERVED_LIQUIDATION")]
+            ready = [r for r in rows if r["status"] == "READY"]
             per_symbol = []
             for symbol in symbols:
                 projected = [r for r in rows if r["symbol"] == symbol]
