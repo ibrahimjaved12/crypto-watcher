@@ -107,6 +107,7 @@ class FamilyEvaluationSpec:
     outcome_id: str
     outcome_kind: str | None
     candidate_features: tuple[FeatureSpec, ...]
+    expected_config_count: int
 
     def __post_init__(self):
         object.__setattr__(self, "candidate_features", tuple(self.candidate_features))
@@ -114,6 +115,12 @@ class FamilyEvaluationSpec:
             raise ValueError("candidate schema requires FeatureSpec values")
         if len({f.name for f in self.candidate_features}) != len(self.candidate_features):
             raise ValueError("duplicate candidate feature")
+        expected_count = (0 if self.family_id == "EXP-75-04A" else
+                          1 if self.family_id in (
+                              "EXP-75-09", "EXP-75-10", "EXP-75-11-OI", "EXP-75-11-FUNDING",
+                              "EXP-75-11-LIQUIDATION", "EXP-75-12") else 3)
+        if type(self.expected_config_count) is not int or self.expected_config_count != expected_count:
+            raise ValueError("configuration count differs from the frozen family cardinality")
         if self.causal_forward_test:
             if (self.observation_mode not in ("CONTINUOUS", "EVENT")
                     or type(self.horizon_minutes) is not int or self.horizon_minutes <= 0
@@ -177,7 +184,10 @@ FAMILY_EVALUATION_SPECS = tuple(FamilyEvaluationSpec(
     hypothesis.primary_horizon_minutes, hypothesis.primary_outcome_id,
     (None if not hypothesis.causal_forward_test else
      "BINARY" if hypothesis.primary_outcome_id in _BINARY_OUTCOMES else "CONTINUOUS"),
-    schema) for hypothesis, schema in zip(PRIMARY_HYPOTHESES, _CANDIDATE_SCHEMAS))
+    schema, 0 if not hypothesis.causal_forward_test else
+    1 if hypothesis.family_id in ("EXP-75-09", "EXP-75-10", "EXP-75-11-OI",
+                                  "EXP-75-11-FUNDING", "EXP-75-11-LIQUIDATION", "EXP-75-12") else 3)
+    for hypothesis, schema in zip(PRIMARY_HYPOTHESES, _CANDIDATE_SCHEMAS))
 if (len(FAMILY_EVALUATION_SPECS) != 16
         or tuple((s.family_id, s.causal_forward_test, s.horizon_minutes, s.outcome_id)
                  for s in FAMILY_EVALUATION_SPECS)

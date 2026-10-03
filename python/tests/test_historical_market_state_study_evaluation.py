@@ -42,19 +42,38 @@ def synthetic_event_day(index, config, empty=False):
     event = replace(row, family_id=spec.family_id, algorithm_version="synthetic-bocpd-v1",
                     observation_mode="EVENT", horizon_minutes=60, outcome_id="realized_volatility",
                     candidate_features=(0.1,), observation_key="event-" + config,
-                    decision_time_ms=row.decision_time_ms + (1_000 if config == "a" else 5_000))
+                    decision_time_ms=row.decision_time_ms + {"a": 1_000, "b": 5_000, "c": 9_000}[config])
     return AlignedStudyDay(index, source.utc_date, "development", spec.family_id, event.algorithm_version,
                            config, "EVENT", 60, "realized_volatility", "CONTINUOUS", None,
                            () if empty else (event,))
 
 
+def fixed_identities(identity=IDENTITY):
+    count = predictive_family(identity.family_id).expected_config_count
+    configs = (identity.config_version,) if count == 1 else ("config-a", "config-b", "config-c")
+    return tuple(replace(identity, config_version=config) for config in configs)
+
+
+def family_days(identity, days):
+    return tuple(replace(day, config_version=config.config_version, observations=tuple(
+        replace(row, config_version=config.config_version) for row in day.observations))
+        for config in fixed_identities(identity) for day in days)
+
+
+def evaluate_config_fixture(identity, days):
+    common = evaluation.common_development_samples(fixed_identities(identity), family_days(identity, days))
+    sample = next(s for s in common.samples if s.identity == identity)
+    return evaluation.evaluate_development_config(identity, sample.days, common.samples_sha256)
+
+
 @lru_cache(maxsize=1)
 def development_fixture():
     days = tuple(synthetic_day(index) for index in range(8))
-    result = evaluation.evaluate_development_config(IDENTITY, days)
-    nomination = evaluation.nominate_configuration((result,))
+    common, results, nomination = evaluation.evaluate_development_family(
+        fixed_identities(), family_days(IDENTITY, days))
+    result = next(r for r in results if r.identity == IDENTITY)
     pair = evaluation.fit_final_development_pair(nomination, days)
-    freeze = evaluation.DevelopmentFreeze("a" * 64, (result,), (nomination,), (pair,))
+    freeze = evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (pair,), (common,))
     return days, result, nomination, pair, freeze
 
 
@@ -66,7 +85,7 @@ class StudyEvaluationTests(unittest.TestCase):
         extreme = replace(row, baseline_features=row.baseline_features[:2] + (1e3,) + row.baseline_features[3:])
         days = (replace(first, observations=first.observations[:3] + (extreme,) + first.observations[4:]),) + days[1:]
         with patch.object(evaluation, "day_loss", wraps=evaluation.day_loss) as losses:
-            result = evaluation.evaluate_development_config(IDENTITY, days)
+            result = evaluate_config_fixture(IDENTITY, days)
         self.assertEqual(result.status, "EVALUABLE")
         self.assertEqual(len(result.folds), 8)
         self.assertEqual(len(losses.call_args_list), 16)
@@ -87,37 +106,42 @@ class StudyEvaluationTests(unittest.TestCase):
         a = tuple(synthetic_day(i, config="a") for i in range(8))
         b = tuple(replace(synthetic_day(i, config="b"), observations=synthetic_day(i, config="b").observations[8:])
                   for i in range(8))
-        identities = tuple(replace(IDENTITY, config_version=config) for config in ("a", "b"))
-        common = evaluation.common_development_samples(identities, a + b)
+        c = tuple(synthetic_day(i, config="c") for i in range(8))
+        identities = tuple(replace(IDENTITY, config_version=config) for config in ("a", "b", "c"))
+        common = evaluation.common_development_samples(identities, a + b + c)
         self.assertEqual(common.excluded_days, ())
-        self.assertEqual(tuple(len(s.days) for s in common.samples), (8, 8))
+        self.assertEqual(tuple(len(s.days) for s in common.samples), (8, 8, 8))
         for a_day, b_day in zip(common.samples[0].days, common.samples[1].days):
             self.assertEqual(tuple(r.observation_key for r in a_day.observations),
                              tuple(r.observation_key for r in b_day.observations))
             self.assertEqual(len(a_day.observations), 24)
+        self.assertEqual(tuple(d.observations for d in common.samples[0].days),
+                         tuple(tuple(replace(row, config_version="a") for row in d.observations)
+                               for d in common.samples[2].days))
         # Individually adequate disjoint populations must not nominate a winner.
         disjoint_a = tuple(replace(d, observations=d.observations[:16]) for d in a)
         disjoint_b = tuple(replace(synthetic_day(i, config="b"), observations=synthetic_day(i, config="b").observations[16:])
                            for i in range(8))
-        common, results, nomination = evaluation.evaluate_development_family(identities, disjoint_a + disjoint_b)
+        common, results, nomination = evaluation.evaluate_development_family(identities, disjoint_a + disjoint_b + c)
         self.assertTrue(all(not sample.days for sample in common.samples))
         self.assertTrue(all(r.status == "COVERAGE_LIMITED" and r.median_delta is None for r in results))
         self.assertEqual(nomination.status, "NOT_EVALUABLE")
 
     def test_common_keys_cannot_join_different_outcomes_or_baseline_contexts(self):
-        a, b = synthetic_day(0, config="a"), synthetic_day(0, config="b")
+        a, b, c = (synthetic_day(0, config=config) for config in ("a", "b", "c"))
         bad = replace(b.observations[0], outcome=99)
-        identities = tuple(replace(IDENTITY, config_version=config) for config in ("a", "b"))
+        identities = tuple(replace(IDENTITY, config_version=config) for config in ("a", "b", "c"))
         with self.assertRaisesRegex(ValueError, "different baseline/time/outcome"):
-            evaluation.common_development_samples(identities, (a, replace(b, observations=(bad,) + b.observations[1:])))
+            evaluation.common_development_samples(identities, (a, replace(b, observations=(bad,) + b.observations[1:]), c))
 
     def test_event_configs_share_days_and_keep_distinct_native_events(self):
         identities = tuple(evaluation.CandidateConfigIdentity("EXP-75-04B", "synthetic-bocpd-v1", config)
-                           for config in ("a", "b"))
+                           for config in ("a", "b", "c"))
         a = tuple(synthetic_event_day(i, "a") for i in range(10))
         b = tuple(synthetic_event_day(i, "b", empty=i == 2) for i in range(10))
-        common = evaluation.common_development_samples(identities, a + b)
-        self.assertEqual(tuple(len(s.days) for s in common.samples), (9, 9))
+        c = tuple(synthetic_event_day(i, "c") for i in range(10))
+        common = evaluation.common_development_samples(identities, a + b + c)
+        self.assertEqual(tuple(len(s.days) for s in common.samples), (9, 9, 9))
         self.assertEqual(common.excluded_days[0].study_period_index, 2)
         for a_day, b_day in zip(common.samples[0].days, common.samples[1].days):
             self.assertEqual(a_day.study_period_index, b_day.study_period_index)
@@ -141,12 +165,12 @@ class StudyEvaluationTests(unittest.TestCase):
 
     def test_development_rejects_other_phases_and_reports_fit_failure(self):
         with self.assertRaises(ValueError):
-            evaluation.evaluate_development_config(IDENTITY, (synthetic_day(10, "validation"),))
+            evaluation.evaluate_development_config(IDENTITY, (synthetic_day(10, "validation"),), "a" * 64)
         days = tuple(synthetic_day(i) for i in range(8))
         # Constant binary columns have no independent design support.
         unsupported = tuple(replace(day, observations=tuple(
             replace(row, baseline_features=(0.0,) * 15) for row in day.observations)) for day in days)
-        result = evaluation.evaluate_development_config(IDENTITY, unsupported)
+        result = evaluate_config_fixture(IDENTITY, unsupported)
         self.assertEqual(result.status, "FIT_FAILED")
         self.assertIsNone(result.median_delta)
         self.assertTrue(all(fold.day_result is None for fold in result.folds))
@@ -154,30 +178,31 @@ class StudyEvaluationTests(unittest.TestCase):
             evaluation.CandidateConfigIdentity("EXP-75-04A", "pelt", "config-a")
 
     def test_real_binary_lodo_uses_logistic_models_and_brier_loss(self):
-        identity = evaluation.CandidateConfigIdentity("EXP-75-05", "synthetic-regression-v1", "config-a")
+        identity = evaluation.CandidateConfigIdentity("EXP-75-11-OI", "synthetic-oi-v1", "config-a")
         days = []
         for index in range(8):
             source = synthetic_day(index)
             start = source.observations[0].decision_time_ms
             rows = tuple(replace(row, family_id=identity.family_id, algorithm_version=identity.algorithm_version,
-                                 horizon_minutes=5, outcome_id="persistence_weakening", outcome_kind="BINARY",
-                                 decision_time_ms=start + (2 * row_index + target) * 5 * 60_000,
+                                 horizon_minutes=15, outcome_id="v1_direction_persistence", outcome_kind="BINARY",
+                                 decision_time_ms=start + (2 * row_index + target) * 15 * 60_000,
                                  observation_key=f"{row_index:02}-{target}",
-                                 candidate_features=(row.candidate_features[0],), outcome=float(target))
+                                 candidate_features=row.candidate_features, outcome=float(target))
                          for row_index, row in enumerate(source.observations) for target in (0, 1))
             days.append(AlignedStudyDay(index, source.utc_date, "development", identity.family_id,
                                          identity.algorithm_version, identity.config_version, "CONTINUOUS",
-                                         5, "persistence_weakening", "BINARY", 64, rows))
-        result = evaluation.evaluate_development_config(identity, tuple(days))
+                                         15, "v1_direction_persistence", "BINARY", 64, rows))
+        common, results, nomination = evaluation.evaluate_development_family((identity,), tuple(days))
+        result = results[0]
         self.assertEqual(result.status, "EVALUABLE")
         self.assertEqual(result.median_delta, 0)
         self.assertTrue(all(f.day_result.baseline_loss == 0.25 and f.day_result.extended_loss == 0.25
                             for f in result.folds))
-        pair = evaluation.fit_final_development_pair(evaluation.nominate_configuration((result,)), tuple(days))
+        pair = evaluation.fit_final_development_pair(nomination, common.samples[0].days)
         self.assertIsInstance(pair.baseline_model, evaluation.FrozenLogisticModel)
         self.assertIsInstance(pair.extended_model, evaluation.FrozenLogisticModel)
 
-    def test_nomination_largest_raw_median_exact_tie_and_singleton(self):
+    def test_nomination_largest_raw_median_and_exact_tie_for_complete_family(self):
         _, result, nomination, _, _ = development_fixture()
         self.assertEqual(nomination.identity, IDENTITY)
 
@@ -186,12 +211,11 @@ class StudyEvaluationTests(unittest.TestCase):
                           baseline_loss=2 + score, extended_loss=2, delta=score)) for fold in result.folds)
             return replace(result, identity=replace(IDENTITY, config_version=config), folds=folds)
 
-        a, b = scored("a", 1.0), scored("b", 1.0)
-        self.assertEqual(evaluation.nominate_configuration((b, a)).identity.config_version, "a")
+        a, b, c = scored("a", 1.0), scored("b", 1.0), scored("c", 0.5)
+        self.assertEqual(evaluation.nominate_configuration((b, c, a)).identity.config_version, "a")
         slightly_better = scored("b", 1.0 + 1e-12)
-        self.assertEqual(evaluation.nominate_configuration((a, slightly_better)).identity.config_version, "b")
-        raw_winner = scored("c", 0.5)
-        self.assertEqual(evaluation.nominate_configuration((raw_winner, b)).identity.config_version, "b")
+        self.assertEqual(evaluation.nominate_configuration((a, c, slightly_better)).identity.config_version, "b")
+        self.assertEqual(evaluation.nominate_configuration((scored("a", 0.25), c, b)).identity.config_version, "b")
 
     def test_final_fit_binds_nominated_common_sample_and_only_development(self):
         days, _, nomination, pair, _ = development_fixture()
@@ -202,6 +226,106 @@ class StudyEvaluationTests(unittest.TestCase):
             evaluation.fit_final_development_pair(nomination, (replace(days[0], observations=days[0].observations[:-1]),) + days[1:])
         with self.assertRaises(ValueError):
             evaluation.fit_final_development_pair(nomination, tuple(synthetic_day(i, "validation") for i in range(10, 16)))
+
+    def test_complete_family_cardinality_and_algorithm_identity_fail_closed(self):
+        _, _, nomination, pair, development = development_fixture()
+        identities = fixed_identities()
+        results = development.config_results
+        common = development.common_samples[0]
+        self.assertEqual(len(common.samples), 3)
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(r.common_samples_sha256 == common.samples_sha256 for r in results))
+        self.assertEqual(nomination.common_samples_sha256, common.samples_sha256)
+        self.assertEqual(pair.common_samples_sha256, common.samples_sha256)
+        invalid_identities = (
+            identities[:-1], identities + (replace(IDENTITY, config_version="extra"),),
+            (identities[0], identities[0], identities[2]),
+            (identities[0], replace(identities[1], algorithm_version="other-algorithm"), identities[2]),
+            (identities[0], replace(identities[1], family_id="EXP-75-07"), identities[2]),
+        )
+        invalid_results = (
+            results[:-1], results + (replace(results[0], identity=replace(IDENTITY, config_version="extra")),),
+            (results[0], results[0], results[2]),
+            (results[0], replace(results[1], identity=replace(results[1].identity, algorithm_version="other-algorithm")), results[2]),
+            (results[0], replace(results[1], identity=replace(results[1].identity, family_id="EXP-75-07")), results[2]),
+        )
+        for configs, config_results in zip(invalid_identities, invalid_results):
+            with self.subTest(configs=configs):
+                with self.assertRaises(ValueError):
+                    evaluation.common_development_samples(configs, ())
+                with self.assertRaises(ValueError):
+                    evaluation.nominate_configuration(config_results)
+                with self.assertRaises(ValueError):
+                    replace(development, config_results=config_results)
+
+    def test_actual_singleton_uses_the_same_common_sample_chain(self):
+        identity = evaluation.CandidateConfigIdentity("EXP-75-10", "synthetic-mark-trade-v1", "only-config")
+        days = []
+        for index in range(8):
+            source = synthetic_day(index)
+            rows = tuple(replace(row, family_id=identity.family_id, algorithm_version=identity.algorithm_version,
+                                 config_version=identity.config_version, horizon_minutes=5,
+                                 candidate_features=(row.candidate_features[0],)) for row in source.observations)
+            days.append(AlignedStudyDay(index, source.utc_date, "development", identity.family_id,
+                                        identity.algorithm_version, identity.config_version, "CONTINUOUS",
+                                        5, "signed_market_return", "CONTINUOUS", 32, rows))
+        common, results, nomination = evaluation.evaluate_development_family((identity,), tuple(days))
+        self.assertEqual(results[0].status, "EVALUABLE")
+        self.assertEqual(nomination.identity, identity)
+        self.assertEqual(nomination.common_samples_sha256, common.samples_sha256)
+        self.assertEqual(results[0].common_samples_sha256, common.samples_sha256)
+        pair = evaluation.fit_final_development_pair(nomination, common.samples[0].days)
+        freeze = evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (pair,), (common,))
+        self.assertIsNone(freeze.hmm_cross_fit_sha256)
+        self.assertIsNone(freeze.hmm_final_model_sha256)
+        with self.assertRaises(ValueError):
+            evaluation.common_development_samples((identity, replace(identity, config_version="extra")), ())
+
+    def test_different_common_sample_shas_cannot_nominate_or_freeze_together(self):
+        _, _, _, _, development = development_fixture()
+        results = development.config_results
+        different = replace(results[1], common_samples_sha256="b" * 64)
+        mixed = (results[0], different, results[2])
+        with self.assertRaisesRegex(ValueError, "different family common-sample SHAs"):
+            evaluation.nominate_configuration(mixed)
+        with self.assertRaisesRegex(ValueError, "different family common-sample SHAs"):
+            replace(development, config_results=mixed)
+        # A uniform arbitrary SHA is also insufficient: freeze must bind the
+        # actual common-sample family object, not just matching result strings.
+        arbitrary = tuple(replace(result, common_samples_sha256="b" * 64) for result in results)
+        nomination = evaluation.nominate_configuration(arbitrary)
+        pair = replace(development.predictive_pairs[0], nomination_sha256=nomination.nomination_sha256,
+                       common_samples_sha256=nomination.common_samples_sha256)
+        with self.assertRaisesRegex(ValueError, "common-sample identity"):
+            replace(development, config_results=arbitrary, nominations=(nomination,), predictive_pairs=(pair,))
+        with self.assertRaises(ValueError):
+            replace(development, common_samples=())
+
+    def test_freeze_checks_per_config_rows_against_the_common_family_object(self):
+        _, _, _, _, development = development_fixture()
+        results = tuple(replace(result, development_sample_sha256="b" * 64)
+                        for result in development.config_results)
+        nomination = evaluation.nominate_configuration(results)
+        pair = replace(development.predictive_pairs[0], nomination_sha256=nomination.nomination_sha256,
+                       development_sample_sha256=nomination.development_sample_sha256)
+        with self.assertRaisesRegex(ValueError, "common-sample rows/coverage"):
+            replace(development, config_results=results, nominations=(nomination,), predictive_pairs=(pair,))
+
+    def test_hmm_identities_are_required_at_development_freeze(self):
+        identity = evaluation.CandidateConfigIdentity("EXP-75-09", "synthetic-hmm-v1", "only-config")
+        common, results, nomination = evaluation.evaluate_development_family((identity,), ())
+        for cross_fit, final_model in ((None, None), ("b" * 64, None), (None, "c" * 64),
+                                       ("invalid", "c" * 64)):
+            with self.subTest(cross_fit=cross_fit, final_model=final_model), self.assertRaises(ValueError):
+                evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (), (common,),
+                                             hmm_cross_fit_sha256=cross_fit, hmm_final_model_sha256=final_model)
+        freeze = evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (), (common,),
+                                               hmm_cross_fit_sha256="b" * 64, hmm_final_model_sha256="c" * 64)
+        self.assertEqual(freeze.hmm_cross_fit_sha256, "b" * 64)
+        self.assertEqual(freeze.hmm_final_model_sha256, "c" * 64)
+        non_hmm = development_fixture()[-1]
+        self.assertIsNone(non_hmm.hmm_cross_fit_sha256)
+        self.assertIsNone(non_hmm.hmm_final_model_sha256)
 
     def test_validation_predicts_without_fitting_and_cannot_reselect(self):
         _, _, _, pair, _ = development_fixture()

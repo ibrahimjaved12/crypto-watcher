@@ -43,6 +43,19 @@ def _day_identity(day):
     return CandidateConfigIdentity(day.family_id, day.algorithm_version, day.config_version)
 
 
+def _fixed_family_identities(identities):
+    identities = tuple(identities)
+    if (not identities or any(not isinstance(i, CandidateConfigIdentity) for i in identities)
+            or len({i.family_id for i in identities}) != 1
+            or len({i.config_version for i in identities}) != len(identities)
+            or len({i.algorithm_version for i in identities}) != 1):
+        raise ValueError("fixed family requires unique configs and one family/algorithm identity")
+    spec = predictive_family(identities[0].family_id)
+    if len(identities) != spec.expected_config_count:
+        raise ValueError("fixed config count differs from the frozen family cardinality")
+    return spec
+
+
 def _cohort(days, phase, identity=None):
     days = tuple(days)
     if phase not in dict(PHASE_DAY_COUNTS):
@@ -147,9 +160,8 @@ class CommonDevelopmentSamples:
     def __post_init__(self):
         object.__setattr__(self, "samples", tuple(self.samples))
         object.__setattr__(self, "excluded_days", tuple(self.excluded_days))
-        if (not self.samples or len({s.identity.config_version for s in self.samples}) != len(self.samples)
-                or len({s.identity.family_id for s in self.samples}) != 1
-                or self.version != "historical-market-state-common-development-samples-v1"):
+        _fixed_family_identities(s.identity for s in self.samples)
+        if self.version != "historical-market-state-common-development-samples-v1":
             raise ValueError("invalid fixed common-sample family")
         seal_hash(self, "samples_sha256")
 
@@ -157,9 +169,7 @@ class CommonDevelopmentSamples:
 def common_development_samples(fixed_configs, days) -> CommonDevelopmentSamples:
     """Continuous configs share exact rows; event configs share eligible days."""
     identities = tuple(sorted(fixed_configs, key=lambda identity: identity.config_version))
-    if (not identities or len({i.config_version for i in identities}) != len(identities)
-            or len({i.family_id for i in identities}) != 1):
-        raise ValueError("supply the complete unique fixed configuration family")
+    spec = _fixed_family_identities(identities)
     days = tuple(days)
     if any(_day_identity(day) not in identities or day.phase != "development" for day in days):
         raise ValueError("development common samples contain unregistered configs/other phases")
@@ -175,7 +185,6 @@ def common_development_samples(fixed_configs, days) -> CommonDevelopmentSamples:
         raise ValueError("too many distinct development study days")
     per_config = {identity: {d.study_period_index: d for d in grouped[identity]} for identity in identities}
     retained, excluded = {identity: [] for identity in identities}, []
-    spec = predictive_family(identities[0].family_id)
     for index in indices:
         available = [per_config[identity].get(index) for identity in identities]
         if len({day.utc_date for day in available if day is not None}) > 1:
@@ -267,6 +276,7 @@ class DevelopmentConfigResult:
     coverage: PhaseCoverage
     folds: tuple[DevelopmentFold, ...]
     development_sample_sha256: str
+    common_samples_sha256: str
     status: str
     reason: str
     plan_sha256: str = FROZEN_EVALUATION_PLAN.plan_sha256
@@ -277,6 +287,7 @@ class DevelopmentConfigResult:
     def __post_init__(self):
         object.__setattr__(self, "folds", tuple(self.folds))
         require_sha256(self.development_sample_sha256)
+        require_sha256(self.common_samples_sha256)
         if (self.coverage.phase != "development" or self.plan_sha256 != FROZEN_EVALUATION_PLAN.plan_sha256
                 or self.status not in ("EVALUABLE", "COVERAGE_LIMITED", "FIT_FAILED")
                 or self.version != "historical-market-state-development-config-result-v1"):
@@ -307,6 +318,7 @@ class DevelopmentConfigResult:
 class DevelopmentNomination:
     family_id: str
     development_result_refs: tuple[tuple[str, str], ...]
+    common_samples_sha256: str
     status: str
     reason: str
     identity: CandidateConfigIdentity | None = None
@@ -318,6 +330,7 @@ class DevelopmentNomination:
 
     def __post_init__(self):
         predictive_family(self.family_id)
+        require_sha256(self.common_samples_sha256)
         refs = tuple(sorted(tuple(pair) for pair in self.development_result_refs))
         object.__setattr__(self, "development_result_refs", refs)
         if (not refs or len({c for c, _ in refs}) != len(refs)
@@ -353,6 +366,7 @@ class FrozenPredictivePair:
     development_median: float
     nomination_sha256: str
     development_sample_sha256: str
+    common_samples_sha256: str
     plan_sha256: str = FROZEN_EVALUATION_PLAN.plan_sha256
     version: str = "historical-market-state-frozen-predictive-pair-v1"
     pair_sha256: str = field(init=False)
@@ -385,6 +399,7 @@ class FrozenPredictivePair:
         finite_number(self.development_median)
         require_sha256(self.nomination_sha256)
         require_sha256(self.development_sample_sha256)
+        require_sha256(self.common_samples_sha256)
         seal_hash(self, "pair_sha256")
 
 
@@ -418,13 +433,16 @@ def _score_day(day, baseline, candidate, baseline_model, extended_model):
                                baseline_loss, extended_loss, incremental_effect(baseline_loss, extended_loss))
 
 
-def evaluate_development_config(identity: CandidateConfigIdentity, days) -> DevelopmentConfigResult:
+def evaluate_development_config(identity: CandidateConfigIdentity, days,
+                                common_samples_sha256: str) -> DevelopmentConfigResult:
+    require_sha256(common_samples_sha256)
     days = _cohort(days, "development", identity)
     coverage = phase_coverage(days, "development")
     eligible = tuple(d for d in days if day_eligibility(d).status == "ELIGIBLE")
     sample_sha = scientific_sha256(eligible)
     if coverage.status != "ADEQUATE":
-        return DevelopmentConfigResult(identity, coverage, (), sample_sha, "COVERAGE_LIMITED", coverage.reason)
+        return DevelopmentConfigResult(identity, coverage, (), sample_sha, common_samples_sha256,
+                                       "COVERAGE_LIMITED", coverage.reason)
     folds = []
     for held_out in eligible:
         training = tuple(day for day in eligible if day.study_period_index != held_out.study_period_index)
@@ -438,31 +456,32 @@ def evaluate_development_config(identity: CandidateConfigIdentity, days) -> Deve
         except (StudyModelFitError, ValueError) as exc:
             folds.append(DevelopmentFold(held_out.study_period_index, training_indices, "FIT_FAILED", str(exc)))
     success = all(fold.status == "EVALUABLE" for fold in folds)
-    return DevelopmentConfigResult(identity, coverage, tuple(folds), sample_sha,
+    return DevelopmentConfigResult(identity, coverage, tuple(folds), sample_sha, common_samples_sha256,
                                    "EVALUABLE" if success else "FIT_FAILED",
                                    "ALL_LODO_FOLDS_SCORED" if success else "LODO_MODEL_NOT_FEASIBLE")
 
 
 def nominate_configuration(results) -> DevelopmentNomination:
     results = tuple(results)
-    if (not results or len({r.identity.family_id for r in results}) != 1
-            or len({r.identity.config_version for r in results}) != len(results)):
-        raise ValueError("nomination needs every unique fixed config result from one family")
+    _fixed_family_identities(r.identity for r in results)
+    if len({r.common_samples_sha256 for r in results}) != 1:
+        raise ValueError("config results bind different family common-sample SHAs")
     family = results[0].identity.family_id
-    predictive_family(family)
+    common_sha = results[0].common_samples_sha256
     refs = tuple((r.identity.config_version, r.result_sha256) for r in results)
     eligible = tuple(r for r in results if r.status == "EVALUABLE")
     if not eligible:
-        return DevelopmentNomination(family, refs, "NOT_EVALUABLE", "NO_FINITE_COMPLETE_LODO_CONFIG")
+        return DevelopmentNomination(family, refs, common_sha, "NOT_EVALUABLE", "NO_FINITE_COMPLETE_LODO_CONFIG")
     winner = min(eligible, key=lambda r: (-r.median_delta, r.identity.config_version))
-    return DevelopmentNomination(family, refs, "NOMINATED", "LARGEST_MEDIAN_RAW_DAY_DELTA",
+    return DevelopmentNomination(family, refs, common_sha, "NOMINATED", "LARGEST_MEDIAN_RAW_DAY_DELTA",
                                  winner.identity, winner.median_delta, winner.result_sha256,
                                  winner.development_sample_sha256)
 
 
 def evaluate_development_family(fixed_configs, days):
     samples = common_development_samples(fixed_configs, days)
-    results = tuple(evaluate_development_config(sample.identity, sample.days) for sample in samples.samples)
+    results = tuple(evaluate_development_config(sample.identity, sample.days, samples.samples_sha256)
+                    for sample in samples.samples)
     return samples, results, nominate_configuration(results)
 
 
@@ -481,7 +500,7 @@ def fit_final_development_pair(nomination: DevelopmentNomination, days) -> Froze
                                 tuple((d.study_period_index, d.utc_date) for d in eligible),
                                 baseline, candidate, baseline_model, extended_model,
                                 nomination.median_delta, nomination.nomination_sha256,
-                                nomination.development_sample_sha256)
+                                nomination.development_sample_sha256, nomination.common_samples_sha256)
 
 
 @dataclass(frozen=True)
@@ -490,6 +509,7 @@ class DevelopmentFreeze:
     config_results: tuple[DevelopmentConfigResult, ...]
     nominations: tuple[DevelopmentNomination, ...]
     predictive_pairs: tuple[FrozenPredictivePair, ...]
+    common_samples: tuple[CommonDevelopmentSamples, ...]
     plan: StudyEvaluationPlan = FROZEN_EVALUATION_PLAN
     layer_one_terciles: tuple[tuple[str, TercileSpec], ...] = ()
     hmm_cross_fit_sha256: str | None = None
@@ -501,7 +521,8 @@ class DevelopmentFreeze:
         require_sha256(self.study_manifest_sha256)
         for name, key in (("config_results", lambda r: (r.identity.family_id, r.identity.config_version)),
                           ("nominations", lambda n: n.family_id),
-                          ("predictive_pairs", lambda p: p.identity.family_id)):
+                          ("predictive_pairs", lambda p: p.identity.family_id),
+                          ("common_samples", lambda s: s.samples[0].identity.family_id)):
             values = tuple(sorted(getattr(self, name), key=key))
             if len({key(value) for value in values}) != len(values):
                 raise ValueError("duplicate development freeze member")
@@ -512,8 +533,13 @@ class DevelopmentFreeze:
                 or len({name for name, _ in terciles}) != len(terciles)
                 or self.version != "historical-market-state-development-freeze-v1"
                 or any(r.plan_sha256 != self.plan.plan_sha256 for r in self.config_results)
-                or {r.identity.family_id for r in self.config_results} != {n.family_id for n in self.nominations}):
+                or {r.identity.family_id for r in self.config_results} != {n.family_id for n in self.nominations}
+                or {r.identity.family_id for r in self.config_results}
+                != {s.samples[0].identity.family_id for s in self.common_samples}):
             raise ValueError("invalid development freeze plan/family membership")
+        if any(r.identity.family_id == "EXP-75-09" for r in self.config_results):
+            require_sha256(self.hmm_cross_fit_sha256)
+            require_sha256(self.hmm_final_model_sha256)
         for value in (self.hmm_cross_fit_sha256, self.hmm_final_model_sha256):
             if value is not None:
                 require_sha256(value)
@@ -526,6 +552,25 @@ class DevelopmentFreeze:
             results = tuple(r for r in self.config_results if r.identity.family_id == nomination.family_id)
             if nomination != nominate_configuration(results):
                 raise ValueError("freeze nomination differs from exact development nomination")
+            common = next(s for s in self.common_samples if s.samples[0].identity.family_id == nomination.family_id)
+            retained = common_development_samples(tuple(s.identity for s in common.samples),
+                                                  tuple(day for s in common.samples for day in s.days))
+            if retained.samples != common.samples:
+                raise ValueError("freeze common samples violate the family paired-row/day selection rules")
+            if nomination.common_samples_sha256 != common.samples_sha256:
+                raise ValueError("freeze common-sample identity differs from the family selection object")
+            if {r.identity for r in results} != {s.identity for s in common.samples}:
+                raise ValueError("freeze config identities differ from the common-sample family")
+            for result in results:
+                sample = next(s for s in common.samples if s.identity == result.identity)
+                if (result.common_samples_sha256 != common.samples_sha256
+                        or result.development_sample_sha256 != scientific_sha256(sample.days)
+                        or result.coverage != phase_coverage(sample.days, "development")):
+                    raise ValueError("freeze config result does not bind its common-sample rows/coverage")
+                if result.status == "EVALUABLE" and any(
+                    fold.day_result.observation_keys != tuple(sorted(row.observation_key for row in day.observations))
+                    for fold, day in zip(result.folds, sample.days)):
+                    raise ValueError("freeze LODO masks differ from the common-sample observations")
             if nomination.status != "NOMINATED":
                 continue
             expected_pairs.add(nomination.identity)
@@ -533,6 +578,7 @@ class DevelopmentFreeze:
             selected = next(r for r in results if r.result_sha256 == nomination.selected_result_sha256)
             if (pair is None or pair.nomination_sha256 != nomination.nomination_sha256
                     or pair.development_sample_sha256 != nomination.development_sample_sha256
+                    or pair.common_samples_sha256 != common.samples_sha256
                     or pair.development_median != nomination.median_delta
                     or tuple(p for p, _ in pair.training_periods)
                     != tuple(f.held_out_period for f in selected.folds)):

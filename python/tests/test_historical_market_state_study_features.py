@@ -82,6 +82,17 @@ class StudyFeatureTests(unittest.TestCase):
                                     for f in spec.candidate_features)
                                for spec in features.FAMILY_EVALUATION_SPECS), expected)
 
+    def test_frozen_configuration_cardinalities(self):
+        self.assertEqual(tuple(spec.expected_config_count for spec in features.FAMILY_EVALUATION_SPECS),
+                         (3, 3, 3, 0, 3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 1, 1))
+        self.assertEqual(features.FROZEN_EVALUATION_PLAN.families, features.FAMILY_EVALUATION_SPECS)
+        with self.assertRaises(ValueError):
+            replace(features.family_spec("EXP-75-03"), expected_config_count=2)
+        with self.assertRaises(ValueError):
+            replace(features.family_spec("EXP-75-09"), expected_config_count=3)
+        with self.assertRaises(ValueError):
+            replace(features.FROZEN_EVALUATION_PLAN, families=features.FAMILY_EVALUATION_SPECS[:-1])
+
     def test_strict_observation_dimensions_finiteness_and_binary_outcomes(self):
         for changes in ({"candidate_features": (1.0,)}, {"baseline_features": (0.0,)},
                         {"candidate_features": (float("nan"), 0.0)}, {"outcome": float("inf")},
