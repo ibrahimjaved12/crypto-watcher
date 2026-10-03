@@ -209,7 +209,9 @@ def run_test(args):
         exclusions = exclusion_records(adapted)
     report = ScientificTestReport(development.freeze_sha256, validation.freeze_sha256, supplied, upstream,
         results, core.study_primary_holm(supplied, results), development.config_results,
-        development.nominations, validation.decisions)
+        development.nominations, validation.decisions,
+        core.final_family_evidence_summaries(supplied, development.config_results,
+            development.nominations, validation.decisions, results))
     write_artifact(args.output, 'test', report,
         track_a=dev_metadata['track_a'] + val_metadata['track_a'] + test_track_a,
         layer_one=dev_metadata['layer_one'] + val_metadata['layer_one'] + descriptive,

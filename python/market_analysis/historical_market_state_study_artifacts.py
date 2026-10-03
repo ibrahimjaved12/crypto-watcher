@@ -52,6 +52,7 @@ class ScientificTestReport:
     development_results: tuple[e.DevelopmentConfigResult, ...]
     development_nominations: tuple[e.DevelopmentNomination, ...]
     validation_decisions: tuple[e.ValidationDecision, ...]
+    final_family_summaries: tuple[e.FinalFamilyEvidenceSummary, ...]
 
     def __post_init__(self):
         if (self.development_freeze_sha256 != self.authorization.development_freeze_sha256
@@ -88,6 +89,10 @@ class ScientificTestReport:
         if ({r.identity.family_id for r in self.development_results} != set(f.PRIMARY_CONFIRMATORY_FAMILY)
                 or len({r.identity for r in self.development_results}) != len(self.development_results)):
             raise ValueError('test report development result membership mismatch')
+        if self.final_family_summaries != e.final_family_evidence_summaries(
+                self.authorization, self.development_results, self.development_nominations,
+                self.validation_decisions, self.results):
+            raise ValueError('test report final classifications differ from the complete frozen evidence family')
 
 
 # Explicit closed schema registry. Artifact-controlled names never import code.
@@ -103,7 +108,7 @@ _TYPES = (
     e.DayPredictiveResult, e.DevelopmentFold, e.DevelopmentConfigResult,
     e.DevelopmentNomination, e.FrozenPredictivePair, e.LayerOneContinuousEvidence,
     e.FrozenLayerOneBins, e.DevelopmentFreeze, e.ValidationDecision, e.ValidationFreeze,
-    e.TestAuthorizationMember, e.TestAuthorizationFreeze, e.PrimaryTestResult,
+    e.TestAuthorizationMember, e.TestAuthorizationFreeze, e.PrimaryTestResult, e.FinalFamilyEvidenceSummary,
     s.BootstrapNamespace, s.DayBootstrapResult, s.DaySignTestResult, s.HolmMember,
     TrackAReference, ScientificTestReport,
 )

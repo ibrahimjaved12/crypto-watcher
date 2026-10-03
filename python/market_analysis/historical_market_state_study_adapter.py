@@ -149,7 +149,13 @@ def baseline_features(classification, timestamp):
     w = window(classification, 5)
     state = direction(w)
     pace = w.get('pace', {})
-    if not isinstance(pace, dict) or pace.get('available') is not True or pace.get('value') not in (
+    if not isinstance(pace, dict):
+        raise UnavailableObservation('V1 pace unavailable')
+    if state == 'NEUTRAL':
+        if (pace.get('available') is not False or 'value' not in pace or pace['value'] is not None
+                or pace.get('reason') != 'NO_BROAD_DIRECTION'):
+            raise UnavailableObservation('inconsistent NEUTRAL V1 pace')
+    elif pace.get('available') is not True or pace.get('value') not in (
             'ACCELERATING', 'DECELERATING', 'MIXED'):
         raise UnavailableObservation('V1 pace unavailable')
     breadth = w.get('breadth', {})

@@ -293,6 +293,19 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
             self.assertEqual(io.decode(io.encode(value)), value)
         self.assertEqual(len(development.layer_one_terciles), 1)
         self.assertEqual(len(development.predictive_pairs), 1)
+        pair = development.predictive_pairs[0]
+        self.assertIsInstance(pair.baseline_preprocessing, core.FrozenStandardizer)
+        self.assertIsInstance(pair.baseline_model, core.FrozenLinearModel)
+        references = cli.track_a_references(tuple(generated_report(i) for i in range(10)), development.upstream_provenance)
+        with TemporaryDirectory() as root:
+            path = Path(root) / 'nominated-development.json'
+            io.write_artifact(path, 'development', development, track_a=references)
+            restored, _ = io.read_artifact(path, 'development')
+        self.assertEqual(restored, development)
+        self.assertEqual(io.encode(restored), io.encode(development))
+        self.assertEqual(restored.freeze_sha256, development.freeze_sha256)
+        self.assertEqual(restored.predictive_pairs[0].pair_sha256, pair.pair_sha256)
+        self.assertEqual(restored.layer_one_terciles[0].binding_sha256, development.layer_one_terciles[0].binding_sha256)
 
     def test_authorized_test_opens_after_gate_and_only_scores_authorized_family(self):
         development = nominated_freeze()
@@ -329,6 +342,26 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
         self.assertEqual(result.upstream_provenance, upstream)
         self.assertEqual(len(result.holm), 15)
         self.assertEqual(io.decode(io.encode(result)), result)
+        self.assertEqual(len(result.final_family_summaries), 15)
+        authorized_summary = next(s for s in result.final_family_summaries if s.family_id == 'EXP-75-03')
+        self.assertEqual(authorized_summary.classification, result.results[0].classification)
+        self.assertEqual(authorized_summary.test_result_sha256, result.results[0].result_sha256)
+        with self.assertRaises(ValueError):
+            core.final_family_evidence_summaries(authorization, development.config_results,
+                development.nominations, validation.decisions, ())
+        with self.assertRaises(ValueError):
+            replace(result, final_family_summaries=tuple(
+                replace(s, test_result_sha256='0' * 64) if s.family_id == authorized_summary.family_id else s
+                for s in result.final_family_summaries))
+        track_a = cli.track_a_references(tuple(generated_report(i) for i in range(10)), development.upstream_provenance)
+        track_a += cli.track_a_references(tuple(generated_report(i) for i in range(10, 18)), validation.upstream_provenance)
+        track_a += cli.track_a_references(reports, upstream)
+        with TemporaryDirectory() as root:
+            path = Path(root) / 'authorized-test.json'
+            io.write_artifact(path, 'test', result, track_a=track_a)
+            restored, _ = io.read_artifact(path, 'test')
+            self.assertEqual(restored, result)
+            self.assertEqual(restored.final_family_summaries, result.final_family_summaries)
 
     def test_validation_veto_prevents_all_test_report_reads(self):
         development = nominated_freeze()
@@ -348,6 +381,74 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
         loader.assert_not_called()
         scorer.assert_not_called()
         self.assertEqual(report.results, ())
+        self.assertEqual(tuple(s.family_id for s in report.final_family_summaries), f.PRIMARY_CONFIRMATORY_FAMILY)
+        summary = next(s for s in report.final_family_summaries if s.family_id == 'EXP-75-03')
+        self.assertEqual(summary.classification, core.EvidenceClassification.UNSTABLE_ACROSS_PERIODS)
+        self.assertIsNone(summary.test_result_sha256)
+        references = cli.track_a_references(tuple(generated_report(i) for i in range(10)), development.upstream_provenance)
+        references += cli.track_a_references(tuple(generated_report(i) for i in range(10, 18)), validation.upstream_provenance)
+        with TemporaryDirectory() as root:
+            path = Path(root) / 'vetoed-test.json'
+            io.write_artifact(path, 'test', report, track_a=references)
+            self.assertEqual(io.read_artifact(path, 'test')[0], report)
+            for changes in ({'classification': core.EvidenceClassification.INCONCLUSIVE},
+                            {'nomination_sha256': '0' * 64},
+                            {'validation_decision_sha256': '0' * 64},
+                            {'test_result_sha256': '0' * 64},
+                            {'authorization_status': 'COVERAGE_LIMITED'}):
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    altered = replace(summary, **changes)
+                    replace(report, final_family_summaries=tuple(altered if s.family_id == summary.family_id else s
+                                                                for s in report.final_family_summaries))
+            for members in (report.final_family_summaries[:-1], report.final_family_summaries[::-1],
+                            report.final_family_summaries[:-1] + (report.final_family_summaries[0],)):
+                with self.assertRaises(ValueError):
+                    replace(report, final_family_summaries=members)
+            # Re-seal both the inner summary and outer envelope: deterministic
+            # report reconstruction must still reject an invented classification.
+            envelope = json.loads(path.read_text())
+            altered = replace(summary, classification=core.EvidenceClassification.INCONCLUSIVE)
+            entries = envelope['value']['fields']['final_family_summaries']['$tuple']
+            offset = f.PRIMARY_CONFIRMATORY_FAMILY.index(summary.family_id)
+            entries[offset] = io.encode(altered)
+            envelope.pop('artifact_sha256')
+            envelope['artifact_sha256'] = part_b._digest(envelope)
+            path.write_text(canonical_study_json(envelope))
+            with self.assertRaises(ValueError):
+                io.read_artifact(path, 'test')
+
+    def test_complete_summaries_validation_feasibility_and_nonpositive_development(self):
+        development = nominated_freeze()
+        validation, _ = nominated_validation(development, veto=True)
+        for status in ('COVERAGE_LIMITED', 'FIT_FAILED'):
+            if status == 'COVERAGE_LIMITED':
+                decision = core.evaluate_validation(development.predictive_pairs[0], (), validation.upstream_provenance, development)
+            else:
+                decision = replace(validation.decisions[0], status='FIT_FAILED', reason='SYNTHETIC_FIT_FAILURE', day_results=())
+            frozen = core.freeze_validation(development, (decision,), validation.upstream_provenance)
+            authorization = core.authorize_test(development, frozen)
+            summaries = core.final_family_evidence_summaries(authorization, development.config_results,
+                development.nominations, frozen.decisions, ())
+            self.assertEqual(len(summaries), 15)
+            self.assertTrue(all(s.classification == core.EvidenceClassification.COVERAGE_LIMITED for s in summaries))
+        # Explicit synthetic negative held-out losses, preserving all reference
+        # masks and recomputing nomination/pair hashes with the existing core.
+        results = tuple(replace(r, folds=tuple(replace(fold, day_result=replace(fold.day_result,
+            baseline_loss=fold.day_result.extended_loss, extended_loss=fold.day_result.baseline_loss,
+            delta=-fold.day_result.delta)) for fold in r.folds)) if r.identity.family_id == 'EXP-75-03' else r
+            for r in development.config_results)
+        nomination = core.nominate_configuration(tuple(r for r in results if r.identity.family_id == 'EXP-75-03'))
+        pair = replace(development.predictive_pairs[0], development_median=nomination.median_delta,
+                       nomination_sha256=nomination.nomination_sha256)
+        negative = replace(development, config_results=results, predictive_pairs=(pair,),
+            nominations=tuple(nomination if n.family_id == 'EXP-75-03' else n for n in development.nominations))
+        veto, _ = nominated_validation(negative, veto=True)
+        authorization = core.authorize_test(negative, veto)
+        summaries = core.final_family_evidence_summaries(authorization, negative.config_results,
+            negative.nominations, veto.decisions, ())
+        summary = next(s for s in summaries if s.family_id == 'EXP-75-03')
+        self.assertEqual(summary.classification, core.EvidenceClassification.INCONCLUSIVE)
+        self.assertIsNone(summary.test_result_sha256)
 
     def test_all_persisted_outcome_transforms_and_censoring(self):
         outcome = {'market_forward_return': -0.2, 'market_forward_realized_volatility': 0.3,
@@ -478,6 +579,28 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
             row['rvol'] = {'available': False}
         with self.assertRaises(adapter.UnavailableObservation):
             adapter.baseline_features(c, 0)
+
+    def test_structural_neutral_pace_retains_reference_rows_and_rejects_inconsistency(self):
+        c = classification()
+        primary = c['windows'][1][1]
+        primary.update(direction_state='NEUTRAL', pace={'available': False, 'value': None, 'reason': 'NO_BROAD_DIRECTION'})
+        vector = adapter.baseline_features(c, 0)
+        self.assertEqual(vector[:2], (0, 0))
+        self.assertEqual(vector[10:12], (0, 0))
+        report = generated_report()
+        report['candidate_evidence'][0]['native_evidence']['classification'] = c
+        self.assertEqual(len(adapt(seal(report)).day.observations), 1)
+        for pace in ({'available': False, 'value': None, 'reason': 'WARMING'},
+                     {'available': True, 'value': 'ACCELERATING', 'reason': None},
+                     {'available': True, 'value': 'MIXED', 'reason': None},
+                     {'available': False, 'value': 'ACCELERATING', 'reason': 'NO_BROAD_DIRECTION'},
+                     {'available': False, 'reason': 'NO_BROAD_DIRECTION'}):
+            primary['pace'] = pace
+            with self.subTest(pace=pace), self.assertRaises(adapter.UnavailableObservation):
+                adapter.baseline_features(c, 0)
+        for state in ('BROAD_RISE', 'BROAD_DROP'):
+            primary.update(direction_state=state, pace={'available': False, 'value': None, 'reason': 'WARMING'})
+            self.assertEqual(adapt(seal(report)).day.observations, ())
 
     def test_unavailable_baseline_candidate_and_outcome_exclude_both_models(self):
         for target in ('baseline', 'candidate', 'outcome'):
@@ -612,6 +735,9 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
             self.assertIsNone(report.upstream_provenance)
             self.assertEqual(len(report.holm), 15)
             self.assertTrue(all(m.raw_p == 1 for m in report.holm))
+            self.assertEqual(len(report.final_family_summaries), 15)
+            self.assertTrue(all(s.classification == core.EvidenceClassification.COVERAGE_LIMITED
+                                for s in report.final_family_summaries))
 
     def test_validation_no_reselection_or_refit(self):
         development = unavailable_freeze()
