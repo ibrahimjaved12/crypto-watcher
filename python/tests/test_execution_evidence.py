@@ -1,6 +1,7 @@
 """Focused deterministic #37 Part 2 fixtures; no source downloads or studies."""
 
 from dataclasses import FrozenInstanceError, fields, replace
+from contextlib import closing
 from datetime import date, datetime, timezone
 from decimal import Decimal, localcontext
 import hashlib
@@ -9,14 +10,17 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import weakref
 import zipfile
 
 from market_analysis import futures_execution as math
+from market_analysis import binance_execution_evidence as trade_evidence
+from market_analysis.canonical_identity import canonical_value
 from market_analysis.binance_historical_archive import daily_aggtrades_relative_path
 from market_analysis.binance_execution_evidence import (
-    ExactSettlementMark, ExecutionTrade, ExecutionTradeTape, FundingEvidence,
+    ExactSettlementMark, ExecutionTrade, ExecutionTradeTapeEvidence, FundingEvidence,
     FundingSettlementEvidence, adapt_funding_evidence, adapt_mark_risk_evidence,
-    join_settlement_mark, load_execution_mark_risk_evidence, load_execution_trade_tape,
+    iter_execution_trades, join_settlement_mark, load_execution_mark_risk_evidence, load_execution_trade_tape,
 )
 from market_analysis.binance_execution_snapshots import (
     normalize_bracket_snapshot, normalize_contract_snapshot, normalize_fee_snapshot,
@@ -149,27 +153,31 @@ class TradeEvidenceTests(unittest.TestCase):
             archive(Path(b), relative, rows)
             tape = load_execution_trade_tape(a, SYMBOL, [DAY])
             self.assertEqual(tape, load_execution_trade_tape(b, SYMBOL, [DAY]))
-            self.assertEqual([r.aggregate_trade_id for r in tape.rows], [10, 11])
-            self.assertEqual([r.aggressor_side for r in tape.rows], [OrderSide.BUY, OrderSide.SELL])
-            row = tape.rows[0]
+            streamed = list(iter_execution_trades(a, tape))
+            self.assertEqual([r.aggregate_trade_id for r in streamed], [10, 11])
+            self.assertEqual([r.aggressor_side for r in streamed], [OrderSide.BUY, OrderSide.SELL])
+            self.assertEqual((tape.row_count, tape.duplicate_count), (2, 1))
+            self.assertEqual((tape.first_event_key, tape.last_event_key), ((TIME, 10), (TIME, 11)))
+            row = streamed[0]
             self.assertEqual((row.first_trade_id, row.last_trade_id, row.buyer_is_maker), (100, 105, False))
             self.assertEqual((row.price, row.quantity), (D(100), D("2.5")))
             self.assertEqual(row.source_archive_relative_path, str(relative))
             self.assertEqual(row.source_archive_sha256, digest)
             self.assertEqual(row.available_at_ms, TIME)
+            self.assertEqual(row.timestamp_ms, TIME)
             self.assertIn("surrogate", row.availability_policy)
             self.assertNotIn(a, str(tape))
-            self.assertEqual(tape.identity, replace(tape, rows=tuple(reversed(tape.rows))).identity)
             with self.assertRaises(FrozenInstanceError):
                 row.quantity = D(9)
+            with self.assertRaises(FrozenInstanceError):
+                tape.row_count = 9
             revised_package = replace(row.package, archive_sha256="c" * 64)
-            revised = replace(tape, packages=(revised_package,), rows=tuple(
-                replace(r, package=revised_package) for r in tape.rows))
+            revised = replace(tape, packages=(revised_package,))
             self.assertNotEqual(tape.identity, revised.identity)
             with self.assertRaisesRegex(ValueError, "hash conflict"):
                 replace(tape, packages=tape.packages + (revised_package,))
-            with self.assertRaises(ValueError):
-                replace(tape, packages=(revised_package,))
+            with self.assertRaisesRegex(ValueError, "hash conflict"):
+                next(iter_execution_trades(a, revised))
 
     def test_reject_conflicting_duplicates_malformed_and_outside_day(self):
         invalid = [agg(price="NaN"), agg(price="Infinity"), agg(maker="1"), agg(timestamp=TIME + 86400000)]
@@ -185,7 +193,7 @@ class TradeEvidenceTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         load_execution_trade_tape(folder, SYMBOL, [DAY])
             archive(Path(folder), relative, [agg(), agg(price="101")])
-            with self.assertRaisesRegex(ValueError, "conflicting duplicate"):
+            with self.assertRaisesRegex(ValueError, "conflicting aggTrade ID"):
                 load_execution_trade_tape(folder, SYMBOL, [DAY])
 
     def test_checksum_and_direct_contract_validation(self):
@@ -193,7 +201,8 @@ class TradeEvidenceTests(unittest.TestCase):
             relative = daily_aggtrades_relative_path(SYMBOL, DAY)
             archive(Path(folder), relative, [agg()])
             tape = load_execution_trade_tape(folder, SYMBOL, [DAY])
-            row = tape.rows[0]
+            with closing(iter_execution_trades(folder, tape)) as stream:
+                row = next(stream)
             for changes in ({"instrument_id": "binance-usdm:ETHUSDT"}, {"buyer_is_maker": 1},
                             {"price": 100.0}, {"timestamp_ms": True}, {"first_trade_id": 106},
                             {"availability_policy": "historical-network-receipt"}):
@@ -209,11 +218,134 @@ class TradeEvidenceTests(unittest.TestCase):
             archive(Path(folder), daily_mark_price_relative_path(SYMBOL, DAY), [mark_row()])
             tape = load_execution_trade_tape(folder, SYMBOL, [DAY])
             risk = load_execution_mark_risk_evidence(folder, SYMBOL, TIME + 60000, TIME + 60000)
-            self.assertEqual(tape.rows[0].timestamp_ms, risk.minutes[0].candle.open_time_ms)
+            with closing(iter_execution_trades(folder, tape)) as stream:
+                row = next(stream)
+            self.assertEqual(row.timestamp_ms, risk.minutes[0].candle.open_time_ms)
             self.assertIn("no-cross-stream-order", tape.ordering_policy)
             self.assertIsNone(risk.minutes[0].exact_intraminute_timestamp_ms)
             names = {f.name for f in fields(ExecutionTrade)}
             self.assertFalse(names & {"fill_quantity", "queue_position", "stream_sequence", "individual_trades"})
+
+    def test_source_order_and_decimal_spelling_do_not_change_canonical_stream(self):
+        with tempfile.TemporaryDirectory() as folder:
+            relative = daily_aggtrades_relative_path(SYMBOL, DAY)
+            rows = [agg(100, timestamp=TIME + 1), agg(20), agg(9), agg(2, timestamp=TIME + 2)]
+            archive(Path(folder), relative, rows + [agg(9, price="100.00")])
+            a = load_execution_trade_tape(folder, SYMBOL, [DAY])
+            a_rows = [(r.timestamp_ms, r.aggregate_trade_id) for r in iter_execution_trades(folder, a)]
+            archive(Path(folder), relative, [agg(9, price="100.00")] + list(reversed(rows)))
+            b = load_execution_trade_tape(folder, SYMBOL, [DAY])
+            b_rows = [(r.timestamp_ms, r.aggregate_trade_id) for r in iter_execution_trades(folder, b)]
+            self.assertEqual(a_rows, [(TIME, 9), (TIME, 20), (TIME + 1, 100), (TIME + 2, 2)])
+            self.assertEqual(a_rows, b_rows)
+            self.assertEqual(a.normalized_rows_sha256, b.normalized_rows_sha256)
+            self.assertEqual((a.row_count, a.duplicate_count), (b.row_count, b.duplicate_count))
+            self.assertNotEqual(a.identity, b.identity)  # Raw source byte order is still hash-bound.
+            with self.assertRaisesRegex(ValueError, "hash conflict"):
+                next(iter_execution_trades(folder, a))
+            archive(Path(folder), relative, rows[:-1] + [agg(2, timestamp=TIME + 2, price="101")])
+            changed = load_execution_trade_tape(folder, SYMBOL, [DAY])
+            self.assertNotEqual(b.normalized_rows_sha256, changed.normalized_rows_sha256)
+            self.assertNotEqual(b.identity, changed.identity)
+
+    def test_manifest_and_top_level_identity_never_embed_or_load_trade_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            archive(Path(folder), daily_aggtrades_relative_path(SYMBOL, DAY), [agg(10), agg(11)])
+            tape = load_execution_trade_tape(folder, SYMBOL, [DAY])
+            self.assertIsInstance(tape, ExecutionTradeTapeEvidence)
+            self.assertNotIn("rows", {f.name for f in fields(ExecutionTradeTapeEvidence)})
+            self.assertFalse(hasattr(tape, "rows"))
+            self.assertNotIn("rows", canonical_value(tape))
+            with patch.object(trade_evidence, "_ExecutionTradeIndex", side_effect=AssertionError("index opened")), \
+                    patch.object(trade_evidence, "_iter_archive_rows", side_effect=AssertionError("rows loaded")):
+                identity = tape.identity
+                top = execution_evidence_snapshot(SCOPE, aggtrades=tape)
+                ref = next(r for r in top.components if r.component == "aggtrades")
+                self.assertEqual(ref.evidence_identity, identity)
+                self.assertEqual(len(top.identity), 64)
+                self.assertEqual(top.identity, execution_evidence_snapshot(SCOPE, aggtrades=tape).identity)
+                self.assertNotIn("price", json.dumps(canonical_value(tape)))
+
+    def test_synthetic_iteration_keeps_only_bounded_live_rows_and_cleans_temp_disk(self):
+        with tempfile.TemporaryDirectory() as folder:
+            archive(Path(folder), daily_aggtrades_relative_path(SYMBOL, DAY),
+                    [agg(i) for i in range(128, 0, -1)])
+            live, peak, temporary_paths = weakref.WeakSet(), [0], []
+            real_index = trade_evidence._ExecutionTradeIndex
+            test = self
+            class ObservedIndex(real_index):
+                def __enter__(self):
+                    super().__enter__()
+                    test.assertEqual(self._connection.execute("PRAGMA cache_size").fetchone(), (-8192,))
+                    test.assertEqual(self._connection.execute("PRAGMA temp_store").fetchone(), (1,))
+                    temporary_paths.append(Path(self._temporary.name))
+                    return self
+            def tracked_trade(*args, **kwargs):
+                row = ExecutionTrade(*args, **kwargs)
+                live.add(row)
+                peak[0] = max(peak[0], len(live))
+                return row
+            # Plain factory replacement avoids mocks retaining all constructor arguments.
+            with patch.object(trade_evidence, "ExecutionTrade", new=tracked_trade), \
+                    patch.object(trade_evidence, "_ExecutionTradeIndex", new=ObservedIndex):
+                tape = load_execution_trade_tape(folder, SYMBOL, [DAY])
+                self.assertEqual(tape.row_count, 128)
+                self.assertEqual(len(live), 0)
+                self.assertFalse(temporary_paths[-1].exists())
+                count = 0
+                for row in iter_execution_trades(folder, tape):
+                    count += 1
+                    self.assertEqual(row.aggregate_trade_id, count)
+                del row
+                self.assertEqual(count, 128)
+                self.assertEqual(len(live), 0)
+                self.assertLessEqual(peak[0], 3)
+                self.assertFalse(temporary_paths[-1].exists())
+                stream = iter_execution_trades(folder, tape)
+                first = next(stream)
+                self.assertTrue(temporary_paths[-1].exists())
+                stream.close()
+                self.assertFalse(temporary_paths[-1].exists())
+                del first
+                self.assertEqual(len(live), 0)
+
+    def test_iterator_verifies_manifest_before_yield_and_rejects_changed_metadata(self):
+        with tempfile.TemporaryDirectory() as folder:
+            archive(Path(folder), daily_aggtrades_relative_path(SYMBOL, DAY), [agg(10), agg(11)])
+            tape = load_execution_trade_tape(folder, SYMBOL, [DAY])
+            for changes in ({"row_count": 3}, {"duplicate_count": 1},
+                            {"normalized_rows_sha256": "c" * 64}, {"last_event_key": (TIME, 12)}):
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "manifest/content identity mismatch"):
+                    next(iter_execution_trades(folder, replace(tape, **changes)))
+            for changes in ({"ordering_policy": "ZIP-order"}, {"parser_version": "unknown"},
+                            {"tape_version": "unknown"}, {"row_count": True}, {"duplicate_count": -1},
+                            {"packages": ()}, {"instrument_id": "binance-usdm:ETHUSDT"}):
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    replace(tape, **changes)
+
+    def test_empty_and_multiple_packages_selection_and_big_integer_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            first_path = daily_aggtrades_relative_path(SYMBOL, DAY)
+            archive(Path(folder), first_path, [["agg_trade_id", "price", "quantity", "first_trade_id",
+                                              "last_trade_id", "transact_time", "is_buyer_maker"]])
+            empty = load_execution_trade_tape(folder, SYMBOL, [DAY])
+            self.assertEqual((empty.row_count, empty.duplicate_count, empty.first_event_key, empty.last_event_key), (0, 0, None, None))
+            self.assertEqual(list(iter_execution_trades(folder, empty)), [])
+            ref = next(r for r in execution_evidence_snapshot(SCOPE, aggtrades=empty).components if r.component == "aggtrades")
+            self.assertIn("TRADE_ROWS_UNAVAILABLE", ref.limitations)
+            next_day = date(2026, 8, 21)
+            huge = 10 ** 30
+            archive(Path(folder), first_path, [agg(huge + 10), agg(huge + 2), agg(9)])
+            archive(Path(folder), daily_aggtrades_relative_path(SYMBOL, next_day), [agg(1, timestamp=TIME + 86400000)])
+            tape = load_execution_trade_tape(folder, SYMBOL, [next_day, DAY, DAY])
+            self.assertEqual(tape.identity, load_execution_trade_tape(folder, SYMBOL, [DAY, next_day]).identity)
+            self.assertEqual(tape.identity, replace(tape, packages=tuple(reversed(tape.packages))).identity)
+            self.assertEqual([r.aggregate_trade_id for r in iter_execution_trades(folder, tape)], [9, huge + 2, huge + 10, 1])
+            self.assertNotEqual(tape.identity, load_execution_trade_tape(folder, SYMBOL, [DAY]).identity)
+            # A conflicting aggregate ID across days is also caught by the shared disk index.
+            archive(Path(folder), daily_aggtrades_relative_path(SYMBOL, next_day), [agg(9, timestamp=TIME + 86400000)])
+            with self.assertRaisesRegex(ValueError, "conflicting aggTrade ID"):
+                load_execution_trade_tape(folder, SYMBOL, [DAY, next_day])
 
 
 class FundingEvidenceTests(unittest.TestCase):

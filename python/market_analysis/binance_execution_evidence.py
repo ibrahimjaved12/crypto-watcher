@@ -7,12 +7,15 @@ Archive timestamps describe exchange events/completion, not network observation.
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
+import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import sqlite3
 
 from .binance_historical_archive import (
     ARCHIVE_FIRST_SEEN_POLICY, BINANCE_ARCHIVE_ADAPTER_VERSION,
-    _AGG_HEADER, _agg_row, _checksum, _iter_archive_rows, _utc_date,
+    _AGG_HEADER, _AggTradeDuplicateIndex, _agg_row, _checksum, _decimal_identity,
+    _iter_archive_rows, _utc_date,
     daily_aggtrades_relative_path,
 )
 from .canonical_identity import canonical_digest
@@ -105,18 +108,33 @@ class ExecutionTrade(EvidenceIdentity):
         return self.package.archive_sha256
 
 
+EXECUTION_TAPE_VERSION = "binance-usdm-execution-trade-tape-v2:disk-canonical"
+TRADE_ORDERING_POLICY = "single-symbol:exchange-timestamp-then-aggregate-id:no-cross-stream-order-v1"
+TRADE_DUPLICATE_POLICY = "same-aggregate-id-equal-facts-collapse-v1"
+_STREAM_DIGEST_PREFIX = b"binance-usdm-execution-normalized-row-stream-v1\n"
+
+
 @dataclass(frozen=True)
-class ExecutionTradeTape(EvidenceIdentity):
+class ExecutionTradeTapeEvidence(EvidenceIdentity):
+    """Small immutable manifest. Rows and temporary iteration state live elsewhere."""
+
     symbol: str
     instrument_id: str
     packages: tuple[TradeArchivePackage, ...]
-    rows: tuple[ExecutionTrade, ...]
-    ordering_policy: str = "single-symbol:exchange-timestamp-then-aggregate-id:no-cross-stream-order-v1"
+    row_count: int
+    duplicate_count: int
+    first_event_key: tuple[int, int] | None
+    last_event_key: tuple[int, int] | None
+    normalized_rows_sha256: str
+    tape_version: str = EXECUTION_TAPE_VERSION
+    parser_version: str = BINANCE_ARCHIVE_ADAPTER_VERSION
+    ordering_policy: str = TRADE_ORDERING_POLICY
+    duplicate_policy: str = TRADE_DUPLICATE_POLICY
 
     def __post_init__(self):
         instrument(self.symbol, self.instrument_id)
-        if not isinstance(self.packages, tuple) or not isinstance(self.rows, tuple):
-            raise ValueError("immutable package/row tuples required")
+        if not isinstance(self.packages, tuple) or not self.packages:
+            raise ValueError("nonempty immutable package tuple required")
         packages = {}
         for package in self.packages:
             if (not isinstance(package, TradeArchivePackage)
@@ -126,42 +144,160 @@ class ExecutionTradeTape(EvidenceIdentity):
             if prior is not None and prior != package:
                 raise ValueError("source/package hash conflict")
             packages[package.relative_path] = package
-        rows = {}
-        for row in self.rows:
-            if (not isinstance(row, ExecutionTrade) or row.instrument_id != self.instrument_id
-                    or packages.get(row.package.relative_path) != row.package):
-                raise ValueError("trade must bind tape's verified package")
-            prior = rows.get(row.aggregate_trade_id)
-            if prior is not None and prior != row:
-                raise ValueError("conflicting duplicate aggregate_trade_id")
-            rows[row.aggregate_trade_id] = row
-        if self.ordering_policy != type(self).__dataclass_fields__["ordering_policy"].default:
-            raise ValueError("unsupported tape ordering policy")
+        for count in (self.row_count, self.duplicate_count):
+            timestamp(count)
+        sha256(self.normalized_rows_sha256)
+        for key in (self.first_event_key, self.last_event_key):
+            if key is not None:
+                if not isinstance(key, tuple) or len(key) != 2:
+                    raise ValueError("canonical event key must be (timestamp_ms, aggregate_trade_id)")
+                for value in key:
+                    timestamp(value)
+                if _utc_date(key[0]).isoformat() not in {p.utc_day for p in packages.values()}:
+                    raise ValueError("event key outside selected archive UTC days")
+        if self.row_count == 0:
+            if (self.first_event_key is not None or self.last_event_key is not None
+                    or self.duplicate_count or self.normalized_rows_sha256 != hashlib.sha256(_STREAM_DIGEST_PREFIX).hexdigest()):
+                raise ValueError("empty tape metadata mismatch")
+        elif (self.first_event_key is None or self.last_event_key is None
+              or self.first_event_key > self.last_event_key
+              or (self.first_event_key == self.last_event_key) != (self.row_count == 1)):
+            raise ValueError("nonempty tape event-key bounds mismatch")
+        if ((self.tape_version, self.parser_version, self.ordering_policy, self.duplicate_policy)
+                != (EXECUTION_TAPE_VERSION, BINANCE_ARCHIVE_ADAPTER_VERSION,
+                    TRADE_ORDERING_POLICY, TRADE_DUPLICATE_POLICY)):
+            raise ValueError("unsupported tape/parser/ordering/duplicate policy")
         object.__setattr__(self, "packages", tuple(sorted(packages.values(), key=lambda p: p.relative_path)))
-        object.__setattr__(self, "rows", tuple(sorted(rows.values(), key=lambda r: (r.timestamp_ms, r.aggregate_trade_id))))
+
+
+class _ExecutionTradeIndex(_AggTradeDuplicateIndex):
+    """Extend the existing temporary, bounded-cache duplicate index with row order.
+
+    SQLite's on-disk primary key supplies numeric ordering even for aggregate IDs
+    larger than signed 64-bit integers. No SELECT is fetched as a complete list.
+    """
+
+    def __enter__(self):
+        super().__enter__()
+        try:
+            self._connection.execute(
+                "CREATE TABLE execution_trade_order ("
+                "timestamp_ms INTEGER NOT NULL, id_length INTEGER NOT NULL, "
+                "aggregate_trade_id TEXT NOT NULL, package_offset INTEGER NOT NULL, "
+                "price TEXT NOT NULL, quantity TEXT NOT NULL, first_trade_id TEXT NOT NULL, "
+                "last_trade_id TEXT NOT NULL, buyer_is_maker INTEGER NOT NULL, "
+                "PRIMARY KEY (timestamp_ms, id_length, aggregate_trade_id)) WITHOUT ROWID")
+        except sqlite3.Error as exc:
+            self.__exit__(None, None, None)
+            raise ValueError("unable to prepare bounded execution trade index") from exc
+        self.duplicate_count = 0
+        return self
+
+    def add_execution(self, symbol, row, package_offset):
+        # Keep the archive's exact duplicate semantics, including Decimal equality.
+        super().add(symbol, row)
+        aggregate_id = str(row.aggregate_trade_id)
+        try:
+            result = self._connection.execute(
+                "INSERT OR IGNORE INTO execution_trade_order VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (row.timestamp_ms, len(aggregate_id), aggregate_id, package_offset,
+                 str(row.price), str(row.quantity), str(row.first_trade_id), str(row.last_trade_id),
+                 int(row.buyer_is_maker)))
+        except sqlite3.Error as exc:
+            raise ValueError("unable to index execution trade order") from exc
+        if result.rowcount == 0:
+            self.duplicate_count += 1
+
+    def trades(self, packages):
+        try:
+            cursor = self._connection.execute(
+                "SELECT timestamp_ms, aggregate_trade_id, package_offset, price, quantity, "
+                "first_trade_id, last_trade_id, buyer_is_maker FROM execution_trade_order "
+                "ORDER BY timestamp_ms, id_length, aggregate_trade_id")
+            try:
+                for time_ms, aggregate_id, offset, price, quantity, first_id, last_id, maker in cursor:
+                    package = packages[offset]
+                    yield ExecutionTrade(package.symbol, package.instrument_id, int(aggregate_id),
+                                         int(first_id), int(last_id), time_ms, Decimal(price),
+                                         Decimal(quantity), bool(maker), package, time_ms)
+            finally:
+                cursor.close()
+        except sqlite3.Error as exc:
+            raise ValueError("unable to stream canonical execution trades") from exc
+
+
+def _index_trade_package(root, package, offset, index, *, verify_before=True):
+    relative = PurePosixPath(package.relative_path)
+    day = date.fromisoformat(package.utc_day)
+    if verify_before and _checksum(root, relative, package.symbol, "aggTrades", day) != package.archive_sha256:
+        raise ValueError("source/package hash conflict before read")
+    for row in _iter_archive_rows(root, relative, _AGG_HEADER, _agg_row, day):
+        index.add_execution(package.symbol, row, offset)
+    if _checksum(root, relative, package.symbol, "aggTrades", day) != package.archive_sha256:
+        raise ValueError("source/package hash conflict during read")
+    index.commit()
+
+
+def _trade_manifest(symbol, packages, index):
+    digest = hashlib.sha256(_STREAM_DIGEST_PREFIX)
+    count, first, last = 0, None, None
+    for row in index.trades(packages):
+        key = (row.timestamp_ms, row.aggregate_trade_id)
+        if first is None:
+            first = key
+        last = key
+        count += 1
+        # Fixed-size per-row hashes avoid giant canonical lists/strings. Normalize
+        # Decimal spelling exactly, retaining the archive's duplicate semantics.
+        payload = (row.symbol, row.instrument_id, row.aggregate_trade_id,
+                   row.first_trade_id, row.last_trade_id, row.timestamp_ms,
+                   _decimal_identity(row.price), _decimal_identity(row.quantity),
+                   row.buyer_is_maker, row.package.relative_path,
+                   row.available_at_ms, row.availability_policy)
+        digest.update(canonical_digest(payload).encode("ascii"))
+        digest.update(b"\n")
+    return ExecutionTradeTapeEvidence(symbol, f"binance-usdm:{symbol}", tuple(packages), count,
+                                      index.duplicate_count, first, last, digest.hexdigest())
 
 
 def load_execution_trade_tape(archive_root, symbol, utc_days):
-    """Read local checksum-verified packages with the original aggTrade parser."""
+    """Verify local archives into a small manifest using bounded temporary disk.
+
+    Memory scales with selected package metadata, not the aggTrade population.
+    """
     instrument(symbol, f"binance-usdm:{symbol}")
     days = tuple(utc_days)
     if not days or any(type(day) is not date for day in days):
         raise ValueError("explicit archive UTC days required")
     root = Path(archive_root).expanduser().resolve()
-    packages, trades = [], []
-    for day in sorted(set(days)):
-        relative = daily_aggtrades_relative_path(symbol, day)
-        digest = _checksum(root, relative, symbol, "aggTrades", day)
-        package = TradeArchivePackage(symbol, f"binance-usdm:{symbol}", day.isoformat(), str(relative), digest)
-        packages.append(package)
-        for row in _iter_archive_rows(root, relative, _AGG_HEADER, _agg_row, day):
-            trades.append(ExecutionTrade(symbol, package.instrument_id, row.aggregate_trade_id,
-                                         row.first_trade_id, row.last_trade_id, row.timestamp_ms,
-                                         row.price, row.quantity, row.buyer_is_maker, package,
-                                         row.timestamp_ms))
-        if _checksum(root, relative, symbol, "aggTrades", day) != digest:
-            raise ValueError("source/package hash conflict during read")
-    return ExecutionTradeTape(symbol, f"binance-usdm:{symbol}", tuple(packages), tuple(trades))
+    packages = []
+    with _ExecutionTradeIndex() as index:
+        for day in sorted(set(days)):
+            relative = daily_aggtrades_relative_path(symbol, day)
+            digest = _checksum(root, relative, symbol, "aggTrades", day)
+            package = TradeArchivePackage(symbol, f"binance-usdm:{symbol}", day.isoformat(), str(relative), digest)
+            _index_trade_package(root, package, len(packages), index, verify_before=False)
+            packages.append(package)
+        return _trade_manifest(symbol, packages, index)
+
+
+def iter_execution_trades(archive_root, evidence):
+    """Yield canonically ordered immutable rows bound to the supplied manifest.
+
+    Verify packages and recomputed metadata/digest before the first yield. This
+    rebuilds a temporary on-disk index; it adds no persistent evidence state.
+    Exhaust or explicitly close the generator (e.g. contextlib.closing) to clean
+    up temporary disk when stopping early. No acquisition or event resolution.
+    """
+    if not isinstance(evidence, ExecutionTradeTapeEvidence):
+        raise ValueError("immutable execution tape manifest required")
+    root = Path(archive_root).expanduser().resolve()
+    with _ExecutionTradeIndex() as index:
+        for offset, package in enumerate(evidence.packages):
+            _index_trade_package(root, package, offset, index)
+        if _trade_manifest(evidence.symbol, evidence.packages, index) != evidence:
+            raise ValueError("execution tape manifest/content identity mismatch")
+        yield from index.trades(evidence.packages)
 
 
 @dataclass(frozen=True)

@@ -206,6 +206,18 @@ existing V1/research calculations remain separate.
   IDs do not expand an aggregate into individual trades. AggTrades do not prove
   passive fill allocation or queue position. Timestamp/ID sorting applies only
   within the tape and does not prove chronology across streams.
+  `load_execution_trade_tape()` returns an immutable `ExecutionTradeTapeEvidence`
+  manifest containing ordered package identities, parser/tape/ordering/duplicate
+  policies, unique and duplicate counts, first/last event keys and an incremental
+  normalized-row digest. It stores no rows, absolute paths or iteration state.
+  Verification extends the existing temporary SQLite duplicate index with an
+  on-disk canonical-order index; memory scales with package metadata and a bounded
+  page cache, rather than trade count. Tape identity hashes only manifest metadata,
+  including raw package SHAs and the stream digest; the top-level snapshot references
+  that small identity. `iter_execution_trades(root, manifest)` verifies packages and
+  recomputed manifest identity before yielding immutable `ExecutionTrade` rows in
+  `(timestamp_ms, aggregate_trade_id)` order. Its temporary index is removed on
+  exhaustion or explicit iterator close; use `contextlib.closing` when stopping early.
 - **Bounded-resolution evidence:** the existing mark-price loader supplies
   `ONE_MINUTE_OHLC` risk envelopes and completion availability policy. Package SHA
   and existing mark-evidence SHA remain bound. Exact intraminute mark and crossing

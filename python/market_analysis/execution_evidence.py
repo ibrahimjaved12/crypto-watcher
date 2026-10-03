@@ -199,10 +199,10 @@ def execution_evidence_snapshot(execution_scope, *, contract_rules=None, bracket
                                 fees=None, aggtrades=None, mark_price=None, funding=None):
     """Bind typed component identities; omitted components remain explicitly missing."""
     # Local imports avoid coupling the neutral identity contracts to archive I/O.
-    from .binance_execution_evidence import ExecutionTradeTape, MarkRiskEvidence, FundingEvidence
+    from .binance_execution_evidence import ExecutionTradeTapeEvidence, MarkRiskEvidence, FundingEvidence
     from .binance_execution_snapshots import ContractRuleSnapshot, BracketSnapshot, FeeSnapshot
     values = (contract_rules, brackets, fees, aggtrades, mark_price, funding)
-    kinds = (ContractRuleSnapshot, BracketSnapshot, FeeSnapshot, ExecutionTradeTape,
+    kinds = (ContractRuleSnapshot, BracketSnapshot, FeeSnapshot, ExecutionTradeTapeEvidence,
              MarkRiskEvidence, FundingEvidence)
     scope(execution_scope)
     references = []
@@ -223,7 +223,7 @@ def execution_evidence_snapshot(execution_scope, *, contract_rules=None, bracket
                     limitations += ("MARK_MINUTES_UNAVAILABLE",)
             if component == "aggtrades":
                 limitations = ("NO_PASSIVE_FILL_ALLOCATION", "NO_CROSS_STREAM_CHRONOLOGY")
-                if not value.rows:
+                if not value.row_count:
                     limitations += ("TRADE_ROWS_UNAVAILABLE",)
             if component == "funding":
                 limitations = tuple(f"UNAVAILABLE_FUNDING_MARK:{e.event_identity}"
