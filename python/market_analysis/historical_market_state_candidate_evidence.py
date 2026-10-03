@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import Any, Iterable
 
-from .historical_experiment_batch import report_json_safe
+from .historical_market_state_study_json import study_json_safe as report_json_safe
 from .experiments.market_state_common import validate_experiment_points
 
 

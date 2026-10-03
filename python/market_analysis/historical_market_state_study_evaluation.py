@@ -1300,3 +1300,113 @@ def study_primary_holm(authorization: TestAuthorizationFreeze, results) -> tuple
                                         result.sign_test.raw_p if status == "TESTABLE" else None, status))
     adjusted = {m.hypothesis_id: m for m in holm_adjust(PRIMARY_CONFIRMATORY_FAMILY, tuple(supplied))}
     return tuple(adjusted[family] for family in PRIMARY_CONFIRMATORY_FAMILY)
+
+
+@dataclass(frozen=True)
+class FinalFamilyEvidenceSummary:
+    """One final disposition, with scientific references, in the frozen family."""
+
+    family_id: str
+    authorization_status: str
+    authorization_sha256: str
+    identity: CandidateConfigIdentity | None
+    nomination_sha256: str
+    selected_development_result_sha256: str | None
+    validation_decision_sha256: str | None
+    test_result_sha256: str | None
+    classification: EvidenceClassification
+    summary_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        predictive_family(self.family_id)
+        if (self.authorization_status not in ('AUTHORIZED', 'VETOED', 'NOT_EVALUABLE', 'COVERAGE_LIMITED')
+                or not isinstance(self.classification, EvidenceClassification)
+                or self.identity is not None and (
+                    not isinstance(self.identity, CandidateConfigIdentity) or self.identity.family_id != self.family_id)):
+            raise ValueError('invalid final family evidence summary')
+        for digest in (self.authorization_sha256, self.nomination_sha256):
+            require_sha256(digest)
+        for digest in (self.selected_development_result_sha256, self.validation_decision_sha256, self.test_result_sha256):
+            if digest is not None:
+                require_sha256(digest)
+        if ((self.identity is None) != (self.selected_development_result_sha256 is None)
+                or self.identity is None and self.validation_decision_sha256 is not None
+                or (self.authorization_status == 'AUTHORIZED') != (self.test_result_sha256 is not None)):
+            raise ValueError('final summary has inconsistent selected/test evidence references')
+        seal_hash(self, 'summary_sha256')
+
+
+def final_family_evidence_summaries(authorization, development_results, nominations, validation_decisions, test_results):
+    """Classify the complete family using only frozen phase evidence.
+
+    Track-A support and exact redundancy remain false: native diagnostics and
+    non-significance do not establish either scientific claim.
+    """
+    if not isinstance(authorization, TestAuthorizationFreeze) or replace(authorization) != authorization:
+        raise ValueError('final summaries require the exact aggregate authorization')
+    development_results, nominations = tuple(development_results), tuple(nominations)
+    validation_decisions, test_results = tuple(validation_decisions), tuple(test_results)
+    if (any(not isinstance(r, DevelopmentConfigResult) or replace(r) != r for r in development_results)
+            or len({r.identity for r in development_results}) != len(development_results)
+            or {r.identity.family_id for r in development_results} != set(PRIMARY_CONFIRMATORY_FAMILY)
+            or any(not isinstance(n, DevelopmentNomination) or replace(n) != n for n in nominations)
+            or len(nominations) != len(PRIMARY_CONFIRMATORY_FAMILY)
+            or {n.family_id for n in nominations} != set(PRIMARY_CONFIRMATORY_FAMILY)
+            or any(not isinstance(d, ValidationDecision) or replace(d) != d for d in validation_decisions)
+            or len({d.identity.family_id for d in validation_decisions}) != len(validation_decisions)):
+        raise ValueError('final summaries require complete frozen development/validation membership')
+    # Reuse the result-set checks (authorization, duplicates and exact test provenance).
+    study_primary_holm(authorization, test_results)
+    nominated = {n.family_id: n for n in nominations}
+    decisions = {d.identity.family_id: d for d in validation_decisions}
+    tests = {r.family_id: r for r in test_results}
+    if (set(decisions) != {n.family_id for n in nominations if n.status == 'NOMINATED'}
+            or set(tests) != {m.family_id for m in authorization.members if m.status == 'AUTHORIZED'}):
+        raise ValueError('final summaries require exactly nominated validation and authorized test results')
+    summaries = []
+    for member in authorization.members:
+        nomination = nominated[member.family_id]
+        configs = tuple(r for r in development_results if r.identity.family_id == member.family_id)
+        _fixed_family_identities(r.identity for r in configs)
+        if (nomination != nominate_configuration(configs)
+                or member.nomination_sha256 != nomination.nomination_sha256
+                or member.identity != nomination.identity):
+            raise ValueError('final summary nomination/config references differ from authorization')
+        decision, result = decisions.get(member.family_id), tests.get(member.family_id)
+        if nomination.status == 'NOT_EVALUABLE':
+            expected_status = 'NOT_EVALUABLE'
+            if member.predictive_pair_sha256 is not None or member.validation_decision_sha256 is not None:
+                raise ValueError('unavailable development member has fabricated later evidence')
+            classification = classify_evidence(EvidenceComponents(
+                'ADEQUATE' if all(r.coverage.status == 'ADEQUATE' for r in configs) else 'COVERAGE_LIMITED',
+                'FIT_FAILED' if any(r.status == 'FIT_FAILED' for r in configs) else 'FEASIBLE'))
+        else:
+            if (decision.identity != nomination.identity
+                    or decision.development_median != nomination.median_delta
+                    or member.predictive_pair_sha256 != decision.predictive_pair_sha256
+                    or member.validation_decision_sha256 != decision.decision_sha256):
+                raise ValueError('final summary validation references differ from frozen nomination/authorization')
+            expected_status = ('AUTHORIZED' if decision.status == 'CONFIRMED' else
+                               'VETOED' if decision.status == 'NOT_CONFIRMED' else
+                               'COVERAGE_LIMITED' if decision.status == 'COVERAGE_LIMITED' else 'NOT_EVALUABLE')
+            if result is None:
+                classification = classify_evidence(EvidenceComponents(
+                    decision.coverage.status, 'FIT_FAILED' if decision.status == 'FIT_FAILED' else 'FEASIBLE',
+                    nomination.median_delta, decision.median_delta))
+            else:
+                reconstructed = classify_evidence(EvidenceComponents(
+                    result.coverage.status, 'FIT_FAILED' if result.status == 'FIT_FAILED' else 'FEASIBLE',
+                    nomination.median_delta, decision.median_delta,
+                    result.bootstrap.median if result.bootstrap is not None else None,
+                    result.bootstrap.median_ci95 if result.bootstrap is not None else None))
+                if result.classification != reconstructed:
+                    raise ValueError('authorized final classification differs from frozen phase evidence')
+                classification = result.classification
+        if member.status != expected_status:
+            raise ValueError('final summary authorization disposition differs from frozen phases')
+        summaries.append(FinalFamilyEvidenceSummary(
+            member.family_id, member.status, authorization.authorization_sha256, nomination.identity,
+            nomination.nomination_sha256, nomination.selected_result_sha256,
+            decision.decision_sha256 if decision is not None else None,
+            result.result_sha256 if result is not None else None, classification))
+    return tuple(summaries)
