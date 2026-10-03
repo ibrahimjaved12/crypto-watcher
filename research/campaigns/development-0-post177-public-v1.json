@@ -1,8 +1,8 @@
 {
   "version": "historical-study-campaign-v1",
-  "campaign_id": "development-0-post174-public-v1",
-  "runtime_sha": "4f5844b2d9d6db8dcf21e1638bd824781e3d5d43",
-  "orchestration_sha": "4f5844b2d9d6db8dcf21e1638bd824781e3d5d43",
+  "campaign_id": "development-0-post177-public-v1",
+  "runtime_sha": "7fbe824ee6ae066d499eacd54c0cd1c1ff7ce7d6",
+  "orchestration_sha": "7fbe824ee6ae066d499eacd54c0cd1c1ff7ce7d6",
   "producer_revision": "aa981f1cbb4beca699623b2d16c99bb20b73539d",
   "study_manifest_sha256": "7f863cb6e6d3a39c46f109ba65c1617eb0aef894bb7dff74a6b393b24dc714f9",
   "coverage_manifest_sha256": "0b2bb170388ffe0cfaae145bcb94d1b1d4bf2a7da8f36dd9a174ab70d063d8b5",
@@ -40,8 +40,8 @@
     "headroom_bytes": 1
   },
   "budget": {
-    "ceiling_minutes": 625,
-    "max_runs": 2,
+    "ceiling_minutes": 1525,
+    "max_runs": 5,
     "no_progress_cap": 2
   },
   "expanded_budget_authorized": true,
@@ -92,5 +92,5 @@
     "abandoned_drafts": "retain-unless-proven",
     "inputs_and_results": "retain"
   },
-  "budget_notes": "Public-repository rerun after #174 storage/capacity repair. Scientific producer and frozen inputs unchanged. Two 305-minute claims plus five-minute Start; remaining ten minutes for manual controls. Configured bundle/disk ceilings are effectively disabled; physical runner disk availability remains authoritative."
+  "budget_notes": "Public-repository rerun after #175/#176/#177 performance changes. Scientific producer and frozen inputs unchanged."
 }
