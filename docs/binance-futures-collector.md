@@ -4,8 +4,9 @@ The collector is an independently runnable persistent backend worker. It owns on
 USD-M WebSocket connection for the application-assigned shared subscription universe, runs without
 an open dashboard, and is enabled only when both `BINANCE_COLLECTOR_ENABLED=true` and the
 operational database are enabled. The application owns user watchlists; it derives the union of
-watched contracts and assigns that set to the operational database as collector input, and the
-worker reads it there rather than querying Lovable user tables. That reconciliation is
+watched contracts required by accounts with monitoring and market-data collection enabled
+and assigns that set to the operational database as collector input. The worker reads it
+there rather than querying Lovable user tables. That reconciliation is
 application-owned and independent of scheduled monitoring: the dedicated authenticated
 `/api/public/hooks/sync-collector-subscriptions` hook is the initial and ongoing mechanism the
 deployment schedules, and the server's best-effort first-request pass is only a safety net for a
@@ -15,6 +16,33 @@ lease prevents two worker instances from acting as authoritative collectors. The
 application server does not start the collector: importing or starting the app never opens a market
 stream. Production hosting for the worker remains an open decision in
 [#19](https://github.com/ibrahimjaved12/crypto-watcher/issues/19).
+
+## Collection pause and re-enable
+
+The current-state lifecycle is:
+
+- Collection enabled and a symbol required by an eligible watcher: TanStack assigns
+  the symbol, the worker reconciles and performs REST bootstrap/recovery, and health
+  becomes `LIVE` when current evidence is established.
+- The final relevant watcher is removed or disables collection: TanStack removes
+  the symbol from the shared universe. The assignment RPC immediately sets every
+  persisted health row outside that universe to `UNAVAILABLE`, with reason
+  `collection disabled/unsubscribed`, null lag, and zero queue depth. The worker
+  unsubscribes during reconciliation. An empty assignment invalidates all health rows.
+- Collection re-enabled: the symbol re-enters the assigned universe, and its existing
+  health remains `UNAVAILABLE` until normal worker bootstrap/recovery establishes
+  current evidence. Assignment itself never marks it `LIVE`.
+
+Assignment and health invalidation share one transaction. Health persistence checks
+the authoritative assignment under a database lock held through the write, so queued
+or in-flight intents cannot restore `LIVE`, `RECOVERING`, or `STALE` for an unsubscribed
+symbol. These intents safely persist `UNAVAILABLE` with the collection-disabled reason.
+Subscribed symbols retain the normal worker health behavior.
+
+Removal preserves factual last-event time, last completed open time, and reconnect
+count. It never deletes `collector_recent_candles`: historical completed observations
+remain true and continue under the existing retention policy. Other eligible watchers
+keep the symbol assigned even if one account pauses collection.
 
 ## Inputs and candle semantics
 

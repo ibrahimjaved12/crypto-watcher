@@ -38,6 +38,59 @@ BEGIN
   ON CONFLICT (universe_name) DO UPDATE SET
     symbols = EXCLUDED.symbols,
     assigned_at = clock_timestamp();
+
+  UPDATE public.collector_health SET
+    status = 'UNAVAILABLE',
+    error_message = 'collection disabled/unsubscribed',
+    lag_ms = NULL,
+    queue_depth = 0,
+    updated_at = clock_timestamp()
+  WHERE NOT (symbol = ANY(normalized));
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.record_collector_health(
+  p_instrument_id TEXT, p_symbol TEXT, p_timeframe_minutes INTEGER, p_status TEXT,
+  p_last_event_at TIMESTAMPTZ, p_last_completed_open_time TIMESTAMPTZ,
+  p_lag_ms BIGINT, p_queue_depth INTEGER, p_reconnect_count INTEGER,
+  p_error_message TEXT
+) RETURNS VOID
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = public
+AS $$
+DECLARE
+  subscribed BOOLEAN;
+BEGIN
+  -- SHARE conflicts with the ROW EXCLUSIVE lock held by assignment's upsert.
+  -- Hold it through the health write, including when no assignment row exists,
+  -- so assignment/invalidation cannot race with a previously queued intent.
+  LOCK TABLE public.collector_subscriptions IN SHARE MODE;
+  SELECT EXISTS (
+    SELECT 1 FROM public.collector_subscriptions
+    WHERE universe_name = 'binance-usdm-shared' AND p_symbol = ANY(symbols)
+  ) INTO subscribed;
+
+  INSERT INTO public.collector_health (
+    instrument_id, symbol, timeframe_minutes, status, last_event_at,
+    last_completed_open_time, lag_ms, queue_depth, reconnect_count, error_message
+  ) VALUES (
+    p_instrument_id, p_symbol, p_timeframe_minutes,
+    CASE WHEN subscribed THEN p_status ELSE 'UNAVAILABLE' END,
+    p_last_event_at, p_last_completed_open_time,
+    CASE WHEN subscribed THEN p_lag_ms ELSE NULL END,
+    CASE WHEN subscribed THEN p_queue_depth ELSE 0 END,
+    p_reconnect_count,
+    CASE WHEN subscribed THEN nullif(left(coalesce(p_error_message, ''), 1000), '')
+      ELSE 'collection disabled/unsubscribed' END
+  )
+  ON CONFLICT (instrument_id, timeframe_minutes) DO UPDATE SET
+    status = EXCLUDED.status,
+    last_event_at = EXCLUDED.last_event_at,
+    last_completed_open_time = EXCLUDED.last_completed_open_time,
+    lag_ms = EXCLUDED.lag_ms,
+    queue_depth = EXCLUDED.queue_depth,
+    reconnect_count = EXCLUDED.reconnect_count,
+    error_message = EXCLUDED.error_message,
+    updated_at = clock_timestamp();
 END;
 $$;
 
