@@ -6,16 +6,53 @@ import { z } from "zod";
  */
 export const DAY_MS = 86_400_000;
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
-const dayMs = z.number().int().nonnegative().refine((value) => value % DAY_MS === 0, "not a UTC day start");
+const dayMs = z
+  .number()
+  .int()
+  .nonnegative()
+  .refine((value) => value % DAY_MS === 0, "not a UTC day start");
 const decimalText = z.string().regex(/^\d+(\.\d+)?$/);
 const symbol = z.string().regex(/^[A-Z0-9]{5,16}$/);
 
 /** One `GET /fapi/v1/klines?interval=1d` row: [openTime, open, high, low, close, volume, closeTime, quoteVolume, ...]. */
 const binanceKlineSchema = z
-  .tuple([z.number().int().nonnegative(), decimalText, decimalText, decimalText, decimalText, decimalText,
-    z.number().int().nonnegative(), decimalText])
+  .tuple([
+    z.number().int().nonnegative(),
+    decimalText,
+    decimalText,
+    decimalText,
+    decimalText,
+    decimalText,
+    z.number().int().nonnegative(),
+    decimalText,
+  ])
   .rest(z.unknown());
 export const binanceKlinesResponseSchema = z.array(binanceKlineSchema).max(1500);
+
+/** Binance lists adjusted intervals; unlisted symbols retain its standard 8-hour schedule. */
+export function parseBinanceFundingIntervals(value: unknown): Record<string, number> {
+  const parsed = z
+    .array(
+      z.object({
+        symbol,
+        fundingIntervalHours: z
+          .number()
+          .int()
+          .positive()
+          .refine((hours) => hours <= 24 && 24 % hours === 0),
+      }),
+    )
+    .safeParse(value);
+  if (
+    !parsed.success ||
+    new Set(parsed.data.map((row) => row.symbol)).size !== parsed.data.length
+  ) {
+    throw new Error("Invalid Binance funding interval response");
+  }
+  return Object.fromEntries(
+    parsed.data.map((row) => [row.symbol, row.fundingIntervalHours * 3_600_000]),
+  );
+}
 
 export type DailyBar = {
   symbol: string;
@@ -33,7 +70,11 @@ export type DailyBar = {
  * a day is complete once 00:00 UTC of the next day has passed (`day + 1 day <= nowMs`), so the
  * running day Binance always includes last is dropped and never stored.
  */
-export function parseBinanceDailyKlines(symbolName: string, value: unknown, nowMs: number): DailyBar[] {
+export function parseBinanceDailyKlines(
+  symbolName: string,
+  value: unknown,
+  nowMs: number,
+): DailyBar[] {
   const parsed = binanceKlinesResponseSchema.safeParse(value);
   if (!parsed.success) throw new Error("Invalid Binance kline response");
   const out: DailyBar[] = [];
@@ -48,13 +89,23 @@ export function parseBinanceDailyKlines(symbolName: string, value: unknown, nowM
       throw new Error("Invalid Binance kline response");
     }
     previous = openTime;
-    if (openTime + DAY_MS > nowMs) continue;  // the running day: not complete yet
-    out.push({ symbol: symbolName, day_ms: openTime, open, high, low, close, volume, quote_volume: quoteVolume });
+    if (openTime + DAY_MS > nowMs) continue; // the running day: not complete yet
+    out.push({
+      symbol: symbolName,
+      day_ms: openTime,
+      open,
+      high,
+      low,
+      close,
+      volume,
+      quote_volume: quoteVolume,
+    });
   }
   return out;
 }
 
 const weightMap = z.record(z.string(), z.number().finite());
+export const sampleKindSchema = z.enum(["prospective", "retrospective"]);
 
 export const trendLedgerRowSchema = z
   .object({
@@ -66,6 +117,8 @@ export const trendLedgerRowSchema = z
     gross_ppm: z.number().int().nonnegative(),
     symbols_active: z.number().int().nonnegative(),
     weights: weightMap,
+    sample_kind: sampleKindSchema,
+    sample_equity_ppm: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -74,11 +127,33 @@ export const trendWeightRowSchema = z
     track: z.string().min(1).max(64),
     day_ms: dayMs,
     decided_from_close_ms: z.number().int(),
+    decided_at_ms: z.number().int().nonnegative(),
     weights: weightMap,
     defined: z.record(z.string(), z.boolean()),
   })
   .strict()
-  .refine((row) => row.decided_from_close_ms === row.day_ms - DAY_MS, "weight decided after its day");
+  .refine(
+    (row) => row.decided_from_close_ms === row.day_ms - DAY_MS,
+    "weight decided after its day",
+  )
+  .refine((row) => row.decided_at_ms >= row.day_ms, "decision precedes the available close");
+
+export const trendSampleSchema = z
+  .object({
+    n_days: z.number().int().nonnegative(),
+    sum_ppm: z.number().int(),
+    sum_sq_ppm: z.number().int().nonnegative(),
+    turnover_sum_ppm: z.number().int().nonnegative(),
+    gross_sum_ppm: z.number().int().nonnegative(),
+    equity_ppm: z.number().int().nonnegative(),
+    mean_daily: z.number().nullable(),
+    sd_daily: z.number().nullable(),
+    mu_min_daily: z.number().nullable(),
+    days_needed: z.number().int().nonnegative().nullable(),
+    mean_turnover: z.number().nullable(),
+    mean_gross: z.number().nullable(),
+  })
+  .strict();
 
 export const trendStateSchema = z
   .object({
@@ -93,6 +168,9 @@ export const trendStateSchema = z
     max_drawdown_ppm: z.number().int().nonnegative(),
     weights: weightMap,
     mu_min_daily: z.number().nullable(),
+    samples: z
+      .object({ prospective: trendSampleSchema, retrospective: trendSampleSchema })
+      .strict(),
   })
   .strict();
 
@@ -102,8 +180,15 @@ export const forwardTrendResponseSchema = z.object({
   params_hash: sha256,
   symbols: z.array(symbol),
   track_start_ms: dayMs,
-  tracks: z.array(z.object({ name: z.string(), kind: z.enum(["variant", "buy_hold_vt", "equal_weight_long"]),
-    control: z.string().nullable(), config_hash: sha256 })),
+  history_start_ms: dayMs,
+  tracks: z.array(
+    z.object({
+      name: z.string(),
+      kind: z.enum(["variant", "buy_hold_vt", "equal_weight_long"]),
+      control: z.string().nullable(),
+      config_hash: sha256,
+    }),
+  ),
   through_day_ms: dayMs.nullable(),
   ledger: z.array(trendLedgerRowSchema),
   weights: z.array(trendWeightRowSchema),
@@ -116,6 +201,12 @@ export const forwardTrendResponseSchema = z.object({
 export type ForwardTrendResponse = z.infer<typeof forwardTrendResponseSchema>;
 export type TrendState = z.infer<typeof trendStateSchema>;
 export type TrendLedgerRow = z.infer<typeof trendLedgerRowSchema>;
+export type TrendSample = z.infer<typeof trendSampleSchema>;
+export type SampleKind = z.infer<typeof sampleKindSchema>;
+export type StoredTrendDecision = z.infer<typeof trendWeightRowSchema> & {
+  recorded_at_ms: number;
+  sample_kind: SampleKind;
+};
 
 /** Throws a short, value-free error when the Python response breaks the contract. */
 export function validateTrendResponse(value: unknown): ForwardTrendResponse {
@@ -125,6 +216,10 @@ export function validateTrendResponse(value: unknown): ForwardTrendResponse {
     throw new Error(`Invalid forward trend response at ${path || "root"}`);
   }
   const keys = parsed.data.ledger.map((row) => `${row.track}|${row.day_ms}`);
-  if (new Set(keys).size !== keys.length) throw new Error("Invalid forward trend response: duplicate ledger day");
+  if (new Set(keys).size !== keys.length)
+    throw new Error("Invalid forward trend response: duplicate ledger day");
+  const decisions = parsed.data.weights.map((row) => `${row.track}|${row.day_ms}`);
+  if (new Set(decisions).size !== decisions.length)
+    throw new Error("Invalid forward trend response: duplicate weight day");
   return parsed.data;
 }

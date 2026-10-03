@@ -485,13 +485,14 @@ class ForwardDailyBar(InputModel):
 
 class ForwardTrendSymbol(InputModel):
     symbol: str = Field(min_length=5, max_length=16, pattern=r"^[A-Z0-9]+$")
-    bars: Annotated[tuple[ForwardDailyBar, ...], Field(max_length=5000)]
-    funding: Annotated[tuple[ForwardFundingEvent, ...], Field(max_length=5000)] = ()
+    bars: Annotated[tuple[ForwardDailyBar, ...], Field(max_length=20000)]
+    funding: Annotated[tuple[ForwardFundingEvent, ...], Field(max_length=60000)] = ()
     # The funding history the caller fetched covers (funding_from_ms, funding_to_ms]; a day outside it,
     # or any day when the fetch failed (funding_available false), is not finalised.
     funding_available: bool = True
     funding_from_ms: Timestamp | None = None
     funding_to_ms: Timestamp | None = None
+    funding_interval_ms: int = 8 * 3_600_000
 
 
 class ForwardTrendRequest(InputModel):
@@ -500,6 +501,11 @@ class ForwardTrendRequest(InputModel):
     through_day_ms: Timestamp
     states: dict[str, dict[str, Any]] | None = None
     track_start_ms: Timestamp | None = None
+    history_start_ms: Timestamp | None = None
+    expected_symbols: tuple[str, ...] | None = None
+    saved_params_hash: str | None = None
+    decisions: list[dict[str, Any]] = Field(default_factory=list)
+    evaluated_at_ms: Timestamp | None = None
 
     @model_validator(mode="after")
     def unique(self):
@@ -513,8 +519,13 @@ class ForwardTrendRequest(InputModel):
                                      for bar in item.bars],
                             "funding": [{"calc_time_ms": f.calc_time_ms, "rate": str(f.rate)} for f in item.funding],
                             "funding_available": item.funding_available, "funding_from_ms": item.funding_from_ms,
-                            "funding_to_ms": item.funding_to_ms} for item in self.symbols],
+                            "funding_to_ms": item.funding_to_ms,
+                            "funding_interval_ms": item.funding_interval_ms} for item in self.symbols],
                "through_day_ms": self.through_day_ms, "states": self.states}
         if self.track_start_ms is not None:
             out["track_start_ms"] = self.track_start_ms
+        if self.history_start_ms is not None:
+            out["history_start_ms"] = self.history_start_ms
+        out.update(expected_symbols=self.expected_symbols, saved_params_hash=self.saved_params_hash,
+                   decisions=self.decisions, evaluated_at_ms=self.evaluated_at_ms)
         return out

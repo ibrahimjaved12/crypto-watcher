@@ -15,14 +15,14 @@ Python stays calculation-only (`docs/operational-database.md`). The package
 `POST /v1/forward/evaluate` returns everything new, and the TanStack application validates and
 persists it (`forward_*`, `paper_*` tables).
 
-| Module | Does |
-| --- | --- |
+| Module            | Does                                                                                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `bars_adapter.py` | Collector 1-minute rows (doubles) become a benchmark `BarSeries` (integers at 10^8). Also builds 15/60/240 candles with `candles.build_candles`. |
-| `signals.py` | The `FORWARD_STRATEGIES` registry and `generate_signals`. |
-| `setups.py` | `build_setup`, using the labels-v2 geometry. |
-| `outcomes.py` | `resolve_setup`: incremental resolution, identical to `labels.build_labels`. |
-| `wallet.py` | `step(state, events, config)`: the paper wallet, pure and append-only. |
-| `evaluate.py` | One evaluation; the body of the endpoint. |
+| `signals.py`      | The `FORWARD_STRATEGIES` registry and `generate_signals`.                                                                                        |
+| `setups.py`       | `build_setup`, using the labels-v2 geometry.                                                                                                     |
+| `outcomes.py`     | `resolve_setup`: incremental resolution, identical to `labels.build_labels`.                                                                     |
+| `wallet.py`       | `step(state, events, config)`: the paper wallet, pure and append-only.                                                                           |
+| `evaluate.py`     | One evaluation; the body of the endpoint.                                                                                                        |
 
 ## What is recorded
 
@@ -72,7 +72,7 @@ persists it (`forward_*`, `paper_*` tables).
 
 ## Comparison with backtests
 
-Forward resolution *is* the benchmark label. A test builds labels-v2 for a synthetic fixture
+Forward resolution _is_ the benchmark label. A test builds labels-v2 for a synthetic fixture
 with `build_labels` and checks that every forward setup and resolution equals the label row
 field by field: status, p0, sigma, d_ticks, leverage, outcome, net/cost/funding micro-R and
 ambiguity.
@@ -113,76 +113,98 @@ taker fees on both sides, so its PnL is not the label's micro-R.
 
 ## Daily trend track (portfolio mode, #239 P14, #222)
 
-The daily trend Mode B variants (`benchmark/trend.py`, K = 9) are a daily weight stream, not
-discrete trades. They are tracked forward as **hypothetical vol-targeted portfolios**, one per
-variant. There is no margin, liquidation or position-limit model. No variant has a validated edge:
-development-ext gives t of about 2, and validation is underpowered.
+The nine frozen daily trend Mode B variants are hypothetical vol-targeted portfolios, with the
+three vol-targeted buy-and-hold controls and `ew_long`. There is no margin, liquidation or
+position-limit model. No variant has a validated edge.
 
-### Feed
+### Canonical history and startup
 
-- **Table:** the operational `forward_daily_bars` (symbol, UTC day, OHLC, volume, quote volume,
-  source, received_at).
-- **Write rules:** append-only, unique per symbol and day, and completed days only. A row must be
-  received after its day ended (a CHECK constraint); `parseBinanceDailyKlines` also drops the
-  running day.
-- **Source:** the public `GET /fapi/v1/klines?interval=1d` (limit 1500).
-  - The first run backfills from a **fixed** start, 2025-08-07: 420 days before the track start,
-    enough for the 360-day lookback and the rvfilter's 395 closes.
-  - Every later run appends only the days completed since the last stored one.
-  - The start is fixed so that the band-dependent weight paths are identical from run to run.
-- **Gaps** stay MISSING. Days are finalised only through the last day **every** symbol has stored,
-  so a lagging fetch never turns into a permanently flat day.
-- **Funding:** the public `/fapi/v1/fundingRate`, fetched once per symbol per run from the first
-  day not yet finalised.
+The operational `forward_daily_bars` feed stores completed UTC-day Binance USD-M klines from
+**2020-01-01**, matching `benchmark.trend.WARMUP_FIRST_MONTH`. Initial requests paginate the
+public `/fapi/v1/klines?interval=1d` endpoint (1500 rows per page) until the last completed day.
+A 420-day warm-up does not reproduce Donchian state, EWMA or band-dependent weights. Python pads
+pre-listing days with MISSING from the canonical origin, as the daily lake does. Actual gaps stay
+MISSING; the running day is excluded.
 
-### Python (`forward/trend_track.py`, `POST /v1/forward/trend`, stateless)
+Initialization requires successfully fetching the canonical history for the **whole frozen
+universe**. A missing symbol or failed initial page records only diagnostics: no weight, ledger or
+resume state is committed. Recovery retries from the origin, even if some bars were stored during
+the failed attempt. After a committed initialization, the feed appends completed days. A lagging
+symbol holds back finalization for all tracks.
 
-- **Reuse:** it calls `trend.signal_inputs`, `trend.size`, `trend.apply_band` and the nine
-  `trend.VARIANTS` directly; nothing is copied.
-- **`target_weights`:** the weight held on day d+1 uses closes through day d (the backtest's
-  one-day shift).
-- **`step_portfolio`:** one day, using the same float operations in the same order as `trend.net`
-  and `trend.portfolio`:
-  - `w * (close/open - 1) - 11 bp * |w - w_prev| - w * funding`
-  - The equal-weight mean over the active symbols, in integer ppm.
-  - The equity curve, turnover, gross exposure, n, sum and sum of squares, and
-    `mu_min = power.min_detectable_edge_per_day(n, sd)`.
-- **Parity:** the daily stream is tested byte-equal, in ppm and day by day, to
-  `trend.evaluate_variant` (the per-variant body of `evaluate_trend`) and to its buy-and-hold
-  controls on a fixture with gaps and funding.
-- **Funding unknown:** if a fetch failed, or a day is not covered (a full 1000-row page covers
-  only up to its last event), **nothing is finalised**. The run records `funding_unavailable`, is
-  `partial`, and a later run continues. Weights are still decided and stored.
+### Funding and portfolio evaluation
 
-### Controls (from day one)
+Funding history is paginated from the first unfinished day until its required closing midnight.
+Coverage requires every settlement on the UTC grid verified by `/fapi/v1/fundingInfo`, including
+adjusted intervals (unadjusted symbols use Binance's standard 8-hour interval) and day-end; a
+successful response, an empty response or a short page alone establishes no coverage. Missing,
+duplicate or off-grid settlements remain unavailable. A failed interval-metadata fetch also blocks
+finalization. Historical interval transitions need a separately verified settlement schedule rather
+than assuming missing settlements are zero. A run can finalize only the fully verified prefix of days.
 
-- **`bh_vt_<sizing>_<target>`:** the vol-targeted buy-and-hold of each (sizing, sigma target)
-  pair. This is the benchmark of the backtest's alpha test.
-- **`ew_long`:** a long-only equal-weight portfolio (w = 1 per symbol).
-- The circular-shift placebo needs the whole sample and is not computable forward.
+Python calls the backtest's `signal_inputs`, `size`, `apply_band` and `VARIANTS` directly. Closes
+through day d determine weights for day d+1. Daily return is the equal-weight mean over active
+symbols of `w * (close/open - 1) - 11 bp * abs(w - w_prev) - w * funding`, rounded to integer ppm.
+Tests compare the daily stream with the backtest and show that the former 420-day initialization
+changes canonical weights. Funding failures can still record decisions once the whole universe
+has initialized, but cannot finalize their outcomes.
 
-### Persistence and schedule
+### Reconstruction and prospective recording
 
-- **Tables:** `forward_trend_weights`, `forward_trend_ledger` and `forward_trend_state`.
-  - They are append-only and account-scoped (RLS), and every row stores the version and
-    parameter hash.
-  - Weights and ledger rows are unique per (track, day). They are written before the run's state
-    row, so a state never claims a missing day.
-- **Runs:** once a day at 00:05 UTC (`npm run forward:trend`; `--once` for one run) and on demand
-  from the forward page.
-  - A finished day has run key `day:<last completed day>`. A repeat is `already_done`.
-- **Track start:** the track starts on 2026-10-01 (forward live from 2026-10). Closes from the
-  hidden months 2026-01..09 are used only as indicator warm-up, from the live API rather than the
-  lake. No result of a hidden day is computed or shown.
+The accounting start is 2026-10-01. Days reconstructed after their daily close are
+**retrospective reconstruction**, including October 1–8 when first run on October 9. Using
+causal closes to reconstruct them does not make them forward evidence.
 
-### Dashboard
+Each immutable weight stores its source close, actual Python decision time (`decided_at_ms`),
+and database recording time (`recorded_at_ms`). A day is **prospectively recorded** only if that
+same decision was already recorded before its closing outcome. Later retries preserve the first
+recording time and verify the canonical payload rather than silently replacing it. A new decision
+for an already completed day is always retrospective.
 
-For each variant, the forward page shows:
+The 00:05 UTC job can record a weight after that day's open. Prospective here means recorded
+**before the daily close**, and the dashboard states this explicitly; these remain hypothetical
+open-to-close returns, not evidence of execution at the open.
 
-- days tracked and the mean daily return, against its buy-and-hold control and `ew_long`;
-- turnover, gross exposure and the current weights;
-- equity curves (variant, control and `ew_long`);
-- the line "n days, not significant: mean < mu_min (about N days needed)", with
-  `mu_min = 2.8016 * sd / sqrt(n)` from the live sample.
+### Persistence and scheduling
 
-A banner says this is a hypothetical track with no margin or liquidation model.
+`forward_trend_weights`, `forward_trend_ledger` and `forward_trend_state` are append-only and
+account-scoped under RLS. `commit_forward_trend_run` atomically commits rows and their state under
+an account transaction lock. It checks the expected prior state, verifies duplicate payloads,
+checks ledger/sample counts, and rejects conflicting or obsolete runs. Only committed revisions
+can be resumed; newer startup diagnostics never replace them. Resume binds the parameter hash,
+strategy version, history origin, accounting start and ordered frozen universe.
+
+This PR updates the fresh-database table definitions. With no existing tracking data, rebuild the
+empty application database from its schema files and the operational database from its baseline;
+there is no conversion of existing tracking rows or additional upgrade migration.
+
+Run once for **all registered accounts**, using the configured application/operational databases
+and authenticated Python service:
+
+```sh
+npm run forward:trend -- --once
+```
+
+Run continuously (immediately, then daily at 00:05 UTC):
+
+```sh
+npm run forward:trend
+```
+
+`FORWARD_USER_ID` is optional; setting it restricts the job to that account. Account enumeration
+is paginated, account failures do not prevent the remaining accounts from running, and each loop
+includes newly registered users. The forward page's “Run trend now” always uses its authenticated
+user automatically. Production hosting/scheduling remains in `docs/production-todo.md`.
+
+### Dashboard statistics
+
+The dashboard defaults to prospectively recorded days, with a separate reconstruction selector.
+It shows both counts, and separate means, turnover, exposure and equity curves for each sample.
+Ledger and decision reads paginate in stable day/track order against a captured committed snapshot,
+so the API row cap cannot freeze curves or statistics.
+
+Python owns all moments and the power calculation, using `benchmark.power`:
+`mu_min = min_detectable_edge_per_day(n, sd)` and `required_days(mean, sd)`. The dashboard only
+formats the saved values. **Minimum detectable edge** uses a normal approximation, independent
+daily returns, two-sided alpha 0.05 and 80% power. It is a sample-size/power estimate, not a
+significance test or a verdict on the strategy. See the [NIST sample-size discussion](https://itl.nist.gov/div898/handbook/prc/section2/prc222.htm).

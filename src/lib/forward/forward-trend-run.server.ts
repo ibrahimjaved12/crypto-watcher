@@ -1,57 +1,58 @@
 import type { FundingEvent } from "./forward-contract";
-import { fetchRunFunding, FORWARD_SYMBOLS } from "./forward-run.server";
+import { FORWARD_SYMBOLS } from "./forward-run.server";
 import {
   DAY_MS,
   validateTrendResponse,
   type DailyBar,
   type ForwardTrendResponse,
+  type StoredTrendDecision,
   type TrendState,
 } from "./forward-trend-contract";
 
-/**
- * Forward trend track orchestration (#239 P14, #222). Once per day shortly after 00:05 UTC (and on
- * demand) for the six frozen symbols:
- *
- * 1. Daily feed: append the completed UTC days since the last stored one to the operational
- *    `forward_daily_bars` (the first run backfills from TREND_HISTORY_START_MS, >= 400 days before the
- *    track starts, for the 360-day lookback). The running day is never stored; gaps stay missing.
- * 2. Funding history from the first day not yet finalised (public `/fapi/v1/fundingRate`, once per
- *    symbol per run). A failed fetch finalises nothing (`funding_unavailable`), never zeros.
- * 3. The stateless Python `/v1/forward/trend` with every stored bar since the fixed history start and
- *    the latest states; the response is validated, then ledger and weight rows are inserted
- *    (idempotent per (track, day)) BEFORE the run's state row, so a state never claims a missing day.
- *
- * Status `ok` (run key `day:<last completed day>`) means every track is finalised through the last
- * completed day; otherwise the run is `partial` with its reasons and a later run continues.
- */
-export const TREND_TRACK_START_MS = Date.UTC(2026, 9, 1);  // forward live from 2026-10 (owner decision)
-export const TREND_BACKFILL_DAYS = 420;  // >= 400 completed days before the first tracked day
-// Fixed history start: every run sends the same first day, so the band-dependent weight paths are
-// identical from run to run (a moving window would change them).
-export const TREND_HISTORY_START_MS = TREND_TRACK_START_MS - TREND_BACKFILL_DAYS * DAY_MS;
-const KLINE_PAGE = 1500;
+export const TREND_TRACK_START_MS = Date.UTC(2026, 9, 1);
+// Must match benchmark.trend.WARMUP_FIRST_MONTH. A finite warm-up changes path-dependent weights.
+export const TREND_HISTORY_START_MS = Date.UTC(2020, 0, 1);
 const FUNDING_PAGE = 1000;
+export const FUNDING_INTERVAL_MS = 8 * 3_600_000;
+
+export type TrendSnapshot = {
+  id: string;
+  params_hash: string;
+  symbols: string[];
+  history_start_ms: number;
+  track_start_ms: number;
+  states: Record<string, TrendState>;
+};
 
 export interface TrendRepository {
   findOkRun(userId: string, runKey: string): Promise<boolean>;
-  latestStates(userId: string): Promise<Record<string, TrendState> | null>;
-  persistRows(userId: string, runKey: string, response: ForwardTrendResponse): Promise<Record<string, number>>;
-  insertState(userId: string, row: Record<string, unknown>): Promise<void>;
+  latestSnapshot(userId: string): Promise<TrendSnapshot | null>;
+  readDecisions(userId: string, fromMs: number): Promise<StoredTrendDecision[]>;
+  commitRun(
+    userId: string,
+    expectedStateId: string | null,
+    response: ForwardTrendResponse,
+    row: Record<string, unknown>,
+  ): Promise<Record<string, number>>;
+  recordDiagnostic(userId: string, row: Record<string, unknown>): Promise<void>;
 }
 
 export type TrendDeps = {
   now(): number;
   readDailyBars(symbol: string, sinceMs: number): Promise<DailyBar[]>;
   recordDailyBars(bars: DailyBar[], receivedAtMs: number): Promise<number>;
-  /** Completed daily klines from `startMs` (at most 1500; the running day already dropped). */
   fetchDailyKlines(symbol: string, startMs: number, nowMs: number): Promise<DailyBar[]>;
   fetchFunding(symbol: string, startMs: number): Promise<FundingEvent[]>;
+  fetchFundingIntervals(): Promise<Record<string, number>>;
   callPython(body: unknown): Promise<unknown>;
   repository: TrendRepository;
 };
 
-export type TrendRunInput = { userId: string; trigger: "daily" | "on_demand"; symbols?: readonly string[] };
-
+export type TrendRunInput = {
+  userId: string;
+  trigger: "daily" | "on_demand";
+  symbols?: readonly string[];
+};
 export type TrendRunSummary = {
   runKey: string;
   status: "ok" | "partial" | "already_done";
@@ -59,100 +60,247 @@ export type TrendRunSummary = {
   counts?: Record<string, number>;
 };
 
-/** Brings one symbol's stored feed up to the last completed day; returns the stored bars and new rows. */
+/** An initial run verifies the whole history from the canonical origin, even after a partial fetch.
+ * Pre-listing days are missing, as in dk1. Only a successfully committed snapshot permits append.
+ */
 export async function updateDailyFeed(
   deps: Pick<TrendDeps, "readDailyBars" | "recordDailyBars" | "fetchDailyKlines">,
   symbol: string,
   lastCompleteMs: number,
   nowMs: number,
+  initialize = true,
 ): Promise<{ bars: DailyBar[]; inserted: number }> {
-  let bars = await deps.readDailyBars(symbol, TREND_HISTORY_START_MS);
+  const stored = await deps.readDailyBars(symbol, TREND_HISTORY_START_MS);
+  const bars = new Map(stored.map((bar) => [bar.day_ms, bar]));
+  let cursor = initialize
+    ? TREND_HISTORY_START_MS
+    : (stored.at(-1)?.day_ms ?? TREND_HISTORY_START_MS - DAY_MS) + DAY_MS;
   let inserted = 0;
-  for (let page = 0; page < 10; page++) {
-    const last = bars.length ? bars[bars.length - 1]!.day_ms : TREND_HISTORY_START_MS - DAY_MS;
-    if (last >= lastCompleteMs) break;
-    const fetched = await deps.fetchDailyKlines(symbol, last + DAY_MS, nowMs);
-    const fresh = fetched.filter((bar) => bar.day_ms > last && bar.day_ms + DAY_MS <= nowMs);
-    if (fresh.length) {
-      inserted += await deps.recordDailyBars(fresh, nowMs);
-      bars = [...bars, ...fresh];
-    }
-    if (fetched.length < KLINE_PAGE - 1) break;  // the last page (the running day was dropped)
+  while (cursor <= lastCompleteMs) {
+    const fetched = await deps.fetchDailyKlines(symbol, cursor, nowMs);
+    const fresh = fetched.filter((bar) => bar.day_ms >= cursor && bar.day_ms <= lastCompleteMs);
+    if (!fresh.length) throw new Error("Daily history does not reach the required boundary");
+    inserted += await deps.recordDailyBars(fresh, nowMs);
+    for (const bar of fresh) bars.set(bar.day_ms, bar);
+    cursor = fresh.at(-1)!.day_ms + DAY_MS;
   }
-  return { bars, inserted };
+  return { bars: [...bars.values()].sort((a, b) => a.day_ms - b.day_ms), inserted };
 }
 
-export async function runForwardTrend(deps: TrendDeps, input: TrendRunInput): Promise<TrendRunSummary> {
+/** Paginate until closing midnight is observed. A short page is never evidence of coverage.
+ * The verified schedule comes from fundingInfo (standard 8h for unadjusted symbols).
+ * Missing or off-grid settlements stay unavailable;
+ * an interval change requires a separately verified schedule, rather than invented zero funding.
+ */
+export async function fetchTrendFunding(
+  deps: Pick<TrendDeps, "fetchFunding">,
+  symbol: string,
+  fromMs: number,
+  throughMs: number,
+  intervalMs = FUNDING_INTERVAL_MS,
+): Promise<{ events: FundingEvent[]; toMs: number | null }> {
+  // A resumed checkpoint can already cover the boundary. No day is finalized from this empty span.
+  if (throughMs === fromMs) return { events: [], toMs: fromMs };
+  const events: FundingEvent[] = [];
+  let cursor = fromMs + 1;
+  while (cursor <= throughMs) {
+    const page = await deps.fetchFunding(symbol, cursor);
+    const fresh = page.filter(
+      (event) => event.calc_time_ms >= cursor && event.calc_time_ms <= throughMs,
+    );
+    events.push(...fresh);
+    if (!fresh.length || fresh.at(-1)!.calc_time_ms >= throughMs || page.length < FUNDING_PAGE)
+      break;
+    cursor = fresh.at(-1)!.calc_time_ms + 1;
+  }
+  if (
+    !Number.isInteger(intervalMs) ||
+    intervalMs <= 0 ||
+    intervalMs % 3_600_000 !== 0 ||
+    DAY_MS % intervalMs !== 0
+  ) {
+    throw new Error("Unverified funding interval");
+  }
+  let expected = fromMs + intervalMs;
+  for (const event of events) {
+    if (event.calc_time_ms !== expected) break;
+    expected += intervalMs;
+  }
+  const lastVerified = expected - intervalMs;
+  const toMs = lastVerified > fromMs ? Math.floor(lastVerified / DAY_MS) * DAY_MS : null;
+  return { events, toMs: toMs !== null && toMs > fromMs ? toMs : null };
+}
+
+export async function runForwardTrend(
+  deps: TrendDeps,
+  input: TrendRunInput,
+): Promise<TrendRunSummary> {
   const symbols = input.symbols ?? FORWARD_SYMBOLS;
   const now = deps.now();
   const lastCompleteMs = Math.floor(now / DAY_MS) * DAY_MS - DAY_MS;
   const runKey = `day:${lastCompleteMs}`;
   const { repository } = deps;
-  if (await repository.findOkRun(input.userId, runKey)) return { runKey, status: "already_done" };
-
+  const snapshot = await repository.latestSnapshot(input.userId);
+  if (
+    snapshot &&
+    (JSON.stringify(snapshot.symbols) !== JSON.stringify(symbols) ||
+      snapshot.history_start_ms !== TREND_HISTORY_START_MS ||
+      snapshot.track_start_ms !== TREND_TRACK_START_MS)
+  ) {
+    throw new Error(
+      "Saved trend configuration differs; reset the empty database before starting this track",
+    );
+  }
   const reasons: string[] = [];
   const bars = new Map<string, DailyBar[]>();
   const freshness: Record<string, unknown> = {};
   let inserted = 0;
+  let startupIncomplete = lastCompleteMs < TREND_TRACK_START_MS - DAY_MS;
   for (const symbol of symbols) {
     try {
-      const feed = await updateDailyFeed(deps, symbol, lastCompleteMs, now);
+      const feed = await updateDailyFeed(deps, symbol, lastCompleteMs, now, !snapshot);
       bars.set(symbol, feed.bars);
       inserted += feed.inserted;
     } catch {
       bars.set(symbol, await deps.readDailyBars(symbol, TREND_HISTORY_START_MS));
-      reasons.push(`${symbol}: daily kline fetch failed`);
+      reasons.push(`${symbol}: daily kline fetch failed or history incomplete`);
+      if (!snapshot) startupIncomplete = true;
     }
     const series = bars.get(symbol)!;
-    freshness[symbol] = { rows: series.length, last_day_ms: series[series.length - 1]?.day_ms ?? null };
+    freshness[symbol] = { rows: series.length, last_day_ms: series.at(-1)?.day_ms ?? null };
+    if (!series.length || series.at(-1)!.day_ms < TREND_TRACK_START_MS - DAY_MS)
+      startupIncomplete = true;
   }
-  const missing = symbols.filter((symbol) => !bars.get(symbol)!.length);
-  if (missing.length) reasons.push(`no daily bars: ${missing.join(",")}`);
-  // Finalise only through the last day every symbol has stored: a symbol whose fetch lagged must not
-  // turn into a permanently flat (MISSING) day.
-  const throughMs = missing.length ? TREND_TRACK_START_MS - DAY_MS : Math.min(lastCompleteMs,
-    ...symbols.map((symbol) => bars.get(symbol)![bars.get(symbol)!.length - 1]!.day_ms));
-  if (throughMs < lastCompleteMs && !missing.length) reasons.push("daily bars not yet complete for every symbol");
-
-  const states = await repository.latestStates(input.userId);
-  const nextDay = states && Object.keys(states).length
-    ? Math.min(...Object.values(states).map((state) => (state.last_day_ms ?? TREND_TRACK_START_MS - DAY_MS) + DAY_MS))
-    : TREND_TRACK_START_MS;
-  const funding = await fetchRunFunding(deps, symbols, nextDay);
-  const response = validateTrendResponse(await deps.callPython({
-    schema_version: 1,
-    symbols: symbols.filter((symbol) => bars.get(symbol)!.length).map((symbol) => {
-      const events = funding.get(symbol);
-      return {
-        symbol,
-        bars: bars.get(symbol)!.map(({ day_ms, open, high, low, close, volume, quote_volume }) =>
-          ({ day_ms, open, high, low, close, volume, quote_volume })),
-        funding: events ?? [],
-        funding_available: events !== null,
-        funding_from_ms: nextDay,
-        // A full page may stop short of now: only the span it covers counts as known.
-        funding_to_ms: events && events.length >= FUNDING_PAGE ? events[events.length - 1]!.calc_time_ms : now,
-      };
+  if (startupIncomplete) {
+    const reason = [...reasons, "incomplete startup: complete frozen universe history required"]
+      .join("; ")
+      .slice(0, 2000);
+    const key = `${runKey}:partial:${now}`;
+    const counts = { bars_inserted: inserted, ledger: 0, weights: 0 };
+    await repository.recordDiagnostic(input.userId, {
+      run_key: key,
+      trigger: input.trigger,
+      status: "partial",
+      reason,
+      last_complete_day_ms: lastCompleteMs,
+      through_day_ms: null,
+      freshness,
+      counts,
+      states: {},
+      symbols: [...symbols],
+      history_start_ms: TREND_HISTORY_START_MS,
+      track_start_ms: TREND_TRACK_START_MS,
+    });
+    return { runKey: key, status: "partial", reason, counts };
+  }
+  const throughMs = Math.min(
+    lastCompleteMs,
+    ...symbols.map((symbol) => bars.get(symbol)!.at(-1)!.day_ms),
+  );
+  if (throughMs < lastCompleteMs) reasons.push("daily bars not yet complete for every symbol");
+  const states = snapshot?.states ?? null;
+  const nextDay =
+    states && Object.keys(states).length
+      ? Math.min(
+          ...Object.values(states).map(
+            (state) => (state.last_day_ms ?? TREND_TRACK_START_MS - DAY_MS) + DAY_MS,
+          ),
+        )
+      : TREND_TRACK_START_MS;
+  const decisions = await repository.readDecisions(input.userId, nextDay);
+  let intervals: Record<string, number> | null = null;
+  try {
+    intervals = await deps.fetchFundingIntervals();
+  } catch {
+    reasons.push("funding settlement schedule unavailable");
+  }
+  const funding = new Map<
+    string,
+    { events: FundingEvent[]; toMs: number | null; intervalMs: number }
+  >();
+  for (const symbol of symbols) {
+    const intervalMs = intervals?.[symbol] ?? FUNDING_INTERVAL_MS;
+    try {
+      if (!intervals) throw new Error("Funding settlement schedule unavailable");
+      funding.set(symbol, {
+        ...(await fetchTrendFunding(deps, symbol, nextDay, throughMs + DAY_MS, intervalMs)),
+        intervalMs,
+      });
+    } catch {
+      funding.set(symbol, { events: [], toMs: null, intervalMs });
+    }
+  }
+  const response = validateTrendResponse(
+    await deps.callPython({
+      schema_version: 1,
+      symbols: symbols.map((symbol) => {
+        const coverage = funding.get(symbol)!;
+        return {
+          symbol,
+          bars: bars
+            .get(symbol)!
+            .map(({ day_ms, open, high, low, close, volume, quote_volume }) => ({
+              day_ms,
+              open,
+              high,
+              low,
+              close,
+              volume,
+              quote_volume,
+            })),
+          funding: coverage.events,
+          funding_available: coverage.toMs !== null,
+          funding_from_ms: nextDay,
+          funding_to_ms: coverage.toMs,
+          funding_interval_ms: coverage.intervalMs,
+        };
+      }),
+      through_day_ms: throughMs,
+      states,
+      saved_params_hash: snapshot?.params_hash ?? null,
+      decisions,
+      expected_symbols: [...symbols],
+      history_start_ms: TREND_HISTORY_START_MS,
+      track_start_ms: TREND_TRACK_START_MS,
     }),
-    through_day_ms: Math.max(0, throughMs),
-    states,
-    track_start_ms: TREND_TRACK_START_MS,
-  }));
-  if (response.funding_unavailable.length) reasons.push(`funding_unavailable: ${response.funding_unavailable.join(",")}`);
+  );
+  if (snapshot && snapshot.params_hash !== response.params_hash)
+    throw new Error("Saved trend parameter hash differs");
+  if (
+    JSON.stringify(response.symbols) !== JSON.stringify(symbols) ||
+    response.history_start_ms !== TREND_HISTORY_START_MS ||
+    response.track_start_ms !== TREND_TRACK_START_MS
+  )
+    throw new Error("Python returned another trend configuration");
+  if (!Object.keys(response.states).length)
+    throw new Error("Python refused complete-universe initialization");
+  // Even a completed run verifies its saved identity with the current Python strategy before returning.
+  if (await repository.findOkRun(input.userId, runKey)) return { runKey, status: "already_done" };
+  if (response.funding_unavailable.length)
+    reasons.push(`funding_unavailable: ${response.funding_unavailable.join(",")}`);
+  for (const reason of Object.values(response.reasons))
+    if (!reasons.includes(reason)) reasons.push(reason);
   const complete = !reasons.length && response.through_day_ms === lastCompleteMs;
   const key = complete ? runKey : `${runKey}:partial:${now}`;
-  const counts = { bars_inserted: inserted, ...(await repository.persistRows(input.userId, key, response)) };
-  const reason = reasons.join("; ").slice(0, 2000) || (complete ? undefined : "not every track is finalised");
-  await repository.insertState(input.userId, {
-    run_key: key, trigger: input.trigger, status: complete ? "ok" : "partial", reason: reason ?? null,
-    last_complete_day_ms: lastCompleteMs, through_day_ms: response.through_day_ms, states: response.states,
-    versions: response.versions, params_hash: response.params_hash, tracks: response.tracks,
-    funding_unavailable: response.funding_unavailable, assumptions: response.assumptions, freshness, counts,
+  const reason =
+    reasons.join("; ").slice(0, 2000) || (complete ? undefined : "not every track is finalised");
+  const counts = await repository.commitRun(input.userId, snapshot?.id ?? null, response, {
+    run_key: key,
+    trigger: input.trigger,
+    status: complete ? "ok" : "partial",
+    reason: reason ?? null,
+    last_complete_day_ms: lastCompleteMs,
+    freshness,
+    counts: { bars_inserted: inserted },
   });
-  return { runKey: key, status: complete ? "ok" : "partial", counts, ...(reason ? { reason } : {}) };
+  return {
+    runKey: key,
+    status: complete ? "ok" : "partial",
+    counts,
+    ...(reason ? { reason } : {}),
+  };
 }
 
-/** Ms until the next daily run time (00:05 UTC). */
 export function msUntilNextDailyRun(now: number): number {
   const today = Math.floor(now / DAY_MS) * DAY_MS + 5 * 60_000;
   return (now < today ? today : today + DAY_MS) - now;

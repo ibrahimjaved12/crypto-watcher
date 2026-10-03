@@ -1,19 +1,36 @@
 import { forwardTrendDeps } from "../lib/forward/forward-deps.server";
 import { msUntilNextDailyRun, runForwardTrend } from "../lib/forward/forward-trend-run.server";
+import { listForwardUsers } from "../lib/forward/forward-users.server";
+import { supabaseAdmin } from "../integrations/supabase/client.server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 // Local daily trend track job (#239 P14): runs once per day at 00:05 UTC (the previous UTC day's
-// kline is complete by then) for the account FORWARD_USER_ID. `--once` runs a single evaluation and
+// kline is complete by then) for all registered accounts. FORWARD_USER_ID optionally narrows it.
+// `--once` runs a single evaluation and
 // exits. Re-runs are no-ops per (track, day). Production scheduling: docs/production-todo.md.
-const userId = process.env["FORWARD_USER_ID"] ?? "";
-if (!/^[0-9a-f-]{36}$/i.test(userId)) {
-  console.error("[forward-trend] FORWARD_USER_ID must be the account UUID that owns the track");
-  process.exit(1);
-}
-
 async function once() {
-  const summary = await runForwardTrend(await forwardTrendDeps(), { userId, trigger: "daily" });
-  console.log(`[forward-trend] ${summary.runKey} ${summary.status}${summary.reason ? `: ${summary.reason}` : ""}` +
-    (summary.counts ? ` ${JSON.stringify(summary.counts)}` : ""));
+  const users = await listForwardUsers(
+    supabaseAdmin as unknown as SupabaseClient,
+    process.env["FORWARD_USER_ID"],
+  );
+  const deps = await forwardTrendDeps();
+  let failed = 0;
+  for (const userId of users) {
+    try {
+      const summary = await runForwardTrend(deps, { userId, trigger: "daily" });
+      console.log(
+        `[forward-trend] ${userId} ${summary.runKey} ${summary.status}${summary.reason ? `: ${summary.reason}` : ""}` +
+          (summary.counts ? ` ${JSON.stringify(summary.counts)}` : ""),
+      );
+    } catch (error) {
+      failed++;
+      console.error(
+        `[forward-trend] ${userId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (!users.length) console.log("[forward-trend] no registered accounts yet");
+  if (failed) throw new Error(`${failed} account runs failed; remaining accounts were processed`);
 }
 
 async function loop() {

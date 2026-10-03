@@ -1,4 +1,4 @@
-"""Forward track of the daily trend Mode B variants (#239 P14, #222): portfolio mode, pure and stateless.
+"""Forward track of the daily trend Mode B variants (#239 P14, #222): portfolio mode, stateless.
 
 Mode B is a daily weight stream, not discrete trades, so the forward test of the K = 9 frozen
 ``benchmark.trend`` variants is a hypothetical vol-targeted portfolio per variant, evaluated one
@@ -33,19 +33,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_EVEN
 from fractions import Fraction
+import time
 
 import numpy as np
 
 from .. import data_lake
 from ..benchmark import trend
 from ..benchmark.canonical import content_hash
-from ..benchmark.power import min_detectable_edge_per_day
+from ..benchmark.power import min_detectable_edge_per_day, required_days
 
-TRACK_VERSION = "trend-track-v1"
+TRACK_VERSION = "trend-track-v2"
 DAY_MS = trend.DAY_MS
 PPM = trend.PPM
 TRACK_START_MS = data_lake.month_bounds_ms("2026-10")[0]  # forward live from 2026-10 (owner decision)
-MIN_HISTORY_DAYS = 400  # 360-day channel + the rvfilter's 30 + 365 window need about 396 closes
+HISTORY_START_MS = data_lake.month_bounds_ms(trend.WARMUP_FIRST_MONTH)[0]
+FUNDING_INTERVAL_MS = 8 * 3_600_000  # Binance's default; adjusted intervals come from verified metadata
 INITIAL_EQUITY_PPM = PPM
 PRICE_SCALE = 10 ** 8
 _NAN = float("nan")
@@ -57,8 +59,8 @@ class Track:
     kind: str                         # "variant" | "buy_hold_vt" | "equal_weight_long"
     variant: trend.TrendVariant | None = None
 
-    def config(self) -> dict:
-        symbols = sorted(data_lake.SYMBOLS)
+    def config(self, symbols=None) -> dict:
+        symbols = sorted(data_lake.SYMBOLS if symbols is None else symbols)
         if self.kind == "variant":
             return self.variant.config(symbols)
         if self.kind == "buy_hold_vt":
@@ -86,9 +88,13 @@ TRACKS_BY_NAME = {track.name: track for track in TRACKS}
 CONTROL_OF = {variant.name: _control_name(variant) for variant in trend.VARIANTS}
 
 
-def params_hash() -> str:
+def params_hash(symbols=None, history_start_ms=HISTORY_START_MS, track_start_ms=TRACK_START_MS) -> str:
+    symbols = list(data_lake.SYMBOLS if symbols is None else symbols)
     return content_hash({"version": TRACK_VERSION, "strategy_version": trend.STRATEGY_VERSION,
-                         "tracks": {track.name: track.config() for track in TRACKS}})
+                         "universe": symbols, "history_start_ms": history_start_ms, "track_start_ms": track_start_ms,
+                         "funding_schedule_policy": "verified-metadata-strict-utc-grid",
+                         "prospective_rule": "recorded-before-daily-close",
+                         "tracks": {track.name: track.config(symbols) for track in TRACKS}})
 
 
 # ---------------------------------------------------------------- weights
@@ -146,14 +152,37 @@ def target_weights(variants, daily_closes_by_symbol: dict, decision_day_ms: int)
 # ---------------------------------------------------------------- portfolio step
 
 
+def sample_state() -> dict:
+    return {"n_days": 0, "sum_ppm": 0, "sum_sq_ppm": 0, "turnover_sum_ppm": 0, "gross_sum_ppm": 0,
+            "equity_ppm": INITIAL_EQUITY_PPM, "mean_daily": None, "sd_daily": None,
+            "mu_min_daily": None, "days_needed": None, "mean_turnover": None, "mean_gross": None}
+
+
+def update_sample(sample: dict, daily: int, turnover: int, gross: int) -> dict:
+    n, total, squares = sample["n_days"] + 1, sample["sum_ppm"] + daily, sample["sum_sq_ppm"] + daily * daily
+    variance = (squares - Fraction(total * total, n)) / (n - 1) if n > 1 else None
+    sd = max(0.0, float(variance)) ** 0.5 / PPM if variance is not None else None
+    mean = total / n / PPM
+    turns, exposure = sample["turnover_sum_ppm"] + turnover, sample["gross_sum_ppm"] + gross
+    return {"n_days": n, "sum_ppm": total, "sum_sq_ppm": squares,
+            "turnover_sum_ppm": turns, "gross_sum_ppm": exposure,
+            "equity_ppm": round(Fraction(sample["equity_ppm"] * (PPM + daily), PPM)),
+            "mean_daily": mean, "sd_daily": sd,
+            "mu_min_daily": min_detectable_edge_per_day(n, sd) if sd is not None else None,
+            "days_needed": required_days(mean, sd) if sd is not None and mean > 0 else None,
+            "mean_turnover": turns / n / PPM, "mean_gross": exposure / n / PPM}
+
+
 def initial_state(track: str, previous_weights: dict | None = None) -> dict:
     return {"version": TRACK_VERSION, "track": track, "last_day_ms": None, "equity_ppm": INITIAL_EQUITY_PPM,
             "n_days": 0, "sum_ppm": 0, "sum_sq_ppm": 0, "peak_equity_ppm": INITIAL_EQUITY_PPM,
-            "max_drawdown_ppm": 0, "weights": dict(previous_weights or {}), "mu_min_daily": None}
+            "max_drawdown_ppm": 0, "weights": dict(previous_weights or {}), "mu_min_daily": None,
+            "samples": {kind: sample_state() for kind in ("prospective", "retrospective")}}
 
 
 def step_portfolio(state: dict, day_ms: int, weights: dict, day_returns: dict, funding: dict,
-                   turnover_cost_bp: int = trend.COST_BP_PER_UNIT_TURNOVER) -> tuple[dict, dict]:
+                   turnover_cost_bp: int = trend.COST_BP_PER_UNIT_TURNOVER,
+                   sample_kind: str = "retrospective") -> tuple[dict, dict]:
     """One completed day of one track -> (new state, ledger row).
 
     ``weights``: symbol -> (w_t, defined), in the portfolio's symbol order; ``day_returns``: symbol ->
@@ -194,6 +223,10 @@ def step_portfolio(state: dict, day_ms: int, weights: dict, day_returns: dict, f
            "turnover_ppm": int(np.rint(turnover / count * PPM)) if count else 0,
            "gross_ppm": int(np.rint(gross / count * PPM)) if count else 0, "symbols_active": count,
            "weights": {symbol: float(weight) for symbol, weight in held.items()}}
+    samples = dict(state["samples"])
+    samples[sample_kind] = update_sample(samples[sample_kind], daily_ppm, row["turnover_ppm"], row["gross_ppm"])
+    new_state["samples"] = samples
+    row.update(sample_kind=sample_kind, sample_equity_ppm=samples[sample_kind]["equity_ppm"])
     return new_state, row
 
 
@@ -217,6 +250,7 @@ class SymbolHistory:
     funding_from_ms: int | None
     funding_to_ms: int | None
     funding_available: bool
+    funding_interval_ms: int
 
     def index(self, day_ms: int) -> int:
         return (day_ms - self.start_ms) // DAY_MS
@@ -232,49 +266,77 @@ class SymbolHistory:
         if (not self.funding_available or self.funding_from_ms is None or self.funding_to_ms is None
                 or not self.funding_from_ms <= day_ms or day_ms + DAY_MS > self.funding_to_ms):
             return None
+        settlements = [calc for calc, _ in self.funding if day_ms < calc <= day_ms + DAY_MS]
+        # Never infer coverage from an HTTP success, page length, or absent rates. All expected
+        # settlements, including the closing midnight, must exist exactly once. Off-grid schedules
+        # need a separately verified history rather than a silent zero.
+        interval = self.funding_interval_ms
+        if (interval not in tuple(hours * 3_600_000 for hours in (1, 2, 3, 4, 6, 8, 12, 24)) or
+                settlements != list(range(day_ms + interval, day_ms + DAY_MS + 1, interval))):
+            return None
         return float(sum((rate for calc, rate in self.funding if day_ms < calc <= day_ms + DAY_MS), Fraction(0)))
 
 
-def symbol_history(item: dict, through_day_ms: int) -> SymbolHistory | None:
+def symbol_history(item: dict, through_day_ms: int, history_start_ms: int = HISTORY_START_MS) -> SymbolHistory | None:
     bars = sorted(item["bars"], key=lambda bar: bar["day_ms"])
     previous = None
     for bar in bars:
         if bar["day_ms"] % DAY_MS or (previous is not None and bar["day_ms"] <= previous):
             raise ValueError("daily bars must be distinct UTC days")
         previous = bar["day_ms"]
-    bars = [bar for bar in bars if bar["day_ms"] <= through_day_ms]
+    bars = [bar for bar in bars if history_start_ms <= bar["day_ms"] <= through_day_ms]
     funding = tuple(sorted((int(event["calc_time_ms"]), Fraction(Decimal(str(event["rate"]))))
                            for event in item.get("funding", ())))
     if not bars:
         return None
-    start = bars[0]["day_ms"]
+    start = history_start_ms  # pre-listing days are MISSING, as in the canonical daily lake
     days = (through_day_ms - start) // DAY_MS + 1
     opens, closes = np.full(days, _NAN), np.full(days, _NAN)
     for bar in bars:
         i = (bar["day_ms"] - start) // DAY_MS
         opens[i], closes[i] = float(price_e8(bar["open"])), float(price_e8(bar["close"]))
     return SymbolHistory(item["symbol"], start, opens, closes, funding, item.get("funding_from_ms"),
-                         item.get("funding_to_ms"), bool(item.get("funding_available", True)))
+                         item.get("funding_to_ms"), bool(item.get("funding_available", True)),
+                         int(item.get("funding_interval_ms", FUNDING_INTERVAL_MS)))
 
 
 def evaluate(symbols: list, through_day_ms: int, states: dict | None = None,
-             track_start_ms: int = TRACK_START_MS) -> dict:
+             track_start_ms: int = TRACK_START_MS, history_start_ms: int = HISTORY_START_MS,
+             expected_symbols=None, saved_params_hash: str | None = None,
+             decisions: list | None = None, evaluated_at_ms: int | None = None) -> dict:
     """Finalise every completed day after each track's state, through ``through_day_ms``.
 
     Returns new ledger rows, the weight rows of the evaluated days and of the next day (decided from
-    the closes through ``through_day_ms``), the new states and ``funding_unavailable``. Idempotent:
-    the same inputs give the same rows; a day already in a state is never evaluated again.
+    the closes through ``through_day_ms``), the new states and ``funding_unavailable``. Ledger and
+    states are deterministic; existing decisions preserve their actual timestamps. A day already
+    in a state is never evaluated again.
     """
-    if through_day_ms % DAY_MS or track_start_ms % DAY_MS:
+    if through_day_ms % DAY_MS or track_start_ms % DAY_MS or history_start_ms % DAY_MS:
         raise ValueError("days must start at 00:00 UTC")
-    histories = [history for history in (symbol_history(item, through_day_ms) for item in symbols) if history]
-    order = [history.symbol for history in histories]
-    if len(set(order)) != len(order):
+    expected_symbols = list(data_lake.SYMBOLS if expected_symbols is None else expected_symbols)
+    identity = params_hash(expected_symbols, history_start_ms, track_start_ms)
+    if states and saved_params_hash != identity:
+        raise ValueError("saved configuration identity differs")
+    if len(set(expected_symbols)) != len(expected_symbols) or not expected_symbols:
+        raise ValueError("invalid frozen universe")
+    supplied = {item["symbol"]: item for item in symbols}
+    if len(supplied) != len(symbols):
         raise ValueError("duplicate symbol")
+    complete = set(supplied) == set(expected_symbols) and all(
+        any(history_start_ms <= bar["day_ms"] <= min(through_day_ms, track_start_ms - DAY_MS)
+            for bar in supplied[symbol]["bars"]) for symbol in expected_symbols if symbol in supplied)
+    histories = [history for history in (symbol_history(supplied[symbol], through_day_ms, history_start_ms)
+                 for symbol in expected_symbols) if history] if complete else []
     states = dict(states or {})
+    if states and (set(states) != set(TRACKS_BY_NAME) or any(
+            set(state.get("weights", {})) != set(expected_symbols) for state in states.values())):
+        raise ValueError("incomplete saved state")
+    recorded = {(row["track"], row["day_ms"]): row for row in (decisions or [])}
+    if len(recorded) != len(decisions or []):
+        raise ValueError("duplicate recorded decision")
     funding_unavailable = [history.symbol for history in histories if not history.funding_available]
     ledger, weight_rows, reasons, new_states = [], [], {}, {}
-    for track in TRACKS:
+    for track in TRACKS if complete else ():
         paths = {}
         for history in histories:  # closes through the last day plus one NaN: the next day's weight
             paths[history.symbol] = weight_path(track, np.concatenate([history.close, [_NAN]]))
@@ -287,6 +349,19 @@ def evaluate(symbols: list, through_day_ms: int, states: dict | None = None,
                 out[history.symbol] = ((float(weights[i]), bool(defined[i])) if 0 <= i < len(weights)
                                        else (0.0, False))
             return out
+
+        def decision_on(day_ms: int) -> dict:
+            weights = weights_on(day_ms)
+            row = {"track": track.name, "day_ms": day_ms, "decided_from_close_ms": day_ms - DAY_MS,
+                   "weights": {symbol: w for symbol, (w, _) in weights.items()},
+                   "defined": {symbol: d for symbol, (_, d) in weights.items()},
+                   "decided_at_ms": int(time.time() * 1000) if evaluated_at_ms is None else evaluated_at_ms}
+            prior = recorded.get((track.name, day_ms))
+            if prior:
+                if any(prior[key] != row[key] for key in ("weights", "defined", "decided_from_close_ms")):
+                    raise ValueError("recorded decision differs from canonical history")
+                row["decided_at_ms"] = prior["decided_at_ms"]
+            return row
 
         state = states.get(track.name)
         if state is None:
@@ -301,26 +376,30 @@ def evaluate(symbols: list, through_day_ms: int, states: dict | None = None,
             funding = {history.symbol: history.day_funding(day) for history in histories}
             unknown = [symbol for symbol, value in funding.items() if value is None]
             if unknown:
+                funding_unavailable.extend(symbol for symbol in unknown if symbol not in funding_unavailable)
                 reasons[track.name] = f"funding_unavailable:{','.join(unknown)}"
                 break
             weights = weights_on(day)
-            state, row = step_portfolio(state, day, weights, day_returns, funding)
+            decision_on(day)  # validate the immutable decision before evaluating its outcome
+            prior = recorded.get((track.name, day))
+            kind = "prospective" if prior and prior["recorded_at_ms"] < day + DAY_MS else "retrospective"
+            state, row = step_portfolio(state, day, weights, day_returns, funding, sample_kind=kind)
             ledger.append(row)
             day += DAY_MS
         new_states[track.name] = state
         for day_ms in range(first_new, through_day_ms + 2 * DAY_MS, DAY_MS):  # new days and the next day
-            weights = weights_on(day_ms)
-            weight_rows.append({"track": track.name, "day_ms": day_ms, "decided_from_close_ms": day_ms - DAY_MS,
-                                "weights": {symbol: w for symbol, (w, _) in weights.items()},
-                                "defined": {symbol: d for symbol, (_, d) in weights.items()}})
+            weight_rows.append(decision_on(day_ms))
     finalised = [state["last_day_ms"] for state in new_states.values()]
     return {"schema_version": 1, "versions": {"trend_track": TRACK_VERSION, "strategy": trend.STRATEGY_VERSION},
-            "params_hash": params_hash(), "symbols": order, "track_start_ms": track_start_ms,
+            "params_hash": identity, "symbols": expected_symbols, "track_start_ms": track_start_ms,
+            "history_start_ms": history_start_ms,
             "tracks": [{"name": track.name, "kind": track.kind,
-                        "control": CONTROL_OF.get(track.name), "config_hash": content_hash(track.config())}
+                        "control": CONTROL_OF.get(track.name), "config_hash": content_hash(track.config(expected_symbols))}
                        for track in TRACKS],
             "through_day_ms": min(finalised) if finalised and None not in finalised else None,
             "ledger": ledger, "weights": weight_rows, "states": new_states,
-            "funding_unavailable": funding_unavailable, "reasons": reasons,
+            "funding_unavailable": funding_unavailable,
+            "reasons": reasons if complete else {"startup": "incomplete frozen universe history"},
             "assumptions": ["hypothetical-no-margin", "no-liquidation-model", "taker-cost-11bp-per-unit-turnover",
-                            "equal-weight-active-symbols"]}
+                            "equal-weight-active-symbols", "verified-metadata-utc-funding-settlements",
+                            "prospective-recorded-before-close-may-be-after-open"]}

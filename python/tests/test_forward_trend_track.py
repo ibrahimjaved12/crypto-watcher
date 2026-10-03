@@ -16,7 +16,7 @@ from market_analysis.daily_lake import DailySeries
 from market_analysis.forward import trend_track as tt
 
 DAY = tt.DAY_MS
-S0 = data_lake.month_bounds_ms("2024-01")[0]
+S0 = tt.HISTORY_START_MS
 DAYS = 560
 SYMBOLS = data_lake.SYMBOLS[:3]
 GAPS = {SYMBOLS[1]: (200, 470)}  # one in the warm-up, one inside the tracked window
@@ -63,6 +63,16 @@ def forward_symbols(data, *, available=True, funding_to_ms=None, drop=None):
     return items
 
 
+def evaluate(symbols, through_day_ms, states=None, **kwargs):
+    kwargs.setdefault("history_start_ms", S0)
+    kwargs.setdefault("expected_symbols", list(SYMBOLS))
+    kwargs.setdefault("evaluated_at_ms", S0 + (DAYS + 2) * DAY)
+    if states:
+        kwargs.setdefault("saved_params_hash", tt.params_hash(kwargs["expected_symbols"], kwargs["history_start_ms"],
+                                                             kwargs.get("track_start_ms", tt.TRACK_START_MS)))
+    return tt.evaluate(symbols, through_day_ms, states, **kwargs)
+
+
 def ledger_of(result, track):
     return [row for row in result["ledger"] if row["track"] == track]
 
@@ -73,7 +83,7 @@ class ParityTests(unittest.TestCase):
         first_ms, end_ms = S0 + 420 * DAY, S0 + DAYS * DAY
         symbols = backtest_symbols(data, first_ms, end_ms)
         months = trend._month_labels(first_ms, DAYS - 420)
-        forward = tt.evaluate(forward_symbols(data), end_ms - DAY, track_start_ms=first_ms)
+        forward = evaluate(forward_symbols(data), end_ms - DAY, track_start_ms=first_ms)
         controls = {}
         for variant in trend.VARIANTS:  # the per-variant body of trend.evaluate_trend
             _, daily = trend.evaluate_variant(variant, symbols, months, np.zeros(0, dtype=np.int64),
@@ -111,7 +121,7 @@ class TimingTests(unittest.TestCase):
     def test_gap_leaves_the_symbol_flat_and_an_incomplete_day_is_ignored(self):
         data = fixture()
         through = S0 + 450 * DAY
-        result = tt.evaluate(forward_symbols(data, drop=(SYMBOLS[0], 440)), through, track_start_ms=S0 + 430 * DAY)
+        result = evaluate(forward_symbols(data, drop=(SYMBOLS[0], 440)), through, track_start_ms=S0 + 430 * DAY)
         row = next(r for r in result["weights"] if r["track"] == "ens_ls_25" and r["day_ms"] == S0 + 441 * DAY)
         self.assertEqual((row["weights"][SYMBOLS[0]], row["defined"][SYMBOLS[0]]), (0.0, False))
         day = next(r for r in ledger_of(result, "ew_long") if r["day_ms"] == S0 + 440 * DAY)
@@ -119,22 +129,22 @@ class TimingTests(unittest.TestCase):
         extra = forward_symbols(data, drop=(SYMBOLS[0], 440))
         for item in extra:
             item["bars"] = [bar for bar in item["bars"] if bar["day_ms"] <= through]
-        self.assertEqual(tt.evaluate(extra, through, track_start_ms=S0 + 430 * DAY), result)
+        self.assertEqual(evaluate(extra, through, track_start_ms=S0 + 430 * DAY), result)
         extra[0]["bars"].append({"day_ms": through + DAY, "open": "1", "close": "1"})  # beyond through: unused
-        self.assertEqual(tt.evaluate(extra, through, track_start_ms=S0 + 430 * DAY), result)
+        self.assertEqual(evaluate(extra, through, track_start_ms=S0 + 430 * DAY), result)
 
 
 class StateTests(unittest.TestCase):
     def test_idempotent_and_incremental(self):
         data = fixture()
         start, through = S0 + 500 * DAY, S0 + 520 * DAY
-        whole = tt.evaluate(forward_symbols(data), through, track_start_ms=start)
-        first = tt.evaluate(forward_symbols(data), through - 5 * DAY, track_start_ms=start)
-        rest = tt.evaluate(forward_symbols(data), through, first["states"], track_start_ms=start)
+        whole = evaluate(forward_symbols(data), through, track_start_ms=start)
+        first = evaluate(forward_symbols(data), through - 5 * DAY, track_start_ms=start)
+        rest = evaluate(forward_symbols(data), through, first["states"], track_start_ms=start)
         for track in tt.TRACKS:
             self.assertEqual(ledger_of(first, track.name) + ledger_of(rest, track.name), ledger_of(whole, track.name))
         self.assertEqual(rest["states"], whole["states"])
-        again = tt.evaluate(forward_symbols(data), through, whole["states"], track_start_ms=start)
+        again = evaluate(forward_symbols(data), through, whole["states"], track_start_ms=start)
         self.assertEqual((again["ledger"], again["states"]), ([], whole["states"]))  # a re-run adds nothing
         state = whole["states"]["ens_ls_25"]
         self.assertEqual(state["n_days"], 21)
@@ -144,19 +154,19 @@ class StateTests(unittest.TestCase):
     def test_funding_unavailable_finalises_nothing(self):
         data = fixture()
         start, through = S0 + 500 * DAY, S0 + 510 * DAY
-        failed = tt.evaluate(forward_symbols(data, available=False), through, track_start_ms=start)
+        failed = evaluate(forward_symbols(data, available=False), through, track_start_ms=start)
         self.assertEqual(failed["ledger"], [])
         self.assertEqual(failed["funding_unavailable"], list(SYMBOLS))
         self.assertTrue(all(reason.startswith("funding_unavailable:") for reason in failed["reasons"].values()))
         self.assertIsNone(failed["through_day_ms"])
         self.assertTrue(failed["weights"])  # weights are still decided and recorded
-        short = tt.evaluate(forward_symbols(data, funding_to_ms=start + 3 * DAY), through, track_start_ms=start)
+        short = evaluate(forward_symbols(data, funding_to_ms=start + 3 * DAY), through, track_start_ms=start)
         self.assertEqual(short["through_day_ms"], start + 2 * DAY)  # only fully covered days are finalised
 
     def test_unknown_state_is_refused(self):
         data = fixture()
         with self.assertRaises(ValueError):
-            tt.evaluate(forward_symbols(data), S0 + 510 * DAY, {"ens_ls_25": {"version": "x", "track": "ens_ls_25"}},
+            evaluate(forward_symbols(data), S0 + 510 * DAY, {"ens_ls_25": {"version": "x", "track": "ens_ls_25"}},
                         track_start_ms=S0 + 500 * DAY)
 
 
@@ -176,7 +186,8 @@ class ApiTests(unittest.TestCase):
                 low, high = sorted((Decimal(bar["open"]), Decimal(bar["close"])))
                 bar.update(high=str(high), low=str(low))
         body = {"schema_version": 1, "symbols": symbols, "through_day_ms": S0 + 505 * DAY,
-                "track_start_ms": S0 + 500 * DAY}
+                "track_start_ms": S0 + 500 * DAY, "history_start_ms": S0,
+                "expected_symbols": list(SYMBOLS), "evaluated_at_ms": S0 + (DAYS + 2) * DAY}
 
         async def send(payload, headers):
             app = create_app(token)
@@ -187,10 +198,110 @@ class ApiTests(unittest.TestCase):
 
         response = asyncio.run(send(body, {"Authorization": f"Bearer {token}"}))
         self.assertEqual(response.status_code, 200, response.text)
-        direct = tt.evaluate(forward_symbols(data), S0 + 505 * DAY, track_start_ms=S0 + 500 * DAY)
+        direct = evaluate(forward_symbols(data), S0 + 505 * DAY, track_start_ms=S0 + 500 * DAY)
         self.assertEqual([row["daily_ppm"] for row in response.json()["ledger"]],
                          [row["daily_ppm"] for row in direct["ledger"]])
+        headers = {"Authorization": f"Bearer {token}"}
+        incomplete = asyncio.run(send({**body, "symbols": symbols[:1]}, headers))
+        self.assertEqual(incomplete.status_code, 200)
+        self.assertEqual((incomplete.json()["states"], incomplete.json()["weights"]), ({}, []))
+        mismatched = asyncio.run(send({**body, "states": response.json()["states"],
+                                     "saved_params_hash": "0" * 64}, headers))
+        self.assertEqual(mismatched.status_code, 409)
         self.assertEqual(asyncio.run(send(body, {})).status_code, 401)
+
+class RecoveryTests(unittest.TestCase):
+    def test_incomplete_universe_never_emits_initial_state_or_decisions(self):
+        data = fixture()
+        start = S0 + 500 * DAY
+        symbols = forward_symbols(data)
+        for incomplete in (symbols[:1], [symbols[0], {**symbols[1], "bars": []}, symbols[2]]):
+            result = evaluate(incomplete, start + DAY, track_start_ms=start)
+            self.assertEqual((result["states"], result["weights"], result["ledger"]), ({}, [], []))
+            self.assertIn("startup", result["reasons"])
+        recovered = evaluate(symbols, start + DAY, track_start_ms=start)
+        self.assertEqual(set(recovered["states"]["ew_long"]["weights"]), set(SYMBOLS))
+
+    def test_successful_but_empty_or_gapped_funding_is_unknown(self):
+        data = fixture()
+        start = S0 + 500 * DAY
+        for absent in ("all", "middle", "midnight", "duplicate"):
+            symbols = forward_symbols(data)
+            events = symbols[0]["funding"]
+            if absent == "all":
+                symbols[0]["funding"] = []
+            elif absent == "duplicate":
+                events.append(next(event for event in events if event["calc_time_ms"] == start + DAY))
+            else:
+                missing = start + (tt.FUNDING_INTERVAL_MS * 2 if absent == "middle" else DAY)
+                symbols[0]["funding"] = [event for event in events if event["calc_time_ms"] != missing]
+            result = evaluate(symbols, start, track_start_ms=start)
+            self.assertEqual(result["ledger"], [], absent)
+            self.assertIn(SYMBOLS[0], result["funding_unavailable"])
+        zero = forward_symbols(data)
+        for symbol in zero:
+            for event in symbol["funding"]:
+                event["rate"] = "0"
+        self.assertTrue(evaluate(zero, start, track_start_ms=start)["ledger"])
+
+    def test_resume_binds_hash_origin_start_and_universe(self):
+        symbols = forward_symbols(fixture())
+        start = S0 + 500 * DAY
+        first = evaluate(symbols, start, track_start_ms=start)
+        with self.assertRaisesRegex(ValueError, "configuration identity"):
+            evaluate(symbols, start + DAY, first["states"], track_start_ms=start, saved_params_hash="0" * 64)
+        for changes in ({"history_start_ms": S0 + DAY}, {"track_start_ms": start + DAY},
+                        {"expected_symbols": list(reversed(SYMBOLS))}):
+            kwargs = {"track_start_ms": start, "saved_params_hash": first["params_hash"], **changes}
+            with self.assertRaisesRegex(ValueError, "configuration identity"):
+                evaluate(symbols, start + DAY, first["states"], **kwargs)
+
+    def test_adjusted_settlement_interval_requires_its_full_grid(self):
+        symbols = forward_symbols(fixture())
+        start = S0 + 500 * DAY
+        interval = 4 * 3_600_000
+        for item in symbols:
+            item["funding_interval_ms"] = interval
+            item["funding"] = [{"calc_time_ms": calc, "rate": "0"}
+                               for calc in range(start + interval, start + DAY + 1, interval)]
+        self.assertTrue(evaluate(symbols, start, track_start_ms=start)["ledger"])
+        symbols[0]["funding"] = symbols[0]["funding"][1:]
+        self.assertEqual(evaluate(symbols, start, track_start_ms=start)["ledger"], [])
+
+    def test_prospective_and_reconstructed_statistics_are_separate(self):
+        symbols = forward_symbols(fixture())
+        start = S0 + 500 * DAY
+        initial = evaluate(symbols, start - DAY, track_start_ms=start, evaluated_at_ms=start + 5 * 60_000)
+        decisions = [{**row, "recorded_at_ms": start + 6 * 60_000, "sample_kind": "prospective"}
+                     for row in initial["weights"]]
+        result = evaluate(symbols, start + 2 * DAY, initial["states"], track_start_ms=start, decisions=decisions)
+        rows = ledger_of(result, "ew_long")
+        self.assertEqual([row["sample_kind"] for row in rows], ["prospective", "retrospective", "retrospective"])
+        state = result["states"]["ew_long"]
+        self.assertEqual(state["samples"]["prospective"]["n_days"], 1)
+        self.assertEqual(state["samples"]["retrospective"]["n_days"], 2)
+        self.assertEqual(state["samples"]["prospective"]["mean_daily"], rows[0]["daily_ppm"] / tt.PPM)
+        retro = state["samples"]["retrospective"]
+        sd = np.std([row["daily_ppm"] / tt.PPM for row in rows[1:]], ddof=1)
+        self.assertAlmostEqual(retro["mu_min_daily"], tt.min_detectable_edge_per_day(2, sd))
+        late = [{**row, "recorded_at_ms": start + DAY} for row in decisions]
+        reconstructed = evaluate(symbols, start, initial["states"], track_start_ms=start, decisions=late)
+        self.assertEqual(ledger_of(reconstructed, "ew_long")[0]["sample_kind"], "retrospective")
+        decisions[0]["weights"][SYMBOLS[0]] += 0.01
+        with self.assertRaisesRegex(ValueError, "recorded decision differs"):
+            evaluate(symbols, start, initial["states"], track_start_ms=start, decisions=decisions)
+
+    def test_420_days_changes_canonical_2020_weight_path(self):
+        days = (tt.TRACK_START_MS - tt.HISTORY_START_MS) // DAY + 8
+        rng = np.random.default_rng(71)
+        close = 100 * np.exp(np.cumsum(0.001 + 0.02 * rng.standard_normal(days)))
+        track = tt.TRACKS_BY_NAME["tsmom_7"]
+        full, _ = tt.weight_path(track, close)
+        cut = days - 8 - 420
+        short, _ = tt.weight_path(track, close[cut:])
+        self.assertTrue(np.any(full[-8:] != short[-8:]))
+        target = tt.target_weights([track], {"BTCUSDT": (tt.HISTORY_START_MS, close)}, tt.TRACK_START_MS - DAY)
+        self.assertEqual(target[track.name]["BTCUSDT"][0], full[days - 8])
 
 
 if __name__ == "__main__":
