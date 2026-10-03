@@ -841,6 +841,62 @@ def advance_hmm_regime_filter(
     return HMMRegimeEvidence(**values), HMMFilterState(boundary, posterior)
 
 
+def filter_hmm_regime_feature_blocks(
+    feature_blocks: Iterable[Iterable[HMMFeatureRow]],
+    model: GaussianHMMModelArtifact,
+    config: HMMRegimeConfig = HMM_CONFIG_V1,
+) -> tuple[tuple[HMMRegimeEvidence, ...], ...]:
+    """Causally filter pre-extracted feature blocks with reset-at-gap semantics.
+
+    This is the artifact-preparation path used for development cross-fit
+    evaluation. It reuses the existing feature standardization and forward
+    filter implementation and never treats the held-out block as HMM training
+    input.
+    """
+    if not isinstance(model, GaussianHMMModelArtifact):
+        raise ValueError("cross-fit filtering requires a validated HMM model")
+    if not isinstance(config, HMMRegimeConfig) or model.config_version != config.version:
+        raise ValueError("cross-fit filtering requires the matching frozen HMM config")
+    blocks = tuple(tuple(block) for block in feature_blocks)
+    if (not blocks or any(not block for block in blocks)
+            or any(not isinstance(row, HMMFeatureRow) for block in blocks for row in block)):
+        raise ValueError("cross-fit filtering requires nonempty HMM feature blocks")
+    previous_boundary = None
+    for block in blocks:
+        if any(right.evaluation_boundary_time_ms != left.evaluation_boundary_time_ms
+               + HMM_SAMPLE_INTERVAL_MS for left, right in zip(block, block[1:])):
+            raise ValueError("cross-fit feature blocks must be contiguous internally")
+        if previous_boundary is not None and block[0].evaluation_boundary_time_ms <= previous_boundary:
+            raise ValueError("cross-fit feature blocks must be chronological")
+        previous_boundary = block[-1].evaluation_boundary_time_ms
+
+    outputs = []
+    for block in blocks:
+        state = None
+        block_outputs = []
+        for row in block:
+            try:
+                (standardized, reset, predicted, posterior, hard, confidence,
+                 entropy, likelihood) = _filter_observation(row, model, state)
+            except (ArithmeticError, OverflowError, ValueError, ZeroDivisionError):
+                evidence = HMMRegimeEvidence(
+                    row.evaluation_boundary_time_ms, HMM_FEATURE_UNAVAILABLE,
+                    "HMM_INFERENCE_NUMERIC_UNAVAILABLE", row.values, None, None,
+                    None, None, None, None, None, None,
+                    HMM_ALGORITHM_VERSION, config.version, model.model_sha256)
+                state = None
+            else:
+                evidence = HMMRegimeEvidence(
+                    row.evaluation_boundary_time_ms, HMM_READY, None, row.values,
+                    standardized, reset, predicted, posterior, hard, confidence,
+                    entropy, likelihood, HMM_ALGORITHM_VERSION, config.version,
+                    model.model_sha256)
+                state = HMMFilterState(row.evaluation_boundary_time_ms, posterior)
+            block_outputs.append(evidence)
+        outputs.append(tuple(block_outputs))
+    return tuple(outputs)
+
+
 @dataclass(frozen=True)
 class PairedMarketStateHMMPoint:
     evaluation_boundary_time_ms: int
