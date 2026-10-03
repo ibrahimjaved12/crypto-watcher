@@ -170,7 +170,7 @@ async function main() {
           "Python environment missing. Run: python3 -m venv python/.venv && python/.venv/bin/python -m pip install -r python/requirements.txt",
         );
       }
-      const imports = spawnSync(python, ["-c", "import fastapi, uvicorn"], { stdio: "ignore" });
+      const imports = spawnSync(python, ["-c", "import fastapi, uvicorn, numpy"], { stdio: "ignore" });
       if (imports.status !== 0) {
         throw new Error(
           "Python API dependencies missing. Run: python/.venv/bin/python -m pip install -r python/requirements.txt",
