@@ -268,7 +268,7 @@ conditional, causal and financial proposals; wallet settlement remains #36 work.
 
 `futures_execution_resolution{,_contracts}.py` supplies immutable admission,
 order/conditional lifecycle views, position input views, candidates and identified
-financial proposals. Part 3 has its own `binance-usdm-execution-resolution-v2`
+financial proposals. Part 3 has its own `binance-usdm-execution-resolution-v3`
 identity; Part 1 math v4 and Part 2 scientific identities remain unchanged. It
 performs no network calls, reads no clocks, and commits no state. Position
 quantity, entry and isolated collateral are caller-supplied #36 input facts;
@@ -319,10 +319,15 @@ rules/context then supplied, rather than at parent creation.
   OHLC crossing gives a causal interval, never an exact liquidation timestamp.
   A threshold already breached at mark open uses bounds from the position's
   effective start through that open, with `BREACHED_BY_MARK_OPEN` basis.
+  If the position begins after a breached open but during the mark minute, the
+  OHLC cannot establish a post-activation crossing, so the risk remains
+  unavailable. Positions wholly outside the minute produce no risk candidate.
   Only an unambiguously selected risk allows
   `FIXED_BPS_FROM_LIQUIDATION_THRESHOLD_V1`: adverse SELL for LONG, BUY for SHORT,
-  with a separate exact closeout charge. This is a simulation approximation, not
-  a factual Binance liquidation fill, and it is distinct from normal trading fees.
+  with a separate exact closeout charge. The closeout ID binds the selected risk
+  candidate's own proof, so unrelated co-selected candidates do not change that
+  economic proposal. This is a simulation approximation, not a factual Binance
+  liquidation fill, and it is distinct from normal trading fees.
 
 The production fill path consumes `ExecutionTradeTapeEvidence` through
 `iter_execution_trades()` and closes the iterator at the first candidate. It never

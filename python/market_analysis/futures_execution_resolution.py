@@ -372,6 +372,10 @@ def liquidation_candidate(position, minute, marks, brackets, evidence):
     resources = (_position_resource(position.scope, position.position_id),)
     minute_causal = mark_bounds(minute)
     binding = _binding(position, evidence, marks, minute_causal, brackets, CausalPolicy(), AmbiguityPolicy())
+    if ((position.effective_through_ms is not None
+         and position.effective_through_ms < minute.candle.open_time_ms)
+            or position.effective_from_ms > minute.candle.close_time_ms):
+        return None
     threshold = math.liquidation_threshold(position.side, position.quantity, position.average_entry,
                                            position.isolated_wallet_collateral, brackets.table)
     if threshold.status in ("NO_POSITION", "NO_POSITIVE_THRESHOLD"):
@@ -386,6 +390,10 @@ def liquidation_candidate(position, minute, marks, brackets, evidence):
     if not reached:
         return None
     if open_breached:
+        if position.effective_from_ms > minute.candle.open_time_ms:
+            # OHLC cannot establish that a breached open persisted until this
+            # position existed, or that a later extreme happened afterward.
+            return _unavailable(binding, resources, "UNAVAILABLE_POSITION_AT_BREACHED_MARK_OPEN")
         causal = CausalBounds(position.effective_from_ms, minute.candle.open_time_ms,
                               f"markPrice:{minute.instrument_id}", minute.identity)
         crossing_basis = "BREACHED_BY_MARK_OPEN"
@@ -472,14 +480,19 @@ def liquidation_closeout(resolution, position, policy):
         raise ValueError("selected frontier, position view and closeout policy required")
     if resolution.status != "SELECTED":
         raise ValueError("liquidation closeout requires an unambiguously selected risk event")
-    risks = tuple(p for p in resolution.proposals if isinstance(p, LiquidationRiskProposal)
-                  and p.position_id == position.position_id and p.scope == position.scope)
-    if len(risks) != 1 or risks[0].binding.input_identity != position.identity:
+    risks = tuple(c for c in resolution.frontier if isinstance(c.proposal, LiquidationRiskProposal)
+                  and c.proposal.position_id == position.position_id and c.proposal.scope == position.scope)
+    if len(risks) != 1 or risks[0].proposal.binding.input_identity != position.identity:
         raise ValueError("selected risk must bind this exact position view")
-    risk = risks[0]
+    risk_candidate = risks[0]
+    risk = risk_candidate.proposal
+    if any(_materially_compete(risk_candidate, candidate) for candidate in resolution.frontier
+           if candidate.identity != risk_candidate.identity):
+        raise ValueError("selected risk has a materially competing frontier event")
+    selection_identity = resolution.candidate_selection_identity(risk_candidate)
     binding = ProposalBinding(position.identity, risk.binding.evidence_identity,
                               risk.binding.source_evidence_identity, risk.binding.causal,
-                              risk.binding.policy_identities + (policy.identity, resolution.selection_identity))
+                              risk.binding.policy_identities + (policy.identity, selection_identity))
     if any(e.classification is Provenance.UNAVAILABLE for e in
            (policy.evidence, policy.adverse_bps.evidence, policy.fee_evidence)):
         return UnavailableProposal(binding, "UNAVAILABLE_CLOSEOUT_POLICY", ("UNAVAILABLE_CLOSEOUT_POLICY",))
@@ -489,6 +502,6 @@ def liquidation_closeout(resolution, position, policy):
         return UnavailableProposal(binding, price.status, price.reasons, price)
     notional = math.notional(position.quantity, price.value)
     charge = finite_or_exact(exact_scalar(notional.value) * exact_scalar(policy.fee_rate))
-    return LiquidationCloseoutProposal(binding, position.position_id, position.scope, resolution.selection_identity,
+    return LiquidationCloseoutProposal(binding, position.position_id, position.scope, selection_identity,
                                        risk.identity, side, position.quantity, risk.threshold.value, price,
                                        notional, charge, policy.identity, policy.fee_evidence.identity)

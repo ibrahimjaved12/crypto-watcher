@@ -14,7 +14,7 @@ from .futures_execution_contracts import (
 from .exact_scalar import Scalar, exact_scalar
 
 
-ALGORITHM_VERSION = "binance-usdm-execution-resolution-v2"
+ALGORITHM_VERSION = "binance-usdm-execution-resolution-v3"
 POLICY = (
     "next-eligible-contract-trade:market-full-fill:spread-then-slippage:taker:"
     "passive-opposite-aggressor-strict-through:full-print-volume-cap:limit-price:maker:"
@@ -24,7 +24,8 @@ POLICY = (
     "trigger-occurrence-separate-from-child-admission:stable-selected-frontier-closeout-proof:"
     "causal-partial-order:no-event-type-priority:explicit-competing-frontier-ambiguity:"
     "event-funding:exact-settlement-mark:confirmed-position-applicability:"
-    "risk-threshold-distinct-from-fixed-bps-closeout:separate-closeout-charge:"
+    "risk-threshold-distinct-from-fixed-bps-closeout:late-position-mark-open-unavailable:"
+    "candidate-local-closeout-selection-proof:separate-closeout-charge:"
     "bounded-trade-iterator:no-wallet-or-ledger"
 )
 MAX_FRONTIER_CANDIDATES = 128
@@ -514,7 +515,7 @@ class LiquidationCloseoutProposal(ResolutionIdentity):
     binding: ProposalBinding
     position_id: str
     scope: Scope
-    selected_frontier_identity: str
+    selected_candidate_selection_identity: str
     risk_proposal_identity: str
     closing_side: OrderSide
     quantity: Scalar
@@ -532,7 +533,7 @@ class LiquidationCloseoutProposal(ResolutionIdentity):
         scope(self.scope)
         text(self.position_id, "position_id")
         enum_value(self.closing_side, OrderSide)
-        for value in (self.selected_frontier_identity, self.risk_proposal_identity,
+        for value in (self.selected_candidate_selection_identity, self.risk_proposal_identity,
                       self.closeout_policy_identity, self.fee_evidence_identity):
             sha256(value)
         number(self.quantity, "closeout quantity", positive=True)
@@ -609,4 +610,19 @@ class FrontierResolution(ResolutionIdentity):
             "causal_policy_identity": self.causal_policy_identity,
             "ambiguity_policy_identity": self.ambiguity_policy_identity,
             "reasons": tuple(sorted(self.reasons)),
+        })
+
+    def candidate_selection_identity(self, candidate):
+        """Stable selected-event proof that is independent of other frontier members."""
+        if (self.status != "SELECTED" or not isinstance(candidate, ExecutionCandidate)
+                or sum(c.identity == candidate.identity for c in self.frontier) != 1):
+            raise ValueError("candidate must occur exactly once in a selected frontier")
+        return canonical_digest({
+            "algorithm": ALGORITHM_VERSION,
+            "policy": POLICY,
+            "status": "SELECTED",
+            "selected_candidate_identity": candidate.identity,
+            "selected_proposal_identity": candidate.proposal.identity,
+            "causal_policy_identity": self.causal_policy_identity,
+            "ambiguity_policy_identity": self.ambiguity_policy_identity,
         })

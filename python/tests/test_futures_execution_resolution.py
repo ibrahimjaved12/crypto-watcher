@@ -130,6 +130,7 @@ class AdmissionTests(unittest.TestCase):
             with self.assertRaises(FrozenInstanceError):
                 a.intent = replace(a.intent, quantity=D(1))
             self.assertEqual(MATH_VERSION, "binance-usdm-execution-math-v4:exact-rational")
+            self.assertEqual(ALGORITHM_VERSION, "binance-usdm-execution-resolution-v3")
             self.assertNotEqual(ALGORITHM_VERSION, MATH_VERSION)
 
     def test_invalid_unavailable_and_candle_context_never_admit_or_adjust(self):
@@ -648,6 +649,30 @@ class LiquidationTests(unittest.TestCase):
             self.assertFalse(resolution.definitely_precedes(risk.causal, charge.causal))
             self.assertEqual(resolution.resolve_causal_frontier((charge, risk)).status, "AMBIGUOUS")
 
+    def test_breached_open_with_position_starting_later_is_unavailable_without_closeout(self):
+        with fixture(mark_prices=("80", "100", "70", "100")) as f:
+            position = replace(f.position(), effective_from_ms=TIME + 500,
+                               effective_through_ms=TIME + 120000)
+            candidate = f.risk(position)
+            self.assertIsInstance(candidate.proposal, UnavailableProposal)
+            self.assertEqual(candidate.proposal.status, "UNAVAILABLE_POSITION_AT_BREACHED_MARK_OPEN")
+            self.assertEqual((candidate.causal.earliest_possible_ms, candidate.causal.latest_possible_ms),
+                             (TIME, TIME + 59999))
+            resolution_result = resolution.resolve_causal_frontier((candidate,))
+            self.assertEqual(resolution_result.status, "UNAVAILABLE")
+            closeout = CloseoutPolicy(FixedBpsPolicy(D(25), SIMULATION_EVIDENCE),
+                                      D(".01"), SIMULATION_EVIDENCE)
+            with self.assertRaises(ValueError):
+                resolution.liquidation_closeout(resolution_result, position, closeout)
+
+    def test_position_entirely_outside_mark_minute_has_no_liquidation_candidate(self):
+        with fixture(mark_prices=("80", "100", "70", "100")) as f:
+            ended_before = replace(f.position(), effective_through_ms=TIME - 1)
+            starts_after = replace(f.position(), effective_from_ms=TIME + 60000,
+                                   effective_through_ms=TIME + 120000)
+            self.assertIsNone(f.risk(ended_before))
+            self.assertIsNone(f.risk(starts_after))
+
     def test_unavailable_brackets_and_position_window_and_zero_position(self):
         with fixture() as f:
             unknown = normalize_bracket_snapshot(encoded(bracket_payload()), SYMBOL,
@@ -680,7 +705,8 @@ class LiquidationTests(unittest.TestCase):
                     self.assertIsNone(proposal.normal_trading_fee)
                     self.assertEqual(proposal.classification, Provenance.FIXED_SIMULATION_ASSUMPTION)
                     self.assertEqual(proposal.risk_proposal_identity, risk.proposal.identity)
-                    self.assertEqual(proposal.selected_frontier_identity, selected.selection_identity)
+                    self.assertEqual(proposal.selected_candidate_selection_identity,
+                                     selected.candidate_selection_identity(risk))
                     self.assertEqual(proposal.fee_evidence_identity, closeout.fee_evidence.identity)
                 self.assertEqual(proposal.proposal_id, resolution.liquidation_closeout(selected, position, closeout).proposal_id)
                 changed = replace(closeout, fee_rate=D(".02"))
@@ -713,9 +739,27 @@ class LiquidationTests(unittest.TestCase):
             with_later = resolution.resolve_causal_frontier((risk, later))
             self.assertEqual(with_later.status, "SELECTED")
             self.assertEqual(with_later.frontier, (risk,))
+            self.assertNotEqual(with_later.identity, alone.identity)
             first_closeout = resolution.liquidation_closeout(alone, position, closeout)
             second_closeout = resolution.liquidation_closeout(with_later, position, closeout)
             self.assertEqual(first_closeout.proposal_id, second_closeout.proposal_id)
+
+            independent_view = f.view(order_id="independent")
+            independent_view = replace(independent_view,
+                admitted=replace(independent_view.admitted, position_id="position-2"))
+            independent = f.fill(independent_view, f.trades[0])
+            with_independent = resolution.resolve_causal_frontier((risk, independent))
+            reversed_input = resolution.resolve_causal_frontier((independent, risk))
+            self.assertEqual(with_independent.status, "SELECTED")
+            self.assertEqual(len(with_independent.frontier), 2)
+            self.assertNotEqual(with_independent.identity, alone.identity)
+            self.assertEqual(with_independent, reversed_input)
+            self.assertEqual(alone.candidate_selection_identity(risk),
+                             with_independent.candidate_selection_identity(risk))
+            self.assertEqual(alone.candidate_selection_identity(risk),
+                             reversed_input.candidate_selection_identity(risk))
+            third_closeout = resolution.liquidation_closeout(with_independent, position, closeout)
+            self.assertEqual(first_closeout.proposal_id, third_closeout.proposal_id)
 
             competing = f.fill(f.view(), f.trades[0])
             ambiguous = resolution.resolve_causal_frontier((risk, competing))
