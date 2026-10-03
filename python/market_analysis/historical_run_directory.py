@@ -50,7 +50,7 @@ def inherited_run_directory_lease(descriptor, root):
 
 
 @contextmanager
-def owned_run_directory(root):
+def owned_run_directory(root, *, cleanup=True):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".writer.lock").open("a+b") as lock:
@@ -60,6 +60,9 @@ def owned_run_directory(root):
             raise ValueError("historical period already has an active local writer") from exc
         lease = RunDirectoryLease(lock.fileno(), root)
         lease.validate(root)
+        if not cleanup:
+            yield lease
+            return
         # Only runtime-created names under this owned period; requests/jobs
         # from failed stages remain available for diagnosis and retry.
         for path in root.glob(".study-points-*"):

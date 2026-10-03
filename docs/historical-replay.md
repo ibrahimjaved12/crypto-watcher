@@ -913,3 +913,7 @@ surrogate, not transport/source-event provenance or market identity. Live
 collector observations and archive observations can describe equal market facts
 while retaining different provenance. #70's five-second buckets and #71's compact
 normalization projection remain separate from this additive representation.
+
+Manual GitHub-hosted slices, private selected-period input bundles, verified
+recovery generations, explicit phase gates and owner dispatch instructions are
+covered in [the GitHub historical study runbook](github-historical-study.md).

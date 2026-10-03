@@ -313,6 +313,14 @@ class BinanceOpenInterestEvidence:
         return "MISSING_EXACT_OI_ENDPOINT"
 
 
+def open_interest_package_days(start, end):
+    history_start = (start - 20 * 60_000) // OI_CADENCE_MS * OI_CADENCE_MS
+    if history_start < 0:
+        raise ValueError("OI warm-up precedes epoch")
+    first, last = _day(history_start), _day(end)
+    return tuple(first + timedelta(days=offset) for offset in range((last - first).days + 1))
+
+
 def load_binance_usdm_open_interest_evidence(archive_root, configured_symbols,
                                             start: int, end: int, *, download=False):
     symbols = _validate_request(configured_symbols, start, end, download)
@@ -320,11 +328,10 @@ def load_binance_usdm_open_interest_evidence(archive_root, configured_symbols,
     if history_start < 0:
         raise ValueError("OI warm-up precedes epoch")
     root = Path(archive_root).expanduser().resolve()
-    first, last = _day(history_start), _day(end)
+    days = open_interest_package_days(start, end)
     packages, observations, issues = [], {}, {}
     for symbol in symbols:
-        for offset in range((last - first).days + 1):
-            day = first + timedelta(days=offset)
+        for day in days:
             relative = daily_open_interest_relative_path(symbol, day)
             package, rows, row_issues = _load_package(root, symbol, day, relative, download)
             for timestamp, reason in row_issues:

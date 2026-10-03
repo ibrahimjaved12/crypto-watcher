@@ -418,8 +418,11 @@ def _manifest_periods(manifest: HistoricalMarketStateStudyManifest):
     return manifest.selected_periods
 
 
-def select_execution_periods(manifest, phase=None, period_limit=None, *, allow_test=False):
+def select_execution_periods(manifest, phase=None, period_limit=None, *, allow_test=False,
+                             period_index=None):
     """Resolve only frozen phase members; the test phase has an extra guard."""
+    if period_index is not None and phase is None:
+        raise ValueError("period_index requires an explicit phase")
     phase = "development" if phase is None else phase
     if phase not in ("development", "validation", "test"):
         raise ValueError("phase must be development, validation, or test")
@@ -430,6 +433,13 @@ def select_execution_periods(manifest, phase=None, period_limit=None, *, allow_t
     if period_limit is not None and (type(period_limit) is not int or period_limit <= 0):
         raise ValueError("period_limit must be a positive integer")
     periods = tuple(item for item in _manifest_periods(manifest) if item.phase == phase)
+    if period_index is not None:
+        if type(period_index) is not int or period_limit is not None:
+            raise ValueError("period_index must be an integer and cannot combine with period_limit")
+        selected = tuple(item for item in periods if item.study_period_index == period_index)
+        if len(selected) != 1:
+            raise ValueError("period_index is not an exact member of the selected phase")
+        return selected
     return periods if period_limit is None else periods[:period_limit]
 
 
@@ -1894,12 +1904,12 @@ def _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_r
             != dataset.archive_manifest.content_sha256):
         dataset.close()
         raise ValueError("frozen coverage does not match verified core packages for this date")
-    if progress is not None:
-        progress("CORE_ARCHIVE_INDEX_READY", {
-            "archive_content_sha256": dataset.archive_manifest.content_sha256,
-            "trade_stream_sha256": dataset.trade_stream_manifest.normalized_row_stream_sha256,
-        })
     try:
+        if progress is not None:
+            progress("CORE_ARCHIVE_INDEX_READY", {
+                "archive_content_sha256": dataset.archive_manifest.content_sha256,
+                "trade_stream_sha256": dataset.trade_stream_manifest.normalized_row_stream_sha256,
+            })
         with _runtime_measure(runtime_metrics, "canonical_replay_seconds"):
             if checkpoint_root is None:
                 replay = run_bounded_historical_market_replay(dataset)
@@ -1932,6 +1942,8 @@ def _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_r
                        "final_checkpoint": encode(replay.final_checkpoint)}
         _atomic_write(store.root / "prepared-replay.json", _canonical_bytes({**bundle_body,
                       "bundle_sha256": _sha(_canonical_bytes(bundle_body))}))
+        if progress is not None:
+            progress("PREPARED_REPLAY_WRITTEN", {"bundle_sha256": _sha(_canonical_bytes(bundle_body))})
         prepared_period = SimpleNamespace(
             period=period, archive_dataset=dataset, canonical_replay_result=replay,
             experiment_points=None, canonical_v1_branch_by_boundary=None,
@@ -2275,6 +2287,8 @@ def execute_study_periods(
     output_dir: Path | str,
     *, phase: str | None = None,
     period_limit: int | None = None,
+    period_index: int | None = None,
+    slice_controller=None,
     allow_test: bool = False,
     code_revision: str,
     mark_archive_root: Path | str | None = None,
@@ -2288,7 +2302,7 @@ def execute_study_periods(
 ) -> tuple[Path, ...]:
     """Resume deterministic period outputs using only frozen local evidence."""
     selected = select_execution_periods(
-        manifest, phase, period_limit, allow_test=allow_test)
+        manifest, phase, period_limit, allow_test=allow_test, period_index=period_index)
     phase = selected[0].phase if selected else (phase or "development")
     if not isinstance(code_revision, str) or not code_revision:
         raise ValueError("study execution requires code_revision")
@@ -2335,6 +2349,8 @@ def execute_study_periods(
             _append_progress_report(progress_report, manifest, coverage, period,
                                     code_revision, event,
                                     runtime_implementation_revision, details)
+            if slice_controller is not None:
+                slice_controller.observe(event, details or {})
         path = period_dir / _period_filename(period)
         if path.exists():
             report_sha = _verify_existing_period(
@@ -2365,6 +2381,7 @@ def execute_study_periods(
                                       runtime_implementation_revision=runtime_implementation_revision)
         if runtime_metrics is not None:
             artifact_write_started_ns = time.perf_counter_ns()
+        progress("BEFORE_PERIOD_FINALIZATION")
         _write_period_stream(path, payload)
         _period_sidecar(path, manifest, coverage, period, code_revision, payload["report_sha256"])
         progress("PERIOD_ARTIFACT_FINALIZED", {"report_sha256": payload["report_sha256"]})
@@ -2495,6 +2512,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     execute.add_argument("--output-dir", type=Path, required=True)
     execute.add_argument("--phase", choices=("development", "validation", "test"))
     execute.add_argument("--period-limit", type=int)
+    execute.add_argument("--period-index", type=int)
     execute.add_argument("--allow-test", action="store_true")
     execute.add_argument("--code-revision")
     execute.add_argument("--mark-archive-root", type=Path)
@@ -2549,7 +2567,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("operational report path conflicts with the study manifest")
             results = execute_study_periods(
                 manifest, args.coverage_manifest, args.archive_root, args.output_dir,
-                phase=args.phase, period_limit=args.period_limit,
+                phase=args.phase, period_limit=args.period_limit, period_index=args.period_index,
                 allow_test=args.allow_test, code_revision=revision,
                 mark_archive_root=args.mark_archive_root,
                 open_interest_archive_root=args.open_interest_archive_root,
