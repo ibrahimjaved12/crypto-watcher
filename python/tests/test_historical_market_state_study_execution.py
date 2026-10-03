@@ -1,13 +1,25 @@
 """Generated governance and identity fixtures for Part-B execution."""
 
 from contextlib import ExitStack
-from datetime import date
+import csv
+from datetime import date, datetime, timezone
+import hashlib
+import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import json
 import unittest
 from unittest.mock import Mock, patch
+import zipfile
+
+from market_analysis.binance_historical_archive import (
+    BinanceUSDMArchiveRequest, daily_aggtrades_relative_path,
+    daily_kline_relative_path, historical_candle_start_ms,
+    load_binance_usdm_bounded_historical_replay_dataset,
+    load_binance_usdm_historical_replay_dataset, required_aggtrade_dates,
+    required_kline_dates,
+)
 
 from market_analysis.historical_market_state_study import (
     parse_historical_market_state_study_manifest_json,
@@ -20,7 +32,12 @@ from market_analysis.historical_market_state_study_execution import (
     load_and_validate_coverage, select_execution_periods,
     freeze_study_hmm_model, validate_hmm_development_cohort,
 )
+from market_analysis.historical_replay import (
+    HistoricalReplayConfig, run_bounded_historical_market_replay,
+    run_historical_market_replay,
+)
 from market_analysis.historical_liquidation_evidence import daily_liquidation_relative_path
+from market_analysis.movement_metrics import MarketMovementConfig, MarketUniverseInput
 import market_analysis.historical_market_state_study_execution as execution
 
 
@@ -84,7 +101,7 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             content_sha256=content_sha, archive_files=(),
             dataset_id="fixture-dataset", dataset_version="fixture-v1")
         dataset = SimpleNamespace(
-            archive_manifest=archive_manifest, replay_request=object())
+            archive_manifest=archive_manifest, close=lambda: None)
         replay = SimpleNamespace(
             manifest=SimpleNamespace(dataset_content_sha256=content_sha,
                                      dataset_id="fixture-dataset",
@@ -103,9 +120,9 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
         runtime_metrics = execution.StudyPeriodRuntimeMetrics()
         with patch.object(execution.time, "perf_counter_ns",
                           side_effect=lambda: next(ticks)), patch.object(
-                execution, "load_binance_usdm_historical_replay_dataset",
+                execution, "load_binance_usdm_bounded_historical_replay_dataset",
                           return_value=dataset) as loader, patch.object(
-                execution, "run_historical_market_replay", return_value=replay) as runner, patch.object(
+                execution, "run_bounded_historical_market_replay", return_value=replay) as runner, patch.object(
                 execution, "_frozen_eligibility", return_value=eligibility), patch.object(
                 execution, "_study_experiment_points", return_value=()), patch.object(
                 execution, "_build_v1_evidence", return_value=((), {}, {})), patch.object(
@@ -119,7 +136,7 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
         self.assertIs(frozen, coverage_period)
         self.assertEqual(loader.call_count, 1)
         self.assertEqual(runner.call_count, 1)
-        self.assertIs(runner.call_args.args[0], dataset.replay_request)
+        self.assertIs(runner.call_args.args[0], dataset)
         prepared_type.assert_called_once()
         self.assertGreater(runtime_metrics.report_timings()["core_archive_load_seconds"], 0)
         self.assertGreater(runtime_metrics.report_timings()["canonical_replay_seconds"], 0)
@@ -385,7 +402,9 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             coverage_path, coverage = self._coverage_fixture(root, revision)
 
             def execute_once(manifest, frozen_coverage, period, archive, roots,
-                             code_revision, hmm_model, runtime_metrics=None):
+                             code_revision, hmm_model, runtime_metrics=None,
+                             checkpoint_root=None, progress=None,
+                             runtime_implementation_revision=None):
                 executed.append(period.study_period_index)
                 if runtime_metrics is not None:
                     for name in execution.RUNTIME_MEASURED_FIELDS:
@@ -434,8 +453,11 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
 
             ticks = iter(range(1000))
             runtime_path = root / "runtime.jsonl"
+            progress_path = root / "progress.jsonl"
             with patch.object(execution.time, "perf_counter_ns",
                               side_effect=lambda: next(ticks)), patch.object(
+                    execution, "_current_code_revision",
+                    side_effect=("runtime-off", "runtime-on")) as current_revision, patch.object(
                     execution, "_execute_period", side_effect=execute_once) as execute:
                 off = execution.execute_study_periods(
                     self.manifest, coverage_path, root / "core", root / "off",
@@ -443,17 +465,26 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                 on = execution.execute_study_periods(
                     self.manifest, coverage_path, root / "core", root / "on",
                     phase="development", period_limit=1, code_revision=revision,
-                    runtime_report_path=runtime_path)
+                    runtime_report_path=runtime_path,
+                    progress_report_path=progress_path)
 
             self.assertEqual(execute.call_count, 2)
+            self.assertEqual(current_revision.call_count, 2)
             self.assertEqual(executed, [0, 0])
+            for invocation, expected_revision in zip(execute.call_args_list,
+                                                     ("runtime-off", "runtime-on")):
+                self.assertIsNotNone(invocation.kwargs["checkpoint_root"])
+                self.assertTrue(callable(invocation.kwargs["progress"]))
+                self.assertEqual(invocation.kwargs["runtime_implementation_revision"],
+                                 expected_revision)
             self.assertEqual(off[0].read_bytes(), on[0].read_bytes())
             scientific_text = on[0].read_text(encoding="utf-8")
             scientific = json.loads(scientific_text)
             self.assertNotIn(str(runtime_path), scientific_text)
             self.assertEqual(scientific["report_sha256"],
                              execution._verify_hashed_payload(
-                                 scientific, "report_sha256", "period report"))
+                                scientific, "report_sha256", "period report"))
+            self.assertNotIn("runtime_implementation_revision", scientific)
 
             lines = runtime_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 1)
@@ -468,6 +499,11 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             self.assertEqual(runtime["period_report_filename"], on[0].name)
             self.assertEqual(runtime["period_report_sha256"], scientific["report_sha256"])
             self.assertEqual(runtime["artifact_size_bytes"], on[0].stat().st_size)
+            progress_records = [json.loads(line) for line in
+                                progress_path.read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(progress_records)
+            self.assertEqual({item["runtime_implementation_revision"]
+                              for item in progress_records}, {"runtime-on"})
             self.assertTrue(set(execution.RUNTIME_REPORT_TIMING_FIELDS).issubset(runtime))
             self.assertGreater(runtime["period_total_seconds"], 0)
             self.assertGreater(runtime["period_artifact_write_seconds"], 0)
@@ -475,6 +511,142 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                 runtime["all_extensions_seconds"],
                 runtime["supplementary_source_load_seconds"]
                 + sum(runtime[name] for name in execution.RUNTIME_EXTENSION_FIELDS))
+
+    def test_materialized_and_bounded_period_payloads_are_identical(self):
+        revision = "frozen-scientific-producer"
+        coverage = {"coverage_manifest_sha256": "c" * 64, "sources": {}}
+        utc_day = date(2024, 1, 1)
+        start = int(datetime(2024, 1, 1, 12, tzinfo=timezone.utc).timestamp() * 1000)
+        end = start + 10_000
+        config = HistoricalReplayConfig(
+            start, end, finalization_grace_ms=2_000,
+            movement_config=MarketMovementConfig(
+                historical_lookback_ms=60_000,
+                minimum_historical_coverage_ms=60_000))
+        period = SimpleNamespace(
+            study_period_index=0, utc_date=utc_day, phase="development",
+            start_boundary_time_ms=start, end_boundary_time_ms=end)
+        forward = SimpleNamespace(
+            evidence_version="forward-v1", evidence_sha256="1" * 64,
+            source_dataset_content_sha256="2" * 64)
+        safe = execution.report_json_safe
+
+        def report_json_safe(value):
+            if isinstance(value, SimpleNamespace):
+                return {key: report_json_safe(item) for key, item in vars(value).items()}
+            if isinstance(value, dict):
+                return {key: report_json_safe(item) for key, item in value.items()}
+            if isinstance(value, (tuple, list)):
+                return [report_json_safe(item) for item in value]
+            return safe(value)
+
+        with TemporaryDirectory() as temporary:
+            archive_root = Path(temporary)
+
+            def write_package(relative, header, rows):
+                archive = archive_root.joinpath(*relative.parts)
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                text = io.StringIO(newline="")
+                writer = csv.writer(text)
+                writer.writerow(header)
+                writer.writerows(rows)
+                with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+                    member = zipfile.ZipInfo(
+                        f"{relative.stem}.csv", date_time=(1980, 1, 1, 0, 0, 0))
+                    member.compress_type = zipfile.ZIP_DEFLATED
+                    bundle.writestr(member, text.getvalue())
+                digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+                Path(f"{archive}.CHECKSUM").write_text(
+                    f"{digest}  {relative.name}\n", encoding="utf-8")
+
+            trade_header = (
+                "agg_trade_id", "price", "quantity", "first_trade_id",
+                "last_trade_id", "transact_time", "is_buyer_maker")
+            trades = (
+                ("1", "100", "1", "1", "1", str(start - 5_000), "false"),
+                ("2", "101", "1", "2", "2", str(start), "false"),
+                ("3", "102", "1", "3", "3", str(start + 5_000), "false"),
+            )
+            kline_header = (
+                "open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_asset_volume", "number_of_trades",
+                "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore")
+            candle_open = historical_candle_start_ms(config)
+            candles = ((str(candle_open), "100", "101", "99", "100", "1",
+                        str(candle_open + 59_999), "100", "1", "0.5", "50", "0"),)
+            for day in required_aggtrade_dates(config):
+                write_package(
+                    daily_aggtrades_relative_path("BTCUSDT", day), trade_header,
+                    trades if day == utc_day else ())
+            for day in required_kline_dates(config):
+                write_package(
+                    daily_kline_relative_path("BTCUSDT", day), kline_header,
+                    candles if day == utc_day else ())
+
+            request = BinanceUSDMArchiveRequest(
+                archive_root, MarketUniverseInput("period-parity", "v1", ("BTCUSDT",)),
+                config)
+            materialized_dataset = load_binance_usdm_historical_replay_dataset(
+                request, include_taker_flow_evidence=True)
+            bounded_dataset = load_binance_usdm_bounded_historical_replay_dataset(request)
+            try:
+                materialized_replay = run_historical_market_replay(
+                    materialized_dataset.replay_request)
+                bounded_replay = run_bounded_historical_market_replay(bounded_dataset)
+                prepared_routes = []
+                v1_routes = []
+                for dataset, replay in ((materialized_dataset, materialized_replay),
+                                         (bounded_dataset, bounded_replay)):
+                    experiment_points = execution._study_experiment_points(replay, period)
+                    v1_records, v1_states, v1_branches = execution._build_v1_evidence(
+                        period, replay.points)
+                    prepared_routes.append((
+                        SimpleNamespace(
+                            archive_dataset=dataset,
+                            canonical_replay_result=replay,
+                            experiment_points=experiment_points,
+                            canonical_v1_branch_by_boundary=v1_branches,
+                            core_eligibility_sha256="b" * 64),
+                        {"sources": {}}, v1_records, v1_states))
+                    v1_routes.append((experiment_points, v1_records, v1_states, v1_branches))
+
+                with patch.object(execution, "report_json_safe",
+                                  side_effect=report_json_safe), patch.object(
+                        execution, "_prepare_study_period",
+                        side_effect=prepared_routes), patch.object(
+                        execution, "_load_source_evidence", return_value={}), patch.object(
+                        execution, "_candidate_execution",
+                        return_value=((), (), (), {}, None, None)), patch.object(
+                        execution, "_label_price_evidence", return_value=forward), patch.object(
+                        execution, "_continuous_and_event_outcomes",
+                        return_value=((), (), ())):
+                    materialized_payload = execution._execute_period(
+                        self.manifest, coverage, period, archive_root, {}, revision, None)
+                    bounded_payload = execution._execute_period(
+                        self.manifest, coverage, period, archive_root, {}, revision, None,
+                        runtime_metrics=execution.StudyPeriodRuntimeMetrics(),
+                        checkpoint_root=archive_root / "checkpoints",
+                        progress=lambda *_args: None,
+                        runtime_implementation_revision="runtime-implementation")
+            finally:
+                bounded_dataset.close()
+
+        self.assertTrue(materialized_replay.points)
+        self.assertEqual(materialized_replay.points, bounded_replay.points)
+        self.assertEqual(
+            tuple(item.movement_evaluation for item in materialized_replay.points),
+            tuple(item.movement_evaluation for item in bounded_replay.points))
+        self.assertEqual(materialized_replay.diagnostics, bounded_replay.diagnostics)
+        self.assertEqual(materialized_replay.manifest, bounded_replay.manifest)
+        self.assertTrue(v1_routes[0][1])
+        self.assertEqual(v1_routes[0], v1_routes[1])
+        self.assertEqual(execution._canonical(materialized_payload),
+                         execution._canonical(bounded_payload))
+        self.assertEqual(materialized_payload["report_sha256"],
+                         bounded_payload["report_sha256"])
+        for operational_key in ("checkpoint_dir", "progress", "runtime_report",
+                                "runtime_implementation_revision", "timings"):
+            self.assertNotIn(operational_key, bounded_payload)
 
     def test_coverage_only_freeze_binds_ordered_dates_and_semantic_sources(self):
         core = {
@@ -736,6 +908,19 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                     runtime_report_path=runtime_path)
                 execute.assert_called_once()
                 self.assertEqual(resumed, first)
+                progress_rows = [json.loads(line) for line in
+                                 (root / "output" / "study-progress.jsonl").read_text(
+                                     encoding="utf-8").splitlines()]
+                self.assertEqual([row["event"] for row in progress_rows],
+                                 ["PERIOD_STARTED", "PERIOD_ARTIFACT_FINALIZED",
+                                  "SKIPPED_EXISTING_ARTIFACT",
+                                  "SKIPPED_EXISTING_ARTIFACT"])
+                self.assertTrue(all(row["scientific_producer_revision"] == revision
+                                    for row in progress_rows))
+                self.assertTrue(all(row["runtime_implementation_revision"] != revision
+                                    for row in progress_rows))
+                self.assertEqual(report_payload["code_revision"], revision)
+                self.assertNotIn("runtime_implementation_revision", report_payload)
                 skipped = json.loads(runtime_path.read_text(encoding="utf-8"))
                 self.assertEqual(skipped["execution_status"],
                                  "SKIPPED_EXISTING_ARTIFACT")

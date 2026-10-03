@@ -10,7 +10,7 @@ import sys
 from types import MappingProxyType
 
 from .binance_historical_archive import (
-    BinanceHistoricalReplayDataset, BinanceUSDMArchiveRequest,
+    BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset, BinanceUSDMArchiveRequest,
     load_binance_usdm_historical_replay_dataset,
 )
 from .experiments.market_state_common import validate_experiment_points
@@ -101,7 +101,7 @@ class HistoricalLiquidationExtensionRequest:
 
 @dataclass(frozen=True)
 class HistoricalLiquidationExtensionPrepared:
-    archive_dataset: BinanceHistoricalReplayDataset
+    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset
     replay_result: HistoricalMarketReplayResult
     experiment_points: tuple
     partition_plan: ReplayPartitionPlan | None
@@ -110,7 +110,7 @@ class HistoricalLiquidationExtensionPrepared:
     study_phase: str | None = None
 
     def __post_init__(self):
-        if (not isinstance(self.archive_dataset, BinanceHistoricalReplayDataset)
+        if (not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
                 or not isinstance(self.replay_result, HistoricalMarketReplayResult)
                 or ((self.partition_plan is None) == (self.study_phase is None))
                 or (self.partition_plan is not None
@@ -184,7 +184,7 @@ def _validate_prepared(prepared):
         raise ValueError("invalid prepared extension")
     archive, replay, evidence = prepared.archive_dataset, prepared.replay_result, prepared.liquidation_evidence
     manifest = replay.manifest
-    request = archive.replay_request
+    request = archive if isinstance(archive, BinanceBoundedHistoricalReplayDataset) else archive.replay_request
     if (archive.archive_manifest.dataset_id != manifest.dataset_id
             or archive.archive_manifest.dataset_version != manifest.dataset_version
             or archive.archive_manifest.content_sha256 != manifest.dataset_content_sha256

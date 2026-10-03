@@ -16,7 +16,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .binance_historical_archive import (
-    BinanceHistoricalReplayDataset, BinanceUSDMArchiveRequest,
+    BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset, BinanceUSDMArchiveRequest,
     load_binance_usdm_historical_replay_dataset,
 )
 from .historical_experiment_batch import (
@@ -110,14 +110,14 @@ class HistoricalTakerFlowExtensionRequest:
 
 @dataclass(frozen=True)
 class HistoricalTakerFlowExtensionPrepared:
-    archive_dataset: BinanceHistoricalReplayDataset
+    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset
     replay_result: HistoricalMarketReplayResult
     experiment_points: tuple
     partition_plan: ReplayPartitionPlan | None
     study_phase: str | None = None
 
     def __post_init__(self):
-        if (not isinstance(self.archive_dataset, BinanceHistoricalReplayDataset)
+        if (not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
                 or not isinstance(self.replay_result, HistoricalMarketReplayResult)
                 or ((self.partition_plan is None) == (self.study_phase is None))
                 or (self.partition_plan is not None
@@ -311,7 +311,7 @@ def _validate_prepared(prepared: HistoricalTakerFlowExtensionPrepared) -> None:
             or archive.archive_manifest.dataset_id != replay_manifest.dataset_id
             or archive.archive_manifest.dataset_version != replay_manifest.dataset_version
             or archive.archive_manifest.content_sha256 != replay_manifest.dataset_content_sha256
-            or archive.replay_request.universe.symbols != replay_manifest.configured_universe):
+            or (archive.universe.symbols if isinstance(archive, BinanceBoundedHistoricalReplayDataset) else archive.replay_request.universe.symbols) != replay_manifest.configured_universe):
         raise ValueError("taker flow archive and replay identities disagree")
     evidence = archive.taker_flow_evidence
     if evidence is not None:
@@ -322,7 +322,7 @@ def _validate_prepared(prepared: HistoricalTakerFlowExtensionPrepared) -> None:
             raise ValueError("taker flow evidence dataset or symbol order mismatch")
         if ((evidence.engine_start_boundary_time_ms,
              evidence.output_end_boundary_time_ms, evidence.finalization_grace_ms)
-                != (archive.replay_request.config.engine_start_boundary_time_ms,
+                != ((archive.config.engine_start_boundary_time_ms if isinstance(archive, BinanceBoundedHistoricalReplayDataset) else archive.replay_request.config.engine_start_boundary_time_ms),
                     replay_manifest.output_end_boundary_time_ms,
                     replay_manifest.finalization_grace_ms)):
             raise ValueError("taker flow evidence range or finalization grace mismatch")

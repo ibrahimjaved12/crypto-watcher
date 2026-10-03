@@ -27,10 +27,12 @@ from .binance_historical_archive import (
     ARCHIVE_FIRST_SEEN_POLICY, BINANCE_ARCHIVE_DATASET_ID,
     BINANCE_ARCHIVE_DATASET_VERSION,
     BinanceArchiveCoverageError, BinanceHistoricalCoreArchiveEvidence,
-    BinanceHistoricalReplayDataset, BinanceUSDMArchiveRequest,
+    BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset,
+    BinanceUSDMArchiveRequest,
     _KLINE_HEADER, _archive_rows, _checksum,
     _kline_row, daily_aggtrades_relative_path, daily_kline_relative_path,
     load_binance_usdm_historical_replay_dataset, required_aggtrade_dates,
+    load_binance_usdm_bounded_historical_replay_dataset,
     required_kline_dates, verify_binance_usdm_historical_core_archives,
 )
 from .binance_historical_download import (
@@ -119,7 +121,12 @@ from .historical_liquidation_extension import (
     _partition_summaries as _liquidation_summaries,
     build_historical_study_liquidation_points,
 )
-from .historical_replay import run_historical_market_replay
+from .historical_replay import (
+    HistoricalMarketReplayResult, HistoricalReplayCheckpoint,
+    historical_replay_run_manifest, run_bounded_historical_market_replay,
+    run_historical_market_replay,
+)
+from .historical_replay_runtime import ReplayCheckpointStore
 from .historical_taker_flow_extension import (
     TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
     _partition_summaries as _taker_summaries,
@@ -144,6 +151,7 @@ EVENT_TIME_V1_CONTEXT_VERSION = "historical-market-state-event-time-v1-context-v
 BOCPD_ONSET_EVIDENCE_VERSION = "historical-market-state-bocpd-onset-evidence-v1"
 EXECUTION_INDEX_VERSION = "historical-market-state-execution-index-v1"
 RUNTIME_REPORT_VERSION = "historical-market-state-runtime-v1"
+STUDY_PROGRESS_VERSION = "historical-market-state-progress-v1"
 HMM_MODEL_FILENAME = "historical-market-state-study-v1-hmm-model.json"
 EXECUTION_INDEX_FILENAME = "historical-market-state-study-v1-execution-index.json"
 PERIOD_DIRECTORY = "periods"
@@ -262,7 +270,7 @@ class PreparedHistoricalMarketStatePeriod:
     """Shared immutable period inputs and the single canonical V1 branch."""
 
     period: HistoricalStudyPeriod
-    archive_dataset: BinanceHistoricalReplayDataset
+    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset
     canonical_replay_result: Any
     experiment_points: tuple[MarketStateExperimentPoint, ...]
     canonical_v1_branch_by_boundary: Mapping[int, tuple]
@@ -274,7 +282,8 @@ class PreparedHistoricalMarketStatePeriod:
         points = tuple(self.experiment_points)
         branch = dict(self.canonical_v1_branch_by_boundary)
         if (not isinstance(self.period, HistoricalStudyPeriod)
-                or not isinstance(self.archive_dataset, BinanceHistoricalReplayDataset)
+                or not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset,
+                                                         BinanceBoundedHistoricalReplayDataset))
                 or self.canonical_replay_result is None
                 or not points or any(not isinstance(item, MarketStateExperimentPoint)
                                      for item in points)
@@ -1565,17 +1574,21 @@ def _continuous_and_event_outcomes(evidence, candidate_records, v1_state_by_boun
 
 
 def _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
-                          runtime_metrics: StudyPeriodRuntimeMetrics | None = None):
+                          runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
+                          checkpoint_root: Path | None = None,
+                          progress=None,
+                          runtime_implementation_revision: str | None = None):
     """Load and replay core evidence once, then freeze shared V1 study context."""
     config = study_replay_config(period.utc_date)
     with _runtime_measure(runtime_metrics, "core_archive_load_seconds"):
-        dataset = load_binance_usdm_historical_replay_dataset(
+        dataset = load_binance_usdm_bounded_historical_replay_dataset(
             BinanceUSDMArchiveRequest(archive_root, study_universe(), config),
-            include_taker_flow_evidence=True)
+        )
     eligibility = _frozen_eligibility(manifest, period)
     expected_archive = eligibility.provenance.archive_manifest
     if (dataset.archive_manifest.content_sha256 != expected_archive.content_sha256
             or dataset.archive_manifest.archive_files != expected_archive.archive_files):
+        dataset.close()
         raise StudyArtifactConflictError(
             f"verified core dataset changed after study selection: {period.utc_date}")
     frozen_coverage = coverage["periods"][period.study_period_index]
@@ -1583,9 +1596,63 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
             or frozen_coverage["utc_date"] != period.utc_date.isoformat()
             or frozen_coverage["core"]["archive_content_sha256"]
             != dataset.archive_manifest.content_sha256):
+        dataset.close()
         raise ValueError("frozen coverage does not match verified core packages for this date")
-    with _runtime_measure(runtime_metrics, "canonical_replay_seconds"):
-        replay = run_historical_market_replay(dataset.replay_request)
+    if progress is not None:
+        progress("CORE_ARCHIVE_INDEX_READY", {
+            "archive_content_sha256": dataset.archive_manifest.content_sha256,
+            "trade_stream_sha256": dataset.trade_stream_manifest.normalized_row_stream_sha256,
+        })
+    try:
+        with _runtime_measure(runtime_metrics, "canonical_replay_seconds"):
+            if checkpoint_root is None:
+                replay = run_bounded_historical_market_replay(dataset)
+            else:
+                run_manifest = historical_replay_run_manifest(dataset)
+                identity = {
+                    "study_version": STUDY_VERSION,
+                    "study_manifest_sha256": manifest.manifest_sha256,
+                    "extension_coverage_manifest_sha256": coverage["coverage_manifest_sha256"],
+                    "scientific_producer_revision": code_revision,
+                    "runtime_implementation_revision": (
+                        runtime_implementation_revision
+                        if runtime_implementation_revision is not None
+                        else _current_code_revision()),
+                    "study_period_index": period.study_period_index,
+                    "utc_date": period.utc_date.isoformat(),
+                    "phase": period.phase,
+                    "run_fingerprint": run_manifest.run_fingerprint,
+                    "replay_algorithm_version": run_manifest.algorithm_version,
+                    "replay_policy_version": run_manifest.policy_version,
+                    "movement_algorithm_version": run_manifest.movement_algorithm_version,
+                    "movement_config_version": run_manifest.movement_config_version,
+                    "movement_config_parameters": report_json_safe(
+                        run_manifest.movement_config_parameters),
+                    "universe_id": dataset.universe.id,
+                    "universe_version": dataset.universe.version,
+                    "configured_symbols": report_json_safe(dataset.universe.symbols),
+                    "finalization_grace_ms": config.finalization_grace_ms,
+                    "archive_content_sha256": dataset.archive_manifest.content_sha256,
+                    "archive_files": report_json_safe(dataset.archive_manifest.archive_files),
+                    "trade_stream_manifest": report_json_safe(dataset.trade_stream_manifest),
+                }
+                store = ReplayCheckpointStore(
+                    checkpoint_root / f"period-{period.study_period_index:02d}-{period.utc_date.isoformat()}-{period.phase}",
+                    identity, config.output_start_boundary_time_ms,
+                    config.output_end_boundary_time_ms, progress=progress)
+                state = store.load_latest()
+                partial = run_bounded_historical_market_replay(
+                    dataset, runtime_state=state, boundary_callback=store.add_point)
+                if not store._complete:
+                    raise ValueError("replay ended without a complete durable checkpoint")
+                all_points = tuple(store.points)
+                replay = HistoricalMarketReplayResult(
+                    partial.manifest, all_points, partial.diagnostics,
+                    HistoricalReplayCheckpoint(run_manifest.run_fingerprint,
+                                               all_points[-1].evaluation_boundary_time_ms,
+                                               all_points[-1].point_id))
+    finally:
+        dataset.close()
     with _runtime_measure(runtime_metrics, "v1_preparation_seconds"):
         points = _study_experiment_points(replay, period)
         v1_records, v1_state_by_boundary, canonical_branch_by_boundary = (
@@ -1599,14 +1666,20 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
 def _execute_period(
     manifest, coverage, period, archive_root, roots, code_revision,
     hmm_model, runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
+    checkpoint_root: Path | None = None, progress=None,
+    runtime_implementation_revision: str | None = None,
 ):
     if runtime_metrics is None:
         prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
-            _prepare_study_period(manifest, coverage, period, archive_root, code_revision))
+            _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
+                                  checkpoint_root=checkpoint_root, progress=progress,
+                                  runtime_implementation_revision=runtime_implementation_revision))
     else:
         prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
             _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
-                                  runtime_metrics=runtime_metrics))
+                                  runtime_metrics=runtime_metrics,
+                                  checkpoint_root=checkpoint_root, progress=progress,
+                                  runtime_implementation_revision=runtime_implementation_revision))
     dataset = prepared_period.archive_dataset
     replay = prepared_period.canonical_replay_result
     points = prepared_period.experiment_points
@@ -1788,6 +1861,25 @@ def _append_runtime_report(path: Path, record: Mapping[str, Any]) -> None:
         os.fsync(stream.fileno())
 
 
+def _append_progress_report(path: Path, manifest, coverage, period,
+                            code_revision: str, event: str,
+                            runtime_implementation_revision: str,
+                            details: Mapping[str, Any] | None = None) -> None:
+    record = {
+        **(details or {}),
+        "progress_version": STUDY_PROGRESS_VERSION,
+        "event": event,
+        "study_manifest_sha256": manifest.manifest_sha256,
+        "extension_coverage_manifest_sha256": coverage["coverage_manifest_sha256"],
+        "study_period_index": period.study_period_index,
+        "utc_date": period.utc_date.isoformat(),
+        "phase": period.phase,
+        "scientific_producer_revision": code_revision,
+        "runtime_implementation_revision": runtime_implementation_revision,
+    }
+    _append_runtime_report(path, record)
+
+
 def execute_study_periods(
     manifest: HistoricalMarketStateStudyManifest,
     coverage_path: Path | str,
@@ -1803,6 +1895,8 @@ def execute_study_periods(
     liquidation_archive_root: Path | str | None = None,
     hmm_model_path: Path | str | None = None,
     runtime_report_path: Path | str | None = None,
+    checkpoint_dir: Path | str | None = None,
+    progress_report_path: Path | str | None = None,
 ) -> tuple[Path, ...]:
     """Resume deterministic period outputs using only frozen local evidence."""
     selected = select_execution_periods(
@@ -1810,13 +1904,16 @@ def execute_study_periods(
     phase = selected[0].phase if selected else (phase or "development")
     if not isinstance(code_revision, str) or not code_revision:
         raise ValueError("study execution requires code_revision")
+    runtime_implementation_revision = _current_code_revision()
     coverage = load_and_validate_coverage(coverage_path, manifest, code_revision)
     output = Path(output_dir).expanduser().resolve()
+    checkpoints = Path(checkpoint_dir or (output / ".runtime-checkpoints")).expanduser().resolve()
+    progress_report = Path(progress_report_path or (output / "study-progress.jsonl")).expanduser().resolve()
     period_dir = output / PERIOD_DIRECTORY
     period_dir.mkdir(parents=True, exist_ok=True)
     runtime_report = (Path(runtime_report_path).expanduser().resolve()
                       if runtime_report_path is not None else None)
-    if runtime_report is not None:
+    if runtime_report is not None or progress_report is not None:
         protected_paths = {
             Path(coverage_path).expanduser().resolve(),
             (output / EXECUTION_INDEX_FILENAME).resolve(),
@@ -1826,8 +1923,10 @@ def execute_study_periods(
             for item in _manifest_periods(manifest))
         protected_paths.add(
             Path(hmm_model_path or (output / HMM_MODEL_FILENAME)).expanduser().resolve())
-        if runtime_report in protected_paths:
-            raise ValueError("runtime report path conflicts with a scientific study artifact")
+        if runtime_report in protected_paths or progress_report in protected_paths:
+            raise ValueError("operational report path conflicts with a scientific study artifact")
+        if runtime_report == progress_report:
+            raise ValueError("runtime and progress reports require separate paths")
     archive = Path(archive_root).expanduser().resolve()
     roots = {
         "mark_trade": Path(mark_archive_root or archive).expanduser().resolve(),
@@ -1844,11 +1943,16 @@ def execute_study_periods(
 
     written_or_skipped = []
     for period in selected:
+        def progress(event, details=None):
+            _append_progress_report(progress_report, manifest, coverage, period,
+                                    code_revision, event,
+                                    runtime_implementation_revision, details)
         path = period_dir / _period_filename(period)
         if path.exists():
             report_sha = _verify_existing_period(
                 path, manifest, coverage, period, code_revision)
             written_or_skipped.append(path)
+            progress("SKIPPED_EXISTING_ARTIFACT", {"report_sha256": report_sha})
             if runtime_report is not None:
                 _append_runtime_report(runtime_report, _runtime_report_record(
                     manifest, coverage, period, code_revision,
@@ -1859,17 +1963,23 @@ def execute_study_periods(
                            if runtime_report is not None else None)
         period_started_ns = (time.perf_counter_ns()
                              if runtime_metrics is not None else None)
+        progress("PERIOD_STARTED")
         if runtime_metrics is None:
             payload = _execute_period(manifest, coverage, period, archive, roots,
-                                      code_revision, hmm_model)
+                                      code_revision, hmm_model,
+                                      checkpoint_root=checkpoints, progress=progress,
+                                      runtime_implementation_revision=runtime_implementation_revision)
         else:
             payload = _execute_period(manifest, coverage, period, archive, roots,
                                       code_revision, hmm_model,
-                                      runtime_metrics=runtime_metrics)
+                                      runtime_metrics=runtime_metrics,
+                                      checkpoint_root=checkpoints, progress=progress,
+                                      runtime_implementation_revision=runtime_implementation_revision)
         if runtime_metrics is not None:
             artifact_write_started_ns = time.perf_counter_ns()
         content = _canonical(payload)
         _write_atomic_new(path, content)
+        progress("PERIOD_ARTIFACT_FINALIZED", {"report_sha256": payload["report_sha256"]})
         if runtime_metrics is not None:
             finalized_at_ns = time.perf_counter_ns()
             runtime_metrics.record_elapsed_ns(
@@ -2013,6 +2123,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     execute.add_argument("--hmm-model", type=Path)
     execute.add_argument("--runtime-report", type=Path,
                          help="append operational per-period timings to JSONL")
+    execute.add_argument("--checkpoint-dir", type=Path,
+                         help="local replay checkpoints (default: output/.runtime-checkpoints)")
+    execute.add_argument("--progress-report", type=Path,
+                         help="operational progress JSONL (default: output/study-progress.jsonl)")
 
     freeze = commands.add_parser("freeze-hmm", help="fit/freeze HMM from all ten dev blocks")
     freeze.add_argument("--study-manifest", type=Path, required=True)
@@ -2048,10 +2162,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Coverage SHA-256: {artifact['coverage_manifest_sha256']}")
             return 0
         if args.command == "execute":
-            if (args.runtime_report is not None
-                    and args.runtime_report.expanduser().resolve()
-                    == args.study_manifest.expanduser().resolve()):
-                raise ValueError("runtime report path conflicts with the study manifest")
+            if any(item is not None and item.expanduser().resolve()
+                   == args.study_manifest.expanduser().resolve()
+                   for item in (args.runtime_report, args.progress_report)):
+                raise ValueError("operational report path conflicts with the study manifest")
             results = execute_study_periods(
                 manifest, args.coverage_manifest, args.archive_root, args.output_dir,
                 phase=args.phase, period_limit=args.period_limit,
@@ -2061,7 +2175,9 @@ def main(argv: list[str] | None = None) -> int:
                 funding_archive_root=args.funding_archive_root,
                 liquidation_archive_root=args.liquidation_archive_root,
                 hmm_model_path=args.hmm_model,
-                runtime_report_path=args.runtime_report)
+                runtime_report_path=args.runtime_report,
+                checkpoint_dir=args.checkpoint_dir,
+                progress_report_path=args.progress_report)
             for path in results:
                 print(path)
             return 0
