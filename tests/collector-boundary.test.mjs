@@ -699,7 +699,7 @@ test("the application owns the collector universe and completed-candle TA", asyn
 
 test("collector mode reads canonical completed candles instead of a second live series", async () => {
   const engine = await read("../src/lib/ta/engine.server.ts");
-  assert.match(engine, /readCollectorTACandles\(symbol, timeframe\)/);
+  assert.match(engine, /readCollectorCompletedCandles\(symbol, timeframe\)/);
   assert.match(engine, /BINANCE_COLLECTOR_ENABLED/);
   // The REST provider stays the non-collector path; while collector mode is active
   // the engine must not silently fall back to it.
@@ -784,6 +784,9 @@ test("the operational store maps the collector subscription RPCs", async () => {
       if (name === "get_collector_subscriptions") {
         return Promise.resolve({ data: ["btcusdt", "ethusdt"], error: null });
       }
+      if (name === "get_collector_completed_candles") {
+        return Promise.resolve({ data: [], error: null });
+      }
       return Promise.resolve({ data: null, error: null });
     },
   };
@@ -792,6 +795,7 @@ test("the operational store maps the collector subscription RPCs", async () => {
       "@supabase/supabase-js": stub(
         `export function createClient() { throw new Error("unused"); }`,
       ),
+      "../market/completed-candle-contract": transpile(await read("../src/lib/market/completed-candle-contract.ts")),
       "./config.server": stub(
         `export function operationalDbConfig() { throw new Error("unused"); }`,
       ),
@@ -823,7 +827,7 @@ test("the operational store maps the collector subscription RPCs", async () => {
   assert.deepEqual(await store.readCollectorSubscriptions(), ["BTCUSDT", "ETHUSDT"]);
   assert.equal(calls[1][0], "get_collector_subscriptions");
   // The application reads canonical collector candles back through the same adapter.
-  await store.readCollectorTACandles("btcusdt", 15);
-  assert.equal(calls[2][0], "get_collector_ta_candles");
+  await store.readCollectorCompletedCandles("btcusdt", 15);
+  assert.equal(calls[2][0], "get_collector_completed_candles");
   assert.deepEqual(calls[2][1], { p_symbol: "BTCUSDT", p_timeframe_minutes: 15, p_limit: 260 });
 });

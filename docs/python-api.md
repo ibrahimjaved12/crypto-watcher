@@ -316,3 +316,41 @@ TA/database tests, TypeScript typechecking, and targeted ESLint. The aggregate N
 suite still stops on the three diagnostics-test failures tracked by issue #57.
 No application server, production build, Docker image, or hosted end-to-end check
 was run for this change; deployment and secret configuration remain external steps.
+
+
+## Native completed candles: `POST /v1/completed-candles/validate`
+
+This authenticated service-bearer endpoint validates `completed-candle-v1` and
+returns a deterministic structural summary. It performs no provider, database,
+clock, indicator or strategy operation. Responses use `Cache-Control: no-store`.
+It is an explicit reusable application/Python boundary, not a per-collector-message
+call or part of the movement hot path.
+
+Requests contain `contract_version`, a series-level `identity`, and `observations`.
+The V1 identity is strictly Binance USD-M (`provider: binance-usdm`, `exchange:
+binance`), futures/perpetual, trade, native-kline, timeframe 1, with equal symbol
+and native symbol and `instrument_id: binance-usdm:<native_symbol>`. Each observation
+contains `candle` with `open_time_ms`, `close_time_ms`, Decimal-text
+`open/high/low/close/base_volume/quote_volume`, and discriminated `provenance`:
+
+- `websocket`: `endpoint`, actual Binance `source_event_time_ms`, `received_at_ms`.
+- `rest`: `endpoint`, actual `retrieved_at_ms`; a source-event field is forbidden.
+- `archive`: `dataset_id`, `dataset_version`, `dataset_content_sha256`; event,
+  receive and retrieval timestamps are forbidden.
+
+Market intervals are `[open, open + 60_000)`; the inclusive Binance close remains
+`open + 59_999`, and the domain exposes `end_time_exclusive_ms = close + 1`.
+Completion is an admission/type invariant, with no completion flag or clock read.
+Identical market facts are idempotent across observations; conflicting facts at
+the same open time fail validation. Gaps are explicit, never filled.
+
+The summary returns `schema_version: 1`, contract version, provider, exchange,
+instrument ID, price type, timeframe, observation/candle counts, first/last open
+milliseconds and `missing_open_times_ms`. First/last are null only for an empty
+series. Invalid identity, intervals, values, provenance or conflicts return 422;
+unauthorized calls return 401. The application client checks summary identity,
+counts, range and gaps against its request and sends market numbers as decimal text.
+
+Collector-recorded native 1m remains the live authority. #71's compact history
+transport and mathematics remain unchanged, #70's five-second buckets stay
+independent, and ta-v2 continues to accept only 15m/1h/4h.

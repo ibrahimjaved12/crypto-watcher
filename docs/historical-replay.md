@@ -734,3 +734,21 @@ never receives forward labels. Secondary V1 state paths are censored whenever
 their terminal point is outside the selected day's replay interval; an
 evaluable path with no reversal records `CENSORED_NO_REVERSAL`, while gaps in
 the V1 path make the reversal label unavailable.
+
+
+### Neutral native completed-candle projection (#91)
+
+`completed_candle_series_from_archive(dataset, symbol)` joins existing native 1m
+OHLC evidence and movement/archive volume rows by symbol/open time, failing on
+missing or conflicting pairs. It adds `completed-candle-v1` market facts without
+changing historical scientific dataclasses, fingerprints, evidence hashes, or
+availability policy. Intervals are `[open, open + 60_000)` and the Binance close
+label stays `open + 59_999`; gaps are reported and never filled.
+
+Archive observation provenance contains only dataset ID, version and content
+SHA-256. No historical WebSocket event, socket receipt or REST retrieval timestamp
+is fabricated. Existing `first_seen_at_ms` remains the close+1 replay availability
+surrogate, not transport/source-event provenance or market identity. Live
+collector observations and archive observations can describe equal market facts
+while retaining different provenance. #70's five-second buckets and #71's compact
+normalization projection remain separate from this additive representation.

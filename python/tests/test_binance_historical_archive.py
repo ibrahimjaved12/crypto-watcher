@@ -709,5 +709,48 @@ class BinanceHistoricalArchiveTests(unittest.TestCase):
                 replace(flow_dataset, taker_flow_evidence=order_mismatch)
 
 
+
+
+
+class CompletedCandleArchiveTests(unittest.TestCase):
+    def test_paired_archive_contract_preserves_facts_availability_and_hashes(self):
+        from market_analysis.binance_historical_archive import completed_candle_series_from_archive
+        from market_analysis.historical_market_state_study_json import canonical_study_json
+        with tempfile.TemporaryDirectory() as folder:
+            request = _single_day_bundle(Path(folder))
+            dataset = load_binance_usdm_historical_replay_dataset(request)
+            before = canonical_study_json(dataset)
+            series = completed_candle_series_from_archive(dataset, SYMBOL)
+            full = dataset.ohlc_evidence.candles[0]
+            compact = dataset.replay_request.candles[0]
+            fact = series.market_candles[0]
+            self.assertEqual((fact.open, fact.high, fact.low, fact.close),
+                             (full.open, full.high, full.low, full.close))
+            self.assertEqual((fact.base_volume, fact.quote_volume), (compact.volume, compact.quote_volume))
+            self.assertEqual(fact.close_time_ms, full.open_time_ms + 59_999)
+            self.assertEqual(fact.end_time_exclusive_ms, full.open_time_ms + 60_000)
+            self.assertEqual(full.first_seen_at_ms, compact.first_seen_at_ms)
+            self.assertEqual(full.first_seen_at_ms, full.close_time_ms + 1)
+            provenance = series.observations[0].provenance
+            self.assertEqual((provenance.dataset_id, provenance.dataset_version, provenance.dataset_content_sha256),
+                (dataset.archive_manifest.dataset_id, dataset.archive_manifest.dataset_version,
+                 dataset.archive_manifest.content_sha256))
+            self.assertTrue(all(not hasattr(provenance, name) for name in
+                                ("source_event_time_ms", "received_at_ms", "retrieved_at_ms")))
+            self.assertEqual(canonical_study_json(dataset), before)
+            mismatched = replace(dataset, replay_request=replace(dataset.replay_request,
+                candles=(replace(compact, close=compact.close + 1),)))
+            with self.assertRaises(ValueError):
+                completed_candle_series_from_archive(mismatched, SYMBOL)
+            missing = replace(dataset, replay_request=replace(dataset.replay_request, candles=()))
+            with self.assertRaises(ValueError):
+                completed_candle_series_from_archive(missing, SYMBOL)
+            bounded = load_binance_usdm_bounded_historical_replay_dataset(request)
+            try:
+                self.assertEqual(completed_candle_series_from_archive(bounded, SYMBOL), series)
+            finally:
+                bounded.close()
+
+
 if __name__ == "__main__":
     unittest.main()
