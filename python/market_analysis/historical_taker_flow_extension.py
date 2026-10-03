@@ -361,7 +361,7 @@ def _flow_symbol_output(symbol: str, window_minutes: int,
     buy = sums.buy_quote_notional
     sell = sums.sell_quote_notional
     gross = sums.gross_quote_notional
-    net = _exact_sum((buy, -sell))
+    net = _exact_sum((buy, sell.copy_negate()))
     buy_count, sell_count = sums.buy_aggtrade_count, sums.sell_aggtrade_count
     total_count = buy_count + sell_count
     if gross == 0:
