@@ -199,14 +199,14 @@ class ReplayCheckpointStore:
             boundary += 3_600_000
         yield self.end_boundary
 
-    def load_latest(self):
+    def _iter_validated_chunks(self):
         self.point_count = 0
         self.previous_sha = None
         self.previous_boundary = None
         self._complete = False
         paths = sorted(self.root.glob("checkpoint-*.json"))
         if not paths:
-            return None
+            return
         expected = iter(self._checkpoint_boundaries())
         state = None
         for path in paths:
@@ -303,14 +303,22 @@ class ReplayCheckpointStore:
                     or metadata["cumulative_point_count"] != state.emitted_point_count):
                 raise ValueError("replay state boundary/count mismatch")
             self.point_count += len(chunk)
-            del chunk, lines, chunk_raw
+            del lines, chunk_raw, point
             self.previous_sha = current_sha
             self.previous_boundary = boundary
             self._complete = metadata.get("status") == "REPLAY_COMPLETE"
             if self._complete and boundary != self.end_boundary:
                 raise ValueError("premature replay complete checkpoint")
+            yield chunk, state
+            del chunk
         if self.previous_boundary == self.end_boundary and not self._complete:
             raise ValueError("final replay checkpoint is not complete")
+
+    def load_latest(self):
+        """Validate each bounded chunk once, retaining only the final state."""
+        state = None
+        for chunk, state in self._iter_validated_chunks():
+            del chunk
         return state
 
     def add_point(self, point: HistoricalMarketReplayPoint,
@@ -380,20 +388,9 @@ class ReplayCheckpointStore:
 
     def iter_points(self):
         """Revalidate the chain and read immutable chunks without retaining the day."""
-        self.load_latest()
-        for path in sorted(self.root.glob("checkpoint-*.json")):
-            metadata = _read_json_bytes(path.read_bytes())
-            chunk_path = self.root / "chunks" / f"{metadata['point_chunk_sha256']}.jsonl"
-            digest = hashlib.sha256()
-            with chunk_path.open("rb") as stream:
-                for line in stream:
-                    digest.update(line)
-            if digest.hexdigest() != metadata["point_chunk_sha256"]:
-                raise ValueError("replay chunk changed after validation")
-            with chunk_path.open("rb") as stream:
-                next(stream)
-                for line in stream:
-                    yield _decode(HistoricalMarketReplayPoint, _read_json_bytes(line))
+        for chunk, state in self._iter_validated_chunks():
+            yield from chunk
+            del chunk, state
 
 
 def _point_id(fingerprint, boundary):

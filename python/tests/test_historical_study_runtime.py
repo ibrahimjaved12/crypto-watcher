@@ -275,47 +275,90 @@ class ReplayProjectionTests(unittest.TestCase):
             chunk.write_bytes(chunk.read_bytes() + b"\n")
             with self.assertRaises(ValueError):
                 store.load_latest()
+            with self.assertRaises(ValueError):
+                tuple(store.iter_points())
 
-    def test_scaled_rich_object_retention_and_resume_are_hour_bounded(self):
-        # Three whole checkpoint chunks: an accumulating store/core fails here.
-        request = _request(end=OUTPUT + 3 * 3_600_000)
-        view = bounded_view(request)
-        manifest = replay_module.historical_replay_run_manifest(view)
-        references, live_at_checkpoints = [], []
+    def test_callback_only_replay_releases_emitted_points(self):
+        references = []
+        result = run_bounded_historical_market_replay(
+            bounded_view(_request(end=OUTPUT + 10_000)), retain_points=False,
+            boundary_callback=lambda point, state: references.append(weakref.ref(point)))
+        self.assertEqual(result.points, ())
+        self.assertEqual(len(references), 3)
+        self.assertTrue(all(ref() is None for ref in references))
+
+    def test_synthetic_hourly_chunks_release_and_stream_validated_points_once(self):
+        request = _request(end=OUTPUT + 5_000)
+        captured = []
+        replay = run_bounded_historical_market_replay(bounded_view(request),
+            boundary_callback=lambda point, state: captured.append((point, state))
+            if state is not None else None)
+        template, state_template = captured.pop()
+        end = OUTPUT + 3_600_000 + 5_000
         with TemporaryDirectory() as folder:
-            store = store_for(Path(folder), request, manifest)
-            def callback(point, state):
+            store = store_for(Path(folder), request, replay.manifest)
+            store.end_boundary = end
+            references = []
+            for count, boundary in enumerate(range(OUTPUT, end + 1, 5_000), 1):
+                point = replace(template,
+                    point_id=replay_module.canonical_replay_point_id(replay.manifest.run_fingerprint, boundary),
+                    evaluation_boundary_time_ms=boundary,
+                    replay_clock_time_ms=boundary + request.config.finalization_grace_ms,
+                    movement_evaluation=replace(template.movement_evaluation,
+                        evaluation_boundary_time_ms=boundary),
+                    endpoint_buckets=tuple((symbol, replace(bucket, boundary_time_ms=boundary))
+                                           for symbol, bucket in template.endpoint_buckets))
                 references.append(weakref.ref(point))
-                store.add_point(point, state)
-                if state is not None:
-                    live_at_checkpoints.append(sum(ref() is not None for ref in references))
-            result = run_bounded_historical_market_replay(view, retain_points=False,
-                                                        boundary_callback=callback)
-            self.assertGreater(len(references), 2_000)
-            self.assertEqual(result.points, ())
-            self.assertEqual(live_at_checkpoints, [1, 1, 1])
-            self.assertEqual(sum(ref() is not None for ref in references), 0)
-            decoded_references = []
+                state = replace(state_template, completed_boundary_time_ms=boundary,
+                    replay_clock_time_ms=point.replay_clock_time_ms, emitted_point_count=count)
+                store.add_point(point, state if boundary in store._checkpoint_boundaries() else None)
+                del point, state
+                if not store.chunk_points:
+                    self.assertTrue(all(ref() is None for ref in references))
+            self.assertEqual(len(list(store.root.glob("checkpoint-*.json"))), 2)
+            decoded = []
             original_decode = checkpoints._decode
             def track(kind, value, substitutions=None):
                 item = original_decode(kind, value, substitutions)
                 if kind is replay_module.HistoricalMarketReplayPoint:
-                    decoded_references.append(weakref.ref(item))
+                    decoded.append(weakref.ref(item))
                 return item
             with patch.object(checkpoints, "_decode", side_effect=track):
-                store.load_latest()
-            self.assertEqual(len(decoded_references), len(references))
-            self.assertEqual(sum(ref() is not None for ref in decoded_references), 0)
+                latest = store.load_latest()
+                self.assertEqual(len(decoded), count)
+                self.assertTrue(all(ref() is None for ref in decoded))
+                decoded.clear()
+                for index, point in enumerate(store.iter_points()):
+                    boundary = OUTPUT + index * 5_000
+                    self.assertEqual(point.evaluation_boundary_time_ms, boundary)
+                    self.assertEqual(point.point_id, replay_module.canonical_replay_point_id(
+                        replay.manifest.run_fingerprint, boundary))
+                    # At the second chunk, the completed first chunk is released.
+                    if boundary == end:
+                        self.assertTrue(all(ref() is None for ref in decoded[:-1]))
+                    del point
+                self.assertEqual(index + 1, count)
+                self.assertEqual(len(decoded), count)
+                self.assertTrue(all(ref() is None for ref in decoded))
+                decoded.clear()
+                runtime.create_study_point_stream(store)
+                self.assertEqual(len(decoded), count)
+                self.assertTrue(all(ref() is None for ref in decoded))
+            self.assertEqual(latest.emitted_point_count, count)
             self.assertEqual(store.chunk_points, [])
+            # An incomplete prefix must be rejected after generator consumption,
+            # despite completion metadata left from an earlier validation.
+            (store.root / f"checkpoint-{end}.json").unlink()
+            with self.assertRaisesRegex(ValueError, "validated completed replay"):
+                runtime.create_study_point_stream(store)
 
 
 class ScientificStageParityTests(unittest.TestCase):
-    def test_every_registered_fixed_configuration_precomputed_sequential_parity(self):
-        # Usable, changing five-symbol movement fixture exercises native math.
-        points = tuple(_point(9_000_000 + tick * 5_000, "validation") for tick in range(37))
+    def _fixed_parity(self, descriptors, ticks):
+        points = tuple(_point(9_000_000 + tick * 5_000, "validation") for tick in range(ticks))
         period = SimpleNamespace(study_period_index=5, utc_date=date(2024, 1, 1),
             phase="validation", start_boundary_time_ms=9_000_000,
-            end_boundary_time_ms=9_000_000 + 180_000)
+            end_boundary_time_ms=9_000_000 + (ticks - 1) * 5_000)
         classifier, lifecycle_config = MarketClassifierConfig(), MarketEpisodeLifecycleConfig()
         branch, state = {}, None
         for point in points:
@@ -323,17 +366,27 @@ class ScientificStageParityTests(unittest.TestCase):
                 point.source_time_evidence, state, classifier, lifecycle_config)
             state = lifecycle.next_state
             branch[point.movement_evaluation.evaluation_boundary_time_ms] = classification, lifecycle
-        for descriptor in EXPERIMENT_SUITE_V1:
-            if descriptor.experiment_id == "EXP-75-09":
-                continue
+        for descriptor in descriptors:
             with self.subTest(experiment=descriptor.experiment_id, config=descriptor.config_version):
                 expected = descriptor.runner(points, descriptor.config,
                     canonical_branch_by_boundary=branch)
                 actual = descriptor.runner(points, descriptor.config,
                     canonical_branch_by_boundary=None)
                 self.assertEqual(execution._canonical(actual), execution._canonical(expected))
-                self.assertEqual(adapt_candidate_result(period, descriptor, actual),
-                                 adapt_candidate_result(period, descriptor, expected))
+                bundle = adapt_candidate_result(period, descriptor, actual)
+                self.assertEqual(bundle, adapt_candidate_result(period, descriptor, expected))
+                self.assertEqual(descriptor.config.version, descriptor.config_version)
+
+    def test_distinct_fixed_runner_families_full_usable_parity(self):
+        representatives = {}
+        for descriptor in EXPERIMENT_SUITE_V1:
+            if descriptor.experiment_id != "EXP-75-09":
+                representatives.setdefault(descriptor.runner, descriptor)
+        self._fixed_parity(tuple(representatives.values()), 37)
+
+    def test_every_registered_fixed_configuration_small_contract_parity(self):
+        self._fixed_parity(tuple(descriptor for descriptor in EXPERIMENT_SUITE_V1
+                                 if descriptor.experiment_id != "EXP-75-09"), 2)
 
     def _fixture(self, root):
         config = HistoricalReplayConfig(OUTPUT, OUTPUT + 60_000)
@@ -507,43 +560,59 @@ class ScientificStageParityTests(unittest.TestCase):
             prepared, compact, supplementary, model, v1, states = self._fixture(root)
             try:
                 stream = compact.canonical_replay_result.points
-                actual_v1, actual_states = runtime.run_stage(stream, "v1", {
-                    "action": "v1", "prepared": execution._stage_prepared(compact, "v1"),
-                    "scientific_stage": execution._stage_science_identity("v1")})
+                actual_v1, actual_states, empty_branch = execution._build_v1_evidence(
+                    compact.period, stream, retain_branch=False)
                 self.assertEqual(actual_v1, v1)
                 self.assertEqual(actual_states, states)
-                self.assertEqual(execution._build_v1_evidence(prepared.period,
-                    prepared.canonical_replay_result.points, retain_branch=False)[2], {})
+                self.assertEqual(empty_branch, {})
                 expected = execution._candidate_execution(prepared, supplementary, model)
-                progress = []
-                def observe(event, detail):
-                    progress.append((event, detail))
-                # Persist HMM and one fixed stage, then interrupt before the next.
-                original_run = execution.run_stage
-                calls = []
-                def interrupt_after_two(*args, **kwargs):
-                    calls.append(args[1])
-                    if len(calls) == 3:
+                selectors = ("hmm", *(f"fixed-{index:02d}" for index, descriptor
+                    in enumerate(EXPERIMENT_SUITE_V1) if descriptor.experiment_id != "EXP-75-09"),
+                    *(f"atr-{index}" for index in range(len(ATR_CONFIGURATIONS))),
+                    "taker-flow", "mark_trade", "open_interest", "funding", "liquidation")
+                cache, requests, calls, reused = {}, {}, [], []
+                def transport(stream_arg, stage_id, request, **kwargs):
+                    self.assertIs(stream_arg, stream)
+                    calls.append(stage_id)
+                    encoded = runtime._canonical_bytes(runtime.encode(request))
+                    if stage_id in cache:
+                        self.assertEqual(encoded, requests[stage_id])
+                        reused.append(stage_id)
+                    else:
+                        # Mock only stage transport; execute real scientific functions.
+                        cache[stage_id] = runtime._execute_scientific_stage(
+                            runtime.decode(runtime.encode(request)))
+                        requests[stage_id] = encoded
+                    return cache[stage_id]
+                def interrupted(*args, **kwargs):
+                    if len(cache) == 2:
                         raise RuntimeError("synthetic interruption")
-                    return original_run(*args, **kwargs)
-                with patch.object(execution, "run_stage", side_effect=interrupt_after_two):
+                    return transport(*args, **kwargs)
+                with patch.object(execution, "run_stage", side_effect=interrupted):
                     with self.assertRaisesRegex(RuntimeError, "synthetic interruption"):
-                        execution._staged_candidate_execution(compact, supplementary, model, progress=observe)
-                with patch.object(execution, "_candidate_execution",
-                        side_effect=AssertionError("heavy candidate ran in parent")):
-                    actual = execution._staged_candidate_execution(compact, supplementary, model, progress=observe)
+                        execution._staged_candidate_execution(compact, supplementary, model)
+                self.assertEqual(calls, list(selectors[:2]))
+                calls.clear()
+                with patch.object(execution, "run_stage", side_effect=transport):
+                    actual = execution._staged_candidate_execution(compact, supplementary, model)
+                self.assertEqual(calls, list(selectors))
+                self.assertEqual(reused, list(selectors[:2]))
                 self.assertEqual(execution._canonical(actual), execution._canonical(expected))
-                reused = [detail["stage_id"] for event, detail in progress
-                          if event == "POST_REPLAY_STAGE_REUSED"]
-                self.assertEqual(reused, ["hmm", "fixed-00"])
-                started = [detail["stage_id"] for event, detail in progress
-                           if event == "POST_REPLAY_STAGE_STARTED"]
-                self.assertEqual(len(started), 1 + 27 + 3 + 5)
-                completed = [detail for event, detail in progress if event == "POST_REPLAY_STAGE_COMPLETED"]
-                self.assertEqual(len({detail["worker_memory"]["process_id"] for detail in completed}), len(completed))
-                for detail in completed:
-                    self.assertIn("stage_result_sha256", detail)
-                    self.assertIn("worker_memory", detail)
+                for selector in selectors:
+                    request = runtime.decode(checkpoints._read_json_bytes(requests[selector]))
+                    self.assertEqual(request["selector"], selector)
+                    self.assertEqual(request["scientific_stage"], execution._stage_science_identity(selector))
+                    self.assertEqual(set(request["supplementary"]),
+                                     {selector} if selector in supplementary else set())
+                cache["v1"] = (actual_v1, actual_states)
+                dependencies = tuple({"stage_id": selector,
+                    "stage_identity_sha256": runtime._sha(requests.get(selector, b"v1")),
+                    "stage_result_sha256": runtime._sha(runtime._canonical_bytes(
+                        runtime.encode(cache[selector])))} for selector in ("v1", *selectors))
+                def bind_dependencies(stream_arg, stage_ids):
+                    self.assertIs(stream_arg, stream)
+                    self.assertEqual(tuple(stage_ids), ("v1", *selectors))
+                    return dependencies
                 records = (*actual[0], *v1)
                 # Force a sparse exact event to cover context even on unavailable data.
                 event = execution.HistoricalStudyCandidateEvidence(5, prepared.period.utc_date.isoformat(),
@@ -570,30 +639,68 @@ class ScientificStageParityTests(unittest.TestCase):
                 execution_period = SimpleNamespace(**vars(prepared.period))
                 execution_period.start_boundary_time_ms = day_start
                 execution_period.end_boundary_time_ms = day_start + 86_400_000
-                # Only archive preparation/label acquisition are substituted;
-                # both complete scientific pipelines and subprocesses run unchanged.
+                # Reuse already-proven equivalent candidate outputs for report assembly.
+                # Event context/outcome algorithms still run directly through transport.
                 with patch.object(execution, "_prepare_study_period", side_effect=[
                         (prepared, coverage, v1, states), (compact, coverage, actual_v1, actual_states)]), \
                      patch.object(execution, "_load_source_evidence", return_value=supplementary), \
                      patch.object(execution, "_label_price_evidence", return_value=forward), \
                      patch.object(execution, "report_json_safe", side_effect=fixture_safe):
-                    legacy = execution._execute_period(manifest, coverage, execution_period,
-                                root, {}, PRODUCER, model)
-                    staged = execution._execute_period(manifest, coverage, execution_period,
-                                root, {}, PRODUCER, model)
+                    with patch.object(execution, "_candidate_execution", return_value=expected):
+                        legacy = execution._execute_period(manifest, coverage, execution_period,
+                                    root, {}, PRODUCER, model)
+                    with patch.object(execution, "run_stage", side_effect=transport), \
+                         patch.object(execution, "stage_dependencies", side_effect=bind_dependencies):
+                        staged = execution._execute_period(manifest, coverage, execution_period,
+                                    root, {}, PRODUCER, model)
+                for stage_id in ("event-context", "outcomes"):
+                    request = runtime.decode(checkpoints._read_json_bytes(requests[stage_id]))
+                    self.assertEqual(request["required_stage_results"], dependencies)
                 self.assertEqual(legacy, staged)
                 self.assertEqual(legacy["report_sha256"], staged["report_sha256"])
                 self.assertEqual(staged["hmm_model_sha256"], model.model_sha256)
                 self.assertTrue(staged["pelt_no_causal_outcomes"])
                 self.assertFalse(any(item["experiment_id"] == "EXP-75-04A"
                                      for item in staged["candidate_event_outcomes"]))
-                # Complete stage reuse starts no child and rejects stale/corrupt artifacts.
-                with patch.object(runtime.subprocess, "run", side_effect=AssertionError("unexpected child")):
+                calls.clear()
+                reused.clear()
+                with patch.object(execution, "run_stage", side_effect=transport):
                     execution._staged_candidate_execution(compact, supplementary, model)
+                self.assertEqual(calls, list(selectors))
+                self.assertEqual(reused, list(selectors))
+            finally:
+                prepared.archive_dataset.close()
+
+    def test_one_fresh_fixed_worker_publication_reuse_and_corruption(self):
+        with TemporaryDirectory() as folder:
+            prepared, compact, supplementary, model, v1, states = self._fixture(Path(folder))
+            try:
+                stream = compact.canonical_replay_result.points
+                request = {"action": "candidate", "prepared": execution._stage_prepared(compact, "fixed-00"),
+                    "supplementary": {}, "hmm_model": model, "selector": "fixed-00",
+                    "scientific_stage": execution._stage_science_identity("fixed-00")}
+                expected = execution._candidate_execution(prepared, {}, model, stage_selector="fixed-00")
+                progress = []
+                original_run = runtime.subprocess.run
+                with patch.object(runtime.subprocess, "run", wraps=original_run) as launch:
+                    actual = runtime.run_stage(stream, "fixed-00", request,
+                        progress=lambda event, detail: progress.append((event, detail)))
+                self.assertEqual(launch.call_count, 1)
+                self.assertEqual(launch.call_args.args[0][:3],
+                    [runtime.sys.executable, "-m", "market_analysis.historical_study_runtime"])
+                self.assertEqual(execution._canonical(actual), execution._canonical(expected))
+                self.assertEqual([event for event, _ in progress],
+                    ["POST_REPLAY_STAGE_STARTED", "POST_REPLAY_STAGE_COMPLETED"])
+                self.assertIn("stage_result_sha256", progress[-1][1])
+                dependency, = runtime.stage_dependencies(stream, ("fixed-00",))
+                self.assertEqual(dependency["stage_id"], "fixed-00")
+                self.assertEqual(dependency["stage_result_sha256"],
+                                 progress[-1][1]["stage_result_sha256"])
+                with patch.object(runtime.subprocess, "run", side_effect=AssertionError("unexpected child")):
+                    self.assertEqual(runtime.run_stage(stream, "fixed-00", request), actual)
                 path = stream.root.parent / "post-replay" / "fixed-00.json"
                 raw = path.read_bytes()
-                metadata = checkpoints._read_json_bytes(raw)
-                identity = metadata["identity"]
+                identity = checkpoints._read_json_bytes(raw)["identity"]
                 for key in ("runtime_implementation_revision", "scientific_producer_revision",
                             "study_manifest_sha256", "extension_coverage_manifest_sha256",
                             "compact_stream_sha256", "run_fingerprint", "stage_id",
@@ -602,13 +709,11 @@ class ScientificStageParityTests(unittest.TestCase):
                         runtime._load_stage(path, {**identity, key: "conflicting-identity"})
                 path.write_bytes(raw[:-1])
                 with self.assertRaises(ValueError):
-                    execution._staged_candidate_execution(compact, supplementary, model)
-                path.write_bytes(raw)
-                request = {"action": "candidate", "prepared": execution._stage_prepared(compact, "fixed-00"),
-                    "supplementary": {}, "hmm_model": model, "selector": "fixed-00",
-                    "scientific_stage": {"config_version": "stale-config"}}
-                with self.assertRaises(ValueError):
                     runtime.run_stage(stream, "fixed-00", request)
+                path.write_bytes(raw)
+                with self.assertRaises(ValueError):
+                    runtime.run_stage(stream, "fixed-00", {**request,
+                        "scientific_stage": {"config_version": "stale-config"}})
             finally:
                 prepared.archive_dataset.close()
 

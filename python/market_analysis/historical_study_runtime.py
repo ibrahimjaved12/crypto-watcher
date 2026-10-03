@@ -138,15 +138,9 @@ class StudyPointStream:
 
 
 def create_study_point_stream(store):
-    store.load_latest()
-    if not store._complete:
-        raise ValueError("compact spool requires a validated completed replay")
-    identity = {**store.identity, "final_replay_checkpoint_sha256": store.previous_sha,
-                "point_count": store.point_count,
-                "first_boundary": store.start_boundary, "last_boundary": store.end_boundary}
     root = store.root / "study-points"
-    if root.exists():
-        return StudyPointStream(root, identity)
+    if not store.root.exists():
+        raise ValueError("compact spool requires a validated completed replay")
     temporary = Path(tempfile.mkdtemp(prefix=".study-points-", dir=store.root))
     try:
         digest = hashlib.sha256()
@@ -155,13 +149,21 @@ def create_study_point_stream(store):
             for point in store.iter_points():
                 row = CompactStudyPoint(point.point_id, point.evaluation_boundary_time_ms,
                                         point.movement_evaluation, point.source_time_evidence,
-                                        identity["phase"])
+                                        store.identity["phase"])
                 raw = _canonical_bytes(row)
                 stream.write(raw)
                 digest.update(raw)
                 count += 1
             stream.flush()
             os.fsync(stream.fileno())
+        # Generator validation/completion metadata is final only after exhaustion.
+        if not store._complete:
+            raise ValueError("compact spool requires a validated completed replay")
+        identity = {**store.identity, "final_replay_checkpoint_sha256": store.previous_sha,
+                    "point_count": store.point_count,
+                    "first_boundary": store.start_boundary, "last_boundary": store.end_boundary}
+        if root.exists():
+            return StudyPointStream(root, identity)
         body = {"schema_version": SPOOL_VERSION, "identity": identity,
                 "point_count": count, "first_boundary": store.start_boundary,
                 "last_boundary": store.end_boundary, "stream_sha256": digest.hexdigest()}
