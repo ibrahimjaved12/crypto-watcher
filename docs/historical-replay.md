@@ -814,8 +814,14 @@ by the new runtime. CI parity/retention fixtures are necessary but cannot
 establish real-day memory acceptance.
 
 After GitHub Actions is green, repeat the **three full development-day**
-acceptance run with a NEW output/checkpoint directory. Using the same frozen
-coverage and source roots as the failed run:
+acceptance run with the intended PR/runtime commit checked out and a clean
+`python/market_analysis` source tree at that commit. Runtime identity requires
+both the exact committed Git revision and no staged, unstaged, or non-ignored
+untracked package changes. Unrelated dirty docs, tests, archives, checkpoints,
+and output files outside that package do not require the entire repository to
+be clean. Use a NEW output/checkpoint directory; never reuse the old `d502`
+runtime directory. Using the same frozen coverage and source roots as the failed
+run:
 
 ```bash
 CODE_REV="c277011a3c1d3e0db2c5224e49386a375a6afc59"

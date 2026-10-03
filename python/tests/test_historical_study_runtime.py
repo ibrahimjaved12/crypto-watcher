@@ -77,6 +77,57 @@ def store_for(root, request, manifest, phase="development"):
     }, request.config.output_start_boundary_time_ms, request.config.output_end_boundary_time_ms)
 
 
+class RuntimeSourceRevisionTests(unittest.TestCase):
+    def test_clean_package_returns_exact_full_revision(self):
+        for revision in ("a" * 40, "b" * 64):
+            with self.subTest(revision=revision), patch.object(
+                    runtime.subprocess, "run", side_effect=[
+                        SimpleNamespace(stdout=revision + "\n"),
+                        SimpleNamespace(stdout="")]) as run:
+                self.assertEqual(runtime.current_runtime_implementation_revision(), revision)
+                root = str(Path(runtime.__file__).resolve().parents[2])
+                self.assertEqual(run.call_args_list, [
+                    unittest.mock.call(["git", "-C", root, "rev-parse", "HEAD"],
+                                       check=True, capture_output=True, text=True),
+                    unittest.mock.call(["git", "-C", root, "status", "--porcelain",
+                                        "--untracked-files=all", "--", "python/market_analysis"],
+                                       check=True, capture_output=True, text=True)])
+
+    def test_tracked_staged_and_untracked_package_changes_fail_closed(self):
+        for status in (" M python/market_analysis/module.py\n",
+                       "M  python/market_analysis/module.py\n",
+                       "?? python/market_analysis/new_module.py\n"):
+            with self.subTest(status=status), patch.object(
+                    runtime.subprocess, "run", side_effect=[
+                        SimpleNamespace(stdout="a" * 40), SimpleNamespace(stdout=status)]):
+                with self.assertRaisesRegex(ValueError, "source tree is not clean at HEAD"):
+                    runtime.current_runtime_implementation_revision()
+
+    def test_unrelated_dirty_files_do_not_block_package_identity(self):
+        outside_status = " M docs/historical-replay.md\n?? python/tests/local.py\n?? outputs/result.json\n"
+        def git_response(argv, **kwargs):
+            if argv[3:] == ["rev-parse", "HEAD"]:
+                return SimpleNamespace(stdout="a" * 40)
+            # A whole-repository status would expose unrelated local changes.
+            scoped = argv[3:] == ["status", "--porcelain", "--untracked-files=all",
+                                  "--", "python/market_analysis"]
+            return SimpleNamespace(stdout="" if scoped else outside_status)
+        with patch.object(runtime.subprocess, "run", side_effect=git_response):
+            self.assertEqual(runtime.current_runtime_implementation_revision(), "a" * 40)
+
+    def test_git_head_and_status_failures_fail_closed(self):
+        failures = ([OSError("git unavailable")],
+                    [runtime.subprocess.CalledProcessError(1, "git rev-parse")],
+                    [SimpleNamespace(stdout="a" * 40),
+                     runtime.subprocess.CalledProcessError(1, "git status")],
+                    [SimpleNamespace(stdout="invalid HEAD")])
+        for responses in failures:
+            with self.subTest(responses=responses), patch.object(
+                    runtime.subprocess, "run", side_effect=responses):
+                with self.assertRaises(ValueError):
+                    runtime.current_runtime_implementation_revision()
+
+
 class WorkerRuntimeRevisionTests(unittest.TestCase):
     def _job(self, root, runtime_revision, *, include_runtime_revision=True):
         request_raw = runtime._canonical_bytes(runtime.encode({"action": "fixture"}))
@@ -111,6 +162,21 @@ class WorkerRuntimeRevisionTests(unittest.TestCase):
             result = checkpoints._read_json_bytes(result_path.read_bytes())
             self.assertEqual(result["identity"], identity)
             self.assertEqual(runtime.decode(result["result"]), {"fixture": "executed"})
+
+    def test_worker_dirty_source_fails_before_request_execution_or_publication(self):
+        with TemporaryDirectory() as folder:
+            job_path, result_path, _ = self._job(Path(folder), "a" * 40)
+            # A missing request also proves rejection precedes reading it.
+            (Path(folder) / "request.json").unlink()
+            with patch.object(runtime.subprocess, "run", side_effect=[
+                    SimpleNamespace(stdout="a" * 40),
+                    SimpleNamespace(stdout=" M python/market_analysis/module.py\n")]), \
+                 patch.object(runtime, "_execute_scientific_stage") as execute:
+                with self.assertRaisesRegex(ValueError, "worker runtime implementation revision") as caught:
+                    runtime._worker(job_path)
+            self.assertIn("source tree is not clean at HEAD", str(caught.exception.__cause__))
+            execute.assert_not_called()
+            self.assertFalse(result_path.exists())
 
     def test_worker_revision_mismatch_fails_before_execution_or_result_publication(self):
         with TemporaryDirectory() as folder:

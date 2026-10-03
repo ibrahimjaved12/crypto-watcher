@@ -36,15 +36,24 @@ STAGE_VERSION = "historical-study-stage-v1"
 
 
 def current_runtime_implementation_revision() -> str:
-    """Resolve the Git revision containing this local runtime implementation."""
+    """Resolve HEAD only when the executable package source is clean there."""
     root = Path(__file__).resolve().parents[2]
-    completed = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True)
-    revision = completed.stdout.strip()
-    if (len(revision) not in (40, 64)
-            or any(character not in "0123456789abcdef" for character in revision)):
-        raise ValueError("could not determine a valid runtime implementation revision")
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True)
+        revision = completed.stdout.strip()
+        if (len(revision) not in (40, 64)
+                or any(character not in "0123456789abcdef" for character in revision)):
+            raise ValueError("could not determine a valid runtime implementation revision")
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain",
+             "--untracked-files=all", "--", "python/market_analysis"],
+            check=True, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("could not verify runtime implementation source at HEAD") from exc
+    if status.stdout.strip():
+        raise ValueError("runtime implementation source tree is not clean at HEAD")
     return revision
 
 
