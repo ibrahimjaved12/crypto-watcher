@@ -295,6 +295,8 @@ class FundingEvidence(EvidenceIdentity):
                 or any(not isinstance(e, FundingSettlementEvidence) or e.instrument_id != self.instrument_id
                        for e in self.events)):
             raise ValueError("immutable same-instrument funding events required")
+        if any(e.upstream_evidence_sha256 != self.upstream_evidence_sha256 for e in self.events):
+            raise ValueError("funding event/collection upstream evidence hash mismatch")
         # rateType can distinguish factual events at the same timestamp; never order them as executions.
         keys = {(e.funding_timestamp_ms, json.loads(e.factual_fields_json).get("rateType")) for e in self.events}
         if len(keys) != len(self.events):

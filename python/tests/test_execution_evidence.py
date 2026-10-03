@@ -131,7 +131,8 @@ def fees(maker="0.0002", provenance=None):
 def funding():
     return FundingSettlementEvidence(SYMBOL, INSTRUMENT, TIME, D("0.0001"), 8, TIME + 1,
                                      "calc-time-plus-one-millisecond-surrogate-v1",
-                                     SourceIdentity(factual(), HASH), factual_fields_json='{"rateType":"Regular"}')
+                                     SourceIdentity(factual(), HASH), upstream_evidence_sha256=HASH,
+                                     factual_fields_json='{"rateType":"Regular"}')
 
 
 def exact_mark(event, price="100"):
@@ -276,6 +277,24 @@ class FundingEvidenceTests(unittest.TestCase):
             self.assertEqual(event.upstream_evidence_sha256, before)
             self.assertIsNone(event.source.provenance.observed_at_ms)
             self.assertEqual(event.funding_mark_status, "UNAVAILABLE_FUNDING_MARK")
+            self.assertEqual(event.factual_fields_json, "{}")
+            for rate_type in ("Regular", "Special"):
+                with self.subTest(rate_type=rate_type):
+                    record = {"symbol": SYMBOL, "fundingTime": TIME, "fundingRate": "0.00010000",
+                              "markPrice": "100.123456789", "rateType": rate_type,
+                              "fundingIntervalHours": 8, "factualFlag": "retained"}
+                    joined = settlement_mark_from_funding_history(encoded([record]), event, factual())
+                    self.assertEqual(json.loads(joined.factual_fields_json), {
+                        "rateType": rate_type, "fundingIntervalHours": 8, "factualFlag": "retained"})
+                    self.assertEqual(joined.settlement_mark, D("100.123456789"))
+                    self.assertEqual(joined.exact_mark.funding_event_identity, joined.event_identity)
+                    self.assertNotEqual(joined.event_identity, event.event_identity)
+                    self.assertEqual(joined.upstream_evidence_sha256, before)
+                    self.assertEqual(joined.package_relative_path, event.package_relative_path)
+                    self.assertEqual(joined.source, event.source)
+                    self.assertEqual(replace(adapted, events=(joined,)).upstream_evidence_sha256, before)
+            self.assertEqual(event.factual_fields_json, "{}")
+            self.assertEqual(original.evidence_sha256, before)
 
     def test_frozen_official_funding_history_exact_rate_type_and_hash(self):
         event = funding()
@@ -291,10 +310,82 @@ class FundingEvidenceTests(unittest.TestCase):
                            ("rateType", "Special"), ("fundingIntervalHours", 4), ("markPrice", "NaN")):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 settlement_mark_from_funding_history(encoded([dict(record, **{key: value})]), event, factual())
-        with self.assertRaises(ValueError):
-            settlement_mark_from_funding_history(raw, replace(event, factual_fields_json="{}"), factual())
+        enriched = settlement_mark_from_funding_history(raw, replace(event, factual_fields_json="{}"), factual())
+        self.assertEqual(enriched.factual_fields_json, joined.factual_fields_json)
+        self.assertEqual(enriched.exact_mark.funding_event_identity, enriched.event_identity)
         with self.assertRaisesRegex(ValueError, "hash conflict"):
             settlement_mark_from_funding_history(raw, event, factual(), expected_sha256=HASH)
+
+    def test_missing_rate_type_multiple_matches_fail_ambiguous_before_mark_validation(self):
+        event = replace(funding(), factual_fields_json="{}")
+        regular = {"symbol": SYMBOL, "fundingTime": TIME, "fundingRate": "0.0001",
+                   "markPrice": "100", "rateType": "Regular"}
+        special = dict(regular, rateType="Special", markPrice="101")
+        # Neither input order nor even malformed markPrice may decide the event.
+        for records in ([regular, special], [special, regular],
+                        [dict(regular, markPrice="NaN"), special], [regular, regular]):
+            with self.subTest(records=records), self.assertRaisesRegex(ValueError, "ambiguous funding-history event"):
+                settlement_mark_from_funding_history(encoded(records), event, factual())
+        with self.assertRaisesRegex(ValueError, "ambiguous funding-history event"):
+            settlement_mark_from_funding_history(encoded([regular, special]),
+                replace(event, factual_fields_json='{"markPrice":"100"}'), factual())
+        self.assertEqual(event.factual_fields_json, "{}")
+        self.assertIsNone(event.exact_mark)
+
+    def test_candidates_filter_exact_rate_interval_and_known_facts_before_uniqueness(self):
+        event = replace(funding(), factual_fields_json='{"factualFlag":"known"}')
+        good = {"symbol": SYMBOL, "fundingTime": TIME, "fundingRate": "0.0001000000",
+                "markPrice": "100.123456789", "rateType": "Special", "factualFlag": "known"}
+        for key, value in (("symbol", "ETHUSDT"), ("fundingTime", TIME + 1),
+                           ("fundingRate", "0.00010000000000000000000000001"),
+                           ("fundingIntervalHours", 4), ("fundingIntervalHours", True),
+                           ("factualFlag", "different")):
+            wrong = dict(good, **{key: value})
+            with self.subTest(key=key, value=value):
+                with self.assertRaisesRegex(ValueError, "mismatch"):
+                    settlement_mark_from_funding_history(encoded([wrong]), event, factual())
+                for records in ([wrong, good], [good, wrong]):
+                    with localcontext() as context:
+                        context.prec = 1
+                        joined = settlement_mark_from_funding_history(encoded(records), event, factual())
+                    self.assertEqual(joined.settlement_mark, D("100.123456789"))
+                    self.assertEqual(json.loads(joined.factual_fields_json)["rateType"], "Special")
+        missing_fact = dict(good)
+        del missing_fact["factualFlag"]
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            settlement_mark_from_funding_history(encoded([missing_fact]), event, factual())
+        matched = settlement_mark_from_funding_history(encoded([missing_fact, good]), event, factual())
+        self.assertEqual(json.loads(matched.factual_fields_json)["factualFlag"], "known")
+
+    def test_explicit_rate_type_selects_matching_event_and_requires_known_facts(self):
+        event = replace(funding(), factual_fields_json='{"rateType":"Regular","factualFlag":"known"}')
+        regular = {"symbol": SYMBOL, "fundingTime": TIME, "fundingRate": "0.0001",
+                   "markPrice": "100", "rateType": "Regular", "factualFlag": "known"}
+        special = dict(regular, rateType="Special", markPrice="101")
+        joined = settlement_mark_from_funding_history(encoded([special, regular]), event, factual())
+        self.assertEqual(joined.settlement_mark, D(100))
+        self.assertEqual(json.loads(joined.factual_fields_json)["rateType"], "Regular")
+        for row in (special, dict(regular, factualFlag="different"),
+                    {k: v for k, v in regular.items() if k != "factualFlag"},
+                    {k: v for k, v in regular.items() if k != "rateType"}):
+            with self.subTest(row=row), self.assertRaisesRegex(ValueError, "mismatch"):
+                settlement_mark_from_funding_history(encoded([row]), event, factual())
+
+    def test_funding_collection_requires_every_events_actual_upstream_hash(self):
+        event = funding()
+        collection = FundingEvidence(SYMBOL, INSTRUMENT, (event,), HASH)
+        self.assertEqual(collection.events[0].upstream_evidence_sha256, HASH)
+        with self.assertRaisesRegex(ValueError, "upstream evidence hash mismatch"):
+            replace(collection, upstream_evidence_sha256="b" * 64)
+        for wrong in (replace(event, upstream_evidence_sha256="b" * 64),
+                      replace(event, upstream_evidence_sha256=None)):
+            with self.assertRaisesRegex(ValueError, "upstream evidence hash mismatch"):
+                replace(collection, events=(wrong,))
+            later = replace(wrong, funding_timestamp_ms=TIME + 1, available_at_ms=TIME + 2,
+                            source=replace(wrong.source, provenance=replace(
+                                wrong.source.provenance, effective_at_ms=TIME + 1)))
+            with self.assertRaisesRegex(ValueError, "upstream evidence hash mismatch"):
+                replace(collection, events=(event, later))
 
 
 class MarkRiskTests(unittest.TestCase):

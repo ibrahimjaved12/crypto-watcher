@@ -235,8 +235,13 @@ Current/nearest marks, trades, candle open/close, interpolation and forward fill
 are never substituted. A local frozen official funding-history JSON record can
 supply its factual mark only after exact symbol/time/rate/event matching; supplied
 `rateType` and ancillary facts are preserved and identity-bound. An archive event
-without `rateType` does not implicitly mean `Regular`: an unambiguous event identity
-must be supplied before joining a record that declares it. Archive availability
+without `rateType` can be enriched from a uniquely matching official record using
+its known symbol, timestamp, exact rate, optional supplied interval and every
+already-known ancillary fact. Missing `rateType` never defaults to `Regular`;
+zero matching records fail explicitly, and multiple matching records fail as
+ambiguous without using `markPrice` to choose. The exact mark binds the enriched
+event identity. Funding collections require every contained event to bind the
+collection's upstream evidence SHA. Archive availability
 surrogates remain distinct from genuinely observed/effective provenance timestamps.
 An exact mark's availability uses its supplied observation time, or explicitly
 remains unknown; joining it never backdates observation to the rate archive's

@@ -329,9 +329,10 @@ def normalize_fee_snapshot(raw, symbol, provenance, *, account_specific, expecte
 def settlement_mark_from_funding_history(raw, event, provenance, *, expected_sha256=None):
     """Join a frozen official /fapi/v1/fundingRate record to an existing event.
 
-Require rate equality and ancillary event facts as well as symbol/time. Never
-infer interval from a current fundingInfo response; the archive event owns it.
-"""
+    Require unique agreement with every known event fact before enrichment.
+    Missing rateType imposes no default; multiple matching events are ambiguous.
+    Never infer interval from current fundingInfo; the archive event owns it.
+    """
     from .binance_execution_evidence import (
         ExactSettlementMark, FundingSettlementEvidence, join_settlement_mark,
     )
@@ -342,25 +343,33 @@ infer interval from a current fundingInfo response; the archive event owns it.
     rows = payload if isinstance(payload, list) else [payload]
     if any(not isinstance(r, dict) for r in rows):
         raise ValueError("funding-history records required")
-    # A Regular/Special event at the same timestamp is not the same funding event.
     facts = _decode(event.factual_fields_json)
-    matches = [r for r in rows if r.get("symbol") == event.symbol
-               and r.get("fundingTime") == event.funding_timestamp_ms
-               and r.get("rateType") == facts.get("rateType")]
-    if len(matches) != 1:
-        raise ValueError("funding-history symbol/time/event identity mismatch")
+    matches = []
+    for row in rows:
+        if row.get("symbol") != event.symbol or row.get("fundingTime") != event.funding_timestamp_ms:
+            continue
+        timestamp(row["fundingTime"])
+        if _required_number(row, "fundingRate") != event.funding_rate:
+            continue
+        if "fundingIntervalHours" in row and (type(row["fundingIntervalHours"]) is not int
+                                            or row["fundingIntervalHours"] != event.funding_interval_hours):
+            continue
+        # Includes rateType only when already known. Every other known ancillary
+        # fact must also be present and equal; markPrice never selects an event.
+        if any(key not in row or canonical_value(row[key]) != value
+               for key, value in facts.items() if key != "markPrice"):
+            continue
+        matches.append(row)
+    if not matches:
+        raise ValueError("funding-history symbol/time/rate/event facts mismatch")
+    if len(matches) > 1:
+        raise ValueError("ambiguous funding-history event: multiple matching records")
     row = matches[0]
-    timestamp(row["fundingTime"])
-    if _required_number(row, "fundingRate") != event.funding_rate:
-        raise ValueError("funding-history rate/event mismatch")
-    if "fundingIntervalHours" in row and (type(row["fundingIntervalHours"]) is not int
-                                        or row["fundingIntervalHours"] != event.funding_interval_hours):
-        raise ValueError("funding-history interval mismatch")
-    if any(key in row and canonical_value(row[key]) != value for key, value in facts.items()):
-        raise ValueError("funding-history factual event mismatch")
+    if "markPrice" in facts and ("markPrice" not in row or canonical_value(row["markPrice"]) != facts["markPrice"]):
+        raise ValueError("funding-history mark fact mismatch")
     # Bind every supplied factual field (including rateType), retaining the original
-    # archive event through its upstream/package identities. Missing rateType never
-    # means Regular; the caller must explicitly supply the intended event's facts.
+    # archive event through its upstream/package identities. Unknown rateType is
+    # enriched from the unique factual record, never assumed to mean Regular.
     ancillary = {k: v for k, v in row.items() if k not in ("symbol", "fundingTime", "fundingRate", "markPrice")}
     joined_facts = dict(facts, **ancillary)
     enriched = replace(event, factual_fields_json=json.dumps(canonical_value(joined_facts), sort_keys=True))
