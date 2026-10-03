@@ -31,6 +31,7 @@ from market_analysis.historical_study_batch import (
 from market_analysis.historical_study_bundles import (
     BLOCK, PART_LIMIT, BundleFootprintError, identifier, sha, safe_relative, regular, file_sha,
     read_bundle, unpack_files, install_files, pack_files, verify_recovery_tree,
+    classify_recovery_inventory,
 )
 from market_analysis.historical_run_directory import owned_run_directory
 
@@ -471,11 +472,12 @@ def restore():
         raise ValueError('generation locator does not match sealed manifest')
     github.verify_lineage(value, spec)
     budget_parent(spec, minutes, value)
-    for row in value['files']:
-        if not row['path'].startswith('campaigns/' + spec['campaign_id'] + '/'):
-            raise ValueError('recovery inventory escapes campaign root')
-    if (any('-test' in row['path'] for row in value['files']) and phase != 'test'
-            or any('-validation' in row['path'] for row in value['files']) and phase == 'development'):
+    manifest, coverage = frozen_inputs(spec)
+    prerequisites(spec, manifest, coverage, phase, os.environ.get('STUDY_ALLOW_TEST') == 'true')
+    included = classify_recovery_inventory(value, manifest, spec['campaign_id'], spec['expected_membership'])
+    phases = {item.phase for item in included}
+    if ('test' in phases and phase != 'test'
+            or 'validation' in phases and phase == 'development'):
         raise ValueError('recovery contains later-phase evidence; dispatch its explicit authorized phase')
     limits(spec, value)
     github.fetch_parts(value, assets, BASE / 'transfers/recovery-parts')
@@ -569,12 +571,12 @@ def snapshot():
                 if (BASE / 'transfers/recovery-manifest.json').exists() else None)
     old = budget_parent(spec, minutes, recovery)
     root = BASE / 'campaigns' / spec['campaign_id']
-    # Ownership remains held from validation through every packed byte; no
-    # cleanup is done by a snapshot and an orphan worker makes acquisition fail.
+    # Keep campaign ownership without broad cleanup. Each exclusively owned
+    # period cleans only known abandoned runtime temporaries before validation.
     with ExitStack() as stack:
         stack.enter_context(owned_run_directory(root, cleanup=False))
         for period_root in sorted((root / 'checkpoints').glob('period-*')):
-            stack.enter_context(owned_run_directory(period_root, cleanup=False))
+            stack.enter_context(owned_run_directory(period_root))
         files, work = verify_recovery_tree(BASE, spec['campaign_id'], manifest, coverage,
                                          campaign_identity(spec), check=deadline.check, locks_held=True)
         status_path = root / 'operations/status.json'

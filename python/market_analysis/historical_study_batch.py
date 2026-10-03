@@ -15,7 +15,7 @@ import time
 from . import historical_market_state_study_execution as execution
 from .historical_study_bundles import (
     BASE, SOURCES, identifier, sha, file_sha, regular, read_bundle, safe_relative,
-    install_files, verify_recovery_tree,
+    install_files, verify_recovery_tree, classify_recovery_inventory,
 )
 from .historical_study_runtime import current_runtime_implementation_revision
 
@@ -316,11 +316,14 @@ def _run_owned(args):
             raise ValueError('recovery campaign/runtime/lock/layout identity mismatch')
         # Even aggregation/development dispatch cannot inspect a restored test
         # report without reconstructing exact test authorization first.
-        if any('-test' in row['path'] for row in recovery['files']):
+        included = classify_recovery_inventory(recovery, manifest, spec['campaign_id'],
+                                               spec['expected_membership'])
+        phases = {item.phase for item in included}
+        if 'test' in phases:
             if args.phase != 'test':
                 raise ValueError('later test evidence requires its explicit authorized phase')
             prerequisites(spec, manifest, coverage, 'test', args.allow_test)
-        if any('-validation' in row['path'] for row in recovery['files']) and args.phase == 'development':
+        if 'validation' in phases and args.phase == 'development':
             raise ValueError('later validation evidence requires its explicit phase prerequisites')
         _, work = verify_recovery_tree(args.restore_staging, spec['campaign_id'], manifest, coverage,
                                        campaign_identity(spec))

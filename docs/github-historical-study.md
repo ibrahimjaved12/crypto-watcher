@@ -162,7 +162,15 @@ serializes the initial platform with `cancel-in-progress:false`. Do not cancel a
 working job casually. The workflow validates each restored unit in staging using
 the existing replay/spool/stage/report validators. Validation resolves references
 against the staging mirror without rewriting their stored JSON, then installs the
-verified files at stable paths. Input preflight checks original file hashes and
+verified files at stable paths. Both transport and portable restore classify only
+exact frozen checkpoint directory and report/sidecar names in the sealed inventory,
+and reject periods outside the campaign's declared membership before scientific
+recovery is read. Campaign IDs such as `study-test-pilot` and operation log names
+are opaque: their spelling never supplies a phase. Development refuses genuine
+validation/test evidence; validation refuses genuine test evidence. Earlier-phase
+work remains usable by appropriately authorized later phases, and explicit test
+authorization plus the exact validated parents are required before test evidence
+is opened. Input preflight checks original file hashes and
 selected source coverage; it does not parse aggTrades twice.
 
 After owner setup and the workflow/campaign are on main, use these exact dispatch
@@ -191,9 +199,13 @@ gh workflow run historical-study.yml --ref main \
 
 That plan conservatively reserves **20 + 50 + 50 = 120 runner-minutes total**, not
 120 per slice. It is an upper allocation, not a prediction that a full period will
-fit. The default single dispatch is 60 minutes. Allowed allocations are 16–350,
-with a 15-minute reserve; configured job timeout is 355, below the hosted six-hour
-limit. Time is counted from the owned job API's `started_at` before checkout/acquisition,
+fit. The default single dispatch is 60 minutes. Workflow choices are exactly
+16, 20, 30, 50, 60, 120, 180, 240, 300 and 350 minutes, with a 15-minute reserve.
+The main-branch job guard rejects values outside that choice set, and the selected
+allocation also sets GitHub's whole-job hard timeout, including checkout/setup.
+Python retains its 16–350 validation and earlier cancellation deadline so normal
+snapshot/publication finish inside the allocation with their final grace; the hard
+timeout is a last safeguard. Time is counted from the owned job API's `started_at` before checkout/acquisition,
 including runner setup already elapsed before the first user step. Dependency
 installation, network operations, verification/packing and uploads all have bounded
 timeouts against that deadline. Snapshot and upload leave additional final grace.
@@ -217,6 +229,18 @@ contains only an allowlisted receipt: state, sizes, allocation, exact tag and se
 manifest SHA. Raw inputs, detailed evidence, spools, failed job/request diagnostics
 and logs stay in the private data repository. Publication failure fails the workflow;
 a successful saved recovery does not change a `FAILED` scientific status to success.
+
+Snapshot retains the exclusive campaign lease without broad campaign cleanup.
+After the supervisor terminates/reaps science, each exclusive period lease runs
+the same known temporary cleanup as execution before validation and packing. It
+unlinks only established atomic `.<filename>.<random>.tmp`, `.shared-v1-*` and
+`.*.records-*` temporary names in the period root, post-replay, chunks and states,
+and handles known abandoned `.study-points-*` directories without following
+symlinks. This removes a temporary alias left between publication's hardlink and
+unlink while preserving the published bytes and hashes. Published units and
+request/job diagnostics remain intact; arbitrary remaining hardlinks, symlinks
+and non-regular files still fail strict validation. Active/orphan ownership still
+blocks snapshot acquisition. Forced-kill recovery has not been executed or verified.
 
 ## Aggregation and scientific sequence
 

@@ -234,6 +234,40 @@ def period_root(campaign, period):
         f'period-{period.study_period_index:02d}-{period.utc_date.isoformat()}-{period.phase}')
 
 
+def classify_recovery_inventory(inventory, manifest, campaign, expected_membership):
+    """Return original frozen periods named by canonical recovery file paths.
+
+    Campaign IDs and generic operational filenames are opaque, not phase evidence.
+    This inspects only sealed inventory metadata, never scientific file contents.
+    """
+    campaign = identifier(campaign)
+    checkpoint_names = {period_root(campaign, period).name: period
+                        for period in manifest.selected_periods}
+    report_names = {execution._period_filename(period): period
+                    for period in manifest.selected_periods}
+    included = {}
+    for row in inventory['files']:
+        parts = safe_relative(row['path']).parts
+        if len(parts) < 3 or parts[:2] != ('campaigns', campaign):
+            raise ValueError('recovery inventory escapes the exact campaign root')
+        tail = parts[2:]
+        period = None
+        if tail[0] == 'checkpoints':
+            if len(tail) < 3 or tail[1] not in checkpoint_names:
+                raise ValueError('unknown/malformed recovery checkpoint period directory')
+            period = checkpoint_names[tail[1]]
+        elif tail[0] == 'outputs' and len(tail) >= 2 and tail[1] in (
+                execution.PERIOD_DIRECTORY, '.period-manifests'):
+            if len(tail) != 3 or tail[2] not in report_names:
+                raise ValueError('unknown/malformed recovery report or sidecar filename')
+            period = report_names[tail[2]]
+        if period is not None:
+            if period.study_period_index not in expected_membership[period.phase]:
+                raise ValueError('recovery period is outside declared campaign membership')
+            included[period.study_period_index] = period
+    return tuple(included[index] for index in sorted(included))
+
+
 def planned_packages(period):
     from .binance_historical_archive import BinanceUSDMArchiveRequest, daily_kline_relative_path
     from .historical_mark_price_evidence import _package_days, daily_mark_price_relative_path

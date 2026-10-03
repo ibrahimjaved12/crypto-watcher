@@ -32,8 +32,9 @@ on:
         description: Trusted sealed recovery inventory SHA (required with tag)
         type: string
       job_minutes:
-        description: Total allocation 16..350; includes 15-minute setup/upload reserve
-        type: string
+        description: Whole-job allocation; includes 15-minute setup/upload reserve
+        type: choice
+        options: ['16', '20', '30', '50', '60', '120', '180', '240', '300', '350']
         default: '60'
 
 permissions:
@@ -47,9 +48,9 @@ concurrency:
 
 jobs:
   study:
-    if: github.ref == 'refs/heads/main'
+    if: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["16","20","30","50","60","120","180","240","300","350"]'), inputs.job_minutes) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: ${{ fromJSON(inputs.job_minutes) }}
     env:
       STUDY_OPERATION: ${{ inputs.operation }}
       STUDY_CAMPAIGN_SPEC: ${{ inputs.campaign_spec }}
