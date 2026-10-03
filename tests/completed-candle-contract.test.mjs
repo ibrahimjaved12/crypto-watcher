@@ -81,8 +81,8 @@ test("generic operational read preserves exact native identity and provenance at
 test("DB adapter fails closed on inconsistent identities, intervals and transport provenance", async () => {
   for (const patch of [{ endpoint: "wss://fstream.binance.com/market/stream" },
     { transport: "websocket", endpoint: "/fapi/v1/klines", source_event_at_ms: 12345 },
-    { source_event_at_ms: 1 }, { transport: "websocket", source_event_at_ms: null },
-    { transport: "websocket", source_event_at_ms: true }, { received_at_ms: null },
+    { source_event_at_ms: 1 }, { transport: "websocket", endpoint: "wss://fstream.binance.com/market/stream", source_event_at_ms: null },
+    { transport: "websocket", endpoint: "wss://fstream.binance.com/market/stream", source_event_at_ms: true }, { received_at_ms: null },
     { symbol: "ETHUSDT" }, { native_symbol: "ETHUSDT" }, { instrument_id: "BTCUSDT" },
     { market_type: "spot" }, { contract_type: "dated" }, { provider: "other" }, { price_type: "mark" },
     { timeframe_minutes: 15 }, { close_time_ms: 60_000 }, { open_time_ms: 1 },
