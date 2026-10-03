@@ -4,6 +4,8 @@ import { useMemo, useState } from "react";
 import { Download, FlaskConical, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { EmptyState, ErrorNotice, PageHeader, TechnicalDetails } from "@/components/presentation";
+import { alertRuleLabel, issueSummary, pairLabel, sourceLabel } from "@/lib/presentation/labels";
 import { AppShell } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -71,7 +73,15 @@ function AlertsPage() {
     const rows = alerts.data ?? [];
     if (!q) return rows;
     return rows.filter((r) =>
-      [r.symbol, r.rule, r.data_source, new Date(r.triggered_at).toLocaleString()]
+      [
+        r.symbol,
+        pairLabel(r.symbol),
+        r.rule,
+        alertRuleLabel(r),
+        r.data_source,
+        sourceLabel(r.data_source),
+        new Date(r.triggered_at).toLocaleString(),
+      ]
         .join(" ")
         .toLowerCase()
         .includes(q),
@@ -84,7 +94,7 @@ function AlertsPage() {
       toast.success("Test alert saved — it is marked as test data.");
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(issueSummary(e.message)),
   });
 
   const remove = useMutation({
@@ -104,53 +114,61 @@ function AlertsPage() {
 
   return (
     <AppShell>
-      <div className="flex flex-wrap items-end gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Alert history</h1>
-          <p className="text-sm text-muted-foreground">
-            {filtered.length} of {alerts.data?.length ?? 0} alerts
-          </p>
-        </div>
-        <div className="ml-auto flex flex-wrap gap-2">
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search symbol, rule, source…"
-            className="w-56"
-            aria-label="Search alerts"
-          />
-          <Button variant="secondary" onClick={exportCsv} disabled={filtered.length === 0}>
-            <Download className="size-4" aria-hidden />
-            CSV
-          </Button>
-          <Button variant="secondary" onClick={() => test.mutate()}>
-            <FlaskConical className="size-4" aria-hidden />
-            Test alert
-          </Button>
-        </div>
-      </div>
-
-      <div className="panel mt-5 overflow-x-auto">
-        <Table>
+      <PageHeader
+        title="Alerts"
+        description="Saved price movements from the pairs you follow. Review what changed and the rule that triggered it."
+      >
+        <Input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search symbol, rule, source…"
+          className="w-56"
+          aria-label="Search alerts"
+        />
+        <Button variant="secondary" onClick={exportCsv} disabled={filtered.length === 0}>
+          <Download className="size-4" aria-hidden />
+          Export CSV
+        </Button>
+        <Button variant="outline" onClick={() => test.mutate()} disabled={test.isPending}>
+          <FlaskConical className="size-4" aria-hidden />
+          Create test alert
+        </Button>
+      </PageHeader>
+      <p className="mt-5 text-xs text-muted-foreground">
+        {alerts.isPending
+          ? "Loading alerts…"
+          : `${filtered.length} of ${alerts.data?.length ?? 0} saved alerts`}
+      </p>
+      {alerts.error && <ErrorNotice title="Alert history unavailable." error={alerts.error} />}
+      {remove.error && <ErrorNotice title="Alert could not be deleted." error={remove.error} />}
+      {test.error && <ErrorNotice title="Test alert could not be saved." error={test.error} />}
+      <div className="panel mt-3 overflow-x-auto">
+        <Table className="data-table min-w-[1050px]" tabIndex={0} aria-label="Alert history">
+          <caption className="sr-only">Saved movement alerts</caption>
           <TableHeader>
             <TableRow>
-              <TableHead>Symbol</TableHead>
-              <TableHead>Time</TableHead>
-              <TableHead>Change</TableHead>
-              <TableHead>Comparison</TableHead>
-              <TableHead>Rule</TableHead>
-              <TableHead>Price</TableHead>
-              <TableHead>Source</TableHead>
-              <TableHead />
+              <TableHead scope="col">Pair</TableHead>
+              <TableHead scope="col">Time</TableHead>
+              <TableHead scope="col">Change</TableHead>
+              <TableHead scope="col">Comparison</TableHead>
+              <TableHead scope="col">Rule</TableHead>
+              <TableHead scope="col">Price</TableHead>
+              <TableHead scope="col">Source</TableHead>
+              <TableHead scope="col">
+                <span className="sr-only">Actions</span>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.map((a) => (
-              <TableRow key={a.id}>
-                <TableCell className="num font-medium">
-                  {a.symbol}
+              <TableRow key={a.id} className={a.is_test ? "bg-warn/5" : undefined}>
+                <TableCell className="font-medium">
+                  {pairLabel(a.symbol)}
                   {a.is_test ? (
-                    <Badge variant="outline" className="ml-2 border-warn/60 text-warn">
+                    <Badge
+                      variant="outline"
+                      className="ml-2 border-warn/60 bg-warn/10 font-bold text-warn"
+                    >
                       TEST DATA
                     </Badge>
                   ) : null}
@@ -166,14 +184,11 @@ function AlertsPage() {
                 </TableCell>
                 <TableCell className="num text-xs">
                   {a.comparison_mode === "baseline" ? (
-                    <span
-                      title={
-                        a.baseline_at
-                          ? `Baseline at ${new Date(a.baseline_at).toLocaleString()}`
-                          : undefined
-                      }
-                    >
-                      From {Number(a.baseline_price).toLocaleString()} USDT
+                    <span>
+                      From{" "}
+                      {a.baseline_price == null
+                        ? "unavailable baseline"
+                        : `${Number(a.baseline_price).toLocaleString()} USDT`}
                     </span>
                   ) : a.window_minutes == null ? (
                     "—"
@@ -181,18 +196,35 @@ function AlertsPage() {
                     (WINDOW_LABELS[a.window_minutes] ?? `${a.window_minutes}m`)
                   )}
                 </TableCell>
-                <TableCell className="max-w-[220px] truncate text-xs" title={a.rule}>
-                  {a.rule}
+                <TableCell className="min-w-52 max-w-72 text-xs">
+                  {alertRuleLabel(a)}
+                  <TechnicalDetails className="mt-2">
+                    <p>
+                      Saved rule: <code>{a.rule}</code>
+                    </p>
+                    <p>
+                      Source: <code>{a.data_source}</code> · Comparison:{" "}
+                      <code>{a.comparison_mode}</code>
+                    </p>
+                    <p>
+                      Baseline time:{" "}
+                      {a.baseline_at ? new Date(a.baseline_at).toLocaleString() : "—"}
+                    </p>
+                    <p>
+                      Observed: {a.observed_at ? new Date(a.observed_at).toLocaleString() : "—"}
+                    </p>
+                  </TechnicalDetails>
                 </TableCell>
                 <TableCell className="num text-xs">
                   {a.price == null ? "—" : `$${Number(a.price).toLocaleString()}`}
                 </TableCell>
-                <TableCell className="text-xs">{a.data_source}</TableCell>
+                <TableCell className="text-xs">{sourceLabel(a.data_source)}</TableCell>
                 <TableCell>
                   <Button
                     variant="ghost"
                     size="icon"
-                    aria-label="Delete alert"
+                    aria-label={`Delete ${a.is_test ? "test " : ""}alert for ${pairLabel(a.symbol)}`}
+                    disabled={remove.isPending}
                     onClick={() => remove.mutate(a.id)}
                   >
                     <Trash2 className="size-4" aria-hidden />
@@ -200,10 +232,14 @@ function AlertsPage() {
                 </TableCell>
               </TableRow>
             ))}
-            {filtered.length === 0 ? (
+            {filtered.length === 0 && !alerts.isPending && !alerts.isError ? (
               <TableRow>
                 <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
-                  No alerts yet.
+                  <EmptyState title={search ? "No matching alerts" : "No saved movements yet"}>
+                    {search
+                      ? "Try another pair, rule or source."
+                      : "Qualifying price movements appear here after a monitoring check. Test alerts are always labeled TEST DATA."}
+                  </EmptyState>
                 </TableCell>
               </TableRow>
             ) : null}

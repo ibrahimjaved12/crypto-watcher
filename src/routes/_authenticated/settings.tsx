@@ -3,6 +3,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
+import {
+  EmptyState,
+  ErrorNotice,
+  PageHeader,
+  StatusBadge,
+  TechnicalDetails,
+} from "@/components/presentation";
+import {
+  collectorStatusLabel,
+  freshnessLabel,
+  issueSummary,
+  monitoringRunLabel,
+  sourceLabel,
+  statusTone,
+} from "@/lib/presentation/labels";
 import { AppShell } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -122,404 +137,584 @@ function SettingsPage() {
       toast.success("Settings saved.");
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(issueSummary(e.message)),
   });
 
   return (
     <AppShell>
-      <h1 className="text-2xl font-semibold">Monitoring settings</h1>
-      <p className="text-sm text-muted-foreground">
-        Control each monitoring activity separately. These settings apply to scheduled runs and Run
-        check now.
-      </p>
-
-      <div className="mt-5 grid gap-4 lg:grid-cols-2">
+      <PageHeader
+        title="Settings"
+        description="Choose what to monitor, then review how the system is performing."
+      />
+      {settings.error && (
+        <div className="mt-4">
+          <ErrorNotice title="Preferences could not be loaded." error={settings.error} />
+        </div>
+      )}
+      {save.error && (
+        <div className="mt-4">
+          <ErrorNotice title="Preferences could not be saved." error={save.error} />
+        </div>
+      )}
+      <div className="mt-6 grid items-start gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.3fr)]">
         <form
-          className="panel space-y-5 p-5"
+          className="panel min-w-0 p-5 sm:p-6"
           onSubmit={(e) => {
             e.preventDefault();
             save.mutate();
           }}
         >
-          <div className="space-y-2">
-            <Label htmlFor="threshold">Alert threshold (%)</Label>
-            <Input
-              id="threshold"
-              type="number"
-              step="0.1"
-              min="0.1"
-              max="100"
-              required
-              value={threshold}
-              onChange={(e) => setThreshold(e.target.value)}
-            />
-            <p className="text-xs text-muted-foreground">
-              Alert on a rise or fall of this percentage from the saved baseline, even when the move
-              takes longer than 15 minutes.
+          <h2 className="text-xl font-semibold">Monitoring preferences</h2>
+          <p className="mb-5 mt-2 text-sm text-muted-foreground">
+            These preferences apply to manual checks and any configured scheduled runs.
+          </p>
+          {settings.isPending && (
+            <p role="status" className="mb-4 text-sm text-muted-foreground">
+              Loading preferences…
             </p>
-          </div>
-
-          <div className="space-y-2 rounded-md border border-border p-3 text-sm">
-            <p className="font-medium">Comparison: saved baseline</p>
-            <p className="text-muted-foreground">
-              The first successful check sets a baseline for each pair. Each saved alert resets it
-              to the alert price. At 2%, a baseline of 100 USDT alerts at 102 or 98 USDT. Small
-              moves are retained between checks.
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Uses completed one-minute candles. Changing the threshold or data source starts a new
-              baseline on the next fresh check. Dashboard percentage windows are separate from this
-              alert rule.
-            </p>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="cooldown">Cooldown per pair and direction (minutes)</Label>
-            <Input
-              id="cooldown"
-              type="number"
-              min="1"
-              max="1440"
-              required
-              value={cooldown}
-              onChange={(e) => setCooldown(e.target.value)}
-            />
-            <p className="text-xs text-muted-foreground">
-              An upward alert does not block a downward alert. During cooldown the baseline stays
-              fixed; a further qualifying move can alert on a fresh check after cooldown.
-            </p>
-          </div>
-
-          <div className="flex items-center justify-between rounded-md border border-border p-3">
-            <div>
-              <Label htmlFor="enabled">Monitoring master switch</Label>
+          )}
+          <fieldset
+            className="space-y-5 disabled:opacity-60"
+            disabled={settings.isPending || settings.isError || save.isPending}
+          >
+            <div className="space-y-2">
+              <Label htmlFor="threshold">Alert threshold (%)</Label>
+              <Input
+                id="threshold"
+                type="number"
+                step="0.1"
+                min="0.1"
+                max="100"
+                required
+                value={threshold}
+                onChange={(e) => setThreshold(e.target.value)}
+              />
               <p className="text-xs text-muted-foreground">
-                Pause every activity below without losing its individual setting or saved state.
+                Alert on a rise or fall of this percentage from the saved baseline, even when the
+                move takes longer than 15 minutes.
               </p>
             </div>
-            <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
-          </div>
 
-          <fieldset className="space-y-3 rounded-md border border-border p-3">
-            <legend className="px-1 text-sm font-medium">Current monitoring activities</legend>
-
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <Label htmlFor="market-data">Market-data collection</Label>
-                <p className="text-xs text-muted-foreground">
-                  Fetches and checkpoints the latest completed one-minute candle even if the two
-                  activities below are paused. Turning this off also pauses both of them.
-                </p>
-              </div>
-              <Switch
-                id="market-data"
-                checked={marketDataEnabled}
-                onCheckedChange={setMarketDataEnabled}
-              />
+            <div className="space-y-2 rounded-md border border-border p-3 text-sm">
+              <p className="font-medium">How the saved baseline works</p>
+              <p className="text-muted-foreground">
+                The first successful check sets a baseline for each pair. Each saved alert resets it
+                to the alert price. At 2%, a baseline of 100 USDT alerts at 102 or 98 USDT. Small
+                moves are retained between checks.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Uses completed one-minute candles. Changing the threshold or data source starts a
+                new baseline on the next fresh check. Overview percentage windows are separate from
+                this alert rule.
+              </p>
             </div>
 
-            <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-3">
-              <div>
-                <Label htmlFor="movement-alerts">Movement-alert generation</Label>
-                <p className="text-xs text-muted-foreground">
-                  Applies the saved-baseline threshold and cooldown, then saves qualifying alerts.
-                </p>
-              </div>
-              <Switch
-                id="movement-alerts"
-                checked={movementAlertsEnabled}
-                onCheckedChange={setMovementAlertsEnabled}
+            <div className="space-y-2">
+              <Label htmlFor="cooldown">Cooldown per pair and direction (minutes)</Label>
+              <Input
+                id="cooldown"
+                type="number"
+                min="1"
+                max="1440"
+                required
+                value={cooldown}
+                onChange={(e) => setCooldown(e.target.value)}
               />
+              <p className="text-xs text-muted-foreground">
+                An upward alert does not block a downward alert. During cooldown the baseline stays
+                fixed; a further qualifying move can alert on a fresh check after cooldown.
+              </p>
             </div>
 
-            <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-3">
+            <div className="flex items-center justify-between rounded-md border border-border p-3">
               <div>
-                <Label htmlFor="technical-analysis">Completed-candle technical analysis</Label>
+                <Label htmlFor="enabled">Monitoring master switch</Label>
                 <p className="text-xs text-muted-foreground">
-                  Saves 15m, 1h and 4h indicator snapshots and evaluates their pending outcomes.
+                  Pause every activity below without losing its individual setting or saved state.
                 </p>
               </div>
-              <Switch
-                id="technical-analysis"
-                checked={technicalAnalysisEnabled}
-                onCheckedChange={setTechnicalAnalysisEnabled}
-              />
+              <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
             </div>
+
+            <fieldset className="space-y-3 rounded-md border border-border p-3">
+              <legend className="px-1 text-sm font-medium">Current monitoring activities</legend>
+
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <Label htmlFor="market-data">Market-data collection</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Collects completed one-minute market candles. Turning this off also pauses
+                    movement alerts and completed-candle analysis.
+                  </p>
+                </div>
+                <Switch
+                  id="market-data"
+                  checked={marketDataEnabled}
+                  onCheckedChange={setMarketDataEnabled}
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-3">
+                <div>
+                  <Label htmlFor="movement-alerts">Movement alerts</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Applies the saved-baseline threshold and cooldown, then saves qualifying alerts.
+                  </p>
+                </div>
+                <Switch
+                  id="movement-alerts"
+                  checked={movementAlertsEnabled}
+                  onCheckedChange={setMovementAlertsEnabled}
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-3">
+                <div>
+                  <Label htmlFor="technical-analysis">Completed-candle analysis</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Saves 15m, 1h and 4h indicator snapshots and evaluates their pending outcomes.
+                  </p>
+                </div>
+                <Switch
+                  id="technical-analysis"
+                  checked={technicalAnalysisEnabled}
+                  onCheckedChange={setTechnicalAnalysisEnabled}
+                />
+              </div>
+            </fieldset>
+
+            <details className="space-y-3 rounded-md border border-dashed border-border p-3">
+              <summary className="cursor-pointer text-sm font-medium">
+                Future monitoring activities
+              </summary>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-medium">Future activities</p>
+                <Badge variant="outline">Not available yet</Badge>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                These activities are not configurable through monitoring preferences yet. Strategy
+                Lab evaluations are separate.
+              </p>
+              {[
+                "Developing-setup and strategy evaluation",
+                "Paper-trading execution",
+                "Email notification delivery",
+                "WhatsApp notification delivery",
+              ].map((label) => (
+                <div
+                  key={label}
+                  className="flex items-center justify-between gap-3 border-t border-border/70 pt-3 text-sm"
+                >
+                  <span>{label}</span>
+                  <Badge variant="secondary">Planned</Badge>
+                </div>
+              ))}
+            </details>
+
+            <Button type="submit" disabled={save.isPending}>
+              {save.isPending ? "Saving preferences…" : "Save preferences"}
+            </Button>
           </fieldset>
-
-          <section className="space-y-3 rounded-md border border-dashed border-border p-3">
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-medium">Future activities</p>
-              <Badge variant="outline">Not available yet</Badge>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              These remain off until their roadmap features exist. They are status rows, not working
-              switches.
-            </p>
-            {[
-              "Developing-setup and strategy evaluation",
-              "Paper-trading execution",
-              "Email notification delivery",
-              "WhatsApp notification delivery",
-            ].map((label) => (
-              <div
-                key={label}
-                className="flex items-center justify-between gap-3 border-t border-border/70 pt-3 text-sm"
-              >
-                <span>{label}</span>
-                <Badge variant="secondary">Planned</Badge>
-              </div>
-            ))}
-          </section>
-
-          <Button type="submit" disabled={save.isPending}>
-            Save settings
-          </Button>
         </form>
 
-        <section className="panel p-5">
-          <h2 className="text-base font-semibold">Recent monitoring runs</h2>
-          <p className="text-xs text-muted-foreground">
-            Every scheduled and manual check, including failures.
-          </p>
-          {operational.data?.diagnostics ? (
-            <p className="num mt-1 text-xs text-muted-foreground">
-              Request-driven operational storage: {operational.data.diagnostics.recent_candle_rows}{" "}
-              completed candles · {operational.data.diagnostics.checkpoint_rows} checkpoints ·{" "}
-              {operational.data.diagnostics.monitor_run_rows} runs ·{" "}
-              {operational.data.diagnostics.pending_outbox_rows} pending sync ·{" "}
-              {operational.data.diagnostics.failed_outbox_rows} failed ·{" "}
-              {operational.data.diagnostics.dead_outbox_rows} dead-letter
-            </p>
-          ) : null}
-          {overallCollectorStatus ? (
-            <div className="mt-3 space-y-2 border-t border-border/60 pt-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-medium">Shared Binance collector</p>
-                  <p className="num text-xs text-muted-foreground">
-                    Collector-owned storage:{" "}
-                    {operational.data?.collectorDiagnostics?.candle_rows ?? 0} completed candles
-                  </p>
-                </div>
-                <Badge variant={collectorBadgeVariant(overallCollectorStatus)}>
-                  {overallCollectorStatus}
-                </Badge>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[760px] text-left text-xs">
-                  <thead className="text-muted-foreground">
-                    <tr className="border-b border-border/60">
-                      <th className="py-2 pr-3 font-medium">Symbol</th>
-                      <th className="py-2 pr-3 font-medium">Interval</th>
-                      <th className="py-2 pr-3 font-medium">Status</th>
-                      <th className="py-2 pr-3 font-medium">Latest source event</th>
-                      <th className="py-2 pr-3 font-medium">Latest completed</th>
-                      <th className="py-2 pr-3 font-medium">Lag</th>
-                      <th className="py-2 font-medium">Reconnects</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {collectorHealth.map((row) => (
-                      <tr
-                        key={`${row.instrument_id}:${row.timeframe_minutes}`}
-                        className="border-b border-border/40 last:border-0"
-                      >
-                        <td className="py-2 pr-3 font-medium">{row.symbol}</td>
-                        <td className="py-2 pr-3">{formatInterval(row.timeframe_minutes)}</td>
-                        <td className="py-2 pr-3">
-                          <Badge variant={collectorBadgeVariant(row.status)}>{row.status}</Badge>
-                        </td>
-                        <td className="num py-2 pr-3">
-                          {row.last_event_at ? new Date(row.last_event_at).toLocaleString() : "—"}
-                        </td>
-                        <td className="num py-2 pr-3">
-                          {row.last_completed_open_time
-                            ? new Date(row.last_completed_open_time).toLocaleString()
-                            : "—"}
-                        </td>
-                        <td className="num py-2 pr-3">{formatLag(row.lag_ms)}</td>
-                        <td className="num py-2">{row.reconnect_count}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+        <section className="min-w-0 space-y-5">
+          <div className="panel space-y-5 p-5 sm:p-6">
+            <div>
+              <h2 className="text-xl font-semibold">System health</h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Collection, movement checks and saved-analysis freshness.
+              </p>
             </div>
-          ) : null}
-          {movementEngine ? (
-            <div className="mt-3 space-y-2 border-t border-border/60 pt-3 text-xs">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-medium">Market movement engine</p>
-                  <p className="num text-muted-foreground">
-                    {movementEngine.configuredSymbolCount} configured ·{" "}
-                    {movementEngine.eligibleSymbolCount} eligible
-                  </p>
-                </div>
-                <Badge variant={movementBadgeVariant(movementEngine.status)}>
-                  {movementEngine.status}
-                </Badge>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Primary 5m</span>
-                <span className="num ml-auto">
-                  {movementEngine.primaryDirectionState} · {movementEngine.primaryPace}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Last evaluation boundary</span>
-                <span className="num ml-auto">
-                  {new Date(movementEngine.lastEvaluationBoundaryTime).toLocaleString()}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Most recent transition</span>
-                <span className="num ml-auto">
-                  {movementEngine.mostRecentTransition
-                    ? `${movementEngine.mostRecentTransition.transition} · ${movementEngine.mostRecentTransition.transitionReason}`
-                    : "—"}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Algorithm / config / universe</span>
-                <span className="num ml-auto">
-                  {movementEngine.movementAlgorithmVersion} · {movementEngine.movementConfigVersion}{" "}
-                  · {movementEngine.universeVersion}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Finalization config / grace</span>
-                <span className="num ml-auto">
-                  {movementEngine.finalizationConfigVersion ?? "—"}
-                  {movementEngine.finalizationGraceMs === null
-                    ? ""
-                    : ` · ${movementEngine.finalizationGraceMs}ms`}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Late after finalization</span>
-                <span className="num ml-auto">{movementEngine.lateAfterFinalizationCount}</span>
-              </div>
-            </div>
-          ) : null}
-          {activityFreshness ? (
-            <div className="mt-3 space-y-2 border-t border-border/60 pt-3 text-xs">
-              <p className="text-sm font-medium">Activity freshness</p>
-              {collectorHealth.length === 0
-                ? (() => {
-                    const status = timestampFreshness(
-                      activityFreshness.marketCheckpoint.observedAt,
-                      {
-                        available: activityFreshness.marketCheckpoint.available,
-                        now: freshnessNow,
-                        freshForMs: 10 * 60_000,
-                        delayedForMs: 30 * 60_000,
-                      },
-                    );
-                    return (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
-                        <span className="text-muted-foreground">Latest market checkpoint</span>
-                        <span className="num ml-auto">
-                          {activityFreshness.marketCheckpoint.observedAt
-                            ? new Date(
-                                activityFreshness.marketCheckpoint.observedAt,
-                              ).toLocaleString()
-                            : "—"}
-                        </span>
-                      </div>
-                    );
-                  })()
-                : null}
-              {(() => {
-                const status = timestampFreshness(activityFreshness.movement.evaluatedThrough, {
-                  available: activityFreshness.movement.available,
-                  now: freshnessNow,
-                  freshForMs: 10 * 60_000,
-                  delayedForMs: 30 * 60_000,
-                });
-                return (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
-                    <span className="text-muted-foreground">Movement evaluated through</span>
-                    <span className="num ml-auto">
-                      {activityFreshness.movement.evaluatedThrough
-                        ? new Date(activityFreshness.movement.evaluatedThrough).toLocaleString()
-                        : "—"}
-                    </span>
+            {operational.isPending ? (
+              <p role="status" className="text-sm text-muted-foreground">
+                Loading system health…
+              </p>
+            ) : operational.error ? (
+              <ErrorNotice error={operational.error} />
+            ) : (
+              <>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-xl border border-border bg-background/30 p-4">
+                    <p className="mb-3 text-sm font-medium">Market collector</p>
+                    <StatusBadge tone={statusTone(overallCollectorStatus)}>
+                      {overallCollectorStatus
+                        ? collectorStatusLabel(overallCollectorStatus)
+                        : "Unavailable"}
+                    </StatusBadge>
+                    <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+                      {overallCollectorStatus === "LIVE"
+                        ? "Market candles are arriving."
+                        : overallCollectorStatus === "RECOVERING"
+                          ? "Collection is reconnecting and recovering data."
+                          : overallCollectorStatus === "STALE"
+                            ? "Completed market candles are delayed."
+                            : "Collector health is unavailable. See diagnostics for recorded state."}
+                    </p>
                   </div>
-                );
-              })()}
-              {activityFreshness.ta.map((entry) => {
-                const duration = entry.timeframeMinutes * 60_000;
-                const status = timestampFreshness(entry.evaluatedAt, {
-                  available: entry.available,
-                  now: freshnessNow,
-                  freshForMs: duration * 2,
-                  delayedForMs: duration * 3,
-                });
-                return (
-                  <div key={entry.timeframeMinutes} className="flex flex-wrap items-center gap-2">
-                    <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
-                    <span className="text-muted-foreground">
-                      Last successful {formatInterval(entry.timeframeMinutes)} TA
-                    </span>
-                    <span className="num ml-auto">
-                      {entry.evaluatedAt ? new Date(entry.evaluatedAt).toLocaleString() : "—"}
-                      {entry.completedCandleAt
-                        ? ` · candle ${new Date(entry.completedCandleAt).toLocaleString()}`
-                        : ""}
-                    </span>
+                  <div className="rounded-xl border border-border bg-background/30 p-4">
+                    <p className="mb-3 text-sm font-medium">Movement engine</p>
+                    <StatusBadge tone={statusTone(movementEngine?.status)}>
+                      {collectorStatusLabel(movementEngine?.status)}
+                    </StatusBadge>
+                    <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+                      {movementEngine
+                        ? `${movementEngine.eligibleSymbolCount} of ${movementEngine.configuredSymbolCount} configured pairs eligible for evaluation.`
+                        : "No movement-engine status is available."}
+                    </p>
                   </div>
-                );
-              })}
-            </div>
-          ) : null}
-          <ul className="mt-4 space-y-2">
-            {(runs.data ?? []).map((r) => (
-              <li key={r.id} className="rounded-md border border-border/70 p-3 text-sm">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge
-                    variant={
-                      r.status === "success"
-                        ? "secondary"
-                        : r.status === "failed"
-                          ? "destructive"
-                          : "outline"
-                    }
-                  >
-                    {r.status}
-                  </Badge>
-                  <span className="num text-xs text-muted-foreground">
-                    {new Date(r.ran_at).toLocaleString()}
-                  </span>
-                  <span className="num ml-auto text-xs text-muted-foreground">
-                    {r.symbols_checked} pairs · {r.alerts_created} alerts
-                    {r.data_source ? ` · ${r.data_source}` : ""}
-                  </span>
                 </div>
-                <p className="num mt-2 text-xs text-muted-foreground">
-                  {r.duration_ms ?? 0} ms · {r.metrics.exchangeRequests ?? 0} exchange requests ·{" "}
-                  {r.metrics.candleRows ?? 0} candle rows · {r.metrics.taCalculations ?? 0} TA
-                  calculations · {r.metrics.taSignalsSaved ?? 0} TA signals ·{" "}
-                  {r.metrics.taOutcomesUpdated ?? 0} outcomes · {r.metrics.databaseReads ?? 0} DB
-                  reads · {r.metrics.databaseWriteAttempts ?? 0} DB write attempts ·{" "}
-                  {r.metrics.databaseNoOps ?? 0} no-ops · {r.metrics.marketCacheHits ?? 0} shared
-                  inputs
-                </p>
-                {r.error_message ? (
-                  <p className="mt-2 text-xs text-destructive">{r.error_message}</p>
-                ) : null}
-              </li>
-            ))}
-            {runs.data?.length === 0 ? (
-              <li className="text-sm text-muted-foreground">
-                No manual or scheduled monitoring runs recorded yet.
-              </li>
+                <div>
+                  <h3 className="mb-3 text-sm font-medium">Analysis freshness</h3>
+                  <div className="space-y-2">
+                    {activityFreshness?.ta.length ? (
+                      activityFreshness.ta.map((entry) => {
+                        const duration = entry.timeframeMinutes * 60_000;
+                        const status = timestampFreshness(entry.evaluatedAt, {
+                          available: entry.available,
+                          now: freshnessNow,
+                          freshForMs: duration * 2,
+                          delayedForMs: duration * 3,
+                        });
+                        return (
+                          <div
+                            key={entry.timeframeMinutes}
+                            className="flex flex-wrap items-center gap-3 rounded-lg border border-border/70 p-3"
+                          >
+                            <span className="text-sm font-medium">
+                              {formatInterval(entry.timeframeMinutes)} snapshots
+                            </span>
+                            <StatusBadge tone={statusTone(status)}>
+                              {freshnessLabel(status)}
+                            </StatusBadge>
+                            <span className="ml-auto text-xs text-muted-foreground">
+                              {entry.evaluatedAt
+                                ? new Date(entry.evaluatedAt).toLocaleString()
+                                : "No successful evaluation recorded"}
+                            </span>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Analysis freshness is unavailable.
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
+                  <h3 className="text-sm font-medium">Last monitoring run</h3>
+                  <StatusBadge tone={statusTone(runs.data?.[0]?.status)}>
+                    {runs.data?.[0] ? monitoringRunLabel(runs.data[0].status) : "No checks yet"}
+                  </StatusBadge>
+                  {runs.data?.[0] && (
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {new Date(runs.data[0].ran_at).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+          <TechnicalDetails title="Advanced diagnostics">
+            {operational.data?.diagnostics ? (
+              <p className="num mt-1 text-xs text-muted-foreground">
+                Request-driven operational storage:{" "}
+                {operational.data.diagnostics.recent_candle_rows} completed candles ·{" "}
+                {operational.data.diagnostics.checkpoint_rows} checkpoints ·{" "}
+                {operational.data.diagnostics.monitor_run_rows} runs ·{" "}
+                {operational.data.diagnostics.pending_outbox_rows} pending sync ·{" "}
+                {operational.data.diagnostics.failed_outbox_rows} failed ·{" "}
+                {operational.data.diagnostics.dead_outbox_rows} dead-letter
+              </p>
             ) : null}
-          </ul>
+            {overallCollectorStatus ? (
+              <div className="mt-3 space-y-2 border-t border-border/60 pt-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium">Shared Binance collector</p>
+                    <p className="num text-xs text-muted-foreground">
+                      Collector-owned storage:{" "}
+                      {operational.data?.collectorDiagnostics?.candle_rows ?? 0} completed candles
+                    </p>
+                  </div>
+                  <Badge variant={collectorBadgeVariant(overallCollectorStatus)}>
+                    {overallCollectorStatus}
+                  </Badge>
+                </div>
+
+                <div
+                  className="overflow-x-auto"
+                  tabIndex={0}
+                  role="region"
+                  aria-label="Collector diagnostics"
+                >
+                  <table className="w-full min-w-[760px] text-left text-xs">
+                    <caption className="sr-only">
+                      Raw collector health and source timestamps
+                    </caption>
+                    <thead className="text-muted-foreground">
+                      <tr className="border-b border-border/60">
+                        <th scope="col" className="py-2 pr-3 font-medium">
+                          Symbol
+                        </th>
+                        <th scope="col" className="py-2 pr-3 font-medium">
+                          Interval
+                        </th>
+                        <th scope="col" className="py-2 pr-3 font-medium">
+                          Status
+                        </th>
+                        <th scope="col" className="py-2 pr-3 font-medium">
+                          Latest source event
+                        </th>
+                        <th scope="col" className="py-2 pr-3 font-medium">
+                          Latest completed
+                        </th>
+                        <th scope="col" className="py-2 pr-3 font-medium">
+                          Lag
+                        </th>
+                        <th scope="col" className="py-2 font-medium">
+                          Reconnects
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {collectorHealth.map((row) => (
+                        <tr
+                          key={`${row.instrument_id}:${row.timeframe_minutes}`}
+                          className="border-b border-border/40 last:border-0"
+                        >
+                          <td className="py-2 pr-3 font-medium">{row.symbol}</td>
+                          <td className="py-2 pr-3">{formatInterval(row.timeframe_minutes)}</td>
+                          <td className="py-2 pr-3">
+                            <Badge variant={collectorBadgeVariant(row.status)}>{row.status}</Badge>
+                          </td>
+                          <td className="num py-2 pr-3">
+                            {row.last_event_at ? new Date(row.last_event_at).toLocaleString() : "—"}
+                          </td>
+                          <td className="num py-2 pr-3">
+                            {row.last_completed_open_time
+                              ? new Date(row.last_completed_open_time).toLocaleString()
+                              : "—"}
+                          </td>
+                          <td className="num py-2 pr-3">{formatLag(row.lag_ms)}</td>
+                          <td className="num py-2">{row.reconnect_count}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : null}
+            {movementEngine ? (
+              <div className="mt-3 space-y-2 border-t border-border/60 pt-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium">Market movement engine</p>
+                    <p className="num text-muted-foreground">
+                      {movementEngine.configuredSymbolCount} configured ·{" "}
+                      {movementEngine.eligibleSymbolCount} eligible
+                    </p>
+                  </div>
+                  <Badge variant={movementBadgeVariant(movementEngine.status)}>
+                    {movementEngine.status}
+                  </Badge>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-muted-foreground">Primary 5m</span>
+                  <span className="num ml-auto">
+                    {movementEngine.primaryDirectionState} · {movementEngine.primaryPace}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-muted-foreground">Last evaluation boundary</span>
+                  <span className="num ml-auto">
+                    {new Date(movementEngine.lastEvaluationBoundaryTime).toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-muted-foreground">Most recent transition</span>
+                  <span className="num ml-auto">
+                    {movementEngine.mostRecentTransition
+                      ? `${movementEngine.mostRecentTransition.transition} · ${movementEngine.mostRecentTransition.transitionReason}`
+                      : "—"}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-muted-foreground">Algorithm / config / universe</span>
+                  <span className="num ml-auto">
+                    {movementEngine.movementAlgorithmVersion} ·{" "}
+                    {movementEngine.movementConfigVersion} · {movementEngine.universeVersion}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-muted-foreground">Finalization config / grace</span>
+                  <span className="num ml-auto">
+                    {movementEngine.finalizationConfigVersion ?? "—"}
+                    {movementEngine.finalizationGraceMs === null
+                      ? ""
+                      : ` · ${movementEngine.finalizationGraceMs}ms`}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-muted-foreground">Late after finalization</span>
+                  <span className="num ml-auto">{movementEngine.lateAfterFinalizationCount}</span>
+                </div>
+              </div>
+            ) : null}
+            {activityFreshness ? (
+              <div className="mt-3 space-y-2 border-t border-border/60 pt-3 text-xs">
+                <p className="text-sm font-medium">Activity freshness</p>
+                {collectorHealth.length === 0
+                  ? (() => {
+                      const status = timestampFreshness(
+                        activityFreshness.marketCheckpoint.observedAt,
+                        {
+                          available: activityFreshness.marketCheckpoint.available,
+                          now: freshnessNow,
+                          freshForMs: 10 * 60_000,
+                          delayedForMs: 30 * 60_000,
+                        },
+                      );
+                      return (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
+                          <span className="text-muted-foreground">Latest market checkpoint</span>
+                          <span className="num ml-auto">
+                            {activityFreshness.marketCheckpoint.observedAt
+                              ? new Date(
+                                  activityFreshness.marketCheckpoint.observedAt,
+                                ).toLocaleString()
+                              : "—"}
+                          </span>
+                        </div>
+                      );
+                    })()
+                  : null}
+                {(() => {
+                  const status = timestampFreshness(activityFreshness.movement.evaluatedThrough, {
+                    available: activityFreshness.movement.available,
+                    now: freshnessNow,
+                    freshForMs: 10 * 60_000,
+                    delayedForMs: 30 * 60_000,
+                  });
+                  return (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
+                      <span className="text-muted-foreground">Movement evaluated through</span>
+                      <span className="num ml-auto">
+                        {activityFreshness.movement.evaluatedThrough
+                          ? new Date(activityFreshness.movement.evaluatedThrough).toLocaleString()
+                          : "—"}
+                      </span>
+                    </div>
+                  );
+                })()}
+                {activityFreshness.ta.map((entry) => {
+                  const duration = entry.timeframeMinutes * 60_000;
+                  const status = timestampFreshness(entry.evaluatedAt, {
+                    available: entry.available,
+                    now: freshnessNow,
+                    freshForMs: duration * 2,
+                    delayedForMs: duration * 3,
+                  });
+                  return (
+                    <div key={entry.timeframeMinutes} className="flex flex-wrap items-center gap-2">
+                      <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
+                      <span className="text-muted-foreground">
+                        Last successful {formatInterval(entry.timeframeMinutes)} TA
+                      </span>
+                      <span className="num ml-auto">
+                        {entry.evaluatedAt ? new Date(entry.evaluatedAt).toLocaleString() : "—"}
+                        {entry.completedCandleAt
+                          ? ` · candle ${new Date(entry.completedCandleAt).toLocaleString()}`
+                          : ""}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+          </TechnicalDetails>
+          <div className="panel p-5 sm:p-6">
+            <h2 className="text-lg font-semibold">Recent monitoring runs</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Manual and scheduled checks, including incomplete runs and failures.
+            </p>
+            <ul className="mt-4 space-y-3">
+              {(runs.data ?? []).map((r) => (
+                <li key={r.id} className="rounded-xl border border-border/70 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <StatusBadge tone={statusTone(r.status)}>
+                      {monitoringRunLabel(r.status)}
+                    </StatusBadge>
+                    <time className="text-xs text-muted-foreground" dateTime={r.ran_at}>
+                      {new Date(r.ran_at).toLocaleString()}
+                    </time>
+                  </div>
+                  <dl className="my-4 grid grid-cols-3 gap-3 text-xs">
+                    <div>
+                      <dt className="text-muted-foreground">Pairs checked</dt>
+                      <dd className="num mt-1 text-lg">{r.symbols_checked}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Alerts created</dt>
+                      <dd className="num mt-1 text-lg">{r.alerts_created}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Duration</dt>
+                      <dd className="num mt-1 text-lg">
+                        {r.duration_ms == null ? "—" : formatLag(r.duration_ms)}
+                      </dd>
+                    </div>
+                  </dl>
+                  {r.data_source && (
+                    <p className="mb-3 text-xs text-muted-foreground">
+                      {sourceLabel(r.data_source)}
+                    </p>
+                  )}
+                  {r.error_message && (
+                    <p className="mb-3 text-sm text-bear">{issueSummary(r.error_message)}</p>
+                  )}
+                  <TechnicalDetails>
+                    <p>
+                      Raw status: <code>{r.status}</code> · Source:{" "}
+                      <code>{r.data_source ?? "none"}</code> · Duration:{" "}
+                      {r.duration_ms ?? "unavailable"} ms
+                    </p>
+                    <dl className="grid grid-cols-2 gap-2">
+                      {[
+                        ["Exchange requests", r.metrics.exchangeRequests],
+                        ["Candle rows", r.metrics.candleRows],
+                        ["Analysis calculations", r.metrics.taCalculations],
+                        ["Snapshots saved", r.metrics.taSignalsSaved],
+                        ["Outcomes updated", r.metrics.taOutcomesUpdated],
+                        ["Database reads", r.metrics.databaseReads],
+                        ["Database write attempts", r.metrics.databaseWriteAttempts],
+                        ["Database no-ops", r.metrics.databaseNoOps],
+                        ["Shared input cache hits", r.metrics.marketCacheHits],
+                      ].map(([name, value]) => (
+                        <div key={String(name)}>
+                          <dt>{name}</dt>
+                          <dd className="num text-foreground">{value ?? 0}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                    {r.error_message && (
+                      <div>
+                        <p className="mb-2 font-medium">Exact recorded error</p>
+                        <pre className="whitespace-pre-wrap text-bear">{r.error_message}</pre>
+                      </div>
+                    )}
+                  </TechnicalDetails>
+                </li>
+              ))}
+            </ul>
+            {runs.data?.length === 0 && (
+              <EmptyState title="No monitoring checks yet">
+                Use Check market now in Overview to request a check. Saved runs will appear here.
+              </EmptyState>
+            )}
+          </div>
         </section>
       </div>
     </AppShell>

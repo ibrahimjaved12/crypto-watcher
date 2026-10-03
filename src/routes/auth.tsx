@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Activity } from "lucide-react";
+import { Orbit } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -89,12 +89,19 @@ function AuthPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4 py-12">
-      <div className="panel w-full max-w-md p-6">
-        <Link to="/" className="mb-6 flex items-center gap-2 font-display text-xl font-semibold">
-          <Activity className="size-5 text-primary" aria-hidden />
+    <main className="observatory flex min-h-screen items-center justify-center px-4 py-12">
+      <div className="panel w-full max-w-md p-6 sm:p-8">
+        <Link to="/" className="mb-8 flex items-center gap-2.5 font-display text-xl font-semibold">
+          <span className="orbit-mark size-10">
+            <Orbit className="size-5 text-primary" aria-hidden />
+          </span>
           Crypto Watch
         </Link>
+        <p className="eyebrow">Your market workspace</p>
+        <h1 className="mb-2 mt-2 text-2xl font-semibold">Welcome to Crypto Watch</h1>
+        <p className="mb-6 text-sm leading-relaxed text-muted-foreground">
+          Sign in to follow your markets, review alerts and keep your observations together.
+        </p>
         <Tabs defaultValue="signin">
           <TabsList className="w-full">
             <TabsTrigger className="flex-1" value="signin">
@@ -132,7 +139,7 @@ function AuthPage() {
                   />
                 </div>
                 <Button type="submit" className="w-full" disabled={busy}>
-                  {tab === "signin" ? "Sign in" : "Create account"}
+                  {busy ? "Please wait…" : tab === "signin" ? "Sign in" : "Create account"}
                 </Button>
               </form>
             </TabsContent>
@@ -148,6 +155,6 @@ function AuthPage() {
           Continue with Google
         </Button>
       </div>
-    </div>
+    </main>
   );
 }

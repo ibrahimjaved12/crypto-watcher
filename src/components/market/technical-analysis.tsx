@@ -1,9 +1,17 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { automaticQueryOptions, logActivity } from "@/lib/activity-controls";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { EmptyState, ErrorNotice, StatusBadge, TechnicalDetails } from "@/components/presentation";
+import {
+  humanizeCode,
+  outcomeLabel,
+  pairLabel,
+  sourceLabel,
+  statusTone,
+} from "@/lib/presentation/labels";
 import { explainTA } from "@/lib/ta/interpretation";
 
 export function TechnicalAnalysis() {
@@ -15,6 +23,7 @@ export function TechnicalAnalysis() {
   const [frame, setFrame] = useState(15);
   const [symbol, setSymbol] = useState("");
   const [page, setPage] = useState(0);
+  const [expanded, setExpanded] = useState<string | null>(null);
   const history = useQuery({
     queryKey: ["ta", frame, symbol, page],
     queryFn: async () => {
@@ -38,9 +47,9 @@ export function TechnicalAnalysis() {
   const number = (v: unknown) =>
     typeof v === "number" ? v.toLocaleString(undefined, { maximumFractionDigits: 5 }) : "--";
   return (
-    <section className="mt-6 min-w-0 border-t border-border pt-5">
+    <section className="panel mt-8 min-w-0 p-5 sm:p-6">
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-lg font-semibold">Technical analysis</h2>
+        <h2 className="text-lg font-semibold">Saved analysis history</h2>
         <div className="flex" role="group" aria-label="Timeframe">
           {[
             [0, "All"],
@@ -62,14 +71,14 @@ export function TechnicalAnalysis() {
           ))}
         </div>
         <input
-          aria-label="Filter TA symbol"
-          placeholder="Symbol"
+          aria-label="Filter analysis by pair"
+          placeholder="Pair, e.g. BTCUSDT"
           value={symbol}
           onChange={(e) => {
             setSymbol(e.target.value);
             setPage(0);
           }}
-          className="h-9 w-36 rounded-md border border-input bg-background px-3 text-sm"
+          className="h-9 w-48 rounded-md border border-input bg-background px-3 text-sm"
         />
         <Button
           variant="ghost"
@@ -83,14 +92,12 @@ export function TechnicalAnalysis() {
         </Button>
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
-        Completed candles only · 15m, 1h and 4h snapshots. Indicators describe price and volume;
-        agreement is not independent confirmation. Expand “Indicator explanations” for values and
-        rules. New v2 values appear after the next monitor check; older records retain their
-        original values.
+        Saved snapshots from completed 15m, 1h and 4h candles. Scores describe rule-based
+        directional bias, not win probability. Expand a record for indicators and context.
       </p>
       {!automatic.enabled && (
         <p className="mt-2 text-xs text-muted-foreground">
-          Automatic TA refresh paused. Press Refresh after changing filters or pages.
+          Automatic history refresh is paused. Press Refresh after changing filters or pages.
         </p>
       )}
       {history.isPending && !history.isFetching && !automatic.enabled ? (
@@ -98,33 +105,39 @@ export function TechnicalAnalysis() {
       ) : history.isPending ? (
         <p className="py-4 text-sm">Loading analysis...</p>
       ) : history.error ? (
-        <p role="alert" className="py-4 text-sm text-destructive">
-          TA history unavailable: {history.error.message}
-        </p>
+        <ErrorNotice title="Saved analysis unavailable." error={history.error} />
       ) : !history.data?.length ? (
-        <p className="py-4 text-sm text-muted-foreground">No analysis recorded.</p>
+        <div className="mt-4">
+          <EmptyState title="No saved snapshots in this view">
+            Try another pair or timeframe. Monitoring saves new snapshots when completed-candle
+            analysis is enabled and enough history is available.
+          </EmptyState>
+        </div>
       ) : (
         <div
-          className="mt-3 max-h-96 overflow-auto"
+          className="mt-4 overflow-x-auto"
           tabIndex={0}
-          aria-label="Technical analysis history"
+          role="region"
+          aria-label="Saved analysis history"
         >
-          <table className="w-full min-w-[900px] text-left text-xs">
-            <thead className="sticky top-0 bg-background">
-              <tr className="border-b border-border">
+          <table className="data-table min-w-[960px]">
+            <caption className="sr-only">
+              Completed-candle market snapshots. All candle times use your local timezone.
+            </caption>
+            <thead>
+              <tr>
                 {[
-                  "Pair / exchange",
-                  "Candle (local time)",
-                  "Interpretation",
-                  "TA score",
-                  "EMA 20 / 50 / 200",
+                  "Pair / timeframe",
+                  "Candle time",
+                  "Market reading",
+                  "Rule score",
                   "RSI 14",
-                  "ATR 14 / %",
-                  "Volume change",
-                  "Signals",
-                  "Forward return",
+                  "Volatility / ATR %",
+                  "Notable signals",
+                  "Outcome",
+                  "Details",
                 ].map((h) => (
-                  <th className="p-2 font-medium" key={h}>
+                  <th scope="col" key={h}>
                     {h}
                   </th>
                 ))}
@@ -134,124 +147,165 @@ export function TechnicalAnalysis() {
               {history.data.slice(0, 25).map((row) => {
                 const values = (row.indicators ?? {}) as Record<string, unknown>;
                 const factors = (row.factor_breakdown ?? {}) as Record<string, unknown>;
-                const factor = (name: string) => {
-                  const value = factors[name];
-                  return value && typeof value === "object" && !Array.isArray(value)
-                    ? (value as Record<string, unknown>)
-                    : {};
-                };
-                const label = (value: unknown) =>
-                  typeof value === "string"
-                    ? value.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())
-                    : "Unavailable";
-                const signed = (v: number | null) =>
-                  v === null ? "Unavailable" : v > 0 ? `+${v}` : String(v);
+                const isOpen = expanded === row.id;
                 return (
-                  <tr key={row.id} className="border-b border-border/50 align-top">
-                    <td className="p-2">
-                      {row.symbol}
-                      <div className="text-muted-foreground">
-                        {row.source} · {row.source_native_symbol}
-                      </div>
-                      <div className="text-muted-foreground">
-                        {row.timeframe === 15 ? "15m" : `${row.timeframe / 60}h`} · {row.version}
-                      </div>
-                    </td>
-                    <td className="p-2 whitespace-nowrap">
-                      {new Date(row.candle_at).toLocaleString()}
-                      <div className="text-muted-foreground">
-                        Closed{" "}
-                        {new Date(
-                          Date.parse(row.candle_at) + row.timeframe * 60_000,
-                        ).toLocaleString()}
-                      </div>
-                    </td>
-                    <td className="p-2 min-w-52">
-                      <div
-                        className={
-                          row.classification === "bullish"
-                            ? "text-emerald-400"
-                            : row.classification === "bearish"
-                              ? "text-rose-400"
-                              : "text-muted-foreground"
-                        }
-                      >
-                        {label(factor("trend")["classification"])} trend
-                      </div>
-                      <div>{label(factor("momentum")["classification"])} momentum</div>
-                      <div className="mt-1 text-muted-foreground">
-                        {label(factor("patterns")["classification"])}
-                      </div>
-                      <details className="mt-2 max-w-md">
-                        <summary className="cursor-pointer">Indicator explanations</summary>
-                        <dl className="mt-2 space-y-3">
-                          {explainTA(row.price, row.indicators, row.patterns).map((item) => (
-                            <div key={item.label}>
-                              <dt className="font-medium">
-                                {item.label}: {item.value}
-                              </dt>
-                              <dd className="mt-1 text-muted-foreground">{item.explanation}</dd>
-                            </div>
-                          ))}
-                        </dl>
-                      </details>
-                    </td>
-                    <td className="p-2 min-w-44">
-                      <details>
-                        <summary className="cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-2">
-                          {signed(row.score)} <span className="text-muted-foreground">/ ±100</span>
-                        </summary>
-                        <dl className="mt-2 space-y-1">
-                          {Object.entries(factors).map(([name, raw]) => {
-                            const value =
-                              raw && typeof raw === "object" && !Array.isArray(raw)
-                                ? (raw as Record<string, unknown>)
-                                : {};
-                            const points =
-                              typeof value["contribution"] === "number"
-                                ? value["contribution"]
-                                : null;
-                            return (
-                              <div key={name} className="flex justify-between gap-3">
-                                <dt className="capitalize" title={label(value["reason"])}>
-                                  {name}
-                                </dt>
-                                <dd>{signed(points)}</dd>
-                              </div>
-                            );
-                          })}
-                        </dl>
-                        <p className="mt-2 text-muted-foreground">
-                          Rule-based bias, not a probability. Uses EMA20/50 trend, RSI, patterns and
-                          volume only. MACD, EMA200, bands, ADX and range provide separate context
-                          and add no points.
+                  <Fragment key={row.id}>
+                    <tr>
+                      <td>
+                        <span className="font-semibold">{pairLabel(row.symbol)}</span>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {row.timeframe === 15 ? "15m" : `${row.timeframe / 60}h`}
                         </p>
-                        <span className="text-muted-foreground">{row.strategy_version}</span>
-                      </details>
-                    </td>
-                    <td className="p-2">
-                      {number(values["ema20"])} / {number(values["ema50"])} /{" "}
-                      {number(values["ema200"])}
-                    </td>
-                    <td className="p-2">{number(values["rsi14"])}</td>
-                    <td className="p-2">
-                      {number(values["atr14"])}
-                      <div className="text-muted-foreground">
-                        {row.atr_pct === null ? "--" : `${row.atr_pct.toFixed(2)}%`}
-                      </div>
-                    </td>
-                    <td className="p-2">
-                      {values["volume_change_pct"] === null
-                        ? "--"
-                        : `${number(values["volume_change_pct"])}%`}
-                    </td>
-                    <td className="p-2 max-w-52 break-words">
-                      {row.patterns.map((p) => p.replaceAll("_", " ")).join(", ") || "None"}
-                    </td>
-                    <td className="p-2">
-                      {row.return_pct === null ? row.outcome_status : `${number(row.return_pct)}%`}
-                    </td>
-                  </tr>
+                      </td>
+                      <td className="whitespace-nowrap text-xs">
+                        {new Date(row.candle_at).toLocaleDateString()}
+                        <p className="num mt-1 text-muted-foreground">
+                          {new Date(row.candle_at).toLocaleTimeString()}
+                        </p>
+                      </td>
+                      <td>
+                        <StatusBadge tone={statusTone(row.classification)}>
+                          {humanizeCode(row.classification)}
+                        </StatusBadge>
+                      </td>
+                      <td className="num">
+                        {row.score === null ? "—" : `${row.score > 0 ? "+" : ""}${row.score}`}
+                        <p className="mt-1 text-xs text-muted-foreground">/ ±100</p>
+                      </td>
+                      <td className="num">{number(values["rsi14"])}</td>
+                      <td className="num">
+                        {row.atr_pct === null ? "—" : `${row.atr_pct.toFixed(2)}%`}
+                      </td>
+                      <td className="max-w-48 text-xs">
+                        {row.patterns.map(humanizeCode).join(", ") || "None detected"}
+                      </td>
+                      <td>
+                        {row.return_pct === null ? (
+                          outcomeLabel(row.outcome_status)
+                        ) : (
+                          <>
+                            <span className="num">
+                              {row.return_pct > 0 ? "+" : ""}
+                              {number(row.return_pct)}%
+                            </span>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {outcomeLabel(row.outcome_status)}
+                            </p>
+                          </>
+                        )}
+                      </td>
+                      <td>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-expanded={isOpen}
+                          aria-controls={`snapshot-${row.id}`}
+                          aria-label={`${isOpen ? "Hide" : "View"} details for ${pairLabel(row.symbol)} at ${new Date(row.candle_at).toLocaleString()}`}
+                          onClick={() => setExpanded(isOpen ? null : row.id)}
+                        >
+                          {isOpen ? "Hide" : "View"}
+                        </Button>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr id={`snapshot-${row.id}`}>
+                        <td colSpan={9} className="bg-background/40">
+                          <div className="grid gap-6 lg:grid-cols-[1fr_2fr]">
+                            <div className="space-y-4">
+                              <div>
+                                <h3 className="font-semibold">Snapshot context</h3>
+                                <p className="mt-2 text-sm text-muted-foreground">
+                                  {sourceLabel(row.source)} · Close price{" "}
+                                  <span className="num">{number(row.price)} USDT</span>
+                                </p>
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  Candle closed{" "}
+                                  {new Date(
+                                    Date.parse(row.candle_at) + row.timeframe * 60_000,
+                                  ).toLocaleString()}
+                                </p>
+                              </div>
+                              <div>
+                                <h3 className="font-semibold">Factor contributions</h3>
+                                <dl className="mt-2 space-y-2">
+                                  {Object.entries(factors).map(([name, raw]) => {
+                                    const factor =
+                                      raw && typeof raw === "object" && !Array.isArray(raw)
+                                        ? (raw as Record<string, unknown>)
+                                        : {};
+                                    return (
+                                      <div
+                                        key={name}
+                                        className="flex justify-between gap-3 text-sm"
+                                      >
+                                        <dt>
+                                          {humanizeCode(name)}
+                                          <span className="ml-2 text-xs text-muted-foreground">
+                                            {humanizeCode(
+                                              typeof factor["classification"] === "string"
+                                                ? factor["classification"]
+                                                : null,
+                                            )}
+                                          </span>
+                                        </dt>
+                                        <dd className="num">{number(factor["contribution"])}</dd>
+                                      </div>
+                                    );
+                                  })}
+                                </dl>
+                                <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+                                  EMA20/50 trend, RSI, patterns and volume contribute to the rule
+                                  score. MACD, EMA200, bands, ADX and range add context, not points.
+                                  Indicator agreement is not independent confirmation.
+                                </p>
+                              </div>
+                              <TechnicalDetails>
+                                <p>
+                                  Source: <code>{row.source}</code> · Native symbol:{" "}
+                                  <code>{row.source_native_symbol}</code>
+                                </p>
+                                <p>
+                                  Versions:{" "}
+                                  <code>
+                                    {row.version} · {row.strategy_version}
+                                  </code>
+                                </p>
+                                <p>
+                                  Classification: <code>{row.classification}</code> · Outcome:{" "}
+                                  <code>{row.outcome_status}</code>
+                                </p>
+                                <p>
+                                  Reasons: <code>{row.reasons.join(", ") || "none"}</code>
+                                </p>
+                                <pre className="whitespace-pre-wrap text-xs">
+                                  {JSON.stringify(row.factor_breakdown, null, 2)}
+                                </pre>
+                              </TechnicalDetails>
+                            </div>
+                            <div>
+                              <h3 className="mb-3 font-semibold">Indicators & explanations</h3>
+                              <dl className="grid gap-4 md:grid-cols-2">
+                                {explainTA(row.price, row.indicators, row.patterns).map((item) => (
+                                  <div
+                                    key={item.label}
+                                    className="rounded-lg border border-border/70 p-3"
+                                  >
+                                    <dt className="font-medium">
+                                      {humanizeCode(item.label)}
+                                      <p className="num mt-1 text-xs text-primary">{item.value}</p>
+                                    </dt>
+                                    <dd className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                                      {item.explanation}
+                                    </dd>
+                                  </div>
+                                ))}
+                              </dl>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -263,7 +317,7 @@ export function TechnicalAnalysis() {
           variant="ghost"
           size="icon"
           title="Previous page"
-          aria-label="Previous TA page"
+          aria-label="Previous analysis page"
           disabled={page === 0 || history.isFetching}
           onClick={() => setPage(page - 1)}
         >
@@ -274,7 +328,7 @@ export function TechnicalAnalysis() {
           variant="ghost"
           size="icon"
           title="Next page"
-          aria-label="Next TA page"
+          aria-label="Next analysis page"
           disabled={!history.data || history.data.length <= 25 || history.isFetching}
           onClick={() => setPage(page + 1)}
         >

@@ -4,6 +4,9 @@ import { useState } from "react";
 import { Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { EmptyState, ErrorNotice, PageHeader } from "@/components/presentation";
+import { Badge } from "@/components/ui/badge";
+import { issueSummary, pairLabel } from "@/lib/presentation/labels";
 import { AppShell } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -45,7 +48,7 @@ function NotesPage() {
       setSymbol("");
       queryClient.invalidateQueries({ queryKey: ["notes"] });
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(issueSummary(e.message)),
   });
 
   const remove = useMutation({
@@ -55,23 +58,28 @@ function NotesPage() {
 
   return (
     <AppShell>
-      <h1 className="text-2xl font-semibold">Notes</h1>
-      <p className="text-sm text-muted-foreground">
-        Analysis you want to keep. Stored with your account, never in the browser.
-      </p>
-
-      <div className="mt-5 grid gap-4 lg:grid-cols-[380px_1fr]">
+      <PageHeader
+        title="Notes"
+        description="Keep your observations, questions and market decisions in one place. Add a pair to give each note context."
+      />
+      <div className="mt-6 grid items-start gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
         <form
-          className="panel space-y-3 p-5"
+          className="panel space-y-4 p-5 sm:p-6"
           onSubmit={(e) => {
             e.preventDefault();
             save.mutate();
           }}
         >
+          <div>
+            <p className="eyebrow mb-2">Capture an observation</p>
+            <h2 className="text-xl font-semibold">New note</h2>
+          </div>
+          {save.error && <ErrorNotice error={save.error} />}
           <div className="space-y-2">
             <Label htmlFor="note-title">Title</Label>
             <Input
               id="note-title"
+              placeholder="What caught your attention?"
               required
               value={title}
               onChange={(e) => setTitle(e.target.value)}
@@ -96,44 +104,62 @@ function NotesPage() {
             <Label htmlFor="note-body">Note</Label>
             <Textarea
               id="note-body"
-              rows={6}
+              rows={7}
+              placeholder="Record your reasoning, levels to watch, or what you want to revisit."
               value={body}
               onChange={(e) => setBody(e.target.value)}
             />
           </div>
           <Button type="submit" className="w-full" disabled={save.isPending}>
-            Save note
+            {save.isPending ? "Saving note…" : "Save note"}
           </Button>
         </form>
 
-        <div className="space-y-3">
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold">Your observations</h2>
+            <span className="text-xs text-muted-foreground">{notes.data?.length ?? 0} notes</span>
+          </div>
+          {notes.isPending && (
+            <p role="status" className="panel p-6 text-sm text-muted-foreground">
+              Loading your notes…
+            </p>
+          )}
+          {notes.error && <ErrorNotice title="Notes unavailable." error={notes.error} />}
+          {remove.error && <ErrorNotice title="Note could not be deleted." error={remove.error} />}
           {(notes.data ?? []).map((n) => (
             <article key={n.id} className="panel p-5">
               <header className="flex items-start gap-3">
                 <div>
-                  <h2 className="font-semibold">{n.title}</h2>
-                  <p className="num text-xs text-muted-foreground">
-                    {n.symbol ? `${n.symbol} · ` : ""}
-                    {new Date(n.updated_at).toLocaleString()}
-                  </p>
+                  <h2 className="break-words text-lg font-semibold">{n.title}</h2>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    {n.symbol && <Badge variant="secondary">{pairLabel(n.symbol)}</Badge>}
+                    <time dateTime={n.updated_at}>{new Date(n.updated_at).toLocaleString()}</time>
+                  </div>
                 </div>
                 <Button
                   variant="ghost"
                   size="icon"
                   className="ml-auto"
-                  aria-label="Delete note"
+                  aria-label={`Delete note: ${n.title}`}
+                  disabled={remove.isPending}
                   onClick={() => remove.mutate(n.id)}
                 >
                   <Trash2 className="size-4" aria-hidden />
                 </Button>
               </header>
               {n.body ? (
-                <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{n.body}</p>
+                <p className="mt-4 whitespace-pre-wrap break-words text-sm leading-relaxed text-muted-foreground">
+                  {n.body}
+                </p>
               ) : null}
             </article>
           ))}
           {notes.data?.length === 0 ? (
-            <p className="panel p-6 text-sm text-muted-foreground">No notes yet.</p>
+            <EmptyState title="Make room for your own perspective">
+              Write your first observation. A short note today can help you understand a decision
+              later.
+            </EmptyState>
           ) : null}
         </div>
       </div>
