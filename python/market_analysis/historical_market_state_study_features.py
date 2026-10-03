@@ -163,35 +163,71 @@ class FinalizedPeriodProvenance:
 
 
 @dataclass(frozen=True)
+class PartBScientificContract:
+    """Prerequisites known before test opening; contains no period-report hashes."""
+
+    study_version: str
+    study_manifest_sha256: str
+    extension_coverage_manifest_sha256: str
+    part_b_report_schema_version: str
+    part_b_code_revision: str
+    hmm_cross_fit_sha256: str | None = None
+    hmm_final_model_sha256: str | None = None
+    contract_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        if (self.study_version != STUDY_VERSION
+                or self.study_manifest_sha256 != FROZEN_STUDY_MANIFEST_SHA256
+                or self.part_b_report_schema_version != "historical-market-state-study-period-report-v2"):
+            raise ValueError("incompatible shared Part-B scientific contract")
+        require_sha256(self.study_manifest_sha256)
+        require_sha256(self.extension_coverage_manifest_sha256)
+        require_name(self.part_b_code_revision)
+        for digest in (self.hmm_cross_fit_sha256, self.hmm_final_model_sha256):
+            if digest is not None:
+                require_sha256(digest)
+        seal_hash(self, "contract_sha256")
+
+
+def shared_part_b_contract(periods, hmm_cross_fit_sha256=None, hmm_final_model_sha256=None):
+    """Validate shared metadata, also usable for a supplied (incomplete) aligned cohort."""
+    periods = tuple(periods)
+    if not periods or any(not isinstance(p, FinalizedPeriodProvenance) or replace(p) != p for p in periods):
+        raise ValueError("shared contract requires finalized period identities")
+    names = ("study_version", "study_manifest_sha256", "extension_coverage_manifest_sha256",
+             "part_b_report_schema_version", "part_b_code_revision")
+    for name in names:
+        if len({getattr(p, name) for p in periods}) != 1:
+            raise ValueError("mixed Part-B scientific provenance: " + name)
+    for name, expected in (("hmm_cross_fit_sha256", hmm_cross_fit_sha256),
+                           ("hmm_final_model_sha256", hmm_final_model_sha256)):
+        if any(getattr(p, name) is not None and getattr(p, name) != expected for p in periods):
+            raise ValueError("mixed HMM scientific provenance: " + name)
+    return PartBScientificContract(*(getattr(periods[0], name) for name in names),
+                                   hmm_cross_fit_sha256, hmm_final_model_sha256)
+
+
+@dataclass(frozen=True)
 class UpstreamInputProvenance:
+    phase: str
     periods: tuple[FinalizedPeriodProvenance, ...]
     hmm_cross_fit_sha256: str | None = None
     hmm_final_model_sha256: str | None = None
     roster: FrozenPeriodRoster = FROZEN_PERIOD_ROSTER
-    version: str = "historical-market-state-part-c-upstream-inputs-v1"
+    version: str = "historical-market-state-part-c-upstream-inputs-v2"
+    shared_contract: PartBScientificContract = field(init=False)
     provenance_sha256: str = field(init=False)
 
     def __post_init__(self):
         object.__setattr__(self, "periods", tuple(self.periods))
-        if (self.roster != FROZEN_PERIOD_ROSTER or not self.periods
-                or self.version != "historical-market-state-part-c-upstream-inputs-v1"
-                or any(not isinstance(p, FinalizedPeriodProvenance) or replace(p) != p
-                       for p in self.periods)
-                or tuple(p.study_period_index for p in self.periods)
-                != tuple(sorted({p.study_period_index for p in self.periods}))):
-            raise ValueError("upstream provenance requires ordered unique finalized periods")
-        for name in ("study_version", "study_manifest_sha256", "extension_coverage_manifest_sha256",
-                     "part_b_report_schema_version", "part_b_code_revision"):
-            if len({getattr(p, name) for p in self.periods}) != 1:
-                raise ValueError("mixed Part-B scientific provenance: " + name)
-        for digest in (self.hmm_cross_fit_sha256, self.hmm_final_model_sha256):
-            if digest is not None:
-                require_sha256(digest)
-        for period in self.periods:
-            for name in ("hmm_cross_fit_sha256", "hmm_final_model_sha256"):
-                digest = getattr(period, name)
-                if digest is not None and digest != getattr(self, name):
-                    raise ValueError("mixed HMM scientific provenance: " + name)
+        if (self.roster != FROZEN_PERIOD_ROSTER or self.phase not in PHASES
+                or self.version != "historical-market-state-part-c-upstream-inputs-v2"
+                or any(not isinstance(p, FinalizedPeriodProvenance) or replace(p) != p for p in self.periods)
+                or tuple((p.study_period_index, p.utc_date, p.phase) for p in self.periods)
+                != tuple(p for p in self.roster.periods if p[2] == self.phase)):
+            raise ValueError("upstream provenance requires the exact ordered frozen phase roster")
+        object.__setattr__(self, "shared_contract", shared_part_b_contract(
+            self.periods, self.hmm_cross_fit_sha256, self.hmm_final_model_sha256))
         seal_hash(self, "provenance_sha256")
 
     def require_source(self, index, digest):
@@ -347,9 +383,88 @@ if (len(FAMILY_EVALUATION_SPECS) != 16
 
 
 @dataclass(frozen=True)
+class LayerOneStratifierSpec:
+    family_id: str
+    mode: str
+    source_identity: str
+    candidate_feature_name: str | None = None
+    allowed_categories: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "allowed_categories", tuple(self.allowed_categories))
+        require_name(self.family_id)
+        require_name(self.source_identity)
+        if self.mode == "CONTINUOUS_TERCILE":
+            if self.candidate_feature_name != self.source_identity or self.allowed_categories:
+                raise ValueError("continuous Layer-1 source must name its exact candidate feature")
+        elif self.mode == "NATIVE_CATEGORY":
+            if self.candidate_feature_name is not None or not self.allowed_categories:
+                raise ValueError("native Layer-1 source requires frozen categories")
+            for category in self.allowed_categories:
+                require_name(category)
+            if len(set(self.allowed_categories)) != len(self.allowed_categories):
+                raise ValueError("duplicate native Layer-1 category")
+        else:
+            raise ValueError("unknown Layer-1 mode")
+
+
+# One declared Layer-1 source per predictive primary family. These refer to
+# existing extracted features/native states, with no new candidate calculation.
+_LAYER_ONE_CONTINUOUS_SOURCES = (
+    ("EXP-75-01", "ewma_minus_raw_normalized_movement"),
+    ("EXP-75-03", "kalman_trend"),
+    ("EXP-75-05", "candidate_minus_v1_median_acceleration"),
+    ("EXP-75-06A", "candidate_minus_v1_normalized_movement"),
+    ("EXP-75-06B", "candidate_minus_v1_normalized_movement"),
+    ("EXP-75-07", "explained_variance_ratio"),
+    ("EXP-75-08", "median_pairwise_correlation"),
+    ("EXP-75-10", "median_signed_mark_trade_divergence_5m"),
+    ("EXP-75-11-OI", "median_log_oi_change_5m"),
+    ("EXP-75-11-FUNDING", "median_funding_per_hour"),
+    ("EXP-75-11-LIQUIDATION", "log1p_observed_total_notional_15m"),
+    ("EXP-75-12", "pooled_notional_imbalance_5m"),
+)
+_LAYER_ONE_NATIVE_SOURCES = (
+    LayerOneStratifierSpec("EXP-75-02", "NATIVE_CATEGORY", "cusum_direction_state", None,
+                          ("NONE", "UP_SHIFT", "DOWN_SHIFT", "AMBIGUOUS", "UNAVAILABLE")),
+    LayerOneStratifierSpec("EXP-75-04B", "NATIVE_CATEGORY", "bocpd_observation.detector_state", None,
+                          ("WARMING", "NONE", "CHANGE", "UNAVAILABLE")),
+    LayerOneStratifierSpec("EXP-75-09", "NATIVE_CATEGORY", "hard_state", None,
+                          ("LOW_MOVEMENT", "MID_MOVEMENT", "HIGH_MOVEMENT")),
+)
+_layer_one_sources = {
+    family: LayerOneStratifierSpec(family, "CONTINUOUS_TERCILE", feature, feature)
+    for family, feature in _LAYER_ONE_CONTINUOUS_SOURCES}
+_layer_one_sources.update({spec.family_id: spec for spec in _LAYER_ONE_NATIVE_SOURCES})
+LAYER_ONE_STRATIFIERS = tuple(_layer_one_sources[spec.family_id] for spec in FAMILY_EVALUATION_SPECS
+                             if spec.causal_forward_test)
+for spec in LAYER_ONE_STRATIFIERS:
+    family = next(f for f in FAMILY_EVALUATION_SPECS if f.family_id == spec.family_id)
+    if spec.mode == "CONTINUOUS_TERCILE" and (
+            family.observation_mode != "CONTINUOUS"
+            or spec.candidate_feature_name not in tuple(f.name for f in family.candidate_features)):
+        raise ValueError("Layer-1 registry conflicts with frozen candidate semantics")
+
+
+def layer_one_stratifier(family_id):
+    spec = next((s for s in LAYER_ONE_STRATIFIERS if s.family_id == family_id), None)
+    if spec is None:
+        raise ValueError("no predictive Layer-1 stratifier for this family")
+    return spec
+
+
+def require_layer_one_spec(identity, spec):
+    if not isinstance(spec, LayerOneStratifierSpec) or spec != layer_one_stratifier(identity.family_id):
+        raise ValueError("Layer-1 family/mode/source differs from the frozen registry")
+    if spec.mode != "CONTINUOUS_TERCILE":
+        raise ValueError("native-category Layer-1 entries cannot fit continuous terciles")
+
+
+@dataclass(frozen=True)
 class StudyEvaluationPlan:
     baseline_features: tuple[FeatureSpec, ...] = BASELINE_FEATURES
     families: tuple[FamilyEvaluationSpec, ...] = FAMILY_EVALUATION_SPECS
+    layer_one_stratifiers: tuple[LayerOneStratifierSpec, ...] = LAYER_ONE_STRATIFIERS
     reference_states: tuple[str, ...] = ("NEUTRAL", "MIXED", "UTC_00_06", "MID_MOVEMENT")
     phase_day_counts: tuple[tuple[str, int], ...] = PHASE_DAY_COUNTS
     phase_minimum_days: tuple[tuple[str, int], ...] = PHASE_MINIMUM_DAYS
@@ -386,10 +501,11 @@ class StudyEvaluationPlan:
     plan_sha256: str = field(init=False)
 
     def __post_init__(self):
-        for name in ("baseline_features", "families", "reference_states",
+        for name in ("baseline_features", "families", "layer_one_stratifiers", "reference_states",
                      "phase_day_counts", "phase_minimum_days", "scientific_policies"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         if (self.baseline_features != BASELINE_FEATURES or self.families != FAMILY_EVALUATION_SPECS
+                or self.layer_one_stratifiers != LAYER_ONE_STRATIFIERS
                 or self.reference_states != ("NEUTRAL", "MIXED", "UTC_00_06", "MID_MOVEMENT")
                 or self.phase_day_counts != PHASE_DAY_COUNTS
                 or self.phase_minimum_days != PHASE_MINIMUM_DAYS

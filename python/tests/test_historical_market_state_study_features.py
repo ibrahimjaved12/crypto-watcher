@@ -93,6 +93,47 @@ class StudyFeatureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(features.FROZEN_EVALUATION_PLAN, families=features.FAMILY_EVALUATION_SPECS[:-1])
 
+    def test_layer_one_registry_is_frozen_in_plan_and_uses_existing_features(self):
+        registry = features.LAYER_ONE_STRATIFIERS
+        self.assertEqual(tuple(s.family_id for s in registry), features.PRIMARY_CONFIRMATORY_FAMILY)
+        self.assertEqual(features.FROZEN_EVALUATION_PLAN.layer_one_stratifiers, registry)
+        expected = {
+            "EXP-75-01": "ewma_minus_raw_normalized_movement",
+            "EXP-75-03": "kalman_trend",
+            "EXP-75-05": "candidate_minus_v1_median_acceleration",
+            "EXP-75-06A": "candidate_minus_v1_normalized_movement",
+            "EXP-75-06B": "candidate_minus_v1_normalized_movement",
+            "EXP-75-07": "explained_variance_ratio",
+            "EXP-75-08": "median_pairwise_correlation",
+            "EXP-75-10": "median_signed_mark_trade_divergence_5m",
+            "EXP-75-11-OI": "median_log_oi_change_5m",
+            "EXP-75-11-FUNDING": "median_funding_per_hour",
+            "EXP-75-11-LIQUIDATION": "log1p_observed_total_notional_15m",
+            "EXP-75-12": "pooled_notional_imbalance_5m",
+        }
+        self.assertEqual({s.family_id: s.candidate_feature_name for s in registry
+                          if s.mode == "CONTINUOUS_TERCILE"}, expected)
+        for spec in registry:
+            if spec.mode == "CONTINUOUS_TERCILE":
+                self.assertIn(spec.candidate_feature_name,
+                              tuple(f.name for f in features.predictive_family(spec.family_id).candidate_features))
+            else:
+                self.assertIn(spec.family_id, ("EXP-75-02", "EXP-75-04B", "EXP-75-09"))
+                self.assertIsNone(spec.candidate_feature_name)
+                self.assertTrue(spec.allowed_categories)
+        self.assertEqual(features.layer_one_stratifier("EXP-75-09").allowed_categories,
+                         ("LOW_MOVEMENT", "MID_MOVEMENT", "HIGH_MOVEMENT"))
+        with self.assertRaises(ValueError):
+            features.layer_one_stratifier("EXP-75-04A")
+        altered = replace(registry[0], source_identity="other", candidate_feature_name="other")
+        changed = (altered,) + registry[1:]
+        self.assertNotEqual(features.scientific_sha256(registry), features.scientific_sha256(changed))
+        for members in (changed, registry[:-1], tuple(reversed(registry))):
+            with self.assertRaises(ValueError):
+                replace(features.FROZEN_EVALUATION_PLAN, layer_one_stratifiers=members)
+        with self.assertRaises(FrozenInstanceError):
+            registry[0].source_identity = "other"
+
     def test_strict_observation_dimensions_finiteness_and_binary_outcomes(self):
         for changes in ({"candidate_features": (1.0,)}, {"baseline_features": (0.0,)},
                         {"candidate_features": (float("nan"), 0.0)}, {"outcome": float("inf")},

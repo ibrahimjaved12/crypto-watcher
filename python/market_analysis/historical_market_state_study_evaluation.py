@@ -17,6 +17,8 @@ from .historical_market_state_study_features import (
     predictive_family, require_name, require_sha256, scientific_sha256, seal_hash,
     FROZEN_PERIOD_ROSTER, PRIMARY_CONFIRMATORY_FAMILY, UpstreamInputProvenance,
     FinalizedPeriodProvenance, EvidenceValueDay, fit_day_balanced_terciles,
+    PartBScientificContract, shared_part_b_contract, LayerOneStratifierSpec,
+    layer_one_stratifier, require_layer_one_spec,
 )
 from .historical_market_state_study_models import (
     FrozenLinearModel, FrozenLogisticModel, FrozenStandardizer, StudyModelFitError,
@@ -65,7 +67,7 @@ def _validate_source_population(periods):
         if len(values) > 1:
             raise ValueError("mixed HMM scientific provenance: " + name)
         identities.append(next(iter(values), None))
-    return UpstreamInputProvenance(periods, *identities)
+    return shared_part_b_contract(periods, *identities)
 
 
 def _cohort(days, phase, identity=None):
@@ -816,7 +818,7 @@ def fit_final_development_pair(nomination: DevelopmentNomination, days) -> Froze
 @dataclass(frozen=True)
 class LayerOneContinuousEvidence:
     identity: CandidateConfigIdentity
-    declared_stratifier_id: str
+    stratifier: LayerOneStratifierSpec
     days: tuple[EvidenceValueDay, ...]
     source_period_provenance: tuple[tuple[int, str], ...]
     evidence_sha256: str = field(init=False)
@@ -824,7 +826,7 @@ class LayerOneContinuousEvidence:
     def __post_init__(self):
         object.__setattr__(self, "days", tuple(self.days))
         object.__setattr__(self, "source_period_provenance", tuple(tuple(p) for p in self.source_period_provenance))
-        require_name(self.declared_stratifier_id)
+        require_layer_one_spec(self.identity, self.stratifier)
         if predictive_family(self.identity.family_id).observation_mode != "CONTINUOUS":
             raise ValueError("Layer-1 continuous bins require a continuous family")
         if tuple(d.study_period_index for d in self.days) != tuple(i for i, _ in self.source_period_provenance):
@@ -841,14 +843,14 @@ class LayerOneContinuousEvidence:
 @dataclass(frozen=True)
 class FrozenLayerOneBins:
     identity: CandidateConfigIdentity
-    declared_stratifier_id: str
+    stratifier: LayerOneStratifierSpec
     development_evidence_sha256: str
     bins: TercileSpec
     binding_sha256: str = field(init=False)
 
     def __post_init__(self):
         predictive_family(self.identity.family_id)
-        require_name(self.declared_stratifier_id)
+        require_layer_one_spec(self.identity, self.stratifier)
         require_sha256(self.development_evidence_sha256)
         if not isinstance(self.bins, TercileSpec) or replace(self.bins) != self.bins:
             raise ValueError("Layer-1 bins require a valid TercileSpec")
@@ -856,7 +858,7 @@ class FrozenLayerOneBins:
 
 
 def freeze_layer_one_bins(evidence: LayerOneContinuousEvidence) -> FrozenLayerOneBins:
-    return FrozenLayerOneBins(evidence.identity, evidence.declared_stratifier_id,
+    return FrozenLayerOneBins(evidence.identity, evidence.stratifier,
                               evidence.evidence_sha256, fit_day_balanced_terciles(evidence.days))
 
 
@@ -881,6 +883,7 @@ class DevelopmentFreeze:
         require_sha256(self.study_manifest_sha256)
         if (not isinstance(self.upstream_provenance, UpstreamInputProvenance)
                 or replace(self.upstream_provenance) != self.upstream_provenance
+                or self.upstream_provenance.phase != "development"
                 or self.study_manifest_sha256 != self.upstream_provenance.roster.study_manifest_sha256):
             raise ValueError("development freeze requires matching finalized upstream provenance")
         object.__setattr__(self, "upstream_provenance_sha256", self.upstream_provenance.provenance_sha256)
@@ -894,14 +897,14 @@ class DevelopmentFreeze:
             object.__setattr__(self, name, values)
         if any(not isinstance(b, FrozenLayerOneBins) for b in self.layer_one_terciles):
             raise ValueError("Layer-1 bins require family/config/stratifier/source bindings")
-        terciles = tuple(sorted(self.layer_one_terciles, key=lambda b: (b.identity.family_id, b.declared_stratifier_id)))
+        terciles = tuple(sorted(self.layer_one_terciles, key=lambda b: (b.identity.family_id, b.stratifier.source_identity)))
         if any(not isinstance(e, LayerOneContinuousEvidence) for e in self.layer_one_evidence):
             raise ValueError("Layer-1 bins require declared development evidence contracts")
-        evidence = tuple(sorted(self.layer_one_evidence, key=lambda e: (e.identity.family_id, e.declared_stratifier_id)))
+        evidence = tuple(sorted(self.layer_one_evidence, key=lambda e: (e.identity.family_id, e.stratifier.source_identity)))
         object.__setattr__(self, "layer_one_evidence", evidence)
         object.__setattr__(self, "layer_one_terciles", terciles)
         if (self.plan != FROZEN_EVALUATION_PLAN or not self.config_results
-                or len({(b.identity.family_id, b.declared_stratifier_id) for b in terciles}) != len(terciles)
+                or len({(b.identity.family_id, b.stratifier.source_identity) for b in terciles}) != len(terciles)
                 or self.version != "historical-market-state-development-freeze-v1"
                 or any(r.plan_sha256 != self.plan.plan_sha256 for r in self.config_results)
                 or {r.identity.family_id for r in self.config_results} != {n.family_id for n in self.nominations}
@@ -917,6 +920,11 @@ class DevelopmentFreeze:
         if (self.hmm_cross_fit_sha256, self.hmm_final_model_sha256) != (
                 self.upstream_provenance.hmm_cross_fit_sha256, self.upstream_provenance.hmm_final_model_sha256):
             raise ValueError("HMM identities differ from finalized upstream provenance")
+        required_layer_one = {n.identity for n in self.nominations if n.status == "NOMINATED"
+                              and layer_one_stratifier(n.family_id).mode == "CONTINUOUS_TERCILE"}
+        if (len(terciles) != len(required_layer_one)
+                or {b.identity for b in terciles} != required_layer_one):
+            raise ValueError("Layer-1 freeze requires exactly one binding per nominated continuous stratifier")
         if len(evidence) != len(terciles):
             raise ValueError("Layer-1 frozen bins require their declared development evidence")
         for binding, source in zip(terciles, evidence):
@@ -1028,10 +1036,15 @@ def _evaluate_frozen_phase(pair, days, phase):
 
 
 def evaluate_validation(pair: FrozenPredictivePair, days,
-                        upstream_provenance: UpstreamInputProvenance) -> ValidationDecision:
+                        upstream_provenance: UpstreamInputProvenance,
+                        development: DevelopmentFreeze) -> ValidationDecision:
     if (not isinstance(upstream_provenance, UpstreamInputProvenance)
-            or replace(upstream_provenance) != upstream_provenance):
-        raise ValueError("validation requires frozen finalized upstream provenance")
+            or replace(upstream_provenance) != upstream_provenance
+            or upstream_provenance.phase != "validation"):
+        raise ValueError("validation requires validation-phase finalized upstream provenance")
+    if (not isinstance(development, DevelopmentFreeze) or replace(development) != development
+            or upstream_provenance.shared_contract != development.upstream_provenance.shared_contract):
+        raise ValueError("validation shared Part-B scientific contract differs from development")
     days = _cohort(days, "validation", pair.identity)
     for day in days:
         upstream_provenance.require_source(day.study_period_index, day.source_provenance.provenance_sha256)
@@ -1048,12 +1061,17 @@ def evaluate_validation(pair: FrozenPredictivePair, days,
 @dataclass(frozen=True)
 class ValidationFreeze:
     development_freeze_sha256: str
+    upstream_provenance: UpstreamInputProvenance
     decisions: tuple[ValidationDecision, ...]
     version: str = "historical-market-state-validation-freeze-v1"
     freeze_sha256: str = field(init=False)
 
     def __post_init__(self):
         require_sha256(self.development_freeze_sha256)
+        if (not isinstance(self.upstream_provenance, UpstreamInputProvenance)
+                or replace(self.upstream_provenance) != self.upstream_provenance
+                or self.upstream_provenance.phase != "validation"):
+            raise ValueError("validation freeze requires validation-phase upstream provenance")
         object.__setattr__(self, "decisions", tuple(sorted(self.decisions, key=lambda d: d.identity.family_id)))
         if (len({d.identity.family_id for d in self.decisions}) != len(self.decisions)
                 or self.version != "historical-market-state-validation-freeze-v1"):
@@ -1064,19 +1082,22 @@ class ValidationFreeze:
 def _validate_freeze_link(development: DevelopmentFreeze, validation: ValidationFreeze):
     if validation.development_freeze_sha256 != development.freeze_sha256:
         raise ValueError("validation scientific parent SHA mismatch")
+    if validation.upstream_provenance.shared_contract != development.upstream_provenance.shared_contract:
+        raise ValueError("validation shared Part-B scientific contract differs from development")
     for decision in validation.decisions:
-        if decision.upstream_provenance_sha256 != development.upstream_provenance_sha256:
+        if decision.upstream_provenance_sha256 != validation.upstream_provenance.provenance_sha256:
             raise ValueError("validation differs from frozen upstream provenance")
         for day in decision.coverage.days:
             if day.source_provenance_sha256 is not None:
-                development.upstream_provenance.require_source(day.study_period_index, day.source_provenance_sha256)
+                validation.upstream_provenance.require_source(day.study_period_index, day.source_provenance_sha256)
     if ({(d.identity, d.predictive_pair_sha256, d.development_median) for d in validation.decisions}
             != {(p.identity, p.pair_sha256, p.development_median) for p in development.predictive_pairs}):
         raise ValueError("validation must bind exactly the nominated frozen predictive pairs")
 
 
-def freeze_validation(development: DevelopmentFreeze, decisions) -> ValidationFreeze:
-    result = ValidationFreeze(development.freeze_sha256, tuple(decisions))
+def freeze_validation(development: DevelopmentFreeze, decisions,
+                      upstream_provenance: UpstreamInputProvenance) -> ValidationFreeze:
+    result = ValidationFreeze(development.freeze_sha256, upstream_provenance, tuple(decisions))
     _validate_freeze_link(development, result)
     return result
 
@@ -1114,11 +1135,16 @@ class TestAuthorizationFreeze:
     plan_sha256: str
     study_manifest_sha256: str
     members: tuple[TestAuthorizationMember, ...]
+    shared_contract: PartBScientificContract
     version: str = "historical-market-state-test-authorization-freeze-v1"
     authorization_sha256: str = field(init=False)
 
     def __post_init__(self):
         object.__setattr__(self, "members", tuple(self.members))
+        if (not isinstance(self.shared_contract, PartBScientificContract)
+                or replace(self.shared_contract) != self.shared_contract
+                or self.shared_contract.study_manifest_sha256 != self.study_manifest_sha256):
+            raise ValueError("authorization requires the shared Part-B prerequisite identity")
         for digest in (self.development_freeze_sha256, self.validation_freeze_sha256,
                        self.plan_sha256, self.study_manifest_sha256):
             require_sha256(digest)
@@ -1151,13 +1177,15 @@ def authorize_test(development: DevelopmentFreeze, validation: ValidationFreeze)
             pair.pair_sha256 if pair is not None else None,
             decision.decision_sha256 if decision is not None else None))
     return TestAuthorizationFreeze(development.freeze_sha256, validation.freeze_sha256,
-                                   development.plan.plan_sha256, development.study_manifest_sha256, tuple(members))
+                                   development.plan.plan_sha256, development.study_manifest_sha256, tuple(members),
+                                   development.upstream_provenance.shared_contract)
 
 
 @dataclass(frozen=True)
 class PrimaryTestResult:
     authorization: TestAuthorizationFreeze
     family_id: str
+    upstream_provenance_sha256: str
     coverage: PhaseCoverage
     day_results: tuple[DayPredictiveResult, ...]
     bootstrap: DayBootstrapResult | None
@@ -1177,6 +1205,7 @@ class PrimaryTestResult:
         if member is None or member.status != "AUTHORIZED":
             raise ValueError("test requires an authorized member of the aggregate freeze")
         spec = predictive_family(self.family_id)
+        require_sha256(self.upstream_provenance_sha256)
         if (self.coverage.phase != "test" or self.status not in ("EVALUABLE", "COVERAGE_LIMITED", "FIT_FAILED")
                 or self.version != "historical-market-state-primary-test-result-v1"):
             raise ValueError("invalid authorized primary test status")
@@ -1203,12 +1232,19 @@ class PrimaryTestResult:
 
 
 def evaluate_test(development: DevelopmentFreeze, validation: ValidationFreeze,
-                  authorization: TestAuthorizationFreeze, family_id: str, days) -> PrimaryTestResult:
+                  authorization: TestAuthorizationFreeze, family_id: str, days,
+                  upstream_provenance: UpstreamInputProvenance) -> PrimaryTestResult:
     if not isinstance(authorization, TestAuthorizationFreeze):
         raise ValueError("test requires an immutable authorization contract")
     expected = authorize_test(development, validation)
     if authorization != expected:
         raise ValueError("test authorization identity/scientific parent mismatch")
+    if (not isinstance(upstream_provenance, UpstreamInputProvenance)
+            or replace(upstream_provenance) != upstream_provenance
+            or upstream_provenance.phase != "test"):
+        raise ValueError("test evaluation requires test-phase finalized upstream provenance")
+    if upstream_provenance.shared_contract != authorization.shared_contract:
+        raise ValueError("test shared Part-B scientific contract differs from authorization")
     member = next((m for m in authorization.members if m.family_id == family_id), None)
     if member is None or member.status != "AUTHORIZED":
         raise ValueError("only validation-confirmed authorized members unlock test")
@@ -1218,7 +1254,7 @@ def evaluate_test(development: DevelopmentFreeze, validation: ValidationFreeze,
     for day in days:
         if not isinstance(day.source_provenance, FinalizedPeriodProvenance):
             raise ValueError("test requires finalized upstream period provenance")
-        development.upstream_provenance.require_source(day.study_period_index, day.source_provenance.provenance_sha256)
+        upstream_provenance.require_source(day.study_period_index, day.source_provenance.provenance_sha256)
     coverage, results, status, reason = _evaluate_frozen_phase(pair, days, "test")
     bootstrap = sign_test = None
     if status == "EVALUABLE":
@@ -1232,7 +1268,8 @@ def evaluate_test(development: DevelopmentFreeze, validation: ValidationFreeze,
         pair.development_median, decision.median_delta,
         bootstrap.median if bootstrap is not None else None,
         bootstrap.median_ci95 if bootstrap is not None else None))
-    return PrimaryTestResult(authorization, family_id, coverage, results, bootstrap, sign_test, status, reason, classification)
+    return PrimaryTestResult(authorization, family_id, upstream_provenance.provenance_sha256,
+                             coverage, results, bootstrap, sign_test, status, reason, classification)
 
 
 def study_primary_holm(authorization: TestAuthorizationFreeze, results) -> tuple:
