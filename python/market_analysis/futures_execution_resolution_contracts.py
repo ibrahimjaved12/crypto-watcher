@@ -14,13 +14,15 @@ from .futures_execution_contracts import (
 from .exact_scalar import Scalar, exact_scalar
 
 
-ALGORITHM_VERSION = "binance-usdm-execution-resolution-v3"
+ALGORITHM_VERSION = "binance-usdm-execution-resolution-v4"
 POLICY = (
     "next-eligible-contract-trade:market-full-fill:spread-then-slippage:taker:"
     "passive-opposite-aggressor-strict-through:full-print-volume-cap:limit-price:maker:"
     "valid-admission-only:child-admit-at-activation:same-trigger-event-excluded:"
     "external-same-time-unresolved:mark-crossing-interval:preexisting-open-condition-bounds-from-activation:"
     "mark-child-active-after-conservative-bound:"
+    "mark-close-witness-after-activation:close-endpoint-not-crossing-time:"
+    "mark-close-witness-liquidation-after-position-start:"
     "trigger-occurrence-separate-from-child-admission:stable-selected-frontier-closeout-proof:"
     "causal-partial-order:no-event-type-priority:explicit-competing-frontier-ambiguity:"
     "event-funding:exact-settlement-mark:confirmed-position-applicability:"
@@ -151,6 +153,7 @@ class AdmittedOrder(ResolutionIdentity):
     evidence: ExecutionEvidenceSnapshot
     activation: CausalBounds
     conditional_parent_identity: str | None = None
+    activation_endpoint_unresolved: bool = False
 
     def __post_init__(self):
         text(self.order_id, "order_id")
@@ -179,6 +182,12 @@ class AdmittedOrder(ResolutionIdentity):
             raise ValueError("contract-rule evidence reference mismatch")
         if self.conditional_parent_identity is not None:
             sha256(self.conditional_parent_identity)
+        if type(self.activation_endpoint_unresolved) is not bool:
+            raise ValueError("activation endpoint ordering flag must be boolean")
+        if (self.activation_endpoint_unresolved
+                and (self.conditional_parent_identity is None or self.activation.exact
+                     or not self.activation.stream_id.startswith("markPrice:"))):
+            raise ValueError("endpoint ambiguity applies only to interval-activated conditional children")
 
     @property
     def contract_rule_identity(self):
@@ -433,6 +442,7 @@ class TriggerProposal(ResolutionIdentity):
     next_state: str
     timing_basis: str
     opening_trigger_result: Result | None = None
+    closing_trigger_result: Result | None = None
     kind: str = "ORDER_TRIGGER_PROPOSAL"
 
     def __post_init__(self):
@@ -446,23 +456,34 @@ class TriggerProposal(ResolutionIdentity):
                     "TRIGGERED_CHILD_UNAVAILABLE")
         if self.next_state != expected or self.kind != "ORDER_TRIGGER_PROPOSAL":
             raise ValueError("trigger lifecycle mismatch")
-        if self.status not in ("TRIGGERED_EXACT", "TRIGGERED_WITHIN_INTERVAL", "TRIGGERED_BY_MARK_OPEN"):
+        if self.status not in ("TRIGGERED_EXACT", "TRIGGERED_WITHIN_INTERVAL", "TRIGGERED_BY_MARK_OPEN",
+                               "TRIGGERED_BY_MARK_CLOSE_WITNESS"):
             raise ValueError("trigger status mismatch")
         expected_basis = {"TRIGGERED_EXACT": "EXACT_CONTRACT_TRADE",
                           "TRIGGERED_WITHIN_INTERVAL": "CROSSED_WITHIN_MARK_MINUTE",
-                          "TRIGGERED_BY_MARK_OPEN": "CONDITION_ALREADY_TRUE_AT_MARK_OPEN"}[self.status]
+                          "TRIGGERED_BY_MARK_OPEN": "CONDITION_ALREADY_TRUE_AT_MARK_OPEN",
+                          "TRIGGERED_BY_MARK_CLOSE_WITNESS": "MARK_CLOSE_CONFIRMS_POST_CREATION_TRIGGER"}[self.status]
         if self.timing_basis != expected_basis:
             raise ValueError("trigger timing basis/status mismatch")
         if (self.status == "TRIGGERED_EXACT") != self.binding.causal.exact:
             raise ValueError("exact trigger status must match exact causal time")
         if self.timing_basis == "EXACT_CONTRACT_TRADE":
-            if self.opening_trigger_result is not None:
-                raise ValueError("contract-price trigger has no mark opening predicate")
-        elif (not isinstance(self.opening_trigger_result, Result)
-              or self.opening_trigger_result.status != "VALID"
-              or self.opening_trigger_result.calculation != "trigger"
-              or self.opening_trigger_result.value is not (self.timing_basis == "CONDITION_ALREADY_TRUE_AT_MARK_OPEN")):
-            raise ValueError("mark opening trigger predicate must be retained exactly")
+            if self.opening_trigger_result is not None or self.closing_trigger_result is not None:
+                raise ValueError("contract-price trigger has no mark opening/closing predicates")
+        else:
+            if any(not isinstance(result, Result) or result.status != "VALID" or result.calculation != "trigger"
+                   or type(result.value) is not bool
+                   for result in (self.opening_trigger_result, self.closing_trigger_result)):
+                raise ValueError("mark trigger must retain valid opening and closing predicates")
+            if (self.timing_basis == "CONDITION_ALREADY_TRUE_AT_MARK_OPEN"
+                    and (not self.opening_trigger_result.value or self.trigger_result != self.opening_trigger_result)):
+                raise ValueError("open-witness trigger must bind the satisfied opening predicate")
+            if (self.timing_basis == "CROSSED_WITHIN_MARK_MINUTE"
+                    and self.opening_trigger_result.value):
+                raise ValueError("intraminute crossing requires a false opening predicate")
+            if (self.timing_basis == "MARK_CLOSE_CONFIRMS_POST_CREATION_TRIGGER"
+                    and (not self.closing_trigger_result.value or self.trigger_result != self.closing_trigger_result)):
+                raise ValueError("close-witness trigger must bind the satisfied closing predicate")
         if self.child_admission.admitted is not None and self.child_admission.admitted.activation != self.binding.causal:
             raise ValueError("child admission must bind the triggering event/interval")
 
@@ -505,7 +526,8 @@ class LiquidationRiskProposal(ResolutionIdentity):
         if (not isinstance(self.binding, ProposalBinding) or not isinstance(self.threshold, Result)
                 or self.threshold.status != "VALID" or self.threshold.calculation != "liquidation_threshold"
                 or self.threshold.bracket_identity is None or self.kind != "LIQUIDATION_RISK_PROPOSAL"
-                or self.crossing_basis not in ("CROSSED_WITHIN_MARK_MINUTE", "BREACHED_BY_MARK_OPEN")):
+                or self.crossing_basis not in ("CROSSED_WITHIN_MARK_MINUTE", "BREACHED_BY_MARK_OPEN",
+                                                "BREACHED_BY_MARK_CLOSE_AFTER_POSITION_START")):
             raise ValueError("risk proposal must retain valid Part 1 threshold and bracket identity")
         number(self.threshold.value, "risk threshold", positive=True)
 

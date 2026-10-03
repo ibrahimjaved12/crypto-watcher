@@ -268,7 +268,7 @@ conditional, causal and financial proposals; wallet settlement remains #36 work.
 
 `futures_execution_resolution{,_contracts}.py` supplies immutable admission,
 order/conditional lifecycle views, position input views, candidates and identified
-financial proposals. Part 3 has its own `binance-usdm-execution-resolution-v3`
+financial proposals. Part 3 has its own `binance-usdm-execution-resolution-v4`
 identity; Part 1 math v4 and Part 2 scientific identities remain unchanged. It
 performs no network calls, reads no clocks, and commits no state. Position
 quantity, entry and isolated collateral are caller-supplied #36 input facts;
@@ -298,11 +298,17 @@ rules/context then supplied, rather than at parent creation.
   `TRIGGERED_WITHIN_INTERVAL` only when open is false and an extreme reaches the
   trigger. If the condition already holds at open and creation predates the
   minute, causal bounds extend from creation through the mark open; the proposal
-  records `TRIGGERED_BY_MARK_OPEN`. Creation overlapping the minute remains
-  ambiguous. Trigger timing remains a factual proposal when child admission is
-  rejected or unavailable; the exact Part 1 admission result is retained and no
-  executable child view is produced. A child can execute only after its
-  conservative activation bound.
+  records `TRIGGERED_BY_MARK_OPEN`. If creation overlaps the minute, a satisfied
+  mark close strictly after the latest possible creation time is a factual
+  trigger witness. The trigger's occurrence remains bounded from the earliest
+  possible creation time through the candle close; it is not assigned an exact
+  time. A high/low hit without that post-creation close witness, including
+  creation exactly at the close, remains ambiguous. Child execution is possible
+  only after the conservative close bound, and a cross-stream trade exactly at
+  that bound remains unresolved. Trigger timing remains a factual proposal
+  when child admission is rejected or unavailable; the exact Part 1 admission
+  result is retained and no executable child view is produced. A child can
+  execute only after its conservative activation bound.
   Cross-stream equal-time submission/trigger
   evidence remains unresolved, rather than assumed to precede a trade.
 - **Causal resolution:** precedence requires disjoint time bounds or an explicit
@@ -318,9 +324,13 @@ rules/context then supplied, rather than at parent creation.
   funding. Liquidation thresholds and bracket identities remain risk calculations.
   OHLC crossing gives a causal interval, never an exact liquidation timestamp.
   A threshold already breached at mark open uses bounds from the position's
-  effective start through that open, with `BREACHED_BY_MARK_OPEN` basis.
-  If the position begins after a breached open but during the mark minute, the
-  OHLC cannot establish a post-activation crossing, so the risk remains
+  effective start through that open, with `BREACHED_BY_MARK_OPEN` basis. When a
+  position starts during the minute, a breached mark close can witness risk if
+  the position started strictly before the close and remained effective through
+  it. Its bounds run from the position start through mark close, with
+  `BREACHED_BY_MARK_CLOSE_AFTER_POSITION_START` basis; the crossing time remains
+  unknown. A high/low-only breach, a position starting exactly at close, or a
+  position ending before close cannot use the close witness and remains
   unavailable. Positions wholly outside the minute produce no risk candidate.
   Only an unambiguously selected risk allows
   `FIXED_BPS_FROM_LIQUIDATION_THRESHOLD_V1`: adverse SELL for LONG, BUY for SHORT,

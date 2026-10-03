@@ -130,7 +130,7 @@ class AdmissionTests(unittest.TestCase):
             with self.assertRaises(FrozenInstanceError):
                 a.intent = replace(a.intent, quantity=D(1))
             self.assertEqual(MATH_VERSION, "binance-usdm-execution-math-v4:exact-rational")
-            self.assertEqual(ALGORITHM_VERSION, "binance-usdm-execution-resolution-v3")
+            self.assertEqual(ALGORITHM_VERSION, "binance-usdm-execution-resolution-v4")
             self.assertNotEqual(ALGORITHM_VERSION, MATH_VERSION)
 
     def test_invalid_unavailable_and_candle_context_never_admit_or_adjust(self):
@@ -373,6 +373,7 @@ class ConditionalTests(unittest.TestCase):
                 self.assertEqual(p.status, "TRIGGERED_WITHIN_INTERVAL")
                 self.assertEqual(p.timing_basis, "CROSSED_WITHIN_MARK_MINUTE")
                 self.assertFalse(p.opening_trigger_result.value)
+                self.assertFalse(p.closing_trigger_result.value)
                 self.assertEqual((candidate.causal.earliest_possible_ms, candidate.causal.latest_possible_ms), (TIME, TIME + 59999))
                 self.assertFalse(candidate.causal.exact)
                 self.assertIsNone(candidate.causal.sequence_key)
@@ -403,6 +404,55 @@ class ConditionalTests(unittest.TestCase):
                 child = resolution.activated_child_view(resolution.resolve_causal_frontier((candidate,)), parent)
                 self.assertIsNone(f.fill(child, f.trades[0]))
                 self.assertIsInstance(f.fill(child, f.trades[1]).proposal, FillProposal)
+
+    def test_mark_close_witness_after_creation_bounds_trigger_and_child_activation(self):
+        with fixture([print_row(10, TIME + 1000), print_row(11, TIME + 59999),
+                      print_row(12, TIME + 60000)],
+                     mark_prices=("95", "105", "90", "101")) as f:
+            parent = f.conditional(reference=PriceReference.MARK_PRICE, trigger="100")
+            parent = replace(parent, order=replace(parent.order,
+                creation=resolution.external_boundary(TIME + 500, HASH)))
+            candidate = f.trigger(parent)
+            proposal = candidate.proposal
+            self.assertEqual(proposal.status, "TRIGGERED_BY_MARK_CLOSE_WITNESS")
+            self.assertEqual(proposal.timing_basis, "MARK_CLOSE_CONFIRMS_POST_CREATION_TRIGGER")
+            self.assertFalse(proposal.opening_trigger_result.value)
+            self.assertTrue(proposal.closing_trigger_result.value)
+            self.assertEqual(proposal.trigger_result, proposal.closing_trigger_result)
+            self.assertEqual((candidate.causal.earliest_possible_ms, candidate.causal.latest_possible_ms),
+                             (TIME + 500, TIME + 59999))
+            self.assertFalse(candidate.causal.exact)
+            child = resolution.activated_child_view(resolution.resolve_causal_frontier((candidate,)), parent)
+            self.assertEqual(child.admitted.admission_timestamp_ms, TIME + 59999)
+            self.assertIsNone(f.fill(child, f.trades[0]))
+            endpoint = f.fill(child, f.trades[1])
+            self.assertIsInstance(endpoint.proposal, UnavailableProposal)
+            self.assertEqual(endpoint.proposal.status, "AMBIGUOUS_ACTIVATION_ORDER")
+            self.assertIsInstance(f.fill(child, f.trades[2]).proposal, FillProposal)
+
+    def test_mark_trigger_without_post_creation_close_witness_stays_ambiguous(self):
+        with fixture([print_row(10, TIME + 1000)], mark_prices=("95", "105", "90", "95")) as f:
+            parent = f.conditional(reference=PriceReference.MARK_PRICE, trigger="100")
+            parent = replace(parent, order=replace(parent.order,
+                creation=resolution.external_boundary(TIME + 500, HASH)))
+            candidate = f.trigger(parent)
+            self.assertIsInstance(candidate.proposal, UnavailableProposal)
+            self.assertEqual(candidate.proposal.status, "AMBIGUOUS_TRIGGER_ACTIVATION_ORDER")
+            self.assertEqual((candidate.causal.earliest_possible_ms, candidate.causal.latest_possible_ms),
+                             (TIME + 500, TIME + 59999))
+            self.assertEqual(resolution.resolve_causal_frontier((candidate,)).status, "AMBIGUOUS")
+
+    def test_mark_trigger_at_close_is_ambiguous_and_after_close_has_no_candidate(self):
+        with fixture() as f:
+            parent = f.conditional(reference=PriceReference.MARK_PRICE, trigger="100")
+            at_close = replace(parent, order=replace(parent.order,
+                creation=resolution.external_boundary(TIME + 59999, HASH)))
+            candidate = f.trigger(at_close)
+            self.assertIsInstance(candidate.proposal, UnavailableProposal)
+            self.assertEqual(candidate.proposal.status, "AMBIGUOUS_TRIGGER_ACTIVATION_ORDER")
+            after_close = replace(parent, order=replace(parent.order,
+                creation=resolution.external_boundary(TIME + 60000, HASH)))
+            self.assertIsNone(f.trigger(after_close))
 
     def test_exact_known_trigger_stays_selected_when_child_is_rejected_or_unavailable(self):
         with fixture() as f:
@@ -436,10 +486,11 @@ class ConditionalTests(unittest.TestCase):
             parent = f.conditional(reference=PriceReference.MARK_PRICE)
             overlap = replace(parent, order=replace(parent.order, creation=resolution.external_boundary(TIME + 500, HASH)))
             candidate = f.trigger(overlap)
-            self.assertEqual(candidate.proposal.status, "AMBIGUOUS_TRIGGER_ACTIVATION_ORDER")
+            self.assertEqual(candidate.proposal.status, "TRIGGERED_BY_MARK_CLOSE_WITNESS")
+            self.assertTrue(candidate.proposal.closing_trigger_result.value)
             self.assertEqual(candidate.causal.earliest_possible_ms, TIME + 500)
             self.assertEqual(candidate.causal.latest_possible_ms, TIME + 59999)
-            self.assertEqual(resolution.resolve_causal_frontier((candidate,)).status, "AMBIGUOUS")
+            self.assertEqual(resolution.resolve_causal_frontier((candidate,)).status, "SELECTED")
             cancelled = replace(parent, state="CANCELLED")
             self.assertIsNone(f.trigger(cancelled))
 
@@ -664,6 +715,64 @@ class LiquidationTests(unittest.TestCase):
                                       D(".01"), SIMULATION_EVIDENCE)
             with self.assertRaises(ValueError):
                 resolution.liquidation_closeout(resolution_result, position, closeout)
+
+    def test_mark_close_witness_supports_late_position_and_competes_with_intraminute_fill(self):
+        with fixture([print_row(10, TIME + 1000)], mark_prices=("100", "105", "80", "80")) as f:
+            position = replace(f.position(), effective_from_ms=TIME + 500,
+                               effective_through_ms=TIME + 120000)
+            risk = f.risk(position)
+            self.assertIsInstance(risk.proposal, LiquidationRiskProposal)
+            self.assertEqual(risk.proposal.crossing_basis, "BREACHED_BY_MARK_CLOSE_AFTER_POSITION_START")
+            self.assertEqual((risk.causal.earliest_possible_ms, risk.causal.latest_possible_ms),
+                             (TIME + 500, TIME + 59999))
+            view = f.view()
+            fill = f.fill(view, f.trades[0])
+            self.assertIsInstance(fill.proposal, FillProposal)
+            self.assertFalse(resolution.definitely_precedes(fill.causal, risk.causal))
+            self.assertFalse(resolution.definitely_precedes(risk.causal, fill.causal))
+            self.assertEqual(resolution.resolve_causal_frontier((fill, risk)).status, "AMBIGUOUS")
+
+    def test_mark_close_witness_remains_incomparable_with_intraminute_funding(self):
+        with fixture(mark_prices=("100", "105", "80", "80")) as f:
+            position = replace(f.position(), effective_from_ms=TIME + 500,
+                               effective_through_ms=TIME + 120000)
+            risk = f.risk(position)
+            base = funding()
+            funding_time = TIME + 1000
+            source = replace(base.source, provenance=replace(base.source.provenance,
+                                                               effective_at_ms=funding_time))
+            event = replace(base, funding_timestamp_ms=funding_time,
+                            available_at_ms=funding_time + 1, source=source)
+            base_mark = exact_mark(event)
+            mark = replace(base_mark, funding_timestamp_ms=funding_time,
+                           funding_event_identity=event.event_identity,
+                           source=replace(base_mark.source, provenance=replace(
+                               base_mark.source.provenance, effective_at_ms=funding_time,
+                               observed_at_ms=funding_time)))
+            event = join_settlement_mark(event, mark)
+            collection = FundingEvidence(SYMBOL, INSTRUMENT, (event,), HASH)
+            evidence = execution_evidence_snapshot(SCOPE, contract_rules=f.rules, fees=f.fees,
+                brackets=f.brackets, aggtrades=f.tape, mark_price=f.marks, funding=collection)
+            charge = resolution.funding_candidate(position, event, collection, evidence)
+            self.assertFalse(resolution.definitely_precedes(charge.causal, risk.causal))
+            self.assertFalse(resolution.definitely_precedes(risk.causal, charge.causal))
+            self.assertEqual(resolution.resolve_causal_frontier((charge, risk)).status, "AMBIGUOUS")
+
+    def test_mark_close_cannot_witness_position_without_full_endpoint_coverage(self):
+        with fixture(mark_prices=("100", "105", "80", "80")) as f:
+            starts_at_close = replace(f.position(), effective_from_ms=TIME + 59999,
+                                      effective_through_ms=TIME + 120000)
+            ended_before_close = replace(f.position(), effective_from_ms=TIME + 500,
+                                         effective_through_ms=TIME + 59998)
+            for position in (starts_at_close, ended_before_close):
+                candidate = f.risk(position)
+                self.assertIsInstance(candidate.proposal, UnavailableProposal)
+        with fixture(mark_prices=("100", "105", "80", "100")) as f:
+            intraminute_only = replace(f.position(), effective_from_ms=TIME + 500,
+                                       effective_through_ms=TIME + 120000)
+            safe_close = f.risk(intraminute_only)
+            self.assertIsInstance(safe_close.proposal, UnavailableProposal)
+            self.assertEqual(safe_close.proposal.status, "UNAVAILABLE_POSITION_DURING_MARK_INTERVAL")
 
     def test_position_entirely_outside_mark_minute_has_no_liquidation_candidate(self):
         with fixture(mark_prices=("80", "100", "70", "100")) as f:

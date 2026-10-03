@@ -74,7 +74,8 @@ def _snapshot_applicable(snapshot, earliest, latest):
 
 
 def admit_order(order_id, position_id, intent, rules, evidence, admitted_at_ms, *,
-                context=None, activation=None, conditional_parent_identity=None):
+                context=None, activation=None, conditional_parent_identity=None,
+                activation_endpoint_unresolved=False):
     """Freeze exact Part 1 admission inputs; never infer a mark from candles."""
     text(order_id, "order_id")
     text(position_id, "position_id")
@@ -105,11 +106,13 @@ def admit_order(order_id, position_id, intent, rules, evidence, admitted_at_ms, 
         raise ValueError("activation stream instrument mismatch")
     validation = math.validate_order(intent, normalized, context)
     inputs = canonical_digest((order_id, position_id, intent, rule_identity, evidence.identity,
-                               context, activation, conditional_parent_identity))
+                               context, activation, conditional_parent_identity,
+                               activation_endpoint_unresolved))
     admitted = None
     if validation.status == "VALID":
         admitted = AdmittedOrder(order_id, position_id, normalized.scope, intent, normalized,
-                                 rule_identity, validation, context, evidence, activation, conditional_parent_identity)
+                                 rule_identity, validation, context, evidence, activation,
+                                 conditional_parent_identity, activation_endpoint_unresolved)
     return AdmissionResult(validation, admitted, inputs)
 
 
@@ -149,7 +152,7 @@ def _unavailable(binding, resources, status, *, calculation=None, related=()):
     return ExecutionCandidate(UnavailableProposal(binding, status, (status,), calculation, related), resources)
 
 
-def _activation_relation(activation, event):
+def _activation_relation(activation, event, *, endpoint_unresolved=False):
     if definitely_precedes(activation, event):
         return "AFTER"
     if (activation.stream_id == event.stream_id and activation.sequence_key is not None
@@ -158,7 +161,14 @@ def _activation_relation(activation, event):
     if event.latest_possible_ms < activation.earliest_possible_ms:
         return "NOT_AFTER"
     if not activation.exact:
-        return "NOT_AFTER"  # Interval activation guarantees execution only after its end.
+        # Interval activations normally become eligible strictly after their
+        # conservative end. A mark-close witness also retains ambiguity when
+        # an exact cross-stream event shares that endpoint.
+        if event.latest_possible_ms < activation.latest_possible_ms:
+            return "NOT_AFTER"
+        if endpoint_unresolved and event.earliest_possible_ms <= activation.latest_possible_ms:
+            return "UNRESOLVED"
+        return "NOT_AFTER" if event.earliest_possible_ms <= activation.latest_possible_ms else "AFTER"
     return "UNRESOLVED"
 
 
@@ -180,7 +190,8 @@ def fill_candidate(view, trade, tape, fees, policy, evidence):
         if trade.aggressor_side is not opposite or not through:
             return None
     causal = trade_bounds(trade)
-    relation = _activation_relation(admitted.activation, causal)
+    relation = _activation_relation(admitted.activation, causal,
+                                    endpoint_unresolved=admitted.activation_endpoint_unresolved)
     if relation == "NOT_AFTER":
         return None
     if view.last_fill_event is not None and not definitely_precedes(view.last_fill_event, causal):
@@ -270,6 +281,7 @@ def conditional_candidate(view, event, rules, evidence, *, context=None, tape=No
         causal, component = trade_bounds(event), tape
         predicate = math.trigger_predicate(order.trigger, contract_price=event.price)
         opening_predicate = None
+        closing_predicate = None
         timing_basis = "EXACT_CONTRACT_TRADE"
     else:
         _mark_evidence(event, marks, evidence)
@@ -279,43 +291,57 @@ def conditional_candidate(view, event, rules, evidence, *, context=None, tape=No
         extreme = event.candle.high if greater else event.candle.low
         opening_predicate = math.trigger_predicate(order.trigger, mark_price=event.candle.open)
         extreme_predicate = math.trigger_predicate(order.trigger, mark_price=extreme)
-        if opening_predicate.status != "VALID":
-            causal = mark_bounds(event)
-            predicate = opening_predicate
-            timing_basis = "CROSSED_WITHIN_MARK_MINUTE"
-        elif extreme_predicate.status != "VALID":
-            causal = mark_bounds(event)
-            predicate = extreme_predicate
-            timing_basis = "CROSSED_WITHIN_MARK_MINUTE"
-        elif not extreme_predicate.value:
+        closing_predicate = math.trigger_predicate(order.trigger, mark_price=event.candle.close)
+        minute = mark_bounds(event)
+        # A completed candle cannot witness an order created after its close.
+        if order.creation.earliest_possible_ms > minute.latest_possible_ms:
             return None
-        elif opening_predicate.value:
-            if order.creation.latest_possible_ms < event.candle.open_time_ms:
+        predicates = (opening_predicate, extreme_predicate, closing_predicate)
+        if any(result.status != "VALID" for result in predicates):
+            causal = minute
+            binding = _binding(view, evidence, component, causal, CausalPolicy(), AmbiguityPolicy())
+            resources = (_position_resource(order.scope, order.position_id),
+                         f"order:{order.scope.instrument_id}:{order.order_id}")
+            failed = next(result for result in predicates if result.status != "VALID")
+            return _unavailable(binding, resources, failed.status, calculation=failed)
+
+        if order.creation.latest_possible_ms < minute.earliest_possible_ms:
+            if opening_predicate.value:
                 causal = CausalBounds(order.creation.earliest_possible_ms,
-                                      event.candle.open_time_ms,
+                                      minute.earliest_possible_ms,
                                       f"markPrice:{event.instrument_id}", event.identity)
                 predicate = opening_predicate
                 timing_basis = "CONDITION_ALREADY_TRUE_AT_MARK_OPEN"
+            elif extreme_predicate.value:
+                causal = minute
+                predicate = extreme_predicate
+                timing_basis = "CROSSED_WITHIN_MARK_MINUTE"
             else:
-                if order.creation.earliest_possible_ms > event.candle.close_time_ms:
-                    return None
-                earliest = order.creation.earliest_possible_ms
-                causal = CausalBounds(earliest, event.candle.close_time_ms,
-                                      f"markPrice:{event.instrument_id}", event.identity)
-                predicate = opening_predicate
+                return None
+        else:
+            if not extreme_predicate.value:
+                return None
+            causal = CausalBounds(order.creation.earliest_possible_ms, minute.latest_possible_ms,
+                                  f"markPrice:{event.instrument_id}", event.identity)
+            resources = (_position_resource(order.scope, order.position_id),
+                         f"order:{order.scope.instrument_id}:{order.order_id}")
+            # A close satisfying the predicate strictly after the latest
+            # possible creation time is a factual witness. Its occurrence
+            # remains unknown somewhere between creation and candle close.
+            if (order.creation.latest_possible_ms < minute.latest_possible_ms
+                    and closing_predicate.value):
+                predicate = closing_predicate
+                timing_basis = "MARK_CLOSE_CONFIRMS_POST_CREATION_TRIGGER"
+            else:
                 binding = _binding(view, evidence, component, causal, CausalPolicy(), AmbiguityPolicy())
-                resources = (_position_resource(order.scope, order.position_id),
-                             f"order:{order.scope.instrument_id}:{order.order_id}")
                 return _unavailable(binding, resources, "AMBIGUOUS_TRIGGER_ACTIVATION_ORDER",
                                     related=(order.creation.source_event_identity, causal.source_event_identity))
-        else:
-            causal = mark_bounds(event)
-            predicate = extreme_predicate
-            timing_basis = "CROSSED_WITHIN_MARK_MINUTE"
     binding = _binding(view, evidence, component, causal, CausalPolicy(), AmbiguityPolicy())
     resources = (_position_resource(order.scope, order.position_id),
                  f"order:{order.scope.instrument_id}:{order.order_id}")
-    relation = ("AFTER" if timing_basis == "CONDITION_ALREADY_TRUE_AT_MARK_OPEN"
+    relation = ("AFTER" if timing_basis in ("CONDITION_ALREADY_TRUE_AT_MARK_OPEN",
+                                             "MARK_CLOSE_CONFIRMS_POST_CREATION_TRIGGER",
+                                             "CROSSED_WITHIN_MARK_MINUTE")
                 else _activation_relation(order.creation, causal))
     if relation == "NOT_AFTER":
         return None
@@ -325,21 +351,25 @@ def conditional_candidate(view, event, rules, evidence, *, context=None, tape=No
         return None
     # A mark minute overlapping creation cannot establish that its crossing was
     # after submission. Unlike already-triggered child activation, keep it unresolved.
-    if relation == "UNRESOLVED" or (timing_basis != "CONDITION_ALREADY_TRUE_AT_MARK_OPEN"
+    if relation == "UNRESOLVED" or (timing_basis not in ("CONDITION_ALREADY_TRUE_AT_MARK_OPEN",
+                                                          "MARK_CLOSE_CONFIRMS_POST_CREATION_TRIGGER")
                                      and not causal.exact and not definitely_precedes(order.creation, causal)):
         return _unavailable(binding, resources, "AMBIGUOUS_TRIGGER_ACTIVATION_ORDER",
                             related=(order.creation.source_event_identity, causal.source_event_identity))
     admission = admit_order(order.child_order_id, order.position_id, order.child_intent, rules,
                             evidence, causal.latest_possible_ms, context=context, activation=causal,
-                            conditional_parent_identity=order.identity)
+                            conditional_parent_identity=order.identity,
+                            activation_endpoint_unresolved=(timing_basis ==
+                                "MARK_CLOSE_CONFIRMS_POST_CREATION_TRIGGER"))
     status = ("TRIGGERED_EXACT" if timing_basis == "EXACT_CONTRACT_TRADE" else
               "TRIGGERED_BY_MARK_OPEN" if timing_basis == "CONDITION_ALREADY_TRUE_AT_MARK_OPEN" else
+              "TRIGGERED_BY_MARK_CLOSE_WITNESS" if timing_basis == "MARK_CLOSE_CONFIRMS_POST_CREATION_TRIGGER" else
               "TRIGGERED_WITHIN_INTERVAL")
     next_state = ("ACTIVE" if admission.admitted is not None else
                   "TRIGGERED_CHILD_REJECTED" if admission.status == "REJECTED_RULE" else
                   "TRIGGERED_CHILD_UNAVAILABLE")
     proposal = TriggerProposal(binding, order.order_id, predicate, admission, status,
-                               next_state, timing_basis, opening_predicate)
+                               next_state, timing_basis, opening_predicate, closing_predicate)
     return ExecutionCandidate(proposal, resources)
 
 
@@ -387,19 +417,37 @@ def liquidation_candidate(position, minute, marks, brackets, evidence):
                      else minute.candle.open >= threshold.value)
     reached = (minute.candle.low <= threshold.value if position.side is PositionSide.LONG
                else minute.candle.high >= threshold.value)
+    close_breached = (minute.candle.close <= threshold.value if position.side is PositionSide.LONG
+                      else minute.candle.close >= threshold.value)
     if not reached:
         return None
     if open_breached:
         if position.effective_from_ms > minute.candle.open_time_ms:
-            # OHLC cannot establish that a breached open persisted until this
-            # position existed, or that a later extreme happened afterward.
-            return _unavailable(binding, resources, "UNAVAILABLE_POSITION_AT_BREACHED_MARK_OPEN")
-        causal = CausalBounds(position.effective_from_ms, minute.candle.open_time_ms,
-                              f"markPrice:{minute.instrument_id}", minute.identity)
-        crossing_basis = "BREACHED_BY_MARK_OPEN"
+            # The completed close can witness post-start risk only if this
+            # position existed strictly before it and remained active through it.
+            if (close_breached and position.effective_from_ms < minute.candle.close_time_ms
+                    and position.effective_through_ms is not None
+                    and position.effective_through_ms >= minute.candle.close_time_ms):
+                causal = CausalBounds(position.effective_from_ms, minute.candle.close_time_ms,
+                                      f"markPrice:{minute.instrument_id}", minute.identity)
+                crossing_basis = "BREACHED_BY_MARK_CLOSE_AFTER_POSITION_START"
+            else:
+                return _unavailable(binding, resources, "UNAVAILABLE_POSITION_AT_BREACHED_MARK_OPEN")
+        else:
+            causal = CausalBounds(position.effective_from_ms, minute.candle.open_time_ms,
+                                  f"markPrice:{minute.instrument_id}", minute.identity)
+            crossing_basis = "BREACHED_BY_MARK_OPEN"
     else:
-        causal = minute_causal
-        crossing_basis = "CROSSED_WITHIN_MARK_MINUTE"
+        if (position.effective_from_ms > minute.candle.open_time_ms
+                and close_breached and position.effective_from_ms < minute.candle.close_time_ms
+                and position.effective_through_ms is not None
+                and position.effective_through_ms >= minute.candle.close_time_ms):
+            causal = CausalBounds(position.effective_from_ms, minute.candle.close_time_ms,
+                                  f"markPrice:{minute.instrument_id}", minute.identity)
+            crossing_basis = "BREACHED_BY_MARK_CLOSE_AFTER_POSITION_START"
+        else:
+            causal = minute_causal
+            crossing_basis = "CROSSED_WITHIN_MARK_MINUTE"
     if not position.covers(causal.earliest_possible_ms, causal.latest_possible_ms):
         binding = _binding(position, evidence, marks, causal, brackets, CausalPolicy(), AmbiguityPolicy())
         status = ("UNAVAILABLE_POSITION_AT_BREACHED_MARK_OPEN" if open_breached
