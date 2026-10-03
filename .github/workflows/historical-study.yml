@@ -48,9 +48,9 @@ permissions:
   contents: read
   actions: read # Read this job's start timestamp only; no dispatch/cancel permission.
 
-# Initially serialize every campaign, including differently named spec files.
+# Serialize runs of the same campaign spec; different campaigns may run in parallel.
 concurrency:
-  group: historical-study-platform
+  group: historical-study-${{ inputs.campaign_spec }}
   cancel-in-progress: false
 
 jobs:

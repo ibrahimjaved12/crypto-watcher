@@ -338,9 +338,8 @@ def aggregate(spec, manifest, coverage, phase, root):
         period = next((p for p in manifest.selected_periods if path.name == execution._period_filename(p)), None)
         if period is None or period.study_period_index in found:
             raise ValueError('unknown/duplicate finalized report filename')
-        report = execution.load_finalized_period_report(path, manifest, period,
-            coverage_sha256=coverage['coverage_manifest_sha256'], code_revision=spec['producer_revision'])
-        found[period.study_period_index] = report['report_sha256']
+        found[period.study_period_index] = execution.period_report_sha_for_verification(
+            path, manifest, coverage, period, spec['producer_revision'], full=False)
     actual = sorted(index for index in found if manifest.selected_periods[index].phase == phase)
     if actual != expected:
         raise ValueError('finalized reports do not match exact declared aggregation membership')
@@ -411,7 +410,7 @@ def _run_owned(args):
         validated = {}
         with events.span('recovery-validation'):
             restored_files, work = verify_recovery_tree(args.restore_staging, spec['campaign_id'], manifest, coverage,
-                                           campaign_identity(spec), validated=validated)
+                                           campaign_identity(spec), validated=validated, full_report_validation=False)
         restored_unit = last_verified_unit(restored_files, work, args.period_index)
         expected_work = recovery['metadata']['local_completed_work'] if 'control' in spec else recovery['metadata']['completed_work']
         if 'control' in spec:

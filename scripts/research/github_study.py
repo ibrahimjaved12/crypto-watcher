@@ -87,7 +87,7 @@ class GitHub:
         self.branch = details['default_branch']
 
     def response(self, url, *, accept='application/vnd.github+json', method='GET',
-                 body=None, content_type=None, size=None):
+                 body=None, content_type=None, size=None, timeout=30):
         last_status = None
         for attempt in range(3):
             self.deadline.check()
@@ -112,7 +112,7 @@ class GitHub:
                         headers['Content-Length'] = str(size)
                     request = urllib.request.Request(current, data=upload or body, headers=headers, method=method)
                     try:
-                        response = self.opener.open(request, timeout=max(1, min(30, self.deadline.remaining())))
+                        response = self.opener.open(request, timeout=max(1, min(timeout, self.deadline.remaining())))
                         events.emit("REQUEST_COMPLETED", requests_completed=1)
                         return response
                     except urllib.error.HTTPError as exc:
@@ -334,12 +334,37 @@ class GitHub:
         if size > PART_LIMIT:
             raise ValueError('release asset exceeds 1 GiB part limit')
         url = release['upload_url'].split('{', 1)[0] + '?name=' + urllib.parse.quote(path.name, safe='')
-        with self.response(url, method='POST', body=path, size=size, content_type='application/octet-stream') as response:
-            raw = response.read(8 * BLOCK + 1)
-        if len(raw) > 8 * BLOCK:
-            raise ValueError('upload metadata exceeds limit')
-        asset = json.loads(raw)
-        confirmed = self.json(self.prefix + '/releases/assets/' + str(asset['id']))
+        from github_campaign import TransportError
+        for attempt in range(2):
+            try:
+                with self.response(url, method='POST', body=path, size=size, content_type='application/octet-stream',
+                                   timeout=600) as response:
+                    raw = response.read(8 * BLOCK + 1)
+            except TransportError as exc:
+                # A timed-out upload may still have been stored. Reconcile once
+                # against the release inventory, using the same verification.
+                if exc.code != 'AMBIGUOUS_WRITE' or attempt:
+                    raise
+                existing = self.assets(release['id']).get(path.name)
+                if existing is None:
+                    continue
+                try:
+                    self.verify_stored(existing, path, size, digest)
+                    return
+                except ValueError:
+                    pass
+                # Partial or mismatched: remove it so the single retry can create it.
+                with self.response(self.prefix + '/releases/assets/' + str(existing['id']), method='DELETE'):
+                    pass
+                continue
+            if len(raw) > 8 * BLOCK:
+                raise ValueError('upload metadata exceeds limit')
+            asset = json.loads(raw)
+            confirmed = self.json(self.prefix + '/releases/assets/' + str(asset['id']))
+            self.verify_stored(confirmed, path, size, digest)
+            return
+
+    def verify_stored(self, confirmed, path, size, digest):
         if confirmed['size'] != size or confirmed['state'] != 'uploaded':
             raise ValueError('uploaded asset size/state mismatch')
         if confirmed.get('digest'):
@@ -362,7 +387,16 @@ class GitHub:
             if path.name != 'manifest.json':
                 self.upload_verified(release, path)
         self.upload_verified(release, Path(directory) / 'manifest.json')
-        result = self.json(self.prefix + '/releases/' + str(release['id']), 'PATCH', {'draft': False})
+        from github_campaign import TransportError
+        try:
+            result = self.json(self.prefix + '/releases/' + str(release['id']), 'PATCH', {'draft': False})
+        except TransportError as exc:
+            if exc.code != 'AMBIGUOUS_WRITE':
+                raise
+            # The PATCH may have applied before the connection failed.
+            result = self.json(self.prefix + '/releases/' + str(release['id']))
+            if result.get('draft') is not False:
+                raise
         if result.get('draft') is not False:
             raise ValueError('remote generation publication was not verified')
         return result
@@ -447,7 +481,8 @@ def restore_finalized(spec, github=None):
         install_files(selected, stage)
         shutil.rmtree(stage)
         shutil.rmtree(parts)
-    verify_recovery_tree(BASE, spec['campaign_id'], manifest, coverage, campaign_identity(spec), check=github.deadline.check)
+    verify_recovery_tree(BASE, spec['campaign_id'], manifest, coverage, campaign_identity(spec), check=github.deadline.check,
+                         full_report_validation=False)
 
 
 def release_presentation(tag, directory):
@@ -727,7 +762,7 @@ def verified_tree(spec, manifest, coverage, recovery, deadline):
             stack.enter_context(owned_run_directory(period_root))
         with events.span('recovery-validation'):
             files, work = verify_recovery_tree(BASE, spec['campaign_id'], manifest, coverage,
-                campaign_identity(spec), check=deadline.check, locks_held=True)
+                campaign_identity(spec), check=deadline.check, locks_held=True, full_report_validation=False)
         deadline.check()
         prior_work = (recovery['metadata']['local_completed_work'] if 'control' in spec else recovery['metadata']['completed_work']) if recovery else []
         if not set(prior_work).issubset(work):
@@ -927,7 +962,9 @@ def snapshot():
             stack.enter_context(owned_run_directory(checkpoint_root))
         with events.span('recovery-validation'):
             files, work = verify_recovery_tree(BASE, spec['campaign_id'], manifest, coverage,
-                                             campaign_identity(spec), check=deadline.check, locks_held=True)
+                                             campaign_identity(spec), check=deadline.check, locks_held=True,
+                                             # The execute job's snapshot is the one full report validation.
+                                             full_report_validation=operation == 'execute-period')
         status_path = root / 'operations/status.json'
         status = execution._read_json(status_path) if status_path.exists() else {'scientific_state': 'FAILED'}
         previous_work = (recovery['metadata']['local_completed_work'] if 'control' in spec else recovery['metadata']['completed_work']) if recovery else []
