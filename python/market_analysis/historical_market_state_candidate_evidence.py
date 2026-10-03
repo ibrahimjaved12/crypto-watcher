@@ -167,13 +167,25 @@ def adapt_candidate_result(period, descriptor, result) -> CandidateEvidenceBundl
 
     if family == "EXP-75-04B":
         regions = getattr(result, "detection_regions_by_partition", {})
+        point_by_boundary = {
+            _timestamp(point): point for point in points
+            if _timestamp(point) is not None
+        }
         for region in regions.get(period.phase, ()):
             onset = getattr(region, "start_boundary_time_ms", None)
             if type(onset) is not int:
                 raise ValueError("BOCPD region lacks its native onset boundary")
             if not period.start_boundary_time_ms <= onset < period.end_boundary_time_ms:
                 continue
-            native = {"detection_region": report_json_safe(region)}
+            onset_point = point_by_boundary.get(onset)
+            onset_observation = getattr(onset_point, "bocpd_observation", None)
+            if (onset_point is None or onset_observation is None
+                    or getattr(onset_observation, "evaluation_boundary_time_ms", None) != onset):
+                raise ValueError("BOCPD region onset lacks its exact causal observation")
+            native = {
+                "causal_onset_observation": report_json_safe(onset_observation),
+                "descriptive_detection_region": report_json_safe(region),
+            }
             records.append(_record(period, descriptor, onset, "EVENT",
                                    "DETECTION_REGION", native))
 
