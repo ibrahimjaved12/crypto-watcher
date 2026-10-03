@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from market_analysis import futures_execution as math
 from market_analysis import futures_execution_resolution as resolution
+from market_analysis import futures_execution_resolution_contracts as resolution_contracts
 from market_analysis.binance_execution_evidence import (
     FundingEvidence, iter_execution_trades, join_settlement_mark,
     load_execution_mark_risk_evidence, load_execution_trade_tape,
@@ -245,6 +246,8 @@ class MarketFillTests(unittest.TestCase):
             changed_evidence = replace(SIMULATION_EVIDENCE, source="another-spread-assumption")
             changed_policy = replace(policy(), spread=FixedBpsPolicy(D(0), changed_evidence))
             self.assertNotEqual(base.proposal_id, f.fill(view, fill_policy=changed_policy).proposal.proposal_id)
+            with patch.object(resolution_contracts, "MAX_FRONTIER_CANDIDATES", 17):
+                self.assertEqual(base.proposal_id, f.fill(view).proposal.proposal_id)
             with self.assertRaises(FrozenInstanceError):
                 base.fill_quantity = D(9)
 
@@ -347,10 +350,10 @@ class ConditionalTests(unittest.TestCase):
         with fixture() as f:
             parent = f.conditional()
             missing = f.trigger(parent, context=False)
-            self.assertEqual(missing.proposal.status, "UNAVAILABLE_CHILD_ADMISSION")
-            self.assertEqual(missing.proposal.next_state, "TRIGGERED_PENDING_ADMISSION")
+            self.assertEqual(missing.proposal.status, "TRIGGERED_EXACT")
+            self.assertEqual(missing.proposal.next_state, "TRIGGERED_CHILD_UNAVAILABLE")
             self.assertIsNone(missing.proposal.child_admission.admitted)
-            self.assertEqual(resolution.resolve_causal_frontier((missing,)).status, "UNAVAILABLE")
+            self.assertEqual(resolution.resolve_causal_frontier((missing,)).status, "SELECTED")
             valid = f.trigger(parent).proposal.child_admission.admitted
             self.assertEqual(valid.admission_timestamp_ms, TIME)
             self.assertGreater(valid.admission_timestamp_ms, parent.order.creation.latest_possible_ms)
@@ -367,6 +370,8 @@ class ConditionalTests(unittest.TestCase):
                 candidate = f.trigger(parent)
                 p = candidate.proposal
                 self.assertEqual(p.status, "TRIGGERED_WITHIN_INTERVAL")
+                self.assertEqual(p.timing_basis, "CROSSED_WITHIN_MARK_MINUTE")
+                self.assertFalse(p.opening_trigger_result.value)
                 self.assertEqual((candidate.causal.earliest_possible_ms, candidate.causal.latest_possible_ms), (TIME, TIME + 59999))
                 self.assertFalse(candidate.causal.exact)
                 self.assertIsNone(candidate.causal.sequence_key)
@@ -379,6 +384,50 @@ class ConditionalTests(unittest.TestCase):
                     price=D(140) if side is BUY and kind is TriggerType.STOP or side is SELL and kind is TriggerType.TAKE_PROFIT else D(70))))
                 self.assertIsNone(f.trigger(unhit))
 
+    def test_mark_condition_already_true_at_open_uses_creation_to_open_bounds(self):
+        cases = ((TriggerType.STOP, BUY, "80"), (TriggerType.STOP, SELL, "90"),
+                 (TriggerType.TAKE_PROFIT, BUY, "90"), (TriggerType.TAKE_PROFIT, SELL, "80"))
+        for kind, side, trigger in cases:
+            with self.subTest(kind=kind, side=side), fixture(
+                    [print_row(10, TIME), print_row(11, TIME + 1)], mark_prices=("85", "100", "70", "85")) as f:
+                parent = f.conditional(side, kind, PriceReference.MARK_PRICE, trigger)
+                candidate = f.trigger(parent)
+                proposal = candidate.proposal
+                self.assertEqual(proposal.status, "TRIGGERED_BY_MARK_OPEN")
+                self.assertEqual(proposal.timing_basis, "CONDITION_ALREADY_TRUE_AT_MARK_OPEN")
+                self.assertTrue(proposal.opening_trigger_result.value)
+                self.assertEqual((candidate.causal.earliest_possible_ms, candidate.causal.latest_possible_ms),
+                                 (parent.order.creation.earliest_possible_ms, TIME))
+                self.assertEqual(proposal.child_admission.admitted.activation, candidate.causal)
+                child = resolution.activated_child_view(resolution.resolve_causal_frontier((candidate,)), parent)
+                self.assertIsNone(f.fill(child, f.trades[0]))
+                self.assertIsInstance(f.fill(child, f.trades[1]).proposal, FillProposal)
+
+    def test_exact_known_trigger_stays_selected_when_child_is_rejected_or_unavailable(self):
+        with fixture() as f:
+            parent = f.conditional()
+            rejected_parent = replace(parent, order=replace(parent.order,
+                child_intent=OrderIntent(BUY, D(".3"), None, market=True)))
+            rejected = f.trigger(rejected_parent)
+            self.assertEqual(rejected.proposal.status, "TRIGGERED_EXACT")
+            self.assertEqual(rejected.proposal.child_admission.status, "REJECTED_RULE")
+            self.assertEqual(rejected.proposal.next_state, "TRIGGERED_CHILD_REJECTED")
+            selected_rejected = resolution.resolve_causal_frontier((rejected,))
+            self.assertEqual(selected_rejected.status, "SELECTED")
+            self.assertEqual(selected_rejected.proposals[0].child_admission.status, "REJECTED_RULE")
+            with self.assertRaises(ValueError):
+                resolution.activated_child_view(selected_rejected, rejected_parent)
+
+            unavailable = f.trigger(parent, context=False)
+            self.assertEqual(unavailable.proposal.status, "TRIGGERED_EXACT")
+            self.assertEqual(unavailable.proposal.child_admission.status, "UNAVAILABLE_RULE")
+            self.assertEqual(unavailable.proposal.next_state, "TRIGGERED_CHILD_UNAVAILABLE")
+            selected_unavailable = resolution.resolve_causal_frontier((unavailable,))
+            self.assertEqual(selected_unavailable.status, "SELECTED")
+            self.assertEqual(selected_unavailable.proposals[0].child_admission.status, "UNAVAILABLE_RULE")
+            with self.assertRaises(ValueError):
+                resolution.activated_child_view(selected_unavailable, parent)
+
     def test_price_protection_and_creation_overlap_remain_explicit(self):
         with fixture() as f:
             protected = f.trigger(f.conditional(price_protect=True))
@@ -387,6 +436,8 @@ class ConditionalTests(unittest.TestCase):
             overlap = replace(parent, order=replace(parent.order, creation=resolution.external_boundary(TIME + 500, HASH)))
             candidate = f.trigger(overlap)
             self.assertEqual(candidate.proposal.status, "AMBIGUOUS_TRIGGER_ACTIVATION_ORDER")
+            self.assertEqual(candidate.causal.earliest_possible_ms, TIME + 500)
+            self.assertEqual(candidate.causal.latest_possible_ms, TIME + 59999)
             self.assertEqual(resolution.resolve_causal_frontier((candidate,)).status, "AMBIGUOUS")
             cancelled = replace(parent, state="CANCELLED")
             self.assertIsNone(f.trigger(cancelled))
@@ -555,6 +606,48 @@ class LiquidationTests(unittest.TestCase):
             self.assertIsNone(f.risk(f.position(LONG)))
             self.assertIsNone(f.risk(f.position(SHORT)))
 
+    def test_mark_open_already_breached_uses_position_start_to_open_bounds(self):
+        for side in (LONG, SHORT):
+            with self.subTest(side=side):
+                open_price = D(89) if side is LONG else D(111)
+                high, low = max(D(100), open_price + 1), min(D(100), open_price - 1)
+            with fixture(mark_prices=(str(open_price), str(high), str(low), "100")) as f:
+                position = f.position(side)
+                risk = f.risk(position)
+                self.assertIsInstance(risk.proposal, LiquidationRiskProposal)
+                self.assertEqual(risk.proposal.crossing_basis, "BREACHED_BY_MARK_OPEN")
+                self.assertEqual((risk.causal.earliest_possible_ms, risk.causal.latest_possible_ms),
+                                 (position.effective_from_ms, TIME))
+                only_through_open = replace(position, effective_through_ms=TIME)
+                still_known = f.risk(only_through_open)
+                self.assertIsInstance(still_known.proposal, LiquidationRiskProposal)
+                self.assertEqual(still_known.causal, risk.causal)
+
+    def test_mark_open_breach_remains_incomparable_with_preopen_funding(self):
+        with fixture(mark_prices=("80", "100", "70", "100")) as f:
+            original = funding()
+            settlement = TIME - 1
+            event_source = replace(original.source, provenance=replace(
+                original.source.provenance, effective_at_ms=settlement))
+            early_event = replace(original, funding_timestamp_ms=settlement,
+                                  available_at_ms=TIME, source=event_source)
+            mark = exact_mark(early_event)
+            mark_source = replace(mark.source, provenance=replace(
+                mark.source.provenance, effective_at_ms=settlement))
+            early_event = join_settlement_mark(early_event, replace(
+                mark, source=mark_source, funding_timestamp_ms=settlement,
+                funding_event_identity=early_event.event_identity))
+            collection = FundingEvidence(SYMBOL, INSTRUMENT, (early_event,), HASH)
+            evidence = execution_evidence_snapshot(SCOPE, contract_rules=f.rules, fees=f.fees,
+                brackets=f.brackets, aggtrades=f.tape, mark_price=f.marks, funding=collection)
+            position = f.position()
+            risk = f.risk(position)
+            charge = resolution.funding_candidate(position, early_event, collection, evidence)
+            self.assertEqual(risk.proposal.crossing_basis, "BREACHED_BY_MARK_OPEN")
+            self.assertFalse(resolution.definitely_precedes(charge.causal, risk.causal))
+            self.assertFalse(resolution.definitely_precedes(risk.causal, charge.causal))
+            self.assertEqual(resolution.resolve_causal_frontier((charge, risk)).status, "AMBIGUOUS")
+
     def test_unavailable_brackets_and_position_window_and_zero_position(self):
         with fixture() as f:
             unknown = normalize_bracket_snapshot(encoded(bracket_payload()), SYMBOL,
@@ -587,7 +680,7 @@ class LiquidationTests(unittest.TestCase):
                     self.assertIsNone(proposal.normal_trading_fee)
                     self.assertEqual(proposal.classification, Provenance.FIXED_SIMULATION_ASSUMPTION)
                     self.assertEqual(proposal.risk_proposal_identity, risk.proposal.identity)
-                    self.assertEqual(proposal.selected_resolution_identity, selected.identity)
+                    self.assertEqual(proposal.selected_frontier_identity, selected.selection_identity)
                     self.assertEqual(proposal.fee_evidence_identity, closeout.fee_evidence.identity)
                 self.assertEqual(proposal.proposal_id, resolution.liquidation_closeout(selected, position, closeout).proposal_id)
                 changed = replace(closeout, fee_rate=D(".02"))
@@ -606,6 +699,29 @@ class LiquidationTests(unittest.TestCase):
                 result = resolution.liquidation_closeout(selected, position, changed)
                 self.assertIsInstance(result, UnavailableProposal)
                 self.assertEqual(result.status, "UNAVAILABLE_CLOSEOUT_POLICY")
+
+    def test_closeout_identity_ignores_dominated_window_candidates_and_competitors_block_it(self):
+        with fixture([print_row(10, TIME + 500), print_row(11, TIME + 60000)]) as f:
+            position = f.position()
+            risk = f.risk(position)
+            closeout = CloseoutPolicy(FixedBpsPolicy(D(25), SIMULATION_EVIDENCE), D(".01"), SIMULATION_EVIDENCE)
+            alone = resolution.resolve_causal_frontier((risk,))
+            other = f.view(admitted_at=TIME + 59999,
+                activation=resolution.external_boundary(TIME + 59999, HASH), order_id="unrelated")
+            other = replace(other, admitted=replace(other.admitted, position_id="position-2"))
+            later = f.fill(other, f.trades[1])
+            with_later = resolution.resolve_causal_frontier((risk, later))
+            self.assertEqual(with_later.status, "SELECTED")
+            self.assertEqual(with_later.frontier, (risk,))
+            first_closeout = resolution.liquidation_closeout(alone, position, closeout)
+            second_closeout = resolution.liquidation_closeout(with_later, position, closeout)
+            self.assertEqual(first_closeout.proposal_id, second_closeout.proposal_id)
+
+            competing = f.fill(f.view(), f.trades[0])
+            ambiguous = resolution.resolve_causal_frontier((risk, competing))
+            self.assertEqual(ambiguous.status, "AMBIGUOUS")
+            with self.assertRaises(ValueError):
+                resolution.liquidation_closeout(ambiguous, position, closeout)
 
 
 class StreamingAndBoundaryTests(unittest.TestCase):

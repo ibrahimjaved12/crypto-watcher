@@ -268,7 +268,7 @@ conditional, causal and financial proposals; wallet settlement remains #36 work.
 
 `futures_execution_resolution{,_contracts}.py` supplies immutable admission,
 order/conditional lifecycle views, position input views, candidates and identified
-financial proposals. Part 3 has its own `binance-usdm-execution-resolution-v1`
+financial proposals. Part 3 has its own `binance-usdm-execution-resolution-v2`
 identity; Part 1 math v4 and Part 2 scientific identities remain unchanged. It
 performs no network calls, reads no clocks, and commits no state. Position
 quantity, entry and isolated collateral are caller-supplied #36 input facts;
@@ -295,8 +295,15 @@ rules/context then supplied, rather than at parent creation.
 - **Conditional activation:** Part 1 owns all STOP/TAKE_PROFIT inequalities.
   CONTRACT_PRICE triggers bind exact trade keys; the trigger print cannot also
   fill the new child, even at the same millisecond. Mark high/low can establish
-  only `TRIGGERED_WITHIN_INTERVAL` over the complete minute. A child can execute
-  only after that interval ends. Cross-stream equal-time submission/trigger
+  `TRIGGERED_WITHIN_INTERVAL` only when open is false and an extreme reaches the
+  trigger. If the condition already holds at open and creation predates the
+  minute, causal bounds extend from creation through the mark open; the proposal
+  records `TRIGGERED_BY_MARK_OPEN`. Creation overlapping the minute remains
+  ambiguous. Trigger timing remains a factual proposal when child admission is
+  rejected or unavailable; the exact Part 1 admission result is retained and no
+  executable child view is produced. A child can execute only after its
+  conservative activation bound.
+  Cross-stream equal-time submission/trigger
   evidence remains unresolved, rather than assumed to precede a trade.
 - **Causal resolution:** precedence requires disjoint time bounds or an explicit
   same-stream aggTrade key. There is no liquidation/stop/target/funding priority.
@@ -310,6 +317,8 @@ rules/context then supplied, rather than at parent creation.
   missing marks stay `UNAVAILABLE_FUNDING_MARK`, and leverage never multiplies
   funding. Liquidation thresholds and bracket identities remain risk calculations.
   OHLC crossing gives a causal interval, never an exact liquidation timestamp.
+  A threshold already breached at mark open uses bounds from the position's
+  effective start through that open, with `BREACHED_BY_MARK_OPEN` basis.
   Only an unambiguously selected risk allows
   `FIXED_BPS_FROM_LIQUIDATION_THRESHOLD_V1`: adverse SELL for LONG, BUY for SHORT,
   with a separate exact closeout charge. This is a simulation approximation, not

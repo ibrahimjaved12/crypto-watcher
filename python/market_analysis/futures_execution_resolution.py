@@ -269,17 +269,54 @@ def conditional_candidate(view, event, rules, evidence, *, context=None, tape=No
         _trade_evidence(event, tape, evidence)
         causal, component = trade_bounds(event), tape
         predicate = math.trigger_predicate(order.trigger, contract_price=event.price)
+        opening_predicate = None
+        timing_basis = "EXACT_CONTRACT_TRADE"
     else:
         _mark_evidence(event, marks, evidence)
-        causal, component = mark_bounds(event), marks
+        component = marks
         greater = ((order.trigger.kind is TriggerType.STOP and order.trigger.side is OrderSide.BUY)
                    or (order.trigger.kind is TriggerType.TAKE_PROFIT and order.trigger.side is OrderSide.SELL))
         extreme = event.candle.high if greater else event.candle.low
-        predicate = math.trigger_predicate(order.trigger, mark_price=extreme)
+        opening_predicate = math.trigger_predicate(order.trigger, mark_price=event.candle.open)
+        extreme_predicate = math.trigger_predicate(order.trigger, mark_price=extreme)
+        if opening_predicate.status != "VALID":
+            causal = mark_bounds(event)
+            predicate = opening_predicate
+            timing_basis = "CROSSED_WITHIN_MARK_MINUTE"
+        elif extreme_predicate.status != "VALID":
+            causal = mark_bounds(event)
+            predicate = extreme_predicate
+            timing_basis = "CROSSED_WITHIN_MARK_MINUTE"
+        elif not extreme_predicate.value:
+            return None
+        elif opening_predicate.value:
+            if order.creation.latest_possible_ms < event.candle.open_time_ms:
+                causal = CausalBounds(order.creation.earliest_possible_ms,
+                                      event.candle.open_time_ms,
+                                      f"markPrice:{event.instrument_id}", event.identity)
+                predicate = opening_predicate
+                timing_basis = "CONDITION_ALREADY_TRUE_AT_MARK_OPEN"
+            else:
+                if order.creation.earliest_possible_ms > event.candle.close_time_ms:
+                    return None
+                earliest = order.creation.earliest_possible_ms
+                causal = CausalBounds(earliest, event.candle.close_time_ms,
+                                      f"markPrice:{event.instrument_id}", event.identity)
+                predicate = opening_predicate
+                binding = _binding(view, evidence, component, causal, CausalPolicy(), AmbiguityPolicy())
+                resources = (_position_resource(order.scope, order.position_id),
+                             f"order:{order.scope.instrument_id}:{order.order_id}")
+                return _unavailable(binding, resources, "AMBIGUOUS_TRIGGER_ACTIVATION_ORDER",
+                                    related=(order.creation.source_event_identity, causal.source_event_identity))
+        else:
+            causal = mark_bounds(event)
+            predicate = extreme_predicate
+            timing_basis = "CROSSED_WITHIN_MARK_MINUTE"
     binding = _binding(view, evidence, component, causal, CausalPolicy(), AmbiguityPolicy())
     resources = (_position_resource(order.scope, order.position_id),
                  f"order:{order.scope.instrument_id}:{order.order_id}")
-    relation = _activation_relation(order.creation, causal)
+    relation = ("AFTER" if timing_basis == "CONDITION_ALREADY_TRUE_AT_MARK_OPEN"
+                else _activation_relation(order.creation, causal))
     if relation == "NOT_AFTER":
         return None
     if predicate.status != "VALID":
@@ -288,17 +325,21 @@ def conditional_candidate(view, event, rules, evidence, *, context=None, tape=No
         return None
     # A mark minute overlapping creation cannot establish that its crossing was
     # after submission. Unlike already-triggered child activation, keep it unresolved.
-    if relation == "UNRESOLVED" or (not causal.exact and not definitely_precedes(order.creation, causal)):
+    if relation == "UNRESOLVED" or (timing_basis != "CONDITION_ALREADY_TRUE_AT_MARK_OPEN"
+                                     and not causal.exact and not definitely_precedes(order.creation, causal)):
         return _unavailable(binding, resources, "AMBIGUOUS_TRIGGER_ACTIVATION_ORDER",
                             related=(order.creation.source_event_identity, causal.source_event_identity))
     admission = admit_order(order.child_order_id, order.position_id, order.child_intent, rules,
                             evidence, causal.latest_possible_ms, context=context, activation=causal,
                             conditional_parent_identity=order.identity)
-    status = ("TRIGGERED_EXACT" if causal.exact else "TRIGGERED_WITHIN_INTERVAL")
-    if admission.admitted is None:
-        status = "UNAVAILABLE_CHILD_ADMISSION"
+    status = ("TRIGGERED_EXACT" if timing_basis == "EXACT_CONTRACT_TRADE" else
+              "TRIGGERED_BY_MARK_OPEN" if timing_basis == "CONDITION_ALREADY_TRUE_AT_MARK_OPEN" else
+              "TRIGGERED_WITHIN_INTERVAL")
+    next_state = ("ACTIVE" if admission.admitted is not None else
+                  "TRIGGERED_CHILD_REJECTED" if admission.status == "REJECTED_RULE" else
+                  "TRIGGERED_CHILD_UNAVAILABLE")
     proposal = TriggerProposal(binding, order.order_id, predicate, admission, status,
-                               "ACTIVE" if admission.admitted is not None else "TRIGGERED_PENDING_ADMISSION")
+                               next_state, timing_basis, opening_predicate)
     return ExecutionCandidate(proposal, resources)
 
 
@@ -328,23 +369,38 @@ def liquidation_candidate(position, minute, marks, brackets, evidence):
     _component(evidence, "brackets", brackets)
     if position.scope != evidence.scope or brackets.scope != position.scope:
         raise ValueError("liquidation scope mismatch")
-    causal = mark_bounds(minute)
-    binding = _binding(position, evidence, marks, causal, brackets, CausalPolicy(), AmbiguityPolicy())
     resources = (_position_resource(position.scope, position.position_id),)
-    if not position.covers(causal.earliest_possible_ms, causal.latest_possible_ms):
-        return _unavailable(binding, resources, "UNAVAILABLE_POSITION_DURING_MARK_INTERVAL")
-    _snapshot_applicable(brackets, causal.earliest_possible_ms, causal.latest_possible_ms)
+    minute_causal = mark_bounds(minute)
+    binding = _binding(position, evidence, marks, minute_causal, brackets, CausalPolicy(), AmbiguityPolicy())
     threshold = math.liquidation_threshold(position.side, position.quantity, position.average_entry,
                                            position.isolated_wallet_collateral, brackets.table)
     if threshold.status in ("NO_POSITION", "NO_POSITIVE_THRESHOLD"):
         return None
     if threshold.status != "VALID":
+        binding = _binding(position, evidence, marks, minute_causal, brackets, CausalPolicy(), AmbiguityPolicy())
         return _unavailable(binding, resources, threshold.status, calculation=threshold)
+    open_breached = (minute.candle.open <= threshold.value if position.side is PositionSide.LONG
+                     else minute.candle.open >= threshold.value)
     reached = (minute.candle.low <= threshold.value if position.side is PositionSide.LONG
                else minute.candle.high >= threshold.value)
     if not reached:
         return None
-    return ExecutionCandidate(LiquidationRiskProposal(binding, position.position_id, position.scope, threshold), resources)
+    if open_breached:
+        causal = CausalBounds(position.effective_from_ms, minute.candle.open_time_ms,
+                              f"markPrice:{minute.instrument_id}", minute.identity)
+        crossing_basis = "BREACHED_BY_MARK_OPEN"
+    else:
+        causal = minute_causal
+        crossing_basis = "CROSSED_WITHIN_MARK_MINUTE"
+    if not position.covers(causal.earliest_possible_ms, causal.latest_possible_ms):
+        binding = _binding(position, evidence, marks, causal, brackets, CausalPolicy(), AmbiguityPolicy())
+        status = ("UNAVAILABLE_POSITION_AT_BREACHED_MARK_OPEN" if open_breached
+                  else "UNAVAILABLE_POSITION_DURING_MARK_INTERVAL")
+        return _unavailable(binding, resources, status)
+    _snapshot_applicable(brackets, causal.earliest_possible_ms, causal.latest_possible_ms)
+    binding = _binding(position, evidence, marks, causal, brackets, CausalPolicy(), AmbiguityPolicy())
+    return ExecutionCandidate(LiquidationRiskProposal(binding, position.position_id, position.scope,
+                                                       threshold, crossing_basis), resources)
 
 
 def resolve_causal_frontier(candidates, *, causal_policy=CausalPolicy(), ambiguity_policy=AmbiguityPolicy()):
@@ -374,9 +430,7 @@ def resolve_causal_frontier(candidates, *, causal_policy=CausalPolicy(), ambigui
                         for i, a in enumerate(frontier) for b in frontier[i + 1:])
         intrinsic = any(isinstance(c.proposal, UnavailableProposal)
                         and c.proposal.status.startswith("AMBIGUOUS") for c in frontier)
-        unavailable = any(isinstance(c.proposal, UnavailableProposal)
-                          or isinstance(c.proposal, TriggerProposal) and c.proposal.child_admission.admitted is None
-                          for c in frontier)
+        unavailable = any(isinstance(c.proposal, UnavailableProposal) for c in frontier)
         if competing or intrinsic:
             status, reasons = "AMBIGUOUS", ("CAUSALLY_INCOMPARABLE_MATERIAL_EVENTS",)
         elif unavailable:
@@ -425,7 +479,7 @@ def liquidation_closeout(resolution, position, policy):
     risk = risks[0]
     binding = ProposalBinding(position.identity, risk.binding.evidence_identity,
                               risk.binding.source_evidence_identity, risk.binding.causal,
-                              risk.binding.policy_identities + (policy.identity, resolution.identity))
+                              risk.binding.policy_identities + (policy.identity, resolution.selection_identity))
     if any(e.classification is Provenance.UNAVAILABLE for e in
            (policy.evidence, policy.adverse_bps.evidence, policy.fee_evidence)):
         return UnavailableProposal(binding, "UNAVAILABLE_CLOSEOUT_POLICY", ("UNAVAILABLE_CLOSEOUT_POLICY",))
@@ -435,6 +489,6 @@ def liquidation_closeout(resolution, position, policy):
         return UnavailableProposal(binding, price.status, price.reasons, price)
     notional = math.notional(position.quantity, price.value)
     charge = finite_or_exact(exact_scalar(notional.value) * exact_scalar(policy.fee_rate))
-    return LiquidationCloseoutProposal(binding, position.position_id, position.scope, resolution.identity,
+    return LiquidationCloseoutProposal(binding, position.position_id, position.scope, resolution.selection_identity,
                                        risk.identity, side, position.quantity, risk.threshold.value, price,
                                        notional, charge, policy.identity, policy.fee_evidence.identity)

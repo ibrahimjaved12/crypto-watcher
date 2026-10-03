@@ -14,12 +14,14 @@ from .futures_execution_contracts import (
 from .exact_scalar import Scalar, exact_scalar
 
 
-ALGORITHM_VERSION = "binance-usdm-execution-resolution-v1"
+ALGORITHM_VERSION = "binance-usdm-execution-resolution-v2"
 POLICY = (
     "next-eligible-contract-trade:market-full-fill:spread-then-slippage:taker:"
     "passive-opposite-aggressor-strict-through:full-print-volume-cap:limit-price:maker:"
     "valid-admission-only:child-admit-at-activation:same-trigger-event-excluded:"
-    "external-same-time-unresolved:mark-interval-active-after-end:"
+    "external-same-time-unresolved:mark-crossing-interval:preexisting-open-condition-bounds-from-activation:"
+    "mark-child-active-after-conservative-bound:"
+    "trigger-occurrence-separate-from-child-admission:stable-selected-frontier-closeout-proof:"
     "causal-partial-order:no-event-type-priority:explicit-competing-frontier-ambiguity:"
     "event-funding:exact-settlement-mark:confirmed-position-applicability:"
     "risk-threshold-distinct-from-fixed-bps-closeout:separate-closeout-charge:"
@@ -32,8 +34,7 @@ class ResolutionIdentity:
     @property
     def identity(self):
         return canonical_digest({"algorithm": ALGORITHM_VERSION, "math": MATH_VERSION,
-                                 "policy": POLICY, "frontier_capacity": MAX_FRONTIER_CANDIDATES,
-                                 "contract": type(self).__name__, "parameters": self})
+                                 "policy": POLICY, "contract": type(self).__name__, "parameters": self})
 
     @property
     def proposal_id(self):
@@ -316,7 +317,8 @@ class ConditionalOrderView(ResolutionIdentity):
 
     def __post_init__(self):
         if not isinstance(self.order, ConditionalOrder) or self.state not in (
-                "WAITING_TRIGGER", "TRIGGERED_PENDING_ADMISSION", "ACTIVE", "CANCELLED", "FILLED"):
+                "WAITING_TRIGGER", "TRIGGERED_CHILD_REJECTED", "TRIGGERED_CHILD_UNAVAILABLE",
+                "ACTIVE", "CANCELLED", "FILLED"):
             raise ValueError("explicit conditional lifecycle view required")
         if self.caller_state_identity is not None:
             sha256(self.caller_state_identity)
@@ -428,6 +430,8 @@ class TriggerProposal(ResolutionIdentity):
     child_admission: AdmissionResult
     status: str
     next_state: str
+    timing_basis: str
+    opening_trigger_result: Result | None = None
     kind: str = "ORDER_TRIGGER_PROPOSAL"
 
     def __post_init__(self):
@@ -436,15 +440,28 @@ class TriggerProposal(ResolutionIdentity):
                 or not isinstance(self.child_admission, AdmissionResult)):
             raise ValueError("factual trigger result and activation-time child admission required")
         text(self.parent_order_id, "parent order ID")
-        expected = "ACTIVE" if self.child_admission.admitted is not None else "TRIGGERED_PENDING_ADMISSION"
+        expected = ("ACTIVE" if self.child_admission.admitted is not None else
+                    "TRIGGERED_CHILD_REJECTED" if self.child_admission.status == "REJECTED_RULE" else
+                    "TRIGGERED_CHILD_UNAVAILABLE")
         if self.next_state != expected or self.kind != "ORDER_TRIGGER_PROPOSAL":
             raise ValueError("trigger lifecycle mismatch")
-        if self.status not in ("TRIGGERED_EXACT", "TRIGGERED_WITHIN_INTERVAL", "UNAVAILABLE_CHILD_ADMISSION"):
+        if self.status not in ("TRIGGERED_EXACT", "TRIGGERED_WITHIN_INTERVAL", "TRIGGERED_BY_MARK_OPEN"):
             raise ValueError("trigger status mismatch")
-        expected_status = ("UNAVAILABLE_CHILD_ADMISSION" if self.child_admission.admitted is None
-                           else "TRIGGERED_EXACT" if self.binding.causal.exact else "TRIGGERED_WITHIN_INTERVAL")
-        if self.status != expected_status:
-            raise ValueError("trigger status must match causal resolution and child admission")
+        expected_basis = {"TRIGGERED_EXACT": "EXACT_CONTRACT_TRADE",
+                          "TRIGGERED_WITHIN_INTERVAL": "CROSSED_WITHIN_MARK_MINUTE",
+                          "TRIGGERED_BY_MARK_OPEN": "CONDITION_ALREADY_TRUE_AT_MARK_OPEN"}[self.status]
+        if self.timing_basis != expected_basis:
+            raise ValueError("trigger timing basis/status mismatch")
+        if (self.status == "TRIGGERED_EXACT") != self.binding.causal.exact:
+            raise ValueError("exact trigger status must match exact causal time")
+        if self.timing_basis == "EXACT_CONTRACT_TRADE":
+            if self.opening_trigger_result is not None:
+                raise ValueError("contract-price trigger has no mark opening predicate")
+        elif (not isinstance(self.opening_trigger_result, Result)
+              or self.opening_trigger_result.status != "VALID"
+              or self.opening_trigger_result.calculation != "trigger"
+              or self.opening_trigger_result.value is not (self.timing_basis == "CONDITION_ALREADY_TRUE_AT_MARK_OPEN")):
+            raise ValueError("mark opening trigger predicate must be retained exactly")
         if self.child_admission.admitted is not None and self.child_admission.admitted.activation != self.binding.causal:
             raise ValueError("child admission must bind the triggering event/interval")
 
@@ -478,6 +495,7 @@ class LiquidationRiskProposal(ResolutionIdentity):
     position_id: str
     scope: Scope
     threshold: Result
+    crossing_basis: str
     kind: str = "LIQUIDATION_RISK_PROPOSAL"
 
     def __post_init__(self):
@@ -485,7 +503,8 @@ class LiquidationRiskProposal(ResolutionIdentity):
         text(self.position_id, "position_id")
         if (not isinstance(self.binding, ProposalBinding) or not isinstance(self.threshold, Result)
                 or self.threshold.status != "VALID" or self.threshold.calculation != "liquidation_threshold"
-                or self.threshold.bracket_identity is None or self.kind != "LIQUIDATION_RISK_PROPOSAL"):
+                or self.threshold.bracket_identity is None or self.kind != "LIQUIDATION_RISK_PROPOSAL"
+                or self.crossing_basis not in ("CROSSED_WITHIN_MARK_MINUTE", "BREACHED_BY_MARK_OPEN")):
             raise ValueError("risk proposal must retain valid Part 1 threshold and bracket identity")
         number(self.threshold.value, "risk threshold", positive=True)
 
@@ -495,7 +514,7 @@ class LiquidationCloseoutProposal(ResolutionIdentity):
     binding: ProposalBinding
     position_id: str
     scope: Scope
-    selected_resolution_identity: str
+    selected_frontier_identity: str
     risk_proposal_identity: str
     closing_side: OrderSide
     quantity: Scalar
@@ -513,7 +532,7 @@ class LiquidationCloseoutProposal(ResolutionIdentity):
         scope(self.scope)
         text(self.position_id, "position_id")
         enum_value(self.closing_side, OrderSide)
-        for value in (self.selected_resolution_identity, self.risk_proposal_identity,
+        for value in (self.selected_frontier_identity, self.risk_proposal_identity,
                       self.closeout_policy_identity, self.fee_evidence_identity):
             sha256(value)
         number(self.quantity, "closeout quantity", positive=True)
@@ -578,3 +597,16 @@ class FrontierResolution(ResolutionIdentity):
             raise ValueError("frontier must bind the complete supplied candidate identity set")
         if self.status == "SELECTED" and self.proposals != tuple(c.proposal for c in self.frontier):
             raise ValueError("selected proposals must bind the selected frontier")
+
+    @property
+    def selection_identity(self):
+        """Stable proof for the selected minimal frontier, excluding dominated candidates."""
+        return canonical_digest({
+            "algorithm": ALGORITHM_VERSION,
+            "status": self.status,
+            "selected_candidate_identities": tuple(sorted(c.identity for c in self.frontier)),
+            "selected_proposal_identities": tuple(sorted(p.identity for p in self.proposals)),
+            "causal_policy_identity": self.causal_policy_identity,
+            "ambiguity_policy_identity": self.ambiguity_policy_identity,
+            "reasons": tuple(sorted(self.reasons)),
+        })
