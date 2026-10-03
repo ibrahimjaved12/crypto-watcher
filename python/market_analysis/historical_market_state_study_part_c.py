@@ -13,7 +13,9 @@ from statistics import mean, median
 from . import historical_market_state_study_execution as part_b
 from . import historical_market_state_study_evaluation as core
 from .historical_market_state_hmm_crossfit import validate_hmm_crossfit_index, HMM_CROSSFIT_DIRECTORY
-from .historical_market_state_study_adapter import PREDICTIVE_CONFIGS, load_phase_reports, adapt_period, period_provenance
+from .historical_market_state_study_adapter import (
+    PREDICTIVE_CONFIGS, load_phase_reports, for_each_phase_report, index_report, adapt_period, period_provenance,
+)
 from .historical_market_state_study_artifacts import (
     TrackAReference, ScientificTestReport, read_artifact, write_artifact,
 )
@@ -89,6 +91,35 @@ def adapt_configs(reports, upstream, identities, folds=None):
         for report, source in pairs) for identity in identities}
 
 
+def adapt_phase(manifest, coverage, output_dir, phase, revision, cross_fit_sha, final_model_sha,
+                identities, folds=None):
+    """``adapt_configs`` plus ``track_a_references`` with one report in memory at a time.
+
+    Returns ``(adapted, track_a, upstream)``; identical to loading every report
+    first. Reports are hash-verified once on load, so adapt_period skips its
+    repeated full-report hash, and one index per report replaces the
+    per-config scans of candidate_evidence.
+    """
+    days = {identity: [] for identity in identities}
+    track_a = []
+
+    def visit(report, source):
+        index = index_report(report)
+        for identity in days:  # first-occurrence order, as adapt_configs' dict
+            days[identity].append(adapt_period(report, source, identity,
+                held_out_fold=(folds or {}).get(source.study_period_index),
+                report_verified=True, index=index))
+        track_a.append(TrackAReference(source.study_period_index, source.utc_date, source.phase,
+            source.period_report_sha256, tuple(report['native_state_quality_summaries']),
+            part_b._digest(report['native_state_quality_summaries'])))
+
+    upstream = for_each_phase_report(manifest, coverage, output_dir, phase, revision, cross_fit_sha,
+                                     final_model_sha, visit=visit)
+    if len(track_a) != len(upstream.periods):
+        raise ValueError('artifact adapter requires the complete phase report roster')
+    return {identity: tuple(items) for identity, items in days.items()}, tuple(track_a), upstream
+
+
 def exclusion_records(adapted):
     return tuple({'family_id': identity.family_id, 'algorithm_version': identity.algorithm_version,
         'config_version': identity.config_version, 'study_period_index': item.day.study_period_index,
@@ -131,9 +162,8 @@ def run_development(args):
     manifest, coverage = verify_inputs(args.study_manifest, args.coverage_manifest, args.part_b_revision)
     cross_sha, final_sha, folds = load_hmm_prerequisites(manifest, coverage, args.part_b_revision,
                                                        args.hmm_crossfit_index, args.final_hmm_model)
-    reports, upstream = load_phase_reports(manifest, coverage, args.part_b_output_dir, 'development',
-                                          args.part_b_revision, cross_sha, final_sha)
-    adapted = adapt_configs(reports, upstream, PREDICTIVE_CONFIGS, folds)
+    adapted, track_a, upstream = adapt_phase(manifest, coverage, args.part_b_output_dir, 'development',
+                                             args.part_b_revision, cross_sha, final_sha, PREDICTIVE_CONFIGS, folds)
     results, nominations, samples, pairs, evidence, bins = [], [], [], [], [], []
     selected_days = {}
     for family in PRIMARY_CONFIRMATORY_FAMILY:
@@ -163,7 +193,7 @@ def run_development(args):
         tuple(pairs), tuple(samples), upstream, layer_one_terciles=tuple(bins), layer_one_evidence=tuple(evidence),
         hmm_cross_fit_sha256=cross_sha, hmm_final_model_sha256=final_sha)
     nominated = {i: adapted[i] for i in selected_days}
-    write_artifact(args.output, 'development', development, track_a=track_a_references(reports, upstream),
+    write_artifact(args.output, 'development', development, track_a=track_a,
         layer_one=layer_one_description(development, nominated, selected_days), exclusions=exclusion_records(adapted))
     return development
 
@@ -174,14 +204,13 @@ def run_validation(args):
     cross_sha, final_sha, _ = load_hmm_prerequisites(manifest, coverage, args.part_b_revision,
                                                    args.hmm_crossfit_index, args.final_hmm_model)
     require_prerequisites(development, manifest, coverage, args.part_b_revision, cross_sha, final_sha)
-    reports, upstream = load_phase_reports(manifest, coverage, args.part_b_output_dir, 'validation',
-                                          args.part_b_revision, cross_sha, final_sha)
-    adapted = adapt_configs(reports, upstream, tuple(p.identity for p in development.predictive_pairs))
+    adapted, track_a, upstream = adapt_phase(manifest, coverage, args.part_b_output_dir, 'validation',
+        args.part_b_revision, cross_sha, final_sha, tuple(p.identity for p in development.predictive_pairs))
     decisions = tuple(core.evaluate_validation(pair, tuple(d.day for d in adapted[pair.identity]), upstream, development)
                       for pair in development.predictive_pairs)
     validation = core.freeze_validation(development, decisions, upstream)
     authorization = core.authorize_test(development, validation)
-    write_artifact(args.output, 'validation', validation, track_a=track_a_references(reports, upstream),
+    write_artifact(args.output, 'validation', validation, track_a=track_a,
                    layer_one=layer_one_description(development, adapted), exclusions=exclusion_records(adapted))
     write_artifact(args.test_authorization_output, 'authorization', authorization)
     return validation, authorization
@@ -199,12 +228,11 @@ def run_test(args):
     members = tuple(m for m in supplied.members if m.status == 'AUTHORIZED')
     upstream, results, test_track_a, descriptive, exclusions = None, (), (), (), ()
     if members:
-        reports, upstream = load_phase_reports(manifest, coverage, args.part_b_output_dir, 'test',
-            args.part_b_revision, development.hmm_cross_fit_sha256, development.hmm_final_model_sha256)
-        adapted = adapt_configs(reports, upstream, tuple(m.identity for m in members))
+        adapted, test_track_a, upstream = adapt_phase(manifest, coverage, args.part_b_output_dir, 'test',
+            args.part_b_revision, development.hmm_cross_fit_sha256, development.hmm_final_model_sha256,
+            tuple(m.identity for m in members))
         results = tuple(core.evaluate_test(development, validation, supplied, member.family_id,
             tuple(d.day for d in adapted[member.identity]), upstream) for member in members)
-        test_track_a = track_a_references(reports, upstream)
         descriptive = layer_one_description(development, adapted)
         exclusions = exclusion_records(adapted)
     report = ScientificTestReport(development.freeze_sha256, validation.freeze_sha256, supplied, upstream,

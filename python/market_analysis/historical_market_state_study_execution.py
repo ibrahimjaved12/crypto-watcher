@@ -2602,13 +2602,14 @@ def freeze_study_hmm_model(
     period_dir = output / PERIOD_DIRECTORY
     development_periods = tuple(item for item in _manifest_periods(manifest)
                                  if item.phase == "development")
-    blocks, identities, reports = [], [], []
+    blocks, identities = [], []
     coverage_sha = None
     for period in development_periods:
         path = period_dir / _period_filename(period)
         if not path.is_file():
             raise ValueError(
                 f"cannot freeze study HMM before development period {period.study_period_index} completes")
+        report = None  # free the previous report before reading the next one
         report = _read_json(path)
         _validate_period_report(report, manifest, period, code_revision, coverage_sha)
         current_coverage = report["extension_coverage_manifest_sha256"]
@@ -2620,7 +2621,6 @@ def freeze_study_hmm_model(
                            "utc_date": period.utc_date.isoformat(),
                            "phase": period.phase,
                            "period_report_sha256": report["report_sha256"]})
-        reports.append(report)
     ordered_blocks = validate_hmm_development_cohort(blocks, manifest)
     diagnostics, model = train_hmm_regime_model_from_blocks(ordered_blocks, HMM_CONFIG_V1)
     if model is None or diagnostics.status != "HMM_TRAINING_READY":

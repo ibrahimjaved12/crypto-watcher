@@ -166,6 +166,15 @@ def generated_report(index=0, config=None, timestamp=None, evidence=None):
     return seal(body)
 
 
+def phase_visitor(reports, upstream):
+    """Fake for_each_phase_report: visit each report/source pair in order, return upstream."""
+    def visit_all(*inputs, visit):
+        for report, source in zip(reports, upstream.periods):
+            visit(report, source)
+        return upstream
+    return visit_all
+
+
 def adapt(report, config=None, fold=None):
     return adapter.adapt_period(report, adapter.period_provenance(report, CROSS, FINAL),
                                 config or identity(), held_out_fold=fold)
@@ -255,7 +264,7 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
             hmm_crossfit_index='index', final_hmm_model='model', part_b_output_dir='development', output='dev')
         with patch.object(cli, 'verify_inputs', return_value=(manifest, {'coverage_manifest_sha256': COVERAGE})), \
                 patch.object(cli, 'load_hmm_prerequisites', return_value=(CROSS, FINAL, folds)), \
-                patch.object(cli, 'load_phase_reports', return_value=(reports, upstream)) as loader, \
+                patch.object(cli, 'for_each_phase_report', side_effect=phase_visitor(reports, upstream)) as loader, \
                 patch.object(cli, 'write_artifact') as writer:
             development = cli.run_development(args)
         self.assertEqual(loader.call_args.args[3], 'development')
@@ -326,16 +335,16 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
             order.append('authorize')
             return original_authorize(*parents)
 
-        def load(*inputs):
+        def load(*inputs, visit):
             self.assertEqual(order[0], 'authorize')
             order.append('open-test')
             self.assertEqual(inputs[3], 'test')
-            return reports, upstream
+            return phase_visitor(reports, upstream)(*inputs, visit=visit)
 
         with patch.object(cli, 'read_artifact', side_effect=((development, metadata), (validation, metadata), (authorization, {}))), \
                 patch.object(cli, 'verify_inputs', return_value=(manifest, {'coverage_manifest_sha256': COVERAGE})), \
                 patch.object(core, 'authorize_test', side_effect=gate), \
-                patch.object(cli, 'load_phase_reports', side_effect=load), \
+                patch.object(cli, 'for_each_phase_report', side_effect=load), \
                 patch.object(core, 'evaluate_test', wraps=core.evaluate_test) as scorer, \
                 patch.object(cli, 'write_artifact'):
             result = cli.run_test(args)
@@ -377,7 +386,7 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
         manifest = part_b.load_study_manifest(MANIFEST_PATH)
         with patch.object(cli, 'read_artifact', side_effect=((development, metadata), (validation, metadata), (authorization, {}))), \
                 patch.object(cli, 'verify_inputs', return_value=(manifest, {'coverage_manifest_sha256': COVERAGE})), \
-                patch.object(cli, 'load_phase_reports') as loader, patch.object(core, 'evaluate_test') as scorer, \
+                patch.object(cli, 'for_each_phase_report') as loader, patch.object(core, 'evaluate_test') as scorer, \
                 patch.object(cli, 'write_artifact'):
             report = cli.run_test(args)
         loader.assert_not_called()
@@ -735,13 +744,13 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
         manifest = part_b.load_study_manifest(MANIFEST_PATH)
         with patch.object(cli, 'read_artifact', side_effect=((development, {'track_a': (), 'layer_one': (), 'exclusions': ()}),
                 (validation, {'track_a': (), 'layer_one': (), 'exclusions': ()}),
-                (replace(authorization, validation_freeze_sha256='0' * 64), {}))), patch.object(cli, 'load_phase_reports') as loader:
+                (replace(authorization, validation_freeze_sha256='0' * 64), {}))), patch.object(cli, 'for_each_phase_report') as loader:
             with self.assertRaises(ValueError): cli.run_test(args)
             loader.assert_not_called()
         with patch.object(cli, 'read_artifact', side_effect=((development, {'track_a': (), 'layer_one': (), 'exclusions': ()}),
                 (validation, {'track_a': (), 'layer_one': (), 'exclusions': ()}), (authorization, {}))), \
                 patch.object(cli, 'verify_inputs', return_value=(manifest, {'coverage_manifest_sha256': COVERAGE})), \
-                patch.object(cli, 'load_phase_reports') as loader, patch.object(core, 'evaluate_test') as scorer, \
+                patch.object(cli, 'for_each_phase_report') as loader, patch.object(core, 'evaluate_test') as scorer, \
                 patch.object(cli, 'write_artifact'):
             report = cli.run_test(args)
             loader.assert_not_called()
@@ -764,7 +773,8 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
         with patch.object(cli, 'read_artifact', return_value=(development, {})), \
                 patch.object(cli, 'verify_inputs', return_value=(manifest, {'coverage_manifest_sha256': COVERAGE})), \
                 patch.object(cli, 'load_hmm_prerequisites', return_value=(CROSS, FINAL, {})), \
-                patch.object(cli, 'load_phase_reports', return_value=(reports, validation.upstream_provenance)) as loader, \
+                patch.object(cli, 'for_each_phase_report',
+                             side_effect=phase_visitor(reports, validation.upstream_provenance)) as loader, \
                 patch.object(core, 'fit_final_development_pair') as refit, \
                 patch.object(core, 'evaluate_development_family') as reselect, \
                 patch.object(cli, 'write_artifact'):
@@ -799,6 +809,160 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError): replace(adapt(reports[0]).day.observations[0], family_id='EXP-75-04A')
         self.assertFalse(any(i.family_id == 'EXP-75-04A' for i in adapter.PREDICTIVE_CONFIGS))
         self.assertNotIn('track_a_supported', io.encode(reference)['fields'])
+
+
+def development_folds(reports):
+    folds = {}
+    for report in reports:
+        index = report['period']['study_period_index']
+        timestamp = report['candidate_evidence'][0]['decision_time_ms']
+        fold = {'held_out_period': {'period_report_sha256': report['report_sha256'], 'study_period_index': index,
+                'utc_date': report['period']['utc_date']}, 'fold_model_sha256': '9' * 64,
+                'held_out_evidence': [[{**native('EXP-75-09'), 'model_sha256': '9' * 64,
+                                       'evaluation_boundary_time_ms': timestamp}]]}
+        fold['artifact_sha256'] = part_b._digest(fold)
+        folds[index] = fold
+    return folds
+
+
+def outcome(call):
+    """A value or the exact failure, so equivalence also covers raised errors."""
+    try:
+        return ('value', call())
+    except Exception as exc:  # noqa: BLE001 - compared, never swallowed silently
+        return ('error', type(exc), str(exc))
+
+
+class OneReportAtATimeTests(unittest.TestCase):
+    def phase(self, phase, indexes, config=None):
+        reports = tuple(generated_report(i, config) for i in indexes)
+        upstream = f.UpstreamInputProvenance(phase, tuple(adapter.period_provenance(r, CROSS, FINAL) for r in reports),
+                                             CROSS, FINAL)
+        return reports, upstream
+
+    def test_adapt_phase_equals_adapt_configs_and_track_a_references(self):
+        manifest = part_b.load_study_manifest(MANIFEST_PATH)
+        coverage = {'coverage_manifest_sha256': COVERAGE}
+        development = self.phase('development', range(10))
+        validation = self.phase('validation', range(10, 18), identity('EXP-75-02'))
+        cases = (('development', development, adapter.PREDICTIVE_CONFIGS, development_folds(development[0])),
+                 ('validation', validation, adapter.PREDICTIVE_CONFIGS, None),
+                 ('validation', validation, (identity('EXP-75-02'), identity()), None),
+                 ('validation', validation, (), None))
+        for phase, (reports, upstream), identities, folds in cases:
+            with self.subTest(phase=phase, identities=len(identities)):
+                expected = (cli.adapt_configs(reports, upstream, identities, folds),
+                            cli.track_a_references(reports, upstream), upstream)
+                with patch.object(cli, 'for_each_phase_report', side_effect=phase_visitor(reports, upstream)) as loader:
+                    actual = cli.adapt_phase(manifest, coverage, 'output', phase, REVISION, CROSS, FINAL,
+                                             identities, folds)
+                self.assertEqual(loader.call_args.args, (manifest, coverage, 'output', phase, REVISION, CROSS, FINAL))
+                self.assertEqual(actual, expected)
+                self.assertEqual(tuple(actual[0]), tuple(expected[0]))  # identity order too
+
+    def test_adapt_phase_requires_the_complete_roster(self):
+        reports, upstream = self.phase('validation', range(10, 18))
+
+        def incomplete(*inputs, visit):
+            for report, source in zip(reports[:-1], upstream.periods):
+                visit(report, source)
+            return upstream
+
+        with patch.object(cli, 'for_each_phase_report', side_effect=incomplete), \
+                self.assertRaisesRegex(ValueError, 'complete phase report roster'):
+            cli.adapt_phase(None, None, 'output', 'validation', REVISION, CROSS, FINAL, (identity(),))
+
+    def test_verified_and_indexed_adapt_period_equals_default(self):
+        fixtures = [generated_report(10)] + [generated_report(10, config) for config in adapter.PREDICTIVE_CONFIGS]
+        for number, report in enumerate(fixtures):
+            source = adapter.period_provenance(report, CROSS, FINAL)
+            index = adapter.index_report(report)
+            # The shared fixture runs every identity; each own-config fixture runs its config.
+            identities = adapter.PREDICTIVE_CONFIGS if number == 0 else (adapter.PREDICTIVE_CONFIGS[number - 1],)
+            for config in identities:
+                with self.subTest(fixture=number, config=config):
+                    self.assertEqual(
+                        outcome(lambda: adapter.adapt_period(report, source, config, report_verified=True, index=index)),
+                        outcome(lambda: adapter.adapt_period(report, source, config)))
+
+    def test_index_report_preserves_identity_and_v1_order(self):
+        report = generated_report(10, identity('EXP-75-02'))
+        report['candidate_evidence'] = report['candidate_evidence'] + [deepcopy(report['candidate_evidence'][0])]
+        index = adapter.index_report(report)
+        self.assertEqual(index.v1_records, [r for r in report['candidate_evidence'] if r['experiment_id'] == 'V1'])
+        for key, records in index.by_identity.items():
+            self.assertEqual(records, [r for r in report['candidate_evidence'] if adapter._identity(r) == key])
+        self.assertTrue(all(a is b for a, b in zip(index.v1_records, (r for r in report['candidate_evidence']
+                                                                     if r['experiment_id'] == 'V1'))))
+
+    def test_report_verified_skips_only_the_report_rehash(self):
+        report = generated_report(10)
+        source = adapter.period_provenance(report, CROSS, FINAL)
+        for verified, expected in ((False, 1), (True, 0)):
+            with self.subTest(report_verified=verified), \
+                    patch.object(part_b, '_verify_hashed_payload', wraps=part_b._verify_hashed_payload) as verify:
+                adapter.adapt_period(report, source, identity(), report_verified=verified)
+                self.assertEqual(sum(1 for c in verify.call_args_list if c.args[1] == 'report_sha256'), expected)
+        with self.assertRaisesRegex(ValueError, 'adapter source report SHA mismatch'):
+            adapter.adapt_period(report, replace(source, period_report_sha256='0' * 64), identity(),
+                                 report_verified=True)
+        tampered = dict(report, code_revision='other')
+        with self.assertRaisesRegex(ValueError, 'provenance mismatch'):
+            adapter.adapt_period(tampered, source, identity(), report_verified=True)
+
+    def test_for_each_phase_report_loads_then_visits_one_at_a_time(self):
+        import weakref
+        manifest = part_b.load_study_manifest(MANIFEST_PATH)
+        reports = tuple(generated_report(i) for i in range(10, 18))
+
+        class Report(dict):
+            """weakref-able copy of a generated report."""
+
+        events, alive, pending = [], [], list(reports)
+
+        def load(*inputs, **options):
+            self.assertTrue(all(ref() is None for ref in alive), 'previous report still referenced')
+            report = Report(pending.pop(0))
+            alive.append(weakref.ref(report))
+            events.append('load')
+            return report
+
+        def visit(report, source):
+            events.append('visit')
+
+        with patch.object(part_b, 'load_finalized_period_report', side_effect=load):
+            upstream = adapter.for_each_phase_report(manifest, {'coverage_manifest_sha256': COVERAGE},
+                '/synthetic/output', 'validation', REVISION, CROSS, FINAL, visit=visit)
+        self.assertEqual(events, ['load', 'visit'] * 8)
+        self.assertEqual(upstream, f.UpstreamInputProvenance('validation',
+            tuple(adapter.period_provenance(r, CROSS, FINAL) for r in reports), CROSS, FINAL))
+
+        events.clear()
+        pending[:] = reports
+
+        def failing(report, source):
+            events.append('visit')
+            if len(events) == 4:
+                raise ValueError('synthetic visit failure')
+
+        with patch.object(part_b, 'load_finalized_period_report', side_effect=lambda *a, **k: (
+                events.append('load'), pending.pop(0))[1]), \
+                self.assertRaisesRegex(ValueError, 'synthetic visit failure'):
+            adapter.for_each_phase_report(manifest, {'coverage_manifest_sha256': COVERAGE},
+                '/synthetic/output', 'validation', REVISION, CROSS, FINAL, visit=failing)
+        self.assertEqual(events, ['load', 'visit', 'load', 'visit'])
+
+    def test_load_phase_reports_unchanged(self):
+        manifest = part_b.load_study_manifest(MANIFEST_PATH)
+        reports = tuple(generated_report(i) for i in range(10, 18))
+        with patch.object(part_b, 'load_finalized_period_report', side_effect=reports):
+            loaded, upstream = adapter.load_phase_reports(manifest, {'coverage_manifest_sha256': COVERAGE},
+                '/synthetic/output', 'validation', REVISION, CROSS, FINAL)
+        self.assertIsInstance(loaded, tuple)
+        self.assertEqual(len(loaded), len(reports))
+        self.assertTrue(all(a is b for a, b in zip(loaded, reports)))
+        self.assertEqual(upstream, f.UpstreamInputProvenance('validation',
+            tuple(adapter.period_provenance(r, CROSS, FINAL) for r in reports), CROSS, FINAL))
 
 
 if __name__ == '__main__':

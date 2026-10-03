@@ -69,3 +69,19 @@ Then use that new coverage manifest and the same pinned revision for the represe
 three-development-period Part B smoke. Part C development requires all ten finalized
 development reports plus the complete cross-fit index and frozen final HMM, not a
 three-period subset. No real coverage/study/smoke execution is part of this PR.
+
+## Memory: one period report at a time
+
+Part C and the HMM tools (`freeze_study_hmm_model`, the cross-fit build and
+`validate_hmm_crossfit_index`) hold one decoded period report in memory at a
+time. Part C loads, validates and hash-verifies each report once, adapts every
+config for that period from a single index of its candidate evidence, then
+releases it before reading the next. Peak memory is roughly 10-11 GB for one
+report's read plus decode, so a 16 GB runner is enough.
+
+Part C validation also needs the ten development reports in the directory that
+contains the cross-fit index, because `validate_hmm_crossfit_index` re-validates
+them.
+
+No artifact changed: development, validation and test freezes, HMM fold, index
+and model artifacts, and all their hashes are byte-identical.
