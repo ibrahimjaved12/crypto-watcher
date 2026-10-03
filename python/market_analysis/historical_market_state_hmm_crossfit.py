@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 from .experiments.market_state_hmm_regimes import (
     HMM_ALGORITHM_VERSION,
     HMM_CONFIG_V1,
+    _training_fingerprint,
     filter_hmm_regime_feature_blocks,
     train_hmm_regime_model_from_blocks,
 )
@@ -27,18 +29,20 @@ from .historical_market_state_study_execution import (
     StudyArtifactConflictError,
     _artifact_json,
     _canonical,
-    _load_hmm_development_block,
+    _validate_period_report,
+    _validated_period_hmm_block,
     _period_filename,
     _read_json,
     _verify_hashed_payload,
     _write_atomic_new,
     load_study_manifest,
+    _parse_hmm_model,
 )
 
 
-HMM_DEVELOPMENT_CROSSFIT_VERSION = "historical-market-state-hmm-development-crossfit-v1"
+HMM_DEVELOPMENT_CROSSFIT_VERSION = "historical-market-state-hmm-development-crossfit-v2"
 HMM_DEVELOPMENT_CROSSFIT_INDEX_VERSION = (
-    "historical-market-state-hmm-development-crossfit-index-v1"
+    "historical-market-state-hmm-development-crossfit-index-v2"
 )
 HMM_CROSSFIT_DIRECTORY = "hmm-development-crossfit"
 HMM_CROSSFIT_INDEX_FILENAME = "historical-market-state-study-v1-hmm-crossfit-index.json"
@@ -65,42 +69,24 @@ def _load_development_inputs(manifest, output_dir: Path, code_revision: str):
                 f"cannot build HMM cross-fit before development period "
                 f"{period.study_period_index} completes")
         report = _read_json(path)
-        report_sha = _verify_hashed_payload(report, "report_sha256", "development period report")
-        identity = report.get("period", {})
-        if (report.get("period_report_schema_version") != PERIOD_REPORT_SCHEMA_VERSION
-                or report.get("study_manifest_sha256") != manifest.manifest_sha256
-                or report.get("code_revision") != code_revision
-                or identity.get("study_period_index") != period.study_period_index
-                or identity.get("phase") != "development"
-                or identity.get("utc_date") != period.utc_date.isoformat()):
-            raise StudyArtifactConflictError(
-                f"development period artifact identity mismatch: {path.name}")
-        current_coverage = report.get("extension_coverage_manifest_sha256")
-        if not isinstance(current_coverage, str) or len(current_coverage) != 64:
-            raise ValueError("development period lacks frozen extension coverage identity")
+        report_sha = _validate_period_report(report, manifest, period, code_revision, coverage_sha)
+        current_coverage = report["extension_coverage_manifest_sha256"]
         if coverage_sha is None:
             coverage_sha = current_coverage
-        elif current_coverage != coverage_sha:
-            raise ValueError("development period artifacts use different frozen coverage reports")
-        block = _load_hmm_development_block(
-            report.get("hmm_development_training_block"))
-        if (block.study_period_index != period.study_period_index
-                or block.utc_date != period.utc_date.isoformat()
-                or report.get("hmm_development_training_block_sha256")
-                != block.block_sha256):
-            raise ValueError("development period HMM feature evidence hash mismatch")
+        block = _validated_period_hmm_block(report, period)
         blocks.append(block)
         reports.append({
             "study_period_index": period.study_period_index,
             "utc_date": period.utc_date.isoformat(),
             "period_report_sha256": report_sha,
             "training_block_sha256": block.block_sha256,
+            "event_time_v1_context": report["event_time_v1_context"],
         })
     return tuple(blocks), tuple(reports), coverage_sha
 
 
 def _fold_payload(manifest, coverage_sha, code_revision, held_out, training_blocks,
-                  report_identity, diagnostics, model, held_out_evidence):
+                  report_identity, diagnostics, model, held_out_evidence, training_reports):
     body = {
         "artifact_version": HMM_DEVELOPMENT_CROSSFIT_VERSION,
         "study_version": manifest.study_version,
@@ -118,14 +104,17 @@ def _fold_payload(manifest, coverage_sha, code_revision, held_out, training_bloc
             "study_period_index": block.study_period_index,
             "utc_date": block.utc_date,
             "training_block_sha256": block.block_sha256,
-        } for block in training_blocks),
+            "period_report_sha256": source["period_report_sha256"],
+        } for block, source in zip(training_blocks, training_reports)),
         "training_diagnostics": report_json_safe(diagnostics),
         "fold_model_sha256": model.model_sha256,
+        "fold_model": report_json_safe(model),
         "held_out_feature_block_count": len(held_out.feature_blocks),
         "held_out_evidence": report_json_safe(held_out_evidence),
+        "held_out_v1_context": report_identity["event_time_v1_context"],
         "filter_semantics": (
             "causal-forward-filter over stored held-out HMM feature blocks; "
-            "state resets at every stored block/gap; held-out day never enters fold training"
+            "state resets at day start and actual feature gaps; held-out day never enters fold training"
         ),
         "code_revision": code_revision,
     }
@@ -161,7 +150,8 @@ def freeze_development_hmm_crossfit(
             held_out.feature_blocks, model, HMM_CONFIG_V1)
         payload = _fold_payload(
             manifest, coverage_sha, code_revision, held_out, training_blocks,
-            reports[offset], diagnostics, model, held_out_evidence)
+            reports[offset], diagnostics, model, held_out_evidence,
+            tuple(source for index, source in enumerate(reports) if index != offset))
         path = destination / (
             f"{held_out.study_period_index:03d}-{held_out.utc_date}.json")
         if path.exists():
@@ -203,6 +193,164 @@ def freeze_development_hmm_crossfit(
     else:
         _write_atomic_new(index_path, _canonical(index_payload))
     return tuple(written)
+
+
+def validate_hmm_crossfit_index(path: Path | str,
+                                manifest: HistoricalMarketStateStudyManifest,
+                                *, coverage_sha256: str, code_revision: str):
+    """Validate all ten folds and their source-report/model identities for Part C."""
+    index_path = Path(path).expanduser().resolve()
+    index = _read_json(index_path)
+    _verify_hashed_payload(index, "index_sha256", "HMM cross-fit index")
+    periods = _development_periods(manifest)
+    if (index.get("index_version") != HMM_DEVELOPMENT_CROSSFIT_INDEX_VERSION
+            or index.get("artifact_version") != HMM_DEVELOPMENT_CROSSFIT_VERSION
+            or index.get("study_version") != manifest.study_version
+            or index.get("study_manifest_sha256") != manifest.manifest_sha256
+            or index.get("extension_coverage_manifest_sha256") != coverage_sha256
+            or index.get("algorithm_version") != HMM_ALGORITHM_VERSION
+            or index.get("config_version") != HMM_CONFIG_V1.version
+            or index.get("code_revision") != code_revision):
+        raise ValueError("HMM cross-fit index identity differs from the frozen study")
+    entries = index.get("ordered_folds")
+    if not isinstance(entries, list) or len(entries) != len(periods):
+        raise ValueError("HMM cross-fit index must contain all ten ordered folds")
+    source_identities = {}
+    period_dir = index_path.parent / PERIOD_DIRECTORY
+    for period in periods:
+        report = _read_json(period_dir / _period_filename(period))
+        report_sha = _validate_period_report(report, manifest, period, code_revision, coverage_sha256)
+        block = _validated_period_hmm_block(report, period)
+        source_identities[period.study_period_index] = (
+            report_sha, block.block_sha256, block,
+            report["event_time_v1_context"])
+    for offset, (entry, period) in enumerate(zip(entries, periods)):
+        if (not isinstance(entry, dict)
+                or entry.get("study_period_index") != offset
+                or entry.get("utc_date") != period.utc_date.isoformat()
+                or entry.get("fold_file") != f"{offset:03d}-{period.utc_date.isoformat()}.json"):
+            raise ValueError("HMM cross-fit fold ordering/period identity mismatch")
+        fold_path = index_path.parent / HMM_CROSSFIT_DIRECTORY / entry["fold_file"]
+        fold = _read_json(fold_path)
+        _verify_hashed_payload(fold, "artifact_sha256", "HMM cross-fit fold")
+        if (fold.get("artifact_version") != HMM_DEVELOPMENT_CROSSFIT_VERSION
+                or fold.get("study_version") != manifest.study_version
+                or fold.get("study_manifest_sha256") != manifest.manifest_sha256
+                or fold.get("extension_coverage_manifest_sha256") != coverage_sha256
+                or fold.get("algorithm_version") != HMM_ALGORITHM_VERSION
+                or fold.get("config_version") != HMM_CONFIG_V1.version
+                or fold.get("code_revision") != code_revision
+                or fold.get("artifact_sha256") != entry.get("artifact_sha256")):
+            raise ValueError("HMM fold contract differs from the cross-fit index")
+        held = fold.get("held_out_period", {})
+        training = fold.get("ordered_training_blocks")
+        if (not isinstance(held, dict) or not isinstance(training, list)
+                or any(not isinstance(item, dict) for item in training)):
+            raise ValueError("HMM fold period/training references are malformed")
+        expected_training = tuple(item.study_period_index for item in periods if item.study_period_index != offset)
+        if ((held.get("study_period_index"), held.get("utc_date"))
+                != (offset, period.utc_date.isoformat())
+                or held.get("period_report_sha256") != source_identities[offset][0]
+                or held.get("training_block_sha256") != source_identities[offset][1]
+                or not isinstance(held.get("period_report_sha256"), str)
+                or len(held["period_report_sha256"]) != 64
+                or not isinstance(training, list) or len(training) != 9
+                or tuple(item.get("study_period_index") for item in training) != expected_training
+                or any(not all(isinstance(item.get(key), str) and len(item[key]) == 64
+                               for key in ("training_block_sha256", "period_report_sha256"))
+                       for item in training)
+                or tuple((item.get("period_report_sha256"), item.get("training_block_sha256"))
+                         for item in training)
+                != tuple((source_identities[index][0], source_identities[index][1])
+                         for index in expected_training)):
+            raise ValueError("HMM fold lacks its held-out/source training identities")
+        model = _parse_hmm_model(fold.get("fold_model"))
+        if (model.model_sha256 != fold.get("fold_model_sha256")
+                or model.model_sha256 != entry.get("fold_model_sha256")):
+            raise ValueError("HMM fold model hash mismatch")
+        training_blocks = tuple(source_identities[index][2] for index in expected_training)
+        if any(item.movement_scope != training_blocks[0].movement_scope for item in training_blocks):
+            raise ValueError("HMM fold source training scopes differ")
+        training_feature_blocks = tuple(feature_block for item in training_blocks
+                                        for feature_block in item.feature_blocks)
+        expected_training_sha = _training_fingerprint(
+            training_feature_blocks, training_blocks[0].movement_scope, HMM_CONFIG_V1)
+        diagnostics = fold.get("training_diagnostics")
+        if not isinstance(diagnostics, dict):
+            raise ValueError("HMM fold training diagnostics are malformed")
+        if (model.training_data_sha256 != expected_training_sha
+                or model.training_block_count != len(training_feature_blocks)
+                or model.training_usable_row_count != sum(len(block) for block in training_feature_blocks)
+                or model.training_unavailable_row_count != sum(item.unavailable_row_count
+                                                               for item in training_blocks)
+                or diagnostics.get("training_data_sha256") != expected_training_sha):
+            raise ValueError("HMM fold model was not fit on exactly its nine source blocks")
+        if (diagnostics.get("status") != "HMM_TRAINING_READY"
+                or diagnostics.get("reason") is not None
+                or diagnostics.get("usable_row_count") != model.training_usable_row_count
+                or diagnostics.get("unavailable_row_count") != model.training_unavailable_row_count
+                or diagnostics.get("block_count") != model.training_block_count
+                or diagnostics.get("transition_count") != model.training_transition_count
+                or diagnostics.get("first_usable_boundary_time_ms")
+                != model.training_first_usable_boundary_time_ms
+                or diagnostics.get("last_usable_boundary_time_ms")
+                != model.training_last_usable_boundary_time_ms
+                or fold.get("filter_semantics") != (
+                    "causal-forward-filter over stored held-out HMM feature blocks; "
+                    "state resets at day start and actual feature gaps; held-out day never enters fold training")):
+            raise ValueError("HMM fold diagnostics/filter semantics conflict with the frozen model")
+        evidence = fold.get("held_out_evidence")
+        if (type(fold.get("held_out_feature_block_count")) is not int
+                or not isinstance(evidence, list)
+                or len(evidence) != fold["held_out_feature_block_count"]):
+            raise ValueError("HMM fold held-out evidence block count mismatch")
+        context = fold.get("held_out_v1_context")
+        if (not isinstance(context, list) or any(not isinstance(item, dict) for item in context)):
+            raise ValueError("HMM fold held-out V1 context is malformed")
+        context_times = tuple(item.get("decision_time_ms") for item in context)
+        if (context != source_identities[offset][3]
+                or len(context_times) != len(set(context_times))):
+            raise ValueError("HMM fold contains duplicate held-out V1 context")
+        source_feature_blocks = source_identities[offset][2].feature_blocks
+        if (len(evidence) != len(source_feature_blocks)
+                or any(not isinstance(items, list) or len(items) != len(source_rows)
+                       for items, source_rows in zip(evidence, source_feature_blocks))):
+            raise ValueError("HMM fold evidence does not preserve held-out feature block boundaries")
+        previous_boundary = None
+        previous_ready = False
+        for evidence_block, source_block in zip(evidence, source_feature_blocks):
+            for item, source_row in zip(evidence_block, source_block):
+                if not isinstance(item, dict):
+                    raise ValueError("HMM fold contains malformed held-out evidence")
+                if (item.get("model_sha256") != model.model_sha256
+                        or item.get("algorithm_version") != HMM_ALGORITHM_VERSION
+                        or item.get("config_version") != HMM_CONFIG_V1.version
+                        or item.get("evaluation_boundary_time_ms")
+                        != source_row.evaluation_boundary_time_ms
+                        or item.get("evaluation_boundary_time_ms") not in context_times
+                        or item.get("raw_feature_vector") != list(source_row.values)):
+                    raise ValueError("HMM held-out evidence/context identity mismatch")
+                posterior = item.get("posterior_probabilities")
+                if item.get("status") == "HMM_READY":
+                    if (not isinstance(posterior, list) or len(posterior) != 3
+                            or any(type(value) not in (int, float) or not math.isfinite(value)
+                                   or value < 0 for value in posterior)
+                            or abs(sum(posterior) - 1.0) > 1e-10):
+                        raise ValueError("HMM fold contains malformed posterior evidence")
+                    expected_reset = (not previous_ready or previous_boundary is None
+                                      or source_row.evaluation_boundary_time_ms
+                                      != previous_boundary + HMM_CONFIG_V1.sample_interval_ms)
+                    if item.get("filter_reset_before_observation") is not expected_reset:
+                        raise ValueError("HMM fold filtering did not reset at day start/gaps")
+                    previous_ready = True
+                elif item.get("status") != "HMM_FEATURE_UNAVAILABLE" or posterior is not None:
+                    raise ValueError("HMM fold contains an invalid held-out status")
+                else:
+                    if item.get("filter_reset_before_observation") is not None:
+                        raise ValueError("unavailable HMM fold evidence carries a filter transition")
+                    previous_ready = False
+                previous_boundary = source_row.evaluation_boundary_time_ms
+    return index
 
 
 def build_cli_parser() -> argparse.ArgumentParser:

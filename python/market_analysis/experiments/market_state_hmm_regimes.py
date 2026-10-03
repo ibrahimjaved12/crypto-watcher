@@ -783,6 +783,33 @@ def _filter_observation(row, model, previous):
             entropy, predictive_ll)
 
 
+def _advance_hmm_feature_row(row, model, state, config):
+    """Shared evidence/state adapter for canonical and stored-feature inference."""
+    boundary = row.evaluation_boundary_time_ms
+    values = dict(
+        evaluation_boundary_time_ms=boundary, status=HMM_READY, status_reason=None,
+        raw_feature_vector=row.values, standardized_feature_vector=None,
+        filter_reset_before_observation=None, predicted_state_probabilities=None,
+        posterior_probabilities=None, hard_state=None, posterior_confidence=None,
+        posterior_entropy=None, predictive_log_likelihood=None,
+        algorithm_version=HMM_ALGORITHM_VERSION, config_version=config.version,
+        model_sha256=model.model_sha256,
+    )
+    try:
+        standardized, reset, predicted, posterior, hard, confidence, entropy, likelihood = _filter_observation(row, model, state)
+    except (ArithmeticError, OverflowError, ValueError, ZeroDivisionError):
+        values.update(status=HMM_FEATURE_UNAVAILABLE, status_reason="HMM_INFERENCE_NUMERIC_UNAVAILABLE")
+        return HMMRegimeEvidence(**values), None
+    values.update(
+        standardized_feature_vector=standardized,
+        filter_reset_before_observation=reset,
+        predicted_state_probabilities=predicted, posterior_probabilities=posterior,
+        hard_state=hard, posterior_confidence=confidence, posterior_entropy=entropy,
+        predictive_log_likelihood=likelihood,
+    )
+    return HMMRegimeEvidence(**values), HMMFilterState(boundary, posterior)
+
+
 def advance_hmm_regime_filter(
     evaluation: MarketMovementEvaluation,
     partition: ExperimentPartition,
@@ -826,19 +853,7 @@ def advance_hmm_regime_filter(
         return HMMRegimeEvidence(**values), state
     if model is None or row is None:
         return HMMRegimeEvidence(**values), None
-    try:
-        standardized, reset, predicted, posterior, hard, confidence, entropy, likelihood = _filter_observation(row, model, state)
-    except (ArithmeticError, OverflowError, ValueError, ZeroDivisionError):
-        values.update(status=HMM_FEATURE_UNAVAILABLE, status_reason="HMM_INFERENCE_NUMERIC_UNAVAILABLE")
-        return HMMRegimeEvidence(**values), None
-    values.update(
-        standardized_feature_vector=standardized,
-        filter_reset_before_observation=reset,
-        predicted_state_probabilities=predicted, posterior_probabilities=posterior,
-        hard_state=hard, posterior_confidence=confidence, posterior_entropy=entropy,
-        predictive_log_likelihood=likelihood,
-    )
-    return HMMRegimeEvidence(**values), HMMFilterState(boundary, posterior)
+    return _advance_hmm_feature_row(row, model, state, config)
 
 
 def filter_hmm_regime_feature_blocks(
@@ -858,7 +873,7 @@ def filter_hmm_regime_feature_blocks(
     if not isinstance(config, HMMRegimeConfig) or model.config_version != config.version:
         raise ValueError("cross-fit filtering requires the matching frozen HMM config")
     blocks = tuple(tuple(block) for block in feature_blocks)
-    if (not blocks or any(not block for block in blocks)
+    if (any(not block for block in blocks)
             or any(not isinstance(row, HMMFeatureRow) for block in blocks for row in block)):
         raise ValueError("cross-fit filtering requires nonempty HMM feature blocks")
     previous_boundary = None
@@ -871,27 +886,11 @@ def filter_hmm_regime_feature_blocks(
         previous_boundary = block[-1].evaluation_boundary_time_ms
 
     outputs = []
+    state = None  # One held-out day; the canonical filter detects actual gaps.
     for block in blocks:
-        state = None
         block_outputs = []
         for row in block:
-            try:
-                (standardized, reset, predicted, posterior, hard, confidence,
-                 entropy, likelihood) = _filter_observation(row, model, state)
-            except (ArithmeticError, OverflowError, ValueError, ZeroDivisionError):
-                evidence = HMMRegimeEvidence(
-                    row.evaluation_boundary_time_ms, HMM_FEATURE_UNAVAILABLE,
-                    "HMM_INFERENCE_NUMERIC_UNAVAILABLE", row.values, None, None,
-                    None, None, None, None, None, None,
-                    HMM_ALGORITHM_VERSION, config.version, model.model_sha256)
-                state = None
-            else:
-                evidence = HMMRegimeEvidence(
-                    row.evaluation_boundary_time_ms, HMM_READY, None, row.values,
-                    standardized, reset, predicted, posterior, hard, confidence,
-                    entropy, likelihood, HMM_ALGORITHM_VERSION, config.version,
-                    model.model_sha256)
-                state = HMMFilterState(row.evaluation_boundary_time_ms, posterior)
+            evidence, state = _advance_hmm_feature_row(row, model, state, config)
             block_outputs.append(evidence)
         outputs.append(tuple(block_outputs))
     return tuple(outputs)
