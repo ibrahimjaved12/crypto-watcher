@@ -665,12 +665,51 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
         }
         coverage["coverage_manifest_sha256"] = execution._digest(coverage)
         period = periods[0]
+        empty = []
+        scope = ("movement-v1", "config-v1", "universe-v1", "1", ("BTCUSDT",),
+                 "provider", "exchange", "trade")
+        block = HMMDevelopmentTrainingBlock(
+            period.study_period_index, period.utc_date.isoformat(),
+            period.start_boundary_time_ms, period.end_boundary_time_ms,
+            scope, (), 1440)
+        replay_identity = {
+            "movement_algorithm_version": "movement-v1",
+            "movement_config_version": "config-v1", "universe_id": "universe-v1",
+            "universe_version": "1", "configured_universe": ["BTCUSDT"],
+            "provider": "provider", "exchange": "exchange", "price_type": "trade",
+        }
+        context_hashes = {
+            name: {"version": version, "records": empty}
+            for name, version in (
+                ("event_time_v1_context", execution.EVENT_TIME_V1_CONTEXT_VERSION),
+                ("bocpd_onset_evidence", execution.BOCPD_ONSET_EVIDENCE_VERSION),
+            )
+        }
         report = execution._artifact_json({
+            "period_report_schema_version": execution.PERIOD_REPORT_SCHEMA_VERSION,
             "execution_version": EXECUTION_VERSION,
+            "study_version": self.manifest.study_version,
+            "candidate_evidence_version": execution.CANDIDATE_EVIDENCE_VERSION,
+            "forward_outcomes_version": execution.FORWARD_OUTCOMES_VERSION,
+            "tool_config_version": TOOL_CONFIG_VERSION,
             "study_manifest_sha256": self.manifest.manifest_sha256,
             "extension_coverage_manifest_sha256": coverage["coverage_manifest_sha256"],
             "code_revision": revision,
             "period": execution.report_json_safe(period),
+            "canonical_replay_manifest": replay_identity,
+            "candidate_evidence": empty,
+            "candidate_evidence_sha256": execution._digest(empty),
+            "v1_evidence_sha256": execution._digest(empty),
+            "event_time_v1_context_version": execution.EVENT_TIME_V1_CONTEXT_VERSION,
+            "event_time_v1_context": empty,
+            "event_time_v1_context_sha256": execution._digest(
+                context_hashes["event_time_v1_context"]),
+            "bocpd_onset_evidence_version": execution.BOCPD_ONSET_EVIDENCE_VERSION,
+            "bocpd_onset_evidence": empty,
+            "bocpd_onset_evidence_sha256": execution._digest(
+                context_hashes["bocpd_onset_evidence"]),
+            "hmm_development_training_block": execution.report_json_safe(block),
+            "hmm_development_training_block_sha256": block.block_sha256,
         }, "report_sha256")
         report_payload = json.loads(report)
 

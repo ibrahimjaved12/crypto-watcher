@@ -207,8 +207,12 @@ class HistoricalMarketStateHMMCrossFitTests(unittest.TestCase):
             self.assertEqual(first["fold_model"]["training_block_count"], 9)
             self.assertEqual(first["held_out_v1_context"][0]["decision_time_ms"],
                              blocks[0].feature_blocks[0][0].evaluation_boundary_time_ms)
-            paths_again = crossfit.freeze_development_hmm_crossfit(
-                self.manifest, root, code_revision="crossfit-fixture")
+            with patch.object(crossfit, "train_hmm_regime_model_from_blocks",
+                              side_effect=train), patch.object(
+                    crossfit, "filter_hmm_regime_feature_blocks",
+                    side_effect=filter_blocks):
+                paths_again = crossfit.freeze_development_hmm_crossfit(
+                    self.manifest, root, code_revision="crossfit-fixture")
             self.assertEqual(paths_again, paths)
             with patch.object(crossfit, "_parse_hmm_model",
                               side_effect=parse_fixture_model):
