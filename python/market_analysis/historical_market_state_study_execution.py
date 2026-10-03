@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import subprocess
@@ -135,7 +136,9 @@ EXECUTION_VERSION = "historical-market-state-execution-v1"
 EXTENSION_COVERAGE_VERSION = "historical-market-state-extension-coverage-v2"
 HMM_DEVELOPMENT_MODEL_VERSION = "historical-market-state-hmm-development-model-v1"
 TOOL_CONFIG_VERSION = "historical-market-state-study-part-b-tool-v1"
-PERIOD_REPORT_SCHEMA_VERSION = "historical-market-state-study-period-report-v1"
+PERIOD_REPORT_SCHEMA_VERSION = "historical-market-state-study-period-report-v2"
+EVENT_TIME_V1_CONTEXT_VERSION = "historical-market-state-event-time-v1-context-v1"
+BOCPD_ONSET_EVIDENCE_VERSION = "historical-market-state-bocpd-onset-evidence-v1"
 EXECUTION_INDEX_VERSION = "historical-market-state-execution-index-v1"
 RUNTIME_REPORT_VERSION = "historical-market-state-runtime-v1"
 HMM_MODEL_FILENAME = "historical-market-state-study-v1-hmm-model.json"
@@ -972,6 +975,8 @@ def _hmm_study_evidence(period, points, model):
         item, state = advance_hmm_regime_filter(
             point.movement_evaluation, period.phase, model, state,
             config=HMM_CONFIG_V1)
+        if boundary % MINUTE_MS:
+            continue  # Unscheduled points preserve the previous usable regime.
         if item.hard_state is None:
             previous_hard = None
             continue
@@ -982,7 +987,8 @@ def _hmm_study_evidence(period, points, model):
                 period.study_period_index, period.utc_date.isoformat(), period.phase,
                 descriptor.experiment_id, descriptor.algorithm_version,
                 descriptor.config_version, boundary, "CONTINUOUS", item.status, native))
-        if previous_hard is not None and item.hard_state != previous_hard:
+        if (previous_hard is not None and not item.filter_reset_before_observation
+                and item.hard_state != previous_hard):
             transition_count += 1
             records.append(HistoricalStudyCandidateEvidence(
                 period.study_period_index, period.utc_date.isoformat(), period.phase,
@@ -1180,23 +1186,122 @@ def _verify_hashed_payload(payload, hash_field, label):
 
 def _verify_existing_period(path, manifest, coverage, period, code_revision):
     payload = _read_json(path)
+    return _validate_period_report(payload, manifest, period, code_revision,
+                                   coverage["coverage_manifest_sha256"])
+
+
+def _validate_period_report(payload, manifest, period, code_revision, coverage_sha=None):
+    """Shared fail-closed gate for resume, indexing and HMM preparation."""
     supplied = _verify_hashed_payload(payload, "report_sha256", "period report")
-    identity = payload.get("period")
-    if (payload.get("execution_version") != EXECUTION_VERSION
-            or payload.get("study_manifest_sha256") != manifest.manifest_sha256
-            or payload.get("extension_coverage_manifest_sha256")
-            != coverage["coverage_manifest_sha256"]
-            or payload.get("code_revision") != code_revision
-            or not isinstance(identity, dict)
-            or identity.get("study_period_index") != period.study_period_index
-            or identity.get("source_bin_index") != period.source_bin_index
-            or identity.get("utc_date") != period.utc_date.isoformat()
-            or identity.get("phase") != period.phase
-            or identity.get("start_boundary_time_ms") != period.start_boundary_time_ms
-            or identity.get("end_boundary_time_ms") != period.end_boundary_time_ms):
-        raise StudyArtifactConflictError(
-            f"existing finalized report conflicts with requested study identity: {path.name}")
+    headers = {
+        "period_report_schema_version": PERIOD_REPORT_SCHEMA_VERSION,
+        "execution_version": EXECUTION_VERSION, "study_version": STUDY_VERSION,
+        "candidate_evidence_version": CANDIDATE_EVIDENCE_VERSION,
+        "forward_outcomes_version": FORWARD_OUTCOMES_VERSION,
+        "tool_config_version": TOOL_CONFIG_VERSION,
+        "study_manifest_sha256": manifest.manifest_sha256,
+        "code_revision": code_revision,
+    }
+    current_coverage = payload.get("extension_coverage_manifest_sha256")
+    if (any(payload.get(key) != value for key, value in headers.items())
+            or payload.get("period") != report_json_safe(period)
+            or not isinstance(current_coverage, str) or len(current_coverage) != 64
+            or any(char not in "0123456789abcdef" for char in current_coverage)
+            or coverage_sha is not None and current_coverage != coverage_sha):
+        raise StudyArtifactConflictError("period report scientific identity mismatch")
+    records = payload.get("candidate_evidence")
+    if not isinstance(records, list) or payload.get("candidate_evidence_sha256") != _digest(records):
+        raise ValueError("period candidate evidence hash mismatch")
+    if any(not isinstance(record, dict) for record in records):
+        raise ValueError("period candidate evidence contains a malformed record")
+    for record in records:
+        _verify_hashed_payload(record, "candidate_evidence_sha256", "candidate evidence")
+        if (record.get("study_period_index") != period.study_period_index
+                or record.get("utc_date") != period.utc_date.isoformat()
+                or record.get("phase") != period.phase):
+            raise ValueError("candidate evidence has a mixed period identity")
+    v1 = [record for record in records if record.get("experiment_id") == "V1"]
+    if payload.get("v1_evidence_sha256") != _digest(v1):
+        raise ValueError("period V1 evidence hash mismatch")
+    for name, version in (("event_time_v1_context", EVENT_TIME_V1_CONTEXT_VERSION),
+                          ("bocpd_onset_evidence", BOCPD_ONSET_EVIDENCE_VERSION)):
+        section = payload.get(name)
+        if (payload.get(name + "_version") != version or not isinstance(section, list)
+                or payload.get(name + "_sha256") != _digest({"version": version, "records": section})):
+            raise ValueError(f"period {name} scientific section mismatch")
+    expected_times = set()
+    for record in records:
+        if record.get("evidence_kind") != "EVENT":
+            continue
+        boundary = record.get("decision_time_ms")
+        if (type(boundary) is not int
+                or not period.start_boundary_time_ms <= boundary < period.end_boundary_time_ms
+                or boundary % 5_000):
+            raise ValueError("candidate event has no valid exact period boundary")
+        expected_times.add(boundary)
+    if period.phase == "development":
+        _validated_period_hmm_block(payload, period)
+    contexts = payload["event_time_v1_context"]
+    replay = payload.get("canonical_replay_manifest")
+    if (not isinstance(replay, dict)
+            or not isinstance(contexts, list)
+            or any(not isinstance(item, dict) for item in contexts)):
+        raise ValueError("period report lacks its canonical replay identity")
+    replay_provenance = {
+        "movement_algorithm_version": replay.get("movement_algorithm_version"),
+        "movement_config_version": replay.get("movement_config_version"),
+        "universe_id": replay.get("universe_id"),
+        "universe_version": replay.get("universe_version"),
+        "configured_universe": replay.get("configured_universe"),
+        "provider": replay.get("provider"),
+        "exchange": replay.get("exchange"),
+        "price_type": replay.get("price_type"),
+    }
+    provenance_string_keys = tuple(key for key in replay_provenance
+                                  if key != "configured_universe")
+    if (any(not isinstance(replay_provenance[key], str) or not replay_provenance[key]
+            for key in provenance_string_keys)
+            or not isinstance(replay_provenance["configured_universe"], list)
+            or not replay_provenance["configured_universe"]
+            or any(not isinstance(symbol, str) or not symbol
+                   for symbol in replay_provenance["configured_universe"])
+            or [item.get("decision_time_ms") for item in contexts] != sorted(expected_times)
+            or any(not isinstance(item, dict)
+                   or not isinstance(item.get("classification"), dict)
+                   or not isinstance(item.get("lifecycle_state"), dict)
+                   or not isinstance(item.get("transitions"), list)
+                   or not isinstance(item.get("provenance"), dict)
+                   or not isinstance(item["provenance"].get("source_time_evidence"), list)
+                   or any(item["provenance"].get(key) != value
+                          for key, value in replay_provenance.items())
+                   for item in contexts)):
+        raise ValueError("period lacks complete exact-time V1 context")
+    bocpd_records = tuple(HistoricalStudyCandidateEvidence(**{
+        key: value for key, value in record.items() if key != "candidate_evidence_sha256"})
+        for record in records if record.get("experiment_id") == "EXP-75-04B")
+    if payload["bocpd_onset_evidence"] != report_json_safe(_bocpd_onset_evidence(bocpd_records)):
+        raise ValueError("BOCPD onset section differs from exact causal candidate evidence")
     return supplied
+
+
+def _validated_period_hmm_block(report, period):
+    block = _load_hmm_development_block(report.get("hmm_development_training_block"))
+    if ((block.study_period_index, block.utc_date, block.start_boundary_time_ms, block.end_boundary_time_ms)
+            != (period.study_period_index, period.utc_date.isoformat(), period.start_boundary_time_ms,
+                period.end_boundary_time_ms)
+            or report.get("hmm_development_training_block_sha256") != block.block_sha256
+            or any(not block.start_boundary_time_ms <= row.evaluation_boundary_time_ms < block.end_boundary_time_ms
+                   for rows in block.feature_blocks for row in rows)
+            or sum(len(rows) for rows in block.feature_blocks) + block.unavailable_row_count != (period.end_boundary_time_ms - period.start_boundary_time_ms) // MINUTE_MS):
+        raise ValueError("HMM block does not describe the complete frozen development day")
+    replay = report.get("canonical_replay_manifest", {})
+    scope = (replay.get("movement_algorithm_version"), replay.get("movement_config_version"),
+             replay.get("universe_id"), replay.get("universe_version"),
+             tuple(replay.get("configured_universe", ())), replay.get("provider"),
+             replay.get("exchange"), replay.get("price_type"))
+    if block.movement_scope != scope:
+        raise ValueError("HMM block scope differs from its canonical replay source")
+    return block
 
 
 def _load_hmm_development_block(value):
@@ -1208,7 +1313,7 @@ def _load_hmm_development_block(value):
     return HMMDevelopmentTrainingBlock(
         value["study_period_index"], value["utc_date"],
         value["start_boundary_time_ms"], value["end_boundary_time_ms"],
-        tuple(value["movement_scope"]), feature_blocks,
+        tuple(tuple(item) if isinstance(item, list) else item for item in value["movement_scope"]), feature_blocks,
         value["unavailable_row_count"], value["block_sha256"])
 
 
@@ -1265,6 +1370,89 @@ def _load_source_evidence(period, roots):
                         "funding": False, "liquidation": False})
     return {name: {"evidence": values[name], "coverage": summaries[name],
                    "root": roots[name]} for name in summaries}
+
+
+
+def _event_time_v1_context(prepared_period, candidate_records):
+    """Persist the exact canonical V1 branch at every causal event boundary."""
+    event_times = tuple(sorted({
+        item.decision_time_ms for item in candidate_records
+        if item.evidence_kind == "EVENT" and item.decision_time_ms is not None
+    }))
+    if not event_times:
+        return ()
+    branch_by_boundary = prepared_period.canonical_v1_branch_by_boundary
+    replay_by_boundary = {
+        item.evaluation_boundary_time_ms: item
+        for item in prepared_period.canonical_replay_result.points
+    }
+    records = []
+    for boundary in event_times:
+        branch = branch_by_boundary.get(boundary)
+        replay_point = replay_by_boundary.get(boundary)
+        if branch is None or replay_point is None:
+            raise ValueError("causal event lacks exact canonical V1 branch context")
+        classification, lifecycle = branch
+        if (getattr(replay_point.movement_evaluation,
+                    "evaluation_boundary_time_ms", None) != boundary):
+            raise ValueError("event-time V1 context boundary mismatch")
+        movement = replay_point.movement_evaluation
+        records.append({
+            "decision_time_ms": boundary,
+            "classification": report_json_safe(classification),
+            "lifecycle_state": report_json_safe(lifecycle.next_state),
+            "transitions": report_json_safe(lifecycle.transitions),
+            "provenance": {
+                "source_time_evidence": report_json_safe(
+                    replay_point.source_time_evidence),
+                "movement_algorithm_version": movement.algorithm_version,
+                "movement_config_version": movement.config_version,
+                "universe_id": movement.universe_id,
+                "universe_version": movement.universe_version,
+                "configured_universe": report_json_safe(
+                    movement.configured_universe),
+                "provider": movement.provider,
+                "exchange": movement.exchange,
+                "price_type": movement.price_type,
+            },
+        })
+    return tuple(records)
+
+
+def _bocpd_onset_evidence(candidate_records):
+    """Extract only causal BOCPD onset observations from event evidence."""
+    from dataclasses import fields as dataclass_fields
+    from .experiments.market_state_bocpd import BOCPDObservation
+
+    allowed = {item.name for item in dataclass_fields(BOCPDObservation)}
+    records = []
+    for item in candidate_records:
+        if item.experiment_id != "EXP-75-04B" or item.evidence_kind != "EVENT":
+            continue
+        native = item.native_evidence
+        if not isinstance(native, dict):
+            raise ValueError("BOCPD event evidence must be an object")
+        onset = native.get("causal_onset_observation")
+        if (not isinstance(onset, dict)
+                or set(onset) != allowed
+                or onset.get("evaluation_boundary_time_ms") != item.decision_time_ms
+                or onset.get("candidate_algorithm_version") != item.algorithm_version
+                or onset.get("candidate_config_version") != item.config_version
+                or onset.get("available") is not True
+                or type(onset.get("recent_change_probability")) not in (int, float)
+                or not math.isfinite(onset["recent_change_probability"])
+                or not 0 <= onset["recent_change_probability"] <= 1):
+            raise ValueError("BOCPD event lacks exact causal onset observation")
+        records.append({
+            "experiment_id": item.experiment_id,
+            "algorithm_version": item.algorithm_version,
+            "config_version": item.config_version,
+            "decision_time_ms": item.decision_time_ms,
+            "onset_observation": onset,
+        })
+    return tuple(sorted(records, key=lambda item: (
+        item["config_version"], item["decision_time_ms"])))
+
 
 
 def _continuous_and_event_outcomes(evidence, candidate_records, v1_state_by_boundary,
@@ -1384,6 +1572,8 @@ def _execute_period(
     (candidate_records, native_summaries, fixed_identities,
      extension_reports, hmm_block, hmm_model_sha) = extension_results
     candidate_records = tuple((*candidate_records, *v1_records))
+    event_time_v1_context = _event_time_v1_context(prepared_period, candidate_records)
+    bocpd_onset_evidence = _bocpd_onset_evidence(candidate_records)
     with _runtime_measure(runtime_metrics, "forward_label_evidence_seconds"):
         forward_evidence = _label_price_evidence(dataset, archive_root, period)
     with _runtime_measure(runtime_metrics, "forward_outcomes_seconds"):
@@ -1436,6 +1626,18 @@ def _execute_period(
         "candidate_evidence": candidate_records,
         "candidate_evidence_sha256": _digest(candidate_records),
         "v1_evidence_sha256": _digest(v1_records),
+        "event_time_v1_context_version": EVENT_TIME_V1_CONTEXT_VERSION,
+        "event_time_v1_context": event_time_v1_context,
+        "event_time_v1_context_sha256": _digest({
+            "version": EVENT_TIME_V1_CONTEXT_VERSION,
+            "records": event_time_v1_context,
+        }),
+        "bocpd_onset_evidence_version": BOCPD_ONSET_EVIDENCE_VERSION,
+        "bocpd_onset_evidence": bocpd_onset_evidence,
+        "bocpd_onset_evidence_sha256": _digest({
+            "version": BOCPD_ONSET_EVIDENCE_VERSION,
+            "records": bocpd_onset_evidence,
+        }),
         "hmm_development_training_block": report_json_safe(hmm_block),
         "hmm_development_training_block_sha256": (
             hmm_block.block_sha256 if hmm_block is not None else None),
@@ -1473,13 +1675,13 @@ def _update_execution_index(output_dir, manifest, coverage, code_revision):
     if period_dir.exists():
         for path in sorted(period_dir.glob("*.json")):
             payload = _read_json(path)
-            sha = _verify_hashed_payload(payload, "report_sha256", "period report")
-            if (payload.get("study_manifest_sha256") != manifest.manifest_sha256
-                    or payload.get("extension_coverage_manifest_sha256")
-                    != coverage["coverage_manifest_sha256"]
-                    or payload.get("code_revision") != code_revision):
-                raise StudyArtifactConflictError(
-                    f"period directory contains a conflicting finalized report: {path.name}")
+            identity = payload.get("period", {})
+            selected = next((item for item in _manifest_periods(manifest)
+                             if item.study_period_index == identity.get("study_period_index")), None)
+            if selected is None or path.name != _period_filename(selected):
+                raise StudyArtifactConflictError("period directory contains an unknown report")
+            sha = _validate_period_report(payload, manifest, selected, code_revision,
+                                          coverage["coverage_manifest_sha256"])
             period = payload["period"]
             entries.append({"study_period_index": period["study_period_index"],
                             "utc_date": period["utc_date"], "phase": period["phase"],
@@ -1664,25 +1866,11 @@ def freeze_study_hmm_model(
             raise ValueError(
                 f"cannot freeze study HMM before development period {period.study_period_index} completes")
         report = _read_json(path)
-        _verify_hashed_payload(report, "report_sha256", "development period report")
-        identity = report.get("period", {})
-        if (report.get("study_manifest_sha256") != manifest.manifest_sha256
-                or report.get("code_revision") != code_revision
-                or identity.get("study_period_index") != period.study_period_index
-                or identity.get("phase") != "development"
-                or identity.get("utc_date") != period.utc_date.isoformat()):
-            raise StudyArtifactConflictError(
-                f"development period artifact identity mismatch: {path.name}")
-        current_coverage = report.get("extension_coverage_manifest_sha256")
+        _validate_period_report(report, manifest, period, code_revision, coverage_sha)
+        current_coverage = report["extension_coverage_manifest_sha256"]
         if coverage_sha is None:
             coverage_sha = current_coverage
-        elif current_coverage != coverage_sha:
-            raise ValueError("development period artifacts use different frozen coverage reports")
-        block = _load_hmm_development_block(report.get("hmm_development_training_block"))
-        if (block.study_period_index != period.study_period_index
-                or block.utc_date != period.utc_date.isoformat()
-                or report.get("hmm_development_training_block_sha256") != block.block_sha256):
-            raise ValueError("development period HMM feature evidence hash mismatch")
+        block = _validated_period_hmm_block(report, period)
         blocks.append(block)
         identities.append({"study_period_index": period.study_period_index,
                            "utc_date": period.utc_date.isoformat(),
