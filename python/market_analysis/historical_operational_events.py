@@ -39,6 +39,13 @@ def configure(path, *, operation, phase, period=None, deadline_epoch=None, publi
     _context = {'operation': operation, 'phase': phase, 'period': period}
 
 
+def remaining_compute_seconds():
+    """Seconds left before the configured compute deadline; infinity without one."""
+    if _deadline is None:
+        return float('inf')
+    return max(0.0, _deadline - time.monotonic())
+
+
 def allowlisted(row):
     """No free text, paths, URLs or nested worker payloads enter public output."""
     result = {'version': VERSION}

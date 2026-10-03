@@ -129,7 +129,7 @@ from .historical_replay import (
 from .historical_replay_runtime import ReplayCheckpointStore
 from .historical_study_runtime import (
     create_study_point_stream, current_runtime_implementation_revision,
-    run_stage, stage_dependencies, input_descriptor,
+    run_stage, run_stage_batch, stage_dependencies, input_descriptor,
 )
 from .historical_taker_flow_extension import (
     TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
@@ -1285,6 +1285,29 @@ def _candidate_stage_selectors():
                  *(f"atr-{index}" for index in range(len(ATR_CONFIGURATIONS))),
                  "taker-flow", "mark_trade", "open_interest", "funding", "liquidation")
 
+STAGE_BATCH_SIZE = 9
+
+
+def _stage_batch_size():
+    """Consecutive core candidate stages per worker; 1 keeps per-stage workers."""
+    raw = os.environ.get("STUDY_STAGE_BATCH_SIZE")
+    if raw is None or raw == "":
+        return STAGE_BATCH_SIZE
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise ValueError("STUDY_STAGE_BATCH_SIZE must be an integer >= 1")
+    return value
+
+
+def _batchable_candidate_stage(selector, supplementary):
+    # Core candidates only; extension stages keep their own per-stage workers.
+    return ((selector == "hmm" or selector.startswith(("fixed-", "atr-")))
+            and selector not in supplementary)
+
+
 def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=None,
                                 runtime_metrics=None, worker_lease=None):
     stream = prepared.canonical_replay_result.points
@@ -1292,7 +1315,8 @@ def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=
     upstream_v1 = stage_dependencies(stream, ("v1",))
     record_sources, summaries, reports = [], [], {}
     hmm_block = hmm_sha = identities = None
-    for selector in selectors:
+
+    def stage_request(selector):
         source = {selector: supplementary[selector]} if selector in supplementary else {}
         request = {"action": "candidate", "prepared": _stage_prepared(prepared, selector),
                    "supplementary": source, "hmm_model": hmm_model,
@@ -1308,6 +1332,52 @@ def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=
                         else f"{selector}_seconds")
         bocpd_field = ("bocpd_seconds" if request["scientific_stage"]["experiment_id"] == "EXP-75-04B"
                        else None)
+        return source, request, timing_field, bocpd_field
+
+    def accept(selector, result):
+        nonlocal hmm_block, hmm_sha, identities
+        stage_records, stage_summaries, fixed, extension, block, model_sha = result
+        record_sources.append(stage_records)
+        summaries.extend(stage_summaries)
+        reports.update(extension)
+        identities = fixed
+        if selector == "hmm":
+            hmm_block, hmm_sha = block, model_sha
+
+    batch_size = _stage_batch_size()
+    batched = 0
+    if batch_size > 1:
+        while (batched < len(selectors)
+               and _batchable_candidate_stage(selectors[batched], supplementary)):
+            batched += 1
+    position = 0
+    while position < batched:
+        group = []
+        for selector in selectors[position:min(position + batch_size, batched)]:
+            _, request, timing_field, bocpd_field = stage_request(selector)
+            descriptor_started = time.perf_counter_ns()
+            descriptor = input_descriptor(request)
+            group.append((selector, descriptor, (lambda request=request: request),
+                          timing_field, bocpd_field,
+                          time.perf_counter_ns() - descriptor_started))
+        completed = run_stage_batch(
+            stream, [(selector, descriptor, prepare)
+                     for selector, descriptor, prepare, *_ in group],
+            progress=progress, worker_lease=worker_lease)
+        if not completed:
+            raise ValueError("post-replay stage batch made no progress")
+        for (selector, result, seconds), entry in zip(completed, group):
+            if selector != entry[0]:
+                raise ValueError("post-replay stage batch order mismatch")
+            # Worker-measured seconds for new stages, parent seconds for reuse.
+            elapsed_ns = entry[5] + max(0, int(seconds * 1_000_000_000))
+            for field_name in (entry[3], entry[4]):
+                if runtime_metrics is not None and field_name is not None:
+                    runtime_metrics.record_elapsed_ns(field_name, elapsed_ns)
+            accept(selector, result)
+        position += len(completed)
+    for selector in selectors[batched:]:
+        source, request, timing_field, bocpd_field = stage_request(selector)
         with _runtime_measure(runtime_metrics, timing_field), _runtime_measure(runtime_metrics, bocpd_field):
             descriptor = input_descriptor(request)
             unavailable = selector in source and source[selector]["evidence"] is None
@@ -1316,13 +1386,7 @@ def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=
                 local_result=(lambda request=request: _candidate_execution(
                     request["prepared"], request["supplementary"], request["hmm_model"],
                     stage_selector=request["selector"])) if unavailable else None)
-        stage_records, stage_summaries, fixed, extension, block, model_sha = result
-        record_sources.append(stage_records)
-        summaries.extend(stage_summaries)
-        reports.update(extension)
-        identities = fixed
-        if selector == "hmm":
-            hmm_block, hmm_sha = block, model_sha
+        accept(selector, result)
     from .historical_stage_records import JoinedStageRecords
     return JoinedStageRecords(tuple(record_sources)), tuple(summaries), identities, reports, hmm_block, hmm_sha
 
