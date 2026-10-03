@@ -39,6 +39,37 @@ The engine runtime (`movement-engine.server.ts`) starts only inside the authorit
 process (the operational lease owner) and evaluates each newly finalized five-second boundary
 exactly once for the shared universe.
 
+## V1 constants and ownership
+
+The collector owns ingestion, REST recovery, transport ordering and connection health. Python owns
+canonical movement, normalization, classification, lifecycle mathematics and replay semantics.
+TanStack owns auth, orchestration, validation, privileged permanent-database writes and authenticated
+reads. The operational database holds only explicitly assigned bounded working state; verified
+archive files and manifests supply historical research. These responsibilities remain separate.
+
+| Current value | Owner / classification and purpose | Effect on scientific/config meaning | Evidence required before changing |
+| --- | --- | --- | --- |
+| 5-second analytical cadence | Python / **scientific** boundary grid | Defines analytical time resolution | New scientific/config identity and research/revalidation |
+| 1m / 5m / 15m adjacent windows | Python / **scientific** return and adjacent-window comparisons | Defines compared intervals and calculation semantics | New scientific/config identity and research/revalidation |
+| 7-day lookback; 3-day minimum usable coverage; median/MAD estimator | Python / **scientific** normalization reference and eligibility | Changes normalized movement, breadth and classification | New scientific/config identity and research/revalidation |
+| 15s real-trade endpoint/carry freshness | Python / **scientific** endpoint eligibility | Determines which exact endpoints are usable | New scientific/config identity and research/revalidation |
+| 8-day completed-candle retention | Application configuration / **resource/retention** supporting canonical inputs | Stored surplus is neutral with identical inputs; insufficient retention can make evidence unavailable | Demonstrate complete raw-history coverage for each consumer |
+| 5m **and** at most 2,000 logical aggTrade items per contract | Collector / **resource/retention**, bounded snapshot | Not canonical movement history or a guaranteed recovery interval | Concrete consumer-derived sizing evidence; no such invariant is currently demonstrated |
+| 420 boundary records (`DEFAULT_HISTORY_BUCKETS`) | Python / **resource/retention** derived from window minimum | Enough exact history is mandatory; surplus is neutral with identical inputs | Window coverage and safety-margin evidence; preserve current constructor/spec minimum |
+| 2,000ms finalization grace | Collector admission policy + Python finalization / **operational safety** | Does not change return math; can change admitted live evidence and is in replay/config identity | Explicit versioned policy plus measured latency/late-event evidence; none currently justifies another value |
+| 60s movement evaluation/current-state age | Application / **operational safety**, consumer-status diagnostic | Does not define endpoint freshness or market classification | Consumer cadence, finalization-lag and status-jitter evidence |
+| 30s socket silence | Collector / **operational safety**, connection stale handling | Does not define canonical endpoint freshness | Connection-health and recovery evidence |
+| Newest 260 completed candles per canonical series | Operational DB / **resource/retention**, TA availability margin | Stored surplus is neutral with identical inputs; changing the TA input prefix can change outputs | TA history/catch-up coverage and input-prefix impact evidence |
+| 15-minute directional alert cooldown (user configurable) | Individual cumulative monitoring / **product/user notification policy** | Not market-wide V1, episode reversal or predictive evidence; suppression does not create a market state | User notification/product evidence |
+| One Python worker / one replica for live movement | Python deployment / **operational safety**, authoritative state owner | Not mathematical algorithm identity | Designed ownership, partitioning, fencing, ordering and recovery semantics before scaling |
+
+Each horizon compares the current window with the immediately preceding equal-length window.
+The largest calculation needs `2 × 15 minutes / 5 seconds + 1 = 361` records, including the boundary.
+The current 420 capacity adds **59 records**, approximately **4m55s** of boundary-span headroom.
+That margin is specified capacity rather than proven mathematical necessity.
+See [collector bounds](./binance-futures-collector.md), [candle retention](./operational-database.md#reads-retention-and-synchronization),
+[TA input history](./technical-analysis.md#history-policies) and [Python deployment](./python-api.md#movement-service-deployment-invariant).
+
 ## Live finalization / lateness watermark
 
 The existing collector runtime delays each explicit Python boundary request by an explicit grace:
@@ -64,6 +95,11 @@ identifies the grace in force (`movement-finalization-config-v1:grace-<ms>`), so
 change under an unchanged version. It must never be a `VITE_*` variable. The effective
 `finalizationConfigVersion` and `finalizationGraceMs` are persisted in the bounded current evidence
 and exposed through the authenticated current-state and compact diagnostics contracts.
+
+The 2s default governs evidence admission: exchange transaction/event time defines the analytical
+boundary, wall clock determines when it is safe to finalize, and
+late observations never rewrite finalized history. Late-after-finalization observations remain
+diagnostic evidence. Changing grace requires the versioned decision and measurements listed above.
 
 ## Universe semantics
 
@@ -99,8 +135,12 @@ normalization input for each explicit evaluation boundary:
 
 If retained candle coverage is below #71's three-day minimum, the affected symbols are excluded with
 `INSUFFICIENT_NORMALIZATION_HISTORY` rather than weakening the contract. Candle retention defaults
-to 8 days (`OPERATIONAL_CANDLE_RETENTION_DAYS`) to retain the 7-day lookback and 15-minute
-historical return warm-up.
+to 8 days (`OPERATIONAL_CANDLE_RETENTION_DAYS`). The raw-history requirement is approximately
+**7 days + 16 minutes**: the scientific lookback, longest 15-minute return window, and the prior 1m
+candle needed at the return boundary. The worker therefore requires an 8-day whole-day operational
+setting for default V1; 8 days is not itself a scientific market parameter. The three-day minimum
+is an availability gate, not permission to shorten the normal seven-day reference distribution.
+Median/MAD, aligned sampling, gaps and degenerate/unavailable behavior retain their current semantics.
 
 ## Current-state exposure
 
@@ -119,6 +159,8 @@ Authenticated server-side reads:
 The `STALE` threshold is an explicit, version-independent constant (`MOVEMENT_ENGINE_STALE_AFTER_MS`,
 60s) chosen to clear the 30-second persistence cadence plus finalization lag, so a healthy engine
 does not flicker to `STALE` from normal persistence/timer jitter. The write frequency is unchanged.
+This measures movement evaluation/current-state snapshot age. It is distinct from the collector's
+30s socket-silence rule and Python's 15s real-trade endpoint/carry freshness.
 
 Reads go through the operational store's explicit field mapping; the service-role credential never
 reaches the browser. This integration does not build #30's dashboard, #31 setups/scoring, or any
@@ -153,6 +195,29 @@ tenure's pending batch over a newer owner's durable state.
 Raw candle history is re-registered when the completed-minute cutoff, universe, movement session,
 or collector backfill changes. Python derives aligned historical inputs separately for each
 requested evaluation boundary.
+
+### Operational state and research history
+
+Live operational state retains only what live processing, recovery and bounded current consumers
+require. Historical research uses verified archive/file partitions with checksums and manifests
+outside transactional PostgreSQL; see [historical replay](./historical-replay.md#archive-research-and-live-history).
+The live five-second ring remains bounded process/runtime analytical state. Current architecture
+does not justify long-term PostgreSQL persistence of every raw aggTrade or every five-second bucket.
+
+A future persistence proposal must name the consumer, required resolution, retention horizon,
+restore/recovery behavior, expected volume, authoritative writer, and why archive/replay
+reconstruction is insufficient. Possible future usefulness alone is not enough.
+
+## Known follow-ups
+
+These are separate correctness/design work, not changes to the current constants:
+
+- Normalization validation accepts different valid scientific parameters under a reused nonempty
+  version label; effective-parameter/config identity needs hardening.
+- The one-worker invariant is documented but not explicitly pinned at every Uvicorn startup;
+  deployment settings such as `WEB_CONCURRENCY` may change the worker count.
+- Live accepts zero finalization grace, while historical replay requires a positive value.
+- The collector's exact 5m/2,000-item snapshot sizing lacks a demonstrated consumer-derived invariant.
 
 ## Migration
 

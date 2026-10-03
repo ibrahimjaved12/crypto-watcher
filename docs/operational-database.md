@@ -106,17 +106,36 @@ The dashboard's recent-run read is an authenticated TanStack server function. It
 verified Lovable user identity, adds an explicit `user_id` predicate to operational queries,
 and never returns the operational service-role credential.
 
-Shared and legacy completed candles default to seven-day retention (allowed range 1–30 days);
-monitor runs default to 30 days (allowed range 1–90 days), and inactive checkpoints expire after
-30 days. Writes perform database-wide bounded cleanup. Each canonical collector series always keeps
-its newest 260 completed candles regardless of the day window, so the longest completed-candle TA
-frame still has the minimum history and bounded catch-up it needs.
+The active application adapter defaults shared and legacy completed-candle retention to **8 days**
+(`OPERATIONAL_CANDLE_RETENTION_DAYS`, allowed range 1–30 days) and supplies the retention argument to
+SQL. Existing SQL functions retain a legacy **7-day fallback only when that argument is omitted**;
+that fallback is not the active application default, and migration history is unchanged.
+Default V1 needs approximately **7 days + 16 minutes** of raw candles: seven scientific lookback days,
+the longest 15-minute return window and its prior 1m boundary candle. The collector worker requires
+the 8-day whole-day setting for these inputs. Retention is a resource bound: increasing surplus with
+identical canonical inputs is science-neutral; reducing required coverage can make history explicitly
+unavailable and is not equivalent.
+
+Monitor runs default to 30 days (allowed range 1–90 days), and inactive checkpoints expire after
+30 days. Writes perform database-wide bounded cleanup. Age-based retention and the protected
+**newest-260 completed-candle floor per canonical collector series** are separate mechanisms:
+the floor protects TA history/catch-up availability even beyond the day window. It is not Python's
+200-candle TA minimum or the collector's 300-candle bootstrap request. The application TA read horizon
+is also 260 where implemented; changing its actual input prefix can affect recursive indicators.
+See [TA history policies](./technical-analysis.md#history-policies).
+
 The authenticated read reports per-user storage counts; operators can call
 `get_global_storage_diagnostics()` for total row counts, oldest candle time, outbox state counts
 and the oldest undelivered event, and `get_collector_storage_diagnostics()` for shared candle and
 health growth. Only completed candles are persisted—never developing updates or raw `aggTrade`
 events. See [the collector design](./binance-futures-collector.md) for recovery, memory bounds, and
 health.
+
+Operational working state serves live processing, recovery and bounded current consumers.
+Historical research uses verified archive files, checksums and manifests outside transactional
+PostgreSQL. No current consumer justifies storing every raw aggTrade or five-second bucket long term;
+the live ring stays bounded Python runtime state. See the
+[persistence proposal requirements](./market-movement-engine.md#operational-state-and-research-history).
 
 No current durable result is safe to migrate, so the transactional outbox is intentionally
 unused. Its infrastructure atomically stages a stable result ID and stable event ID, claims

@@ -28,14 +28,19 @@ The service does not add a scheduler, login mechanism, or browser-accessible tok
 
 ### Movement service deployment invariant
 
-The `/v1/movement/boundary` adapter keeps bounded session engines and retry
-responses in process-local memory. V1 therefore requires exactly one Python service
+The `/v1/movement/boundary` adapter keeps five-second engines, finalized boundaries, pending
+observations, registered historical inputs, membership/session state, request/retry identities and
+late/rejection diagnostics in process-local memory. V1 therefore requires exactly one Python service
 replica running exactly one Uvicorn worker. Do not use `--workers` greater than one
 or load-balance movement requests across replicas: sequential boundaries could land
-on different independent engines and produce false warm-up or split history. Keep
-the existing single-worker local and Docker commands. Distributed Python session
-state is not implemented; a future architecture change is required before scaling
-this endpoint horizontally.
+on different independent engines and produce false warm-up or split history. This is an
+operational deployment invariant, not mathematical algorithm identity. Persisting other state in
+PostgreSQL does not make multiple workers safe; scaling needs separately designed ownership,
+partitioning, fencing, order and recovery semantics.
+
+Runtime enforcement remains a separate correctness follow-up: current Uvicorn startup does not
+explicitly pin one worker everywhere, and settings such as `WEB_CONCURRENCY` may alter worker count.
+The invariant must hold regardless of launch command; this documentation does not add enforcement.
 
 ## Configuration
 
@@ -165,6 +170,9 @@ endpoint, price type, retrieval/analysis/observation times and:
   window reports its own start/end close time and validity. These windows can end
   at different times. A rolling threshold match is not cumulative alert eligibility.
 - **Baseline:** the existing net-movement rule and directional cooldown preview.
+  Its 15-minute default is user configurable and direction-specific, owned by individual cumulative
+  monitoring/user notifications. It is not market-wide V1 classification, episode reversal or
+  predictive evidence; a suppressed observation does not create a scientific market state.
   `eligibility_evaluated` and nullable `alert_eligible` explicitly distinguish an
   ineligible observation from one that could not be evaluated. `cooldown_evaluated`
   is true only if the rule reached the directional cooldown check, with the relevant

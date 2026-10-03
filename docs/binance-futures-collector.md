@@ -65,23 +65,41 @@ candle gap becomes `UNAVAILABLE`.
 
 Memory contains only the latest trade, one developing candle per contract/timeframe, the latest
 completed checkpoint, connection health, a five-minute/2,000-item aggregate-trade buffer per
-contract, a 35-minute movement bucket ring, and a 256-item completed-candle work queue. Queue
-overflow marks the collector stale, closes the socket, and relies on REST recovery; it never creates
+contract, and a 256-item completed-candle work queue. Python owns the separate 420-record movement
+ring. Queue overflow marks the collector stale, closes the socket, and relies on REST recovery; it never creates
 an unbounded queue. Developing updates, aggregate trades, and movement buckets are not persisted.
+
+The snapshot buffer retains logical aggTrade items subject to **both** five-minute age and at most
+2,000 items per contract. Active symbols may hit the count limit earlier, so it guarantees no
+five-minute recovery history. It is bounded collector transport/resource state, not canonical
+movement analytical history; that path has its own validated ordered observation transport and
+Python bucket state. The exact sizing has no demonstrated consumer-derived invariant and remains
+unchanged pending separate evidence.
+
+The collector's **30s socket-silence** rule handles connection staleness. It is separate from the
+application's **60s movement-state age** diagnostic and Python's **15s endpoint/carry freshness**;
+see [V1 ownership and constants](./market-movement-engine.md#v1-constants-and-ownership).
 
 ## Movement bucket input
 
-Accepted `aggTrade` events also feed a separate, memory-only movement bucket store. It uses Binance's
-trade timestamp (`T`) on a fixed five-second epoch grid and keeps 420 compact buckets (35 minutes) per
+Accepted `aggTrade` observations travel through validated ordered transport to the canonical,
+memory-only Python movement bucket store. It uses Binance's trade timestamp (`T`) on a fixed
+five-second epoch grid and keeps 420 compact boundary records per
 subscribed contract. Each bucket retains its endpoint price, base and quote volume, trade count, last
 real trade/event timestamps, carry-forward flag, and futures provenance. This store is separate from
-the collector's five-minute/2,000-trade safety buffer.
+the collector's five-minute/2,000-item snapshot. The largest adjacent 15m windows require 361 inclusive
+boundary records; 420 supplies 59 extra records (4m55s boundary-span headroom), not an exact
+mathematical requirement. The current capacity and constructor/spec minimum remain 420.
 
 A price is carried through an empty bucket only while its last real trade is at most 15 seconds old;
 later buckets have no endpoint and report stale. Per-window readiness remains `WARMING` until the
 continuous live history spans two adjacent 1m, 5m, or 15m windows. A new process starts empty and does
 not reconstruct this path from REST candles. The deterministic component can be advanced by an
 aligned boundary for live evaluation or replay, and it performs no database writes.
+
+Verified historical aggTrade archives can support research replay, subject to per-partition checks;
+they do not restore the original WebSocket receive stream or reconnect history. See
+[archive research](./historical-replay.md#archive-research-and-live-history).
 
 Recovered/bootstrap candles carry their origin and never bypass the application's due-work check;
 the collector performs no TA. Movement baseline/cooldown/alert state remains wholly in its Lovable
@@ -121,7 +139,10 @@ Apply all unapplied SQL migrations in filename order to the application database
 disposable pre-release operational database from its repository migrations; the base collector
 schema defines the final candle provenance and TA read function. The operational retention migration
 keeps each canonical series' newest 260 completed candles even when that spans more than the day window,
-so the longest TA frame always has enough canonical history. After the reset, the REST bootstrap
+protecting TA history/catch-up availability independently of age-based retention. This storage floor
+is distinct from Python's 200-candle minimum and the application's 260-candle TA read horizon.
+Changing a TA input prefix can affect recursive indicator initialization; see
+[TA history policies](./technical-analysis.md#history-policies). After the reset, the REST bootstrap
 fetches 300 klines per frame and persists the completed ones (excluding the developing candle),
 rebuilding 299 candles for the 15m, 1h, and 4h TA frames. Set this server-only flag (never a
 `VITE_*` variable) on both the

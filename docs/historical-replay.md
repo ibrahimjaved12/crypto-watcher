@@ -48,6 +48,27 @@ after the checkpoint. No private engine state is serialized. Trade processing,
 late-rejection, source-state, and market-wide eligibility counts remain visible
 in replay diagnostics.
 
+## Archive research and live history
+
+Official Binance historical archives can support reproducible causal research when each
+symbol/date/partition's availability, checksum, schema and gaps are individually validated.
+Historical aggregate trades are therefore recoverable for verified partitions. Archive data is
+not an exact record of the original WebSocket receive stream: it does not reconstruct local
+receive timing, delivery anomalies or reconnect history. Availability must be checked per partition.
+
+[Issue #120](https://github.com/ibrahimjaved12/crypto-watcher/issues/120) used official Binance USD-M
+archives for BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT and DOGEUSDT on 2026-09-19 and 2026-09-20:
+10 checksum-verified aggTrade archives, 4,786,579 parsed archive rows and 1,202,462 causally processed
+trades. [Issue #123](https://github.com/ibrahimjaved12/crypto-watcher/issues/123) uses the same
+archive/manifest model for its frozen corpus. Research files live outside transactional PostgreSQL;
+live state retains only bounded processing/recovery/current-consumer needs. This does not justify
+long-term storage of every raw aggTrade or five-second bucket in PostgreSQL. See
+[persistence proposal requirements](./market-movement-engine.md#operational-state-and-research-history).
+
+The 2,000ms grace remains a versioned evidence-admission policy in the replay fingerprint, even
+though it does not change the return formula. A known separate follow-up is the allowed domain:
+live permits zero grace while replay requires a positive value. No domain or default is changed here.
+
 ## Part 2: verified local Binance USD-M daily archives
 
 `binance_historical_archive.py` builds a Part 1 `HistoricalReplayRequest` from
