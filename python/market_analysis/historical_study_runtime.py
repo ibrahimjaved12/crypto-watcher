@@ -332,7 +332,9 @@ def decode(value, point_reference=None):
     if "dataclass" in value:
         module, name = value["dataclass"]
         cls = _operational_type(module, name)
-        if set(value["fields"]) != {item.name for item in _operational_fields(cls)}:
+        legacy_records = (module == "market_analysis.historical_stage_records" and name == "StageRecords"
+                          and set(value["fields"]) == {"path", "count", "sha256", "scientific_path", "scientific_sha256"})
+        if not legacy_records and set(value["fields"]) != {item.name for item in _operational_fields(cls)}:
             raise ValueError("operational dataclass fields mismatch")
         kwargs = {key: decode(item, point_reference) for key, item in value["fields"].items()}
         if name == "BinanceBoundedHistoricalReplayDataset":
@@ -565,41 +567,55 @@ def _run_owned_worker(job_path, environment, lease, *, stage_id=None):
 
 
 def _write_records(path, records):
+    import gzip
+    from contextlib import ExitStack
     from .historical_stage_records import StageRecords
     from .historical_market_state_study_json import iter_canonical_study_json
     from .historical_shared_v1 import _file_sha
+    path = Path(path)
+    scientific_path = path.with_suffix(".scientific.jsonl.gz")
+    path = path.with_name(path.name + ".gz")
     temporaries = []
-    scientific_path = path.with_suffix(".scientific.jsonl")
     try:
-        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent,
-                prefix=f".{path.stem}.records-", delete=False) as handle, \
-             tempfile.NamedTemporaryFile(mode="wb", dir=path.parent,
-                prefix=f".{path.stem}.records-", delete=False) as scientific:
-            temporaries = [Path(handle.name), Path(scientific.name)]
+        with ExitStack() as stack:
+            handles = []
+            for _ in range(2):
+                handle = stack.enter_context(tempfile.NamedTemporaryFile(mode="wb", dir=path.parent,
+                    prefix=f".{path.stem}.records-", delete=False))
+                temporaries.append(Path(handle.name))
+                handles.append(handle)
             digest, scientific_digest, count = hashlib.sha256(), hashlib.sha256(), 0
-            for item in records:
-                raw = _canonical_bytes(encode(item))
-                handle.write(raw)
-                digest.update(raw)
-                for part in iter_canonical_study_json(item):
-                    raw = part.encode("ascii")
-                    scientific.write(raw)
-                    scientific_digest.update(raw)
-                scientific.write(b"\n")
-                scientific_digest.update(b"\n")
-                count += 1
-            for stream in (handle, scientific):
-                stream.flush()
-                os.fsync(stream.fileno())
-        for temporary, destination, sha in zip(temporaries, (path, scientific_path),
-                                                (digest.hexdigest(), scientific_digest.hexdigest())):
-            if destination.exists():
+            # Close compressors before flushing/fsyncing their underlying files.
+            with gzip.GzipFile(filename="", fileobj=handles[0], mode="wb", mtime=0, compresslevel=1) as operational, \
+                 gzip.GzipFile(filename="", fileobj=handles[1], mode="wb", mtime=0, compresslevel=1) as scientific:
+                for item in records:
+                    raw = _canonical_bytes(encode(item))
+                    operational.write(raw)
+                    digest.update(raw)
+                    for part in iter_canonical_study_json(item):
+                        raw = part.encode("ascii")
+                        scientific.write(raw)
+                        scientific_digest.update(raw)
+                    scientific.write(b"\n")
+                    scientific_digest.update(b"\n")
+                    count += 1
+            for handle in handles:
+                handle.flush()
+                os.fsync(handle.fileno())
+        stored_hashes = tuple(_file_sha(temporary) for temporary in temporaries)
+        # Check all existing conflicts before publishing either file.
+        for destination, sha in zip((path, scientific_path), stored_hashes):
+            if destination.exists() and _file_sha(destination) != sha:
+                raise ValueError("conflicting scientific stage records")
+        for temporary, destination, sha in zip(temporaries, (path, scientific_path), stored_hashes):
+            try:
+                os.link(temporary, destination)
+            except FileExistsError:
                 if _file_sha(destination) != sha:
                     raise ValueError("conflicting scientific stage records")
-            else:
-                os.link(temporary, destination)
         return StageRecords(str(path), count, digest.hexdigest(),
-                            str(scientific_path), scientific_digest.hexdigest())
+                            str(scientific_path), scientific_digest.hexdigest(),
+                            "gzip", *stored_hashes)
     finally:
         for temporary in temporaries:
             temporary.unlink(missing_ok=True)
@@ -626,6 +642,7 @@ def _publish_stage(path, identity, result):
                        for index, records in enumerate(result))
     body = {"schema_version": STAGE_VERSION, "identity": identity, "result": encode(result)}
     _atomic_write(path, _canonical_bytes({**body, "stage_result_sha256": _sha(_canonical_bytes(body))}))
+    return result
 
 
 def _valid_git_revision(value):
@@ -723,7 +740,11 @@ def _worker_owned(job_path, lease):
         raise ValueError("stage cannot publish after incomplete point consumption")
     path = Path(job["result_path"])
     lease.validate(path.parent.parent)
-    _publish_stage(path, identity, result)
+    published = _publish_stage(path, identity, result)
+    from .historical_stage_records import StageRecords
+    references = published if isinstance(published, tuple) else (published,)
+    record_paths = {Path(reference) for item in references if isinstance(item, StageRecords)
+                    for reference in (item.path, item.scientific_path) if reference is not None}
     # Sample after encoding, hashing, fsync and immutable stage publication.
     lease.validate(path.parent.parent)
     _atomic_write(path.with_suffix(".observations.json"), _canonical_bytes({
@@ -735,8 +756,7 @@ def _worker_owned(job_path, lease):
         "artifact_sizes_bytes": {artifact.name: artifact.stat().st_size
             for artifact in path.parent.glob(f"{path.stem}.*")
             if artifact.name != path.name and not artifact.name.endswith((".request.json", ".job.json"))},
-        "record_artifact_bytes": (path.with_suffix(".records.jsonl").stat().st_size
-                                  if path.with_suffix(".records.jsonl").exists() else None)}))
+        "record_artifact_bytes": sum(reference.stat().st_size for reference in record_paths)}))
 
 
 if __name__ == "__main__":
