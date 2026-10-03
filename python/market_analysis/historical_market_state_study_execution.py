@@ -135,7 +135,9 @@ EXECUTION_VERSION = "historical-market-state-execution-v1"
 EXTENSION_COVERAGE_VERSION = "historical-market-state-extension-coverage-v2"
 HMM_DEVELOPMENT_MODEL_VERSION = "historical-market-state-hmm-development-model-v1"
 TOOL_CONFIG_VERSION = "historical-market-state-study-part-b-tool-v1"
-PERIOD_REPORT_SCHEMA_VERSION = "historical-market-state-study-period-report-v1"
+PERIOD_REPORT_SCHEMA_VERSION = "historical-market-state-study-period-report-v2"
+EVENT_TIME_V1_CONTEXT_VERSION = "historical-market-state-event-time-v1-context-v1"
+BOCPD_ONSET_EVIDENCE_VERSION = "historical-market-state-bocpd-onset-evidence-v1"
 EXECUTION_INDEX_VERSION = "historical-market-state-execution-index-v1"
 RUNTIME_REPORT_VERSION = "historical-market-state-runtime-v1"
 HMM_MODEL_FILENAME = "historical-market-state-study-v1-hmm-model.json"
@@ -1267,6 +1269,78 @@ def _load_source_evidence(period, roots):
                    "root": roots[name]} for name in summaries}
 
 
+
+def _event_time_v1_context(prepared_period, candidate_records):
+    """Persist the exact canonical V1 branch at every causal event boundary."""
+    event_times = tuple(sorted({
+        item.decision_time_ms for item in candidate_records
+        if item.evidence_kind == "EVENT" and item.decision_time_ms is not None
+    }))
+    if not event_times:
+        return ()
+    branch_by_boundary = prepared_period.canonical_v1_branch_by_boundary
+    replay_by_boundary = {
+        item.evaluation_boundary_time_ms: item
+        for item in prepared_period.canonical_replay_result.points
+    }
+    records = []
+    for boundary in event_times:
+        branch = branch_by_boundary.get(boundary)
+        replay_point = replay_by_boundary.get(boundary)
+        if branch is None or replay_point is None:
+            raise ValueError("causal event lacks exact canonical V1 branch context")
+        classification, lifecycle = branch
+        if (getattr(replay_point.movement_evaluation,
+                    "evaluation_boundary_time_ms", None) != boundary):
+            raise ValueError("event-time V1 context boundary mismatch")
+        movement = replay_point.movement_evaluation
+        records.append({
+            "decision_time_ms": boundary,
+            "classification": report_json_safe(classification),
+            "lifecycle_state": report_json_safe(lifecycle.next_state),
+            "transitions": report_json_safe(lifecycle.transitions),
+            "provenance": {
+                "source_time_evidence": report_json_safe(
+                    replay_point.source_time_evidence),
+                "movement_algorithm_version": movement.algorithm_version,
+                "movement_config_version": movement.config_version,
+                "universe_id": movement.universe_id,
+                "universe_version": movement.universe_version,
+                "configured_universe": report_json_safe(
+                    movement.configured_universe),
+                "provider": movement.provider,
+                "exchange": movement.exchange,
+                "price_type": movement.price_type,
+            },
+        })
+    return tuple(records)
+
+
+def _bocpd_onset_evidence(candidate_records):
+    """Extract only causal BOCPD onset observations from event evidence."""
+    records = []
+    for item in candidate_records:
+        if item.experiment_id != "EXP-75-04B" or item.evidence_kind != "EVENT":
+            continue
+        native = item.native_evidence
+        if not isinstance(native, dict):
+            raise ValueError("BOCPD event evidence must be an object")
+        onset = native.get("causal_onset_observation")
+        if (not isinstance(onset, dict)
+                or onset.get("evaluation_boundary_time_ms") != item.decision_time_ms):
+            raise ValueError("BOCPD event lacks exact causal onset observation")
+        records.append({
+            "experiment_id": item.experiment_id,
+            "algorithm_version": item.algorithm_version,
+            "config_version": item.config_version,
+            "decision_time_ms": item.decision_time_ms,
+            "onset_observation": onset,
+        })
+    return tuple(sorted(records, key=lambda item: (
+        item["config_version"], item["decision_time_ms"])))
+
+
+
 def _continuous_and_event_outcomes(evidence, candidate_records, v1_state_by_boundary,
                                    period):
     continuous = evaluate_continuous_grids(
@@ -1384,6 +1458,9 @@ def _execute_period(
     (candidate_records, native_summaries, fixed_identities,
      extension_reports, hmm_block, hmm_model_sha) = extension_results
     candidate_records = tuple((*candidate_records, *v1_records))
+    event_time_v1_context = _event_time_v1_context(
+        prepared_period, candidate_records)
+    bocpd_onset_evidence = _bocpd_onset_evidence(candidate_records)
     with _runtime_measure(runtime_metrics, "forward_label_evidence_seconds"):
         forward_evidence = _label_price_evidence(dataset, archive_root, period)
     with _runtime_measure(runtime_metrics, "forward_outcomes_seconds"):
@@ -1436,6 +1513,18 @@ def _execute_period(
         "candidate_evidence": candidate_records,
         "candidate_evidence_sha256": _digest(candidate_records),
         "v1_evidence_sha256": _digest(v1_records),
+        "event_time_v1_context_version": EVENT_TIME_V1_CONTEXT_VERSION,
+        "event_time_v1_context": event_time_v1_context,
+        "event_time_v1_context_sha256": _digest({
+            "version": EVENT_TIME_V1_CONTEXT_VERSION,
+            "records": event_time_v1_context,
+        }),
+        "bocpd_onset_evidence_version": BOCPD_ONSET_EVIDENCE_VERSION,
+        "bocpd_onset_evidence": bocpd_onset_evidence,
+        "bocpd_onset_evidence_sha256": _digest({
+            "version": BOCPD_ONSET_EVIDENCE_VERSION,
+            "records": bocpd_onset_evidence,
+        }),
         "hmm_development_training_block": report_json_safe(hmm_block),
         "hmm_development_training_block_sha256": (
             hmm_block.block_sha256 if hmm_block is not None else None),
