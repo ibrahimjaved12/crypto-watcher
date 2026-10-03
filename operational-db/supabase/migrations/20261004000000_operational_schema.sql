@@ -124,6 +124,11 @@ CREATE TABLE public.collector_recent_candles (
   transport TEXT NOT NULL CHECK (transport IN ('rest', 'websocket')),
   inserted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (provider, instrument_id, price_type, timeframe_minutes, open_time),
+  CONSTRAINT collector_candle_provenance CHECK (
+    (transport = 'rest' AND endpoint = '/fapi/v1/klines' AND source_event_at IS NULL)
+    OR (transport = 'websocket' AND endpoint = 'wss://fstream.binance.com/market/stream'
+        AND source_event_at IS NOT NULL)
+  ),
   CHECK (instrument_id = provider || ':' || native_symbol),
   CHECK (high >= greatest(open, close) AND low <= least(open, close) AND high >= low),
   CHECK (close_time = open_time + make_interval(mins => timeframe_minutes) - interval '1 millisecond'),

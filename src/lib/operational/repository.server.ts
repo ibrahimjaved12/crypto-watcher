@@ -350,8 +350,10 @@ export function createOperationalStore(
             row["price_type"] !== identity.priceType || row["timeframe_minutes"] !== timeframeMinutes ||
             typeof row["endpoint"] !== "string" || !row["endpoint"].trim() ||
             (row["transport"] !== "rest" && row["transport"] !== "websocket") ||
-            (row["transport"] === "rest" && row["source_event_at_ms"] !== null) ||
-            (row["transport"] === "websocket" && row["source_event_at_ms"] == null)) {
+            (row["transport"] === "rest" && (row["endpoint"] !== "/fapi/v1/klines" ||
+              row["source_event_at_ms"] !== null)) ||
+            (row["transport"] === "websocket" && (row["endpoint"] !== "wss://fstream.binance.com/market/stream" ||
+              row["source_event_at_ms"] == null))) {
           throw new Error("Operational database returned an invalid collector completed candle row");
         }
         const receivedAt = numeric(row["received_at_ms"]);

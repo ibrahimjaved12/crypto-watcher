@@ -34,7 +34,7 @@ const series = () => ({ contractVersion: "completed-candle-v1", identity: comple
   observations: [{ candle: candle(), provenance: { sourceKind: "rest", endpoint: "/klines", retrievedAt: 120_100 } }] });
 const row = (frame = 1, patch = {}) => ({ provider: "binance-usdm", instrument_id: "binance-usdm:BTCUSDT",
   symbol: "BTCUSDT", native_symbol: "BTCUSDT", market_type: "futures", contract_type: "perpetual",
-  price_type: "trade", timeframe_minutes: frame, endpoint: "/klines", transport: "rest",
+  price_type: "trade", timeframe_minutes: frame, endpoint: "/fapi/v1/klines", transport: "rest",
   open_time_ms: 0, close_time_ms: frame * 60_000 - 1, source_event_at_ms: null, received_at_ms: frame * 60_000 + 100,
   open: 100, high: 102, low: 99, close: 101, volume: 2, quote_volume: 202.25, ...patch });
 const store = (rows) => createOperationalStore({ async rpc() { return { data: rows, error: null }; } },
@@ -66,8 +66,8 @@ test("generic operational read preserves exact native identity and provenance at
     assert.equal(rest.identity.timeframeMinutes, frame);
     assert.equal(rest.observations[0].candle.quoteVolume, 202.25);
     assert.deepEqual(rest.observations[0].provenance,
-      { sourceKind: "rest", endpoint: "/klines", retrievedAt: frame * 60_000 + 100 });
-    const ws = await store([row(frame, { transport: "websocket", source_event_at_ms: 12345 })])
+      { sourceKind: "rest", endpoint: "/fapi/v1/klines", retrievedAt: frame * 60_000 + 100 });
+    const ws = await store([row(frame, { transport: "websocket", endpoint: "wss://fstream.binance.com/market/stream", source_event_at_ms: 12345 })])
       .readCollectorCompletedCandles("BTCUSDT", frame);
     assert.equal(ws.observations[0].provenance.sourceEventTime, 12345);
     assert.equal((await store([]).readCollectorCompletedCandles("BTCUSDT", frame)).observations.length, 0);
@@ -79,7 +79,9 @@ test("generic operational read preserves exact native identity and provenance at
 });
 
 test("DB adapter fails closed on inconsistent identities, intervals and transport provenance", async () => {
-  for (const patch of [{ source_event_at_ms: 1 }, { transport: "websocket", source_event_at_ms: null },
+  for (const patch of [{ endpoint: "wss://fstream.binance.com/market/stream" },
+    { transport: "websocket", endpoint: "/fapi/v1/klines", source_event_at_ms: 12345 },
+    { source_event_at_ms: 1 }, { transport: "websocket", source_event_at_ms: null },
     { transport: "websocket", source_event_at_ms: true }, { received_at_ms: null },
     { symbol: "ETHUSDT" }, { native_symbol: "ETHUSDT" }, { instrument_id: "BTCUSDT" },
     { market_type: "spot" }, { contract_type: "dated" }, { provider: "other" }, { price_type: "mark" },

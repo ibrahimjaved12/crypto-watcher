@@ -647,7 +647,7 @@ test("movement normalization history RPC returns compact one-minute candles per 
       close: 100 + index,
       volume: 5,
       quote_volume: 551 + index,
-      source_event_at: new Date(openTime + 60_000).toISOString(),
+      source_event_at: null,
       received_at: new Date(openTime + 60_000).toISOString(),
       transport: "rest",
     };
@@ -682,6 +682,38 @@ test("baseline exposes only the generic completed candle RPC", async () => {
   const sql = await readFile(new URL("../operational-db/supabase/migrations/20261004000000_operational_schema.sql", import.meta.url), "utf8");
   assert.match(sql, /CREATE FUNCTION public.get_collector_completed_candles/);
   assert.doesNotMatch(sql, /get_collector_ta_candles/);
+});
+
+test("collector persistence binds transport, endpoint and source event without clock ordering", async () => {
+  const opening = Math.floor(Date.now() / 60_000) * 60_000 - 60_000;
+  const rest = {
+    provider: "binance-usdm", instrument_id: "binance-usdm:BTCUSDT", symbol: "BTCUSDT",
+    native_symbol: "BTCUSDT", price_type: "trade", timeframe_minutes: 1,
+    open_time: new Date(opening).toISOString(), close_time: new Date(opening + 59_999).toISOString(),
+    open: 100, high: 102, low: 99, close: 101, volume: 2, quote_volume: 202,
+    transport: "rest", endpoint: "/fapi/v1/klines", source_event_at: null,
+    received_at: new Date(opening + 60_100).toISOString(),
+  };
+  const websocket = { ...rest, transport: "websocket", endpoint: "wss://fstream.binance.com/market/stream",
+    source_event_at: new Date(opening + 60_107).toISOString() };
+  for (const bad of [
+    { ...rest, endpoint: websocket.endpoint },
+    { ...websocket, endpoint: rest.endpoint },
+    { ...rest, source_event_at: websocket.source_event_at },
+    { ...websocket, source_event_at: null },
+  ]) {
+    await assert.rejects(db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([bad])]),
+      /collector_candle_provenance/);
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM collector_recent_candles")).rows[0].count, 0);
+  }
+  // Correct duplicates are admitted only after malformed first observations failed.
+  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([rest])]);
+  await db.query("DELETE FROM collector_recent_candles");
+  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([websocket])]);
+  const stored = (await db.query("SELECT get_collector_completed_candles('BTCUSDT',1,1) AS candles")).rows[0].candles[0];
+  assert.equal(stored.source_event_at_ms, opening + 60_107);
+  assert.equal(stored.received_at_ms, opening + 60_100);
+  assert.ok(stored.received_at_ms < stored.source_event_at_ms);
 });
 
 test("collector TA candle RPC returns full ascending provenance for one frame", async () => {
