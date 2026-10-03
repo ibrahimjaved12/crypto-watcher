@@ -341,19 +341,50 @@ def _log_return(end, start):
     return result if math.isfinite(result) else None
 
 
-def _normalized(current, historical, config):
-    absent = Metric.missing("INSUFFICIENT_NORMALIZATION_HISTORY")
+# (id(historical), id(config)) -> (historical, config, summary). The held
+# references keep both ids from being reused while the entry exists.
+_NORMALIZATION_SUMMARIES = {}
+_NORMALIZATION_SUMMARY_LIMIT = 4096
+
+
+def _normalization_summary(historical, config):
+    """One of ("INSUFFICIENT",), ("INVALID",) or ("OK", center, mad)."""
     if historical is None or historical.usable_coverage_ms < config.minimum_historical_coverage_ms or not historical.returns:
-        return absent, absent, absent, "INSUFFICIENT_NORMALIZATION_HISTORY"
+        return ("INSUFFICIENT",)
     values = tuple(_finite_float(value) for value in historical.returns)
     if any(value is None for value in values):
-        absent = Metric.missing("INVALID_NORMALIZATION_HISTORY")
-        return absent, absent, absent, "INVALID_NORMALIZATION_HISTORY"
+        return ("INVALID",)
     center = _median(values)
     mad = _median(abs(value - center) for value in values)
     if not math.isfinite(center) or not math.isfinite(mad):
+        return ("INVALID",)
+    return ("OK", center, mad)
+
+
+def _memoized_normalization_summary(historical, config):
+    # Only the frozen domain types are memoized; anything else is recomputed.
+    if type(historical) is not HistoricalWindowInput or type(config) is not MarketMovementConfig:
+        return _normalization_summary(historical, config)
+    key = (id(historical), id(config))
+    entry = _NORMALIZATION_SUMMARIES.get(key)
+    if entry is not None and entry[0] is historical and entry[1] is config:
+        return entry[2]
+    summary = _normalization_summary(historical, config)
+    if len(_NORMALIZATION_SUMMARIES) >= _NORMALIZATION_SUMMARY_LIMIT:
+        _NORMALIZATION_SUMMARIES.clear()
+    _NORMALIZATION_SUMMARIES[key] = (historical, config, summary)
+    return summary
+
+
+def _normalized(current, historical, config):
+    summary = _memoized_normalization_summary(historical, config)
+    if summary[0] == "INSUFFICIENT":
+        absent = Metric.missing("INSUFFICIENT_NORMALIZATION_HISTORY")
+        return absent, absent, absent, "INSUFFICIENT_NORMALIZATION_HISTORY"
+    if summary[0] == "INVALID":
         absent = Metric.missing("INVALID_NORMALIZATION_HISTORY")
         return absent, absent, absent, "INVALID_NORMALIZATION_HISTORY"
+    _, center, mad = summary
     if mad <= 0:
         absent = Metric.missing("NORMALIZATION_MAD_UNAVAILABLE")
         return Metric.present(center), absent, absent, "NORMALIZATION_MAD_UNAVAILABLE"
