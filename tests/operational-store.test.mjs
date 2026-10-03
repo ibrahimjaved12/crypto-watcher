@@ -902,7 +902,16 @@ test("repository collector TA read transports recorded provenance without fabric
   }
 });
 
-test("collector retention keeps enough canonical history for the longest TA frame", async () => {
+test("collector retention keeps enough canonical history for the longest TA frame", async (t) => {
+  // Keep fixture construction and SQL retention on the same clock even if the
+  // two one-minute batches would otherwise straddle a real minute boundary.
+  const now = Date.parse("2026-10-04T12:00:30.000Z");
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const databaseClock = await db.query(
+    "SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms",
+  );
+  assert.equal(Number(databaseClock.rows[0].now_ms), now);
+
   const series = (symbol, timeframeMinutes, count, endOpenTime) => {
     const step = timeframeMinutes * 60_000;
     return Array.from({ length: count }, (_, index) => {
