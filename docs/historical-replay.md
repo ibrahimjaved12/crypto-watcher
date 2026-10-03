@@ -798,8 +798,14 @@ returns decoded points. Exhaustion is required before publishing stage results;
 `validate()` remains available for integrity-only callers. Matching spools are
 checked before any replacement is constructed. Atomic publication still uses
 fsync and rejects conflicts. A per-period writer lock permits cleanup of owned
-abandoned temporary files; failed request/job diagnostics are retained until
-verified durable completion.
+abandoned temporary files. Each fresh worker inherits the same acquired open-file
+description through `pass_fds`; its descriptor travels only in ephemeral launch
+arguments, outside request/job artifacts and scientific hashes. The worker checks
+the lease against the intended period lock file and holds it through observation
+writing. Each process closes its own descriptor without `LOCK_UN`, so a surviving
+worker prevents restart cleanup after parent death. Handled cancellation terminates
+and reaps the owned child before parent ownership is dropped. Failed request/job
+diagnostics are retained until verified durable completion.
 
 Stage lookup uses small input descriptors before lossless request encoding.
 Descriptors bind full configurations, frozen period/manifests, producer/runtime,
@@ -837,6 +843,13 @@ The explicit correctness exception is taker-flow
 rounded the operand's coefficient. Affected high-precision outputs and derived
 hashes may change; old derived evidence/results are rejected. Raw archive
 identities and unrelated algorithm versions are unchanged.
+Frozen source coverage may retain the exact legacy source-identity map whose sole
+difference is taker-flow `algorithm_version=taker-buy-sell-imbalance-v1`. Validation
+compares the entire current or expected legacy map and verifies the original
+coverage hash without modifying or re-hashing the artifact. New coverage uses v2;
+derived evidence, stage descriptors and finalized results still require v2, and
+old-runtime checkpoints remain incompatible. No coverage regeneration, migration,
+archive reselection or input wiping is needed for this compatibility.
 
 Progress records per-stage UTC observation times, monotonic durations, reuse,
 artifact sizes and separately labeled parent/worker current and peak RSS samples.

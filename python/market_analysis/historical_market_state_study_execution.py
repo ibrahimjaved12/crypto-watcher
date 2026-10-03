@@ -439,6 +439,18 @@ def load_study_manifest(path: Path | str) -> HistoricalMarketStateStudyManifest:
         path.read_text(encoding="utf-8"))
 
 
+def _compatible_coverage_source_identities(supplied):
+    """Accept only current coverage or the exact pre-correction source map.
+
+    This compatibility is for frozen source facts, never derived calculations.
+    Build independent comparison dictionaries; leave the artifact/hash intact.
+    """
+    legacy = {**SOURCE_IDENTITIES, "taker_flow": {
+        **SOURCE_IDENTITIES["taker_flow"],
+        "algorithm_version": "taker-buy-sell-imbalance-v1"}}
+    return _canonical(supplied) in (_canonical(SOURCE_IDENTITIES), _canonical(legacy))
+
+
 def load_and_validate_coverage(path: Path | str,
                                manifest: HistoricalMarketStateStudyManifest,
                                code_revision: str | None = None):
@@ -452,8 +464,7 @@ def load_and_validate_coverage(path: Path | str,
             or artifact.get("study_version") != STUDY_VERSION
             or artifact.get("study_manifest_sha256") != manifest.manifest_sha256
             or artifact.get("ordered_periods") != expected_dates
-            or _canonical(artifact.get("source_identities"))
-            != _canonical(SOURCE_IDENTITIES)
+            or not _compatible_coverage_source_identities(artifact.get("source_identities"))
             or artifact.get("tool_config_version") != TOOL_CONFIG_VERSION
             or not isinstance(artifact.get("code_revision"), str)
             or not artifact["code_revision"]
@@ -1265,7 +1276,7 @@ def _candidate_stage_selectors():
                  "taker-flow", "mark_trade", "open_interest", "funding", "liquidation")
 
 def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=None,
-                                runtime_metrics=None):
+                                runtime_metrics=None, worker_lease=None):
     stream = prepared.canonical_replay_result.points
     selectors = _candidate_stage_selectors()
     upstream_v1 = stage_dependencies(stream, ("v1",))
@@ -1291,7 +1302,7 @@ def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=
             descriptor = input_descriptor(request)
             unavailable = selector in source and source[selector]["evidence"] is None
             result = run_stage(stream, selector, descriptor=descriptor,
-                prepare=lambda request=request: request, progress=progress,
+                prepare=lambda request=request: request, progress=progress, worker_lease=worker_lease,
                 local_result=(lambda request=request: _candidate_execution(
                     request["prepared"], request["supplementary"], request["hmm_model"],
                     stage_selector=request["selector"])) if unavailable else None)
@@ -1792,7 +1803,7 @@ def _replay_identity(manifest, coverage, period, dataset, config, code_revision,
 
 def _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
                           runtime_metrics=None, checkpoint_root=None, progress=None,
-                          runtime_implementation_revision=None):
+                          runtime_implementation_revision=None, worker_lease=None):
     """Restore verified post-replay inputs before opening the raw trade index."""
     root = (Path(checkpoint_root) / f"period-{period.study_period_index:02d}-{period.utc_date.isoformat()}-{period.phase}"
             if checkpoint_root is not None else None)
@@ -1800,7 +1811,7 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
     config = study_replay_config(period.utc_date)
     if bundle is None or not bundle.exists() or not (root / f"checkpoint-{config.output_end_boundary_time_ms}.json").exists():
         return _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_revision,
-                    runtime_metrics, checkpoint_root, progress, runtime_implementation_revision)
+                    runtime_metrics, checkpoint_root, progress, runtime_implementation_revision, worker_lease)
     from .historical_study_runtime import decode
     from .historical_replay_runtime import _canonical_bytes, _read_json_bytes, _sha
     raw = bundle.read_bytes()
@@ -1851,7 +1862,7 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
         core_eligibility_sha256=eligibility.eligibility_sha256, code_revision=code_revision)
     records, states, branch = run_stage(stream, "v1", {"action": "v1",
         "prepared": _stage_prepared(prepared, "v1"), "scientific_stage": _stage_science_identity("v1")},
-        progress=progress)
+        progress=progress, worker_lease=worker_lease)
     prepared.canonical_v1_branch_by_boundary = branch
     if progress:
         progress("PREPARED_REPLAY_RESTORED", {"bundle_sha256": sha})
@@ -1862,7 +1873,7 @@ def _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_r
                           runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
                           checkpoint_root: Path | None = None,
                           progress=None,
-                          runtime_implementation_revision: str | None = None):
+                          runtime_implementation_revision: str | None = None, worker_lease=None):
     """Load and replay core evidence once, then freeze shared V1 study context."""
     config = study_replay_config(period.utc_date)
     with _runtime_measure(runtime_metrics, "core_archive_load_seconds"):
@@ -1929,7 +1940,8 @@ def _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_r
         with _runtime_measure(runtime_metrics, "v1_preparation_seconds"):
             v1_records, v1_state_by_boundary, branch_reference = run_stage(
                 stream, "v1", {"action": "v1", "prepared": _stage_prepared(prepared_period, "v1"),
-                            "scientific_stage": _stage_science_identity("v1")}, progress=progress)
+                            "scientific_stage": _stage_science_identity("v1")}, progress=progress,
+                worker_lease=worker_lease)
         prepared_period.canonical_v1_branch_by_boundary = branch_reference
         return prepared_period, frozen_coverage, v1_records, v1_state_by_boundary
     with _runtime_measure(runtime_metrics, "v1_preparation_seconds"):
@@ -1949,27 +1961,29 @@ def _execute_period(*args, **kwargs):
     period = args[2] if len(args) > 2 else kwargs["period"]
     from .historical_run_directory import owned_run_directory
     root = Path(checkpoint_root) / f"period-{period.study_period_index:02d}-{period.utc_date.isoformat()}-{period.phase}"
-    with owned_run_directory(root):
-        return _execute_period_unlocked(*args, **kwargs)
+    with owned_run_directory(root) as lease:
+        return _execute_period_unlocked(*args, **kwargs, worker_lease=lease)
 
 
 def _execute_period_unlocked(
     manifest, coverage, period, archive_root, roots, code_revision,
     hmm_model, runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
     checkpoint_root: Path | None = None, progress=None,
-    runtime_implementation_revision: str | None = None,
+    runtime_implementation_revision: str | None = None, worker_lease=None,
 ):
     if runtime_metrics is None:
         prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
             _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
                                   checkpoint_root=checkpoint_root, progress=progress,
-                                  runtime_implementation_revision=runtime_implementation_revision))
+                                  runtime_implementation_revision=runtime_implementation_revision,
+                                  worker_lease=worker_lease))
     else:
         prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
             _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
                                   runtime_metrics=runtime_metrics,
                                   checkpoint_root=checkpoint_root, progress=progress,
-                                  runtime_implementation_revision=runtime_implementation_revision))
+                                  runtime_implementation_revision=runtime_implementation_revision,
+                                  worker_lease=worker_lease))
     dataset = prepared_period.archive_dataset
     replay = prepared_period.canonical_replay_result
     points = prepared_period.experiment_points
@@ -1985,7 +1999,8 @@ def _execute_period_unlocked(
 
     if isinstance(replay, CompactStudyReplay):
         extension_results = _staged_candidate_execution(
-            prepared_period, supplementary, hmm_model, progress=progress, runtime_metrics=runtime_metrics)
+            prepared_period, supplementary, hmm_model, progress=progress, runtime_metrics=runtime_metrics,
+            worker_lease=worker_lease)
     elif runtime_metrics is None:
         extension_results = _candidate_execution(
             prepared_period, supplementary, hmm_model)
@@ -2010,7 +2025,7 @@ def _execute_period_unlocked(
             "boundaries": tuple(sorted({item.decision_time_ms for item in decision_records
                 if item.evidence_kind == "EVENT" and item.decision_time_ms is not None})),
             "scientific_stage": _stage_science_identity("event-context"),
-            "required_stage_results": dependencies}, progress=progress)
+            "required_stage_results": dependencies}, progress=progress, worker_lease=worker_lease)
         if isinstance(replay, CompactStudyReplay) else
         _event_time_v1_context(prepared_period, candidate_records))
     with _runtime_measure(runtime_metrics, "forward_label_evidence_seconds"):
@@ -2021,7 +2036,7 @@ def _execute_period_unlocked(
                 replay.points, "outcomes", {"action": "outcomes", "period": period,
                     "forward_evidence": forward_evidence, "records": decision_records,
                     "states": v1_state_by_boundary, "scientific_stage": _stage_science_identity("outcomes"),
-                    "required_stage_results": dependencies}, progress=progress)
+                    "required_stage_results": dependencies}, progress=progress, worker_lease=worker_lease)
         else:
             continuous, events, state_outcomes = _continuous_and_event_outcomes(
                 forward_evidence, candidate_records, v1_state_by_boundary, period)

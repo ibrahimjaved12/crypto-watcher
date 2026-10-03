@@ -166,10 +166,10 @@ def adapt_candidate_result(period, descriptor, result) -> CandidateEvidenceBundl
                   else None)
         if timestamp % CONTINUOUS_MINUTE_MS == 0:
             records.append(_record(period, descriptor, timestamp, "CONTINUOUS",
-                                   _native_status(point), native)))
+                                   _native_status(point), native))
         if family == "EXP-75-02" and getattr(point, "cusum_directional_onset", False):
             records.append(_record(period, descriptor, timestamp, "EVENT",
-                                   _native_status(point), native)))
+                                   _native_status(point), native))
 
     if family == "EXP-75-04B":
         regions = getattr(result, "detection_regions_by_partition", {})

@@ -460,10 +460,13 @@ def _observation(started, *, reused, path=None, worker=None):
 
 
 def run_stage(stream, stage_id, request=None, *, descriptor=None, prepare=None,
-              progress=None, local_result=None):
+              progress=None, local_result=None, worker_lease=None):
     """Lookup by complete descriptor before preparing any large payload."""
     started = time.perf_counter()
     root = stream.root.parent / "post-replay"
+    if worker_lease is None:
+        raise ValueError("post-replay stage requires period directory ownership")
+    worker_lease.validate(root.parent)
     root.mkdir(exist_ok=True)
     if descriptor is None:
         descriptor = input_descriptor(request)
@@ -501,8 +504,7 @@ def run_stage(stream, stage_id, request=None, *, descriptor=None, prepare=None,
         package_root = str(Path(__file__).resolve().parents[1])
         environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
             package_root, environment.get("PYTHONPATH"))))
-        subprocess.run([sys.executable, "-m", "market_analysis.historical_study_runtime",
-                        str(job_path)], check=True, env=environment)
+        _run_owned_worker(job_path, environment, worker_lease)
     result, sha, measurements = _load_stage(path, identity)
     # Completion and record hashes have been verified after durable publication.
     for suffix in ("request.json", "job.json"):
@@ -512,6 +514,33 @@ def run_stage(stream, stage_id, request=None, *, descriptor=None, prepare=None,
                  "stage_result_sha256": sha, **_observation(started, reused=False,
                  path=path, worker=measurements)})
     return result
+
+
+def _run_owned_worker(job_path, environment, lease):
+    """Inherit only the lease, and reap an interrupted child before returning."""
+    lease.validate(Path(job_path).parent.parent)
+    arguments = [sys.executable, "-m", "market_analysis.historical_study_runtime",
+                 str(job_path), str(lease.descriptor)]
+    # The descriptor is ephemeral argv, not create-only job/request identity.
+    child = subprocess.Popen(arguments, env=environment, close_fds=True,
+                             pass_fds=(lease.descriptor,))
+    try:
+        returncode = child.wait()
+        if returncode:
+            raise subprocess.CalledProcessError(returncode, arguments)
+    except BaseException:
+        try:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass  # The finally block kills and reaps before lease release.
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+        raise
 
 
 def _write_records(path, records):
@@ -637,11 +666,20 @@ def _execute_scientific_stage(request):
     raise ValueError("unknown post-replay action")
 
 
-def _worker(job_path):
+def _worker(job_path, lease_descriptor=None):
+    from .historical_run_directory import inherited_run_directory_lease
+    with inherited_run_directory_lease(lease_descriptor, Path(job_path).parent.parent) as lease:
+        _worker_owned(job_path, lease)
+
+
+def _worker_owned(job_path, lease):
     started = time.perf_counter()
     job = _read_json_bytes(Path(job_path).read_bytes())
     if type(job) is not dict or type(job.get("identity")) is not dict:
         raise ValueError("invalid post-replay worker job")
+    lease.validate(Path(job["result_path"]).parent.parent)
+    if Path(job["request_path"]).parent.resolve() != Path(job_path).parent.resolve():
+        raise ValueError("post-replay request lies outside the leased stage directory")
     identity = job["identity"]
     _verify_worker_runtime_revision(identity)
     raw = Path(job["request_path"]).read_bytes()
@@ -663,8 +701,10 @@ def _worker(job_path):
     if isinstance(source_stream, StudyPointStream) and not source_stream.validated_completion:
         raise ValueError("stage cannot publish after incomplete point consumption")
     path = Path(job["result_path"])
+    lease.validate(path.parent.parent)
     _publish_stage(path, identity, result)
     # Sample after encoding, hashing, fsync and immutable stage publication.
+    lease.validate(path.parent.parent)
     _atomic_write(path.with_suffix(".observations.json"), _canonical_bytes({
         "observed_at_utc": datetime.now(timezone.utc).isoformat(),
         "monotonic_duration_seconds": time.perf_counter() - started,
@@ -680,4 +720,4 @@ def _worker(job_path):
 
 if __name__ == "__main__":
     from market_analysis.historical_study_runtime import _worker as canonical_worker
-    canonical_worker(sys.argv[1])
+    canonical_worker(sys.argv[1], int(sys.argv[2]) if len(sys.argv) == 3 else None)
