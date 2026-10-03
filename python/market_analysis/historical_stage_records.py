@@ -77,7 +77,9 @@ class StageRecords:
     def __len__(self):
         return self.count
 
-    def _lines(self, scientific=False, *, check_canonical=True):
+    def _lines(self, scientific=False, *, check_canonical=True, with_parsed=False):
+        """Verified raw lines; ``with_parsed`` yields ``(raw, value)`` where
+        ``value`` is the operational parse made by the canonical check (else None)."""
         path = self.scientific_path if scientific else self.path
         expected = self.scientific_sha256 if scientific else self.sha256
         stored = self.scientific_stored_sha256 if scientific else self.stored_sha256
@@ -89,13 +91,16 @@ class StageRecords:
                     for raw in stream:
                         if not raw.endswith(b"\n"):
                             raise ValueError("truncated stage records")
+                        value = None
                         if scientific:
                             raw.decode("ascii")
-                        elif check_canonical and raw != _canonical_record_bytes(_read_json_bytes(raw)):
-                            raise ValueError("noncanonical stage record")
+                        elif check_canonical:
+                            value = _read_json_bytes(raw)
+                            if raw != _canonical_record_bytes(value):
+                                raise ValueError("noncanonical stage record")
                         logical_digest.update(raw)
                         count += 1
-                        yield raw
+                        yield (raw, value) if with_parsed else raw
                 finally:
                     if stream is not reader:
                         stream.close()
@@ -135,7 +140,11 @@ class StageRecords:
         yield "]"
 
     def _verification_key(self):
-        """This exact reference plus each stream file's identity, or None."""
+        """Every declared value ``_lines()`` reads or compares against, plus each
+        stream file's identity, or None. Explicit values: never the dataclass hash."""
+        declared = (self.path, self.scientific_path, self.storage_encoding, self.count,
+                    self.sha256, self.stored_sha256,
+                    self.scientific_sha256, self.scientific_stored_sha256)
         files = []
         try:
             for path in (self.path, self.scientific_path):
@@ -147,7 +156,7 @@ class StageRecords:
                               status.st_ctime_ns, status.st_ino, status.st_dev))
         except OSError:
             return None
-        return self, tuple(files)
+        return declared, tuple(files)
 
     def _verified(self):
         key = self._verification_key()
@@ -242,9 +251,17 @@ def _candidate_decisions(source):
     """Yield ``(experiment_id, algorithm_version, config_version,
     decision_time_ms, evidence_kind, item_or_None)`` in record order.
 
-    Decision scalars come from the scientific stream; only EXP-75-04B EVENT
-    lines (or a line whose scientific scalars are not plain) are decoded from
-    the operational stream. Both streams keep their full count/SHA checks.
+    Both streams are read in lockstep and keep their full count/SHA checks.
+
+    The producing worker builds each record as a validated typed object and
+    ``_write_records`` only encodes it (``_canonical_bytes(encode(item))``);
+    nothing on the producing side decodes it back. So the first pass over an
+    unverified reference keeps the full typed decode of every operational
+    line (reusing the canonical check's parse), and every record's decision
+    scalars must match the scientific stream. Once this exact reference and
+    its unchanged files passed ``verify()`` in this process, the canonical
+    check and the cross-check are skipped, and only EXP-75-04B EVENT lines (or
+    lines whose scientific scalars are not plain) are decoded.
     """
     if not isinstance(source, StageRecords) or source.scientific_path is None:
         for item in source:
@@ -252,16 +269,24 @@ def _candidate_decisions(source):
                    item.decision_time_ms, item.evidence_kind, item)
         return
     from .historical_study_runtime import decode
-    # A verified unchanged file was already proven canonical in this process.
-    operational = source._lines(check_canonical=not source._verified())
+    verified = source._verified()
+    operational = source._lines(check_canonical=not verified, with_parsed=True)
     try:
         for science in source._lines(scientific=True):
-            raw = next(operational, None)
-            if raw is None:
+            line = next(operational, None)
+            if line is None:
                 # Operational passed its count check, so the scientific stream is too long.
                 raise ValueError("stage records count/logical SHA mismatch")
+            raw, parsed = line
             fields = _decision_fields(science)
-            if fields is None or (fields[0] == "EXP-75-04B" and fields[4] == "EVENT"):
+            if not verified:
+                item = decode(parsed)
+                actual = (item.experiment_id, item.algorithm_version, item.config_version,
+                          item.decision_time_ms, item.evidence_kind)
+                if fields is not None and actual != fields:
+                    raise ValueError("stage records stream mismatch")
+                yield (*actual, item)
+            elif fields is None or (fields[0] == "EXP-75-04B" and fields[4] == "EVENT"):
                 item = decode(_read_json_bytes(raw))
                 yield (item.experiment_id, item.algorithm_version, item.config_version,
                        item.decision_time_ms, item.evidence_kind, item)

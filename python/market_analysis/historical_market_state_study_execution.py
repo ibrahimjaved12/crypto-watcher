@@ -1324,6 +1324,27 @@ def _batchable_candidate_stage(selector, supplementary):
             and selector not in supplementary)
 
 
+def _candidate_batch_layout(selectors, supplementary, workers):
+    """``(batch_size, batched)`` for the leading batchable candidate stages.
+
+    An explicit STUDY_STAGE_BATCH_SIZE always wins. Otherwise a worker pool
+    gets ``ceil(batchable / workers)`` so every worker takes one batch in a
+    single round; one worker keeps STAGE_BATCH_SIZE. Grouping only: stage
+    identities and outputs do not depend on it. ``batch_size <= 1`` disables
+    batching (``batched == 0``).
+    """
+    batchable = 0
+    while (batchable < len(selectors)
+           and _batchable_candidate_stage(selectors[batchable], supplementary)):
+        batchable += 1
+    raw = os.environ.get("STUDY_STAGE_BATCH_SIZE")
+    if (raw is None or raw == "") and workers > 1 and batchable:
+        batch_size = math.ceil(batchable / workers)
+    else:
+        batch_size = _stage_batch_size()
+    return batch_size, (batchable if batch_size > 1 else 0)
+
+
 def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=None,
                                 runtime_metrics=None, worker_lease=None):
     stream = prepared.canonical_replay_result.points
@@ -1382,14 +1403,9 @@ def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=
                     runtime_metrics.record_elapsed_ns(field_name, elapsed_ns)
             accept(selector, result)
 
-    batch_size = _stage_batch_size()
-    batched = 0
-    if batch_size > 1:
-        while (batched < len(selectors)
-               and _batchable_candidate_stage(selectors[batched], supplementary)):
-            batched += 1
-    position = 0
     workers = _stage_workers()
+    batch_size, batched = _candidate_batch_layout(selectors, supplementary, workers)
+    position = 0
     if workers > 1 and batched:
         # Same batches as a run where every batch completes; workers only decide
         # which process runs each. Results are consumed in the original order;

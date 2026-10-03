@@ -1102,7 +1102,9 @@ class StageVerificationTests(unittest.TestCase):
                     self.assertEqual([[type(field) for field in vars(item).values()] for item in actual[0]],
                                      [[type(field) for field in vars(item).values()] for item in expected[0]])
                     self.assertEqual(len(actual[1]), 3)
-                    self.assertEqual(len(decoded), 2)  # only the two spooled EXP-75-04B EVENT lines
+                    # Unverified: every spooled line gets the typed decode. Verified in
+                    # this process: only the two spooled EXP-75-04B EVENT lines.
+                    self.assertEqual(len(decoded), 2 if verified else len(first) + len(second))
 
     def test_extract_candidate_inputs_keeps_stream_integrity_checks(self):
         from dataclasses import replace
@@ -1115,6 +1117,114 @@ class StageVerificationTests(unittest.TestCase):
                         replace(ref, count=2)):
                 with self.assertRaises(ValueError):
                     self.records.extract_candidate_inputs(bad)
+
+    def handmade(self, root, operational, scientific):
+        """Identity-encoded reference from separately chosen stream contents:
+        hash-valid and canonical, so only structural checks can reject it."""
+        from market_analysis.historical_market_state_study_json import iter_canonical_study_json
+        operational_raw = b"".join(self.runtime._canonical_bytes(value) for value in operational)
+        scientific_raw = b"".join("".join(iter_canonical_study_json(item)).encode("ascii") + b"\n"
+                                  for item in scientific)
+        path, science = root / "handmade.jsonl", root / "handmade.scientific.jsonl"
+        path.write_bytes(operational_raw)
+        science.write_bytes(scientific_raw)
+        return self.records.StageRecords(str(path), len(operational), hashlib.sha256(operational_raw).hexdigest(),
+                                         str(science), hashlib.sha256(scientific_raw).hexdigest())
+
+    def test_extract_candidate_inputs_rejects_operational_scientific_disagreement(self):
+        from market_analysis import historical_market_state_study_execution as execution
+        consistent = self.evidence("EXP-75-01", "EVENT", 5_000, {})
+        for scientific in (self.evidence("EXP-75-02", "EVENT", 5_000, {}),
+                           self.evidence("EXP-75-01", "EVENT", 10_000, {})):
+            with self.subTest(scientific=scientific), TemporaryDirectory() as directory, \
+                 patch.object(execution, "_bocpd_onset_evidence", side_effect=lambda items: tuple(items)):
+                ref = self.handmade(Path(directory), [self.runtime.encode(consistent)], [scientific])
+                with self.assertRaisesRegex(ValueError, "stage records stream mismatch"):
+                    self.records.extract_candidate_inputs(ref)
+
+    def test_structurally_malformed_record_rejected_until_verified_in_process(self):
+        # Decision (b): the producer never decodes what it writes, so the first,
+        # unverified pass keeps the typed decode and rejects a hash-valid but
+        # malformed record. verify() checks canonical bytes and hashes only;
+        # after it succeeds, non-EVENT lines are no longer decoded.
+        from market_analysis import historical_market_state_study_execution as execution
+        item = self.evidence("EXP-75-01", "CONTINUOUS", 60_000, {})
+        malformed = self.runtime.encode(item)
+        malformed["fields"]["unknown"] = None
+        with TemporaryDirectory() as directory, \
+             patch.object(execution, "_bocpd_onset_evidence", side_effect=lambda items: tuple(items)):
+            ref = self.handmade(Path(directory), [malformed], [item])
+            with self.assertRaises(ValueError):
+                self.records.extract_candidate_inputs(ref)
+            ref.verify()
+            self.assertEqual(self.records.extract_candidate_inputs(ref), ((), ()))
+
+    def test_verification_memo_key_uses_declared_values_not_dataclass_hash(self):
+        from dataclasses import dataclass, field, fields, replace
+        with TemporaryDirectory() as directory:
+            ref = self.runtime._write_records(Path(directory) / "stage.records.jsonl", [{"experiment_id": "one"}])
+            ref.verify()
+            self.assertIn(ref._verification_key(), self.records._VERIFIED)
+            for other in (replace(ref, sha256="0" * 64), replace(ref, scientific_sha256="0" * 64),
+                          replace(ref, stored_sha256="0" * 64), replace(ref, scientific_stored_sha256="0" * 64),
+                          replace(ref, count=2)):
+                with self.subTest(other=other):
+                    self.assertNotEqual(other._verification_key(), ref._verification_key())
+                    self.assertFalse(other._verified())
+                    with self.assertRaises(ValueError):
+                        other.verify()
+                    self.assertNotIn(other._verification_key(), self.records._VERIFIED)
+
+            @dataclass(frozen=True)
+            class Annotated(self.records.StageRecords):
+                notes: list = field(default_factory=list)
+
+            annotated = Annotated(**{item.name: getattr(ref, item.name) for item in fields(ref)}, notes=["x"])
+            with self.assertRaises(TypeError):
+                hash(annotated)
+            self.assertTrue(annotated._verified())  # same declared values and files as ref
+            annotated.verify()
+
+
+class CandidateBatchLayoutTests(unittest.TestCase):
+    SELECTORS = ("hmm", *(f"fixed-{index:02d}" for index in range(20)),
+                 *(f"atr-{index}" for index in range(10)), "taker-flow", "funding")
+
+    def layout(self, workers, batch_size_env=None):
+        from market_analysis import historical_market_state_study_execution as execution
+        with patch.dict(os.environ, {}):
+            os.environ.pop("STUDY_STAGE_BATCH_SIZE", None)
+            if batch_size_env is not None:
+                os.environ["STUDY_STAGE_BATCH_SIZE"] = batch_size_env
+            return execution._candidate_batch_layout(self.SELECTORS, {}, workers)
+
+    def groups(self, batch_size, batched):
+        return [self.SELECTORS[start:min(start + batch_size, batched)] for start in range(0, batched, batch_size)]
+
+    def test_pool_batch_size_is_balanced_across_workers(self):
+        self.assertEqual(self.layout(3), (11, 31))
+        self.assertEqual([len(group) for group in self.groups(*self.layout(3))], [11, 11, 9])
+        self.assertEqual(self.layout(3, ""), (11, 31))
+
+    def test_single_worker_keeps_default_batch_size(self):
+        from market_analysis import historical_market_state_study_execution as execution
+        self.assertEqual(self.layout(1), (execution.STAGE_BATCH_SIZE, 31))
+        self.assertEqual(execution.STAGE_BATCH_SIZE, 9)
+
+    def test_explicit_batch_size_overrides_derivation(self):
+        for workers in (1, 3):
+            with self.subTest(workers=workers):
+                self.assertEqual(self.layout(workers, "5"), (5, 31))
+                self.assertEqual(self.layout(workers, "1"), (1, 0))
+                with self.assertRaises(ValueError):
+                    self.layout(workers, "0")
+
+    def test_batches_cover_each_batchable_selector_once_in_order(self):
+        for workers, env in ((1, None), (2, None), (3, None), (4, None), (3, "5"), (1, "31"), (3, "40")):
+            with self.subTest(workers=workers, env=env):
+                batch_size, batched = self.layout(workers, env)
+                flat = [selector for group in self.groups(batch_size, batched) for selector in group]
+                self.assertEqual(flat, list(self.SELECTORS[:31]))
 
 
 _FAKE_POOL_WORKER = """
