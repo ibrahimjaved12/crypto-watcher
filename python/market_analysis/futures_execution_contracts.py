@@ -8,13 +8,13 @@ from .canonical_identity import canonical_digest
 from .exact_scalar import ExactScalar, Scalar, exact_scalar
 
 
-ALGORITHM_VERSION = "binance-usdm-execution-math-v2:exact-rational"
+ALGORITHM_VERSION = "binance-usdm-execution-math-v3:exact-rational"
 POLICY = (
-    "base-unit-quantity:isolated-one-way:half-open-brackets:"
-    "quantity-floor:passive-buy-floor-sell-ceil:explicit-adjustment:"
+    "base-unit-quantity:isolated-one-way:cap-inclusive-brackets:"
+    "quantity-origin-min:quantity-floor:passive-buy-floor-sell-ceil:explicit-adjustment:"
     "stop-buy-ge-sell-le:tp-buy-le-sell-ge:adverse-bps-10000:exact-rational:"
     "percent-buy-upper-sell-lower-mark:market-min-notional-mark:"
-    "price-filter-zero-disabled-origin-min:integer-leverage-1-125"
+    "price-filter-zero-disabled-origin-min:integer-leverage-1-125:market-no-price-limit-price-required"
 )
 
 
@@ -130,16 +130,17 @@ class Scope(Identified):
 
 @dataclass(frozen=True)
 class Grid(Identified):
+    """Binance quantity filter: minimum is the fixed lattice origin."""
+
     minimum: Scalar
     maximum: Scalar
     increment: Scalar
     evidence: Evidence
-    origin: Scalar = Decimal(0)
 
     def __post_init__(self):
         if not isinstance(self.evidence, Evidence):
             raise ValueError("grid evidence required")
-        for name in ("minimum", "maximum", "increment", "origin"):
+        for name in ("minimum", "maximum", "increment"):
             number(getattr(self, name), name)
 
 
@@ -245,6 +246,10 @@ class OrderIntent(Identified):
             number(self.price, "price", positive=True)
         if type(self.market) is not bool or type(self.reduce_only) is not bool:
             raise ValueError("intent flags must be boolean")
+        if self.market and self.price is not None:
+            raise ValueError("MARKET intent must not contain a submitted price")
+        if not self.market and self.price is None:
+            raise ValueError("price-bearing intent requires a submitted price")
 
 
 @dataclass(frozen=True)

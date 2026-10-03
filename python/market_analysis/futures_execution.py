@@ -145,7 +145,6 @@ def _grid_errors(grid):
         number(grid.minimum, "minimum", minimum=0)
         number(grid.maximum, "maximum", positive=True)
         number(grid.increment, "increment", positive=True)
-        number(grid.origin, "origin", minimum=0)
     except ValueError:
         return ("INVALID_GRID",)
     if grid.maximum < grid.minimum:
@@ -156,7 +155,7 @@ def _grid_errors(grid):
 
 
 def _grid_ratio(value, grid):
-    delta = _sub(value, grid.origin)
+    delta = _sub(value, grid.minimum)
     n, d = delta.as_integer_ratio()
     sn, sd = grid.increment.as_integer_ratio()
     return n * sd, d * sn
@@ -179,7 +178,7 @@ def grid_reasons(value, grid):
 
 
 def suggest_grid(value, grid, *, rounding):
-    """Explicit level proposal; stops/targets require caller-selected rounding."""
+    """Explicit quantity proposal on the minimum-based Binance lattice."""
     number(value, "value", minimum=0)
     if _grid_errors(grid):
         raise ValueError("unavailable/invalid grid")
@@ -187,7 +186,7 @@ def suggest_grid(value, grid, *, rounding):
         raise ValueError("explicit FLOOR or CEIL required")
     n, d = _grid_ratio(value, grid)
     steps = n // d if rounding == "FLOOR" else -(-n // d)
-    proposed = _add(grid.origin, _mul(Decimal(steps), grid.increment))
+    proposed = _add(grid.minimum, _mul(Decimal(steps), grid.increment))
     errors = grid_reasons(proposed, grid) if proposed >= 0 else ("BELOW_MINIMUM",)
     return Adjustment(value, proposed, rounding, grid.identity,
                       status="REJECTED_RULE" if errors else "SUGGESTED", reasons=errors)
@@ -310,8 +309,6 @@ def validate_order(intent, rules, context=None):
     for error in price_errors:
         add("PRICE_FILTER:" + error, missing=error.startswith("UNAVAILABLE"),
             malformed=error.startswith("INVALID"))
-    if not intent.market and intent.price is None:
-        add("UNAVAILABLE_LIMIT_PRICE", missing=True)
     reference = mark if intent.market else intent.price
     minimum = rules.min_notional
     if minimum is None or not _evidence_available(minimum.evidence):
@@ -326,7 +323,7 @@ def validate_order(intent, rules, context=None):
         else:
             if not (intent.reduce_only and minimum.reduce_only_exempt):
                 if reference is None:
-                    add("UNAVAILABLE_MARK_PRICE" if intent.market else "UNAVAILABLE_LIMIT_PRICE", missing=True)
+                    add("UNAVAILABLE_MARK_PRICE", missing=True)
                 elif _mul(intent.quantity, reference) < minimum.minimum:
                     add("BELOW_MIN_NOTIONAL")
     percent = rules.percent_price
@@ -397,15 +394,22 @@ def validate_brackets(table):
     return ()
 
 
+def _bracket_contains(notional_value, row, *, first):
+    # Positive cap belongs only to its preceding tier. Zero is assigned to the
+    # first tier for zero-notional pure helpers (maintenance margin = 0).
+    above_floor = notional_value >= row.floor if first else notional_value > row.floor
+    return above_floor and notional_value <= row.cap
+
+
 def select_bracket(notional_value, table):
     number(notional_value, "notional", minimum=0)
     inputs = (notional_value, table)
     errors = validate_brackets(table)
     if errors:
         return _result("select_bracket", inputs, status=errors[0], reasons=errors)
-    # Every row is [floor, cap); the last cap is also exclusive. No extrapolation.
-    for row in table.rows:
-        if row.floor <= notional_value < row.cap:
+    # First tier includes zero; subsequent tiers are (floor, cap].
+    for index, row in enumerate(table.rows):
+        if _bracket_contains(notional_value, row, first=index == 0):
             return _result("select_bracket", inputs, bracket=row)
     return _result("select_bracket", inputs, status="UNAVAILABLE_BRACKETS",
                    reasons=("NOTIONAL_OUTSIDE_SUPPLIED_BRACKETS",))
@@ -464,19 +468,19 @@ def liquidation_threshold(side, quantity, entry, isolated_wallet_collateral, tab
         return _result("liquidation_threshold", inputs, status=errors[0], reasons=errors)
     candidates = []
     positive_outside = False
-    for row in table.rows:
+    for index, row in enumerate(table.rows):
         numerator = _sub(_sub(_mul(s, _mul(quantity, entry)), isolated_wallet_collateral), row.cum)
         denominator = _mul(quantity, _sub(s, row.maintenance_rate))
         if denominator < 0:
             numerator, denominator = numerator.copy_negate(), denominator.copy_negate()
         if numerator <= 0:
             continue
-        implied_numerator = _mul(quantity, numerator)
-        if implied_numerator >= _mul(table.rows[-1].cap, denominator):
-            positive_outside = True
-        if not (_mul(row.floor, denominator) <= implied_numerator < _mul(row.cap, denominator)):
-            continue
         root = _divide(numerator, denominator)
+        implied_notional = _mul(quantity, root)
+        if implied_notional > table.rows[-1].cap:
+            positive_outside = True
+        if not _bracket_contains(implied_notional, row, first=index == 0):
+            continue
         equity = isolated_equity(side, quantity, entry, root, isolated_wallet_collateral).value
         maintenance = _sub(_mul(_mul(quantity, root), row.maintenance_rate), row.cum)
         if equity != maintenance:

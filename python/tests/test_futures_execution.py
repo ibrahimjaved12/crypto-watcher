@@ -166,6 +166,55 @@ class RuleTests(unittest.TestCase):
                          ('LOT_SIZE:OFF_GRID', 'PRICE_FILTER:OFF_GRID'))
         self.assertIn('LOT_SIZE:ABOVE_MAXIMUM', f.validate_order(intent(quantity=D(101)), RULES).reasons)
 
+    def test_quantity_minimum_is_lattice_origin_for_both_filters(self):
+        lot = Grid(D('.15'), D(100), D('.10'), EVIDENCE)
+        market_lot = replace(lot, maximum=D(10))
+        rules = replace(RULES, lot=lot, market_lot=market_lot)
+        context = RuleEvaluationContext(D(100), EVIDENCE)
+        for quantity, valid in (('.15', True), ('.25', True), ('.20', False), ('.30', False)):
+            with self.subTest(quantity=quantity):
+                expected = () if valid else ('OFF_GRID',)
+                self.assertEqual(f.grid_reasons(D(quantity), lot), expected)
+                for market in (False, True):
+                    order = intent(quantity=D(quantity), market=market, price=None if market else D(100))
+                    result = f.validate_order(order, rules, context)
+                    self.assertEqual(result.status, 'VALID' if valid else 'REJECTED_RULE')
+                    if not valid:
+                        self.assertIn('LOT_SIZE:OFF_GRID', result.reasons)
+                        if market:
+                            self.assertIn('MARKET_LOT_SIZE:OFF_GRID', result.reasons)
+        for grid in (lot, market_lot):
+            for original, expected in (('.15', '.15'), ('.20', '.15'), ('.25', '.25'),
+                                        ('.30', '.25'), ('.34', '.25')):
+                suggestion = f.suggest_quantity(D(original), grid)
+                self.assertEqual(suggestion.proposed, D(expected))
+                self.assertLessEqual(suggestion.proposed, suggestion.original)
+                self.assertEqual(f.grid_reasons(suggestion.proposed, grid), ())
+                self.assertTrue(suggestion.requires_acceptance)
+            too_small = f.suggest_quantity(D('.14'), grid)
+            self.assertLessEqual(too_small.proposed, too_small.original)
+            self.assertEqual(too_small.status, 'REJECTED_RULE')
+            self.assertIn('BELOW_MINIMUM', too_small.reasons)
+            self.assertEqual(f.suggest_grid(D('.20'), grid, rounding='CEIL').proposed, D('.25'))
+        self.assertIn('ABOVE_MAXIMUM', f.grid_reasons(D('10.05'), market_lot))
+        with self.assertRaises(TypeError):
+            Grid(D('.15'), D(100), D('.10'), EVIDENCE, origin=D(0))
+
+    def test_order_intent_requires_market_or_price_bearing_shape(self):
+        for side in (BUY, SELL):
+            with self.assertRaises(ValueError):
+                OrderIntent(side, D(1), D(100), market=True)
+            with self.assertRaises(ValueError):
+                OrderIntent(side, D(1), None, market=False)
+            market = OrderIntent(side, D(1), None, market=True)
+            self.assertEqual(f.validate_order(market, RULES).status, 'UNAVAILABLE_RULE')
+            context = RuleEvaluationContext(D(100), EVIDENCE)
+            self.assertEqual(f.validate_order(market, RULES, context).status, 'VALID')
+            price_bearing = OrderIntent(side, D(1), D(100))
+            self.assertEqual(f.validate_order(price_bearing, RULES).status, 'VALID')
+            # A low dynamic mark cannot override the submitted limit notional.
+            self.assertEqual(f.validate_order(price_bearing, RULES, replace(context, mark_price=D(1))).status, 'VALID')
+
     def test_market_lot_and_explicit_mark_context(self):
         order = intent(quantity=D('.3'), market=True, price=None)
         context = RuleEvaluationContext(D(100), EVIDENCE)
@@ -180,8 +229,10 @@ class RuleTests(unittest.TestCase):
         self.assertIn('BELOW_MIN_NOTIONAL', f.validate_order(replace(order, quantity=D('.4')), RULES, low_mark).reasons)
         self.assertNotEqual(f.validate_order(order, RULES, context).identity,
                             f.validate_order(order, RULES, low_mark).identity)
-        # Even a supplied price does not replace the mark for MARKET admission.
-        self.assertIn('BELOW_MIN_NOTIONAL', f.validate_order(replace(order, quantity=D('.4'), price=D(100)), RULES, low_mark).reasons)
+        # A hybrid MARKET intent is malformed, rather than ignored or judged
+        # using its submitted price. Valid MARKET admission still uses mark.
+        with self.assertRaises(ValueError):
+            replace(order, price=D(100))
         self.assertEqual(f.validate_order(replace(order, quantity=D('.4'), reduce_only=True), RULES).status, 'VALID')
         for field in ('notional_price', 'percent_reference_price'):
             with self.assertRaises(TypeError):
@@ -297,9 +348,28 @@ class MarginTests(unittest.TestCase):
         self.assertEqual(f.maintenance_margin(D(2000), TABLE).value, D(30))
         self.assertEqual(f.maintenance_margin(D(2000), TABLE).bracket_identity, TABLE.rows[1].identity)
         self.assertEqual(f.leverage_admissibility(D(999), 20, TABLE).status, 'VALID')
-        self.assertEqual(f.leverage_admissibility(D(1000), 20, TABLE).status, 'REJECTED_RULE')
-        self.assertEqual(f.select_bracket(D(1000), TABLE).bracket_identity, TABLE.rows[1].identity)
-        self.assertEqual(f.select_bracket(D(10000), TABLE).status, 'UNAVAILABLE_BRACKETS')
+        self.assertEqual(f.leverage_admissibility(D(1000), 20, TABLE).status, 'VALID')
+        self.assertEqual(f.select_bracket(D(1000), TABLE).bracket_identity, TABLE.rows[0].identity)
+        self.assertEqual(f.select_bracket(D(10000), TABLE).status, 'VALID')
+
+    def test_cap_inclusive_bracket_ownership_across_helpers(self):
+        for notional, index in (('0', 0), ('999', 0), ('1000', 0),
+                                ('1000.0001', 1), ('10000', 1)):
+            with self.subTest(notional=notional):
+                selected = f.select_bracket(D(notional), TABLE)
+                self.assertEqual(selected.status, 'VALID')
+                self.assertEqual(selected.bracket_identity, TABLE.rows[index].identity)
+                maintenance = f.maintenance_margin(D(notional), TABLE)
+                self.assertEqual(maintenance.bracket_identity, selected.bracket_identity)
+                leverage = f.leverage_admissibility(D(notional), 20, TABLE)
+                self.assertEqual(leverage.bracket_identity, selected.bracket_identity)
+                self.assertEqual(leverage.status, 'VALID' if index == 0 else 'REJECTED_RULE')
+        self.assertEqual(f.maintenance_margin(D(0), TABLE).value, D(0))
+        self.assertEqual(f.maintenance_margin(D(1000), TABLE).value, D(10))
+        self.assertEqual(f.maintenance_margin(D(10000), TABLE).value, D(190))
+        for helper in (f.select_bracket, f.maintenance_margin):
+            self.assertEqual(helper(D('10000.0001'), TABLE).status, 'UNAVAILABLE_BRACKETS')
+        self.assertEqual(f.leverage_admissibility(D('10000.0001'), 1, TABLE).status, 'UNAVAILABLE_BRACKETS')
 
     def test_integer_leverage_domain_and_repeating_initial_margin(self):
         result = f.initial_margin(D(100), 3)
@@ -317,7 +387,7 @@ class MarginTests(unittest.TestCase):
                     replace(TABLE.rows[0], max_initial_leverage=invalid)
         maximum = replace(TABLE, rows=(replace(TABLE.rows[0], max_initial_leverage=125), TABLE.rows[1]))
         self.assertEqual(f.leverage_admissibility(D(999), 125, maximum).status, 'VALID')
-        self.assertEqual(f.leverage_admissibility(D(1000), 125, maximum).status, 'REJECTED_RULE')
+        self.assertEqual(f.leverage_admissibility(D(1000), 125, maximum).status, 'VALID')
         self.assertEqual(f.leverage_admissibility(D(100), 1, TABLE).status, 'VALID')
         with localcontext() as context:
             context.prec = 1
@@ -361,7 +431,21 @@ class MarginTests(unittest.TestCase):
         self.assert_root(LONG, '1', '2000', '1109', '900', 0)
         # Short entry notional is tier 1, root is tier 2.
         self.assert_root(SHORT, '1', '900', '212', '1100', 1)
-        self.assert_root(LONG, '1', '1200', '210', '1000', 1)
+        self.assert_root(LONG, '1', '1200', '210', '1000', 0)
+
+    def test_liquidation_cap_boundary_belongs_to_preceding_tier(self):
+        self.assert_root(LONG, '1', '1200', '210', '1000', 0)
+        self.assert_root(SHORT, '1', '900', '110', '1000', 0)
+        self.assert_root(LONG, '1', '10200', '390', '10000', 1)
+        self.assert_root(SHORT, '1', '9900', '290', '10000', 1)
+        # Once slightly above the first cap, only the second tier owns the root.
+        self.assert_root(LONG, '1', '1200', '209.999902', '1000.0001', 1)
+        # An exact supplied final cap remains usable even without another tier.
+        incomplete = replace(TABLE, rows=TABLE.rows[:1])
+        result = f.liquidation_threshold(SHORT, D(1), D(900), D(110), incomplete)
+        self.assertEqual(result.status, 'VALID')
+        self.assertEqual(result.value, D(1000))
+        self.assertEqual(result.bracket_identity, incomplete.rows[0].identity)
 
     def test_no_position_missing_incomplete_no_positive(self):
         self.assertEqual(f.liquidation_threshold(LONG, D(0), D(100), D(10), None).status, 'NO_POSITION')
