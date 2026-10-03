@@ -1,0 +1,96 @@
+{
+  "version": "historical-study-campaign-v1",
+  "campaign_id": "development-0-post176-public-v1",
+  "runtime_sha": "c257da783de28d6c693d465d4f863b365a0ae8c4",
+  "orchestration_sha": "c257da783de28d6c693d465d4f863b365a0ae8c4",
+  "producer_revision": "aa981f1cbb4beca699623b2d16c99bb20b73539d",
+  "study_manifest_sha256": "7f863cb6e6d3a39c46f109ba65c1617eb0aef894bb7dff74a6b393b24dc714f9",
+  "coverage_manifest_sha256": "0b2bb170388ffe0cfaae145bcb94d1b1d4bf2a7da8f36dd9a174ab70d063d8b5",
+  "study_file_sha256": "ddbb34ccb93132a72d804303a2e011403e7461f79d31a63efd1e970f10ec3724",
+  "coverage_file_sha256": "f805a6caf64852a5b269ca68462786053df7690cc864dfdbb1a64758f191879f",
+  "dependency_locks": {
+    "requirements.txt": "c199df883aab5d81a7e1e1a8199ac499d78b5ab500e1d8a02c60a4a3637c64d2",
+    "requirements-research.txt": "a23aaf94250a9f53031a592980142245a848e2372b6c6c3093e8260b129265b8"
+  },
+  "expected_membership": {
+    "development": [
+      0
+    ],
+    "validation": [],
+    "test": []
+  },
+  "inputs": {
+    "0": {
+      "release_tag": "inputs-development-0-v1",
+      "manifest_sha256": "be56c609ba57acd44bbf3676f05121f266db7f0185b45f5e87aca1170a7a6e96"
+    }
+  },
+  "job_minutes": 300,
+  "publication_reserve_minutes": 15,
+  "max_new_stages": 64,
+  "prepared_cache": {
+    "enabled": true,
+    "max_bytes": 9223372036854775807,
+    "headroom_bytes": 1,
+    "upload_max_seconds": 120
+  },
+  "limits": {
+    "max_transfer_bytes": 9223372036854775807,
+    "max_uncompressed_bytes": 9223372036854775807,
+    "headroom_bytes": 1
+  },
+  "budget": {
+    "ceiling_minutes": 1525,
+    "max_runs": 5,
+    "no_progress_cap": 2
+  },
+  "expanded_budget_authorized": true,
+  "control": {
+    "version": "historical-campaign-plan-v1",
+    "allow_test": false,
+    "tasks": [
+      {
+        "id": "preflight-development-0",
+        "operation": "preflight",
+        "phase": "development",
+        "period_index": 0,
+        "depends_on": [],
+        "expected_outputs": [
+          "preflight"
+        ]
+      },
+      {
+        "id": "execute-development-0",
+        "operation": "execute-period",
+        "phase": "development",
+        "period_index": 0,
+        "depends_on": [
+          "preflight-development-0"
+        ],
+        "expected_outputs": [
+          "period-report",
+          "period-evidence"
+        ]
+      },
+      {
+        "id": "aggregate-development",
+        "operation": "aggregate",
+        "phase": "development",
+        "period_index": null,
+        "depends_on": [
+          "execute-development-0"
+        ],
+        "expected_outputs": [
+          "execution-index"
+        ]
+      }
+    ]
+  },
+  "retention": {
+    "version": "historical-retention-v1",
+    "redundant_recovery": "verified-consolidation-only",
+    "abandoned_drafts": "retain-unless-proven",
+    "inputs_and_results": "retain"
+  },
+  "budget_notes": "Public-repository rerun after #175/#176 performance changes. Scientific producer and frozen inputs unchanged."
+}
