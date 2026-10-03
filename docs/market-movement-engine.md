@@ -56,7 +56,7 @@ archive files and manifests supply historical research. These responsibilities r
 | 8-day completed-candle retention | Application configuration / **resource/retention** supporting canonical inputs | Stored surplus is neutral with identical inputs; insufficient retention can make evidence unavailable | Demonstrate complete raw-history coverage for each consumer |
 | 5m **and** at most 2,000 logical aggTrade items per contract | Collector / **resource/retention**, bounded snapshot | Not canonical movement history or a guaranteed recovery interval | Concrete consumer-derived sizing evidence; no such invariant is currently demonstrated |
 | 420 boundary records (`DEFAULT_HISTORY_BUCKETS`) | Python / **resource/retention** derived from window minimum | Enough exact history is mandatory; surplus is neutral with identical inputs | Window coverage and safety-margin evidence; preserve current constructor/spec minimum |
-| 2,000ms finalization grace | Collector admission policy + Python finalization / **operational safety** | Does not change return math; can change admitted live evidence and is in replay/config identity | Explicit versioned policy plus measured latency/late-event evidence; none currently justifies another value |
+| 2,000ms finalization grace | TanStack live orchestration + Python explicit-boundary finalization / **operational safety** | Does not change return math; can change admitted live evidence and is in replay/config identity | Explicit versioned policy plus measured latency/late-event evidence; none currently justifies another value |
 | 60s movement evaluation/current-state age | Application / **operational safety**, consumer-status diagnostic | Does not define endpoint freshness or market classification | Consumer cadence, finalization-lag and status-jitter evidence |
 | 30s socket silence | Collector / **operational safety**, connection stale handling | Does not define canonical endpoint freshness | Connection-health and recovery evidence |
 | Newest 260 completed candles per canonical series | Operational DB / **resource/retention**, TA availability margin | Stored surplus is neutral with identical inputs; changing the TA input prefix can change outputs | TA history/catch-up coverage and input-prefix impact evidence |
@@ -72,34 +72,38 @@ See [collector bounds](./binance-futures-collector.md), [candle retention](./ope
 
 ## Live finalization / lateness watermark
 
-The existing collector runtime delays each explicit Python boundary request by an explicit grace:
+TanStack live movement orchestration computes the grace-based finalizable boundary. The collector
+transports/advances the explicit ordered boundary and input; Python permanently finalizes that
+boundary and owns canonical bucket mathematics:
 
 ```text
 MOVEMENT_FINALIZATION_GRACE_MS = 2000   # V1 default, server-only
 finalizable_boundary = floor((wall_clock_now_ms - grace_ms) / 5000) * 5000
 ```
 
-- Wall clock only decides _when_ an exchange-time bucket is safe; bucket identity stays
-  exchange/event-time based.
+- Wall clock plus grace decides _when_ the explicit trade-time boundary is safe to finalize;
+  Binance trade/transaction time `T` determines five-second bucket membership.
 - At exactly a boundary `B` the result is `B - 5000`, so the current wall-clock boundary is never
   finalized immediately.
 - A newer accepted trade still advances earlier buckets naturally through #70's trade-time logic.
 - The periodic evaluator uses the boundary only to close quiet/no-trade symbols and trigger one
   synchronized evaluation per boundary.
-- A trade whose exchange time belongs to an already-finalized bucket is rejected, never rewritten,
+- A trade whose trade/transaction time `T` belongs to an already-finalized bucket is rejected, never rewritten,
   and counted as a late-after-finalization event in diagnostics.
 
 The grace is explicit, server-side and versioned. The effective config version deterministically
 identifies the grace in force (`movement-finalization-config-v1:grace-<ms>`), so tuning
-`MOVEMENT_FINALIZATION_GRACE_MS` (integer, 0–60000) is a new config version rather than a silent
+`MOVEMENT_FINALIZATION_GRACE_MS` (integer, 1–60000) is a new config version rather than a silent
 change under an unchanged version. It must never be a `VITE_*` variable. The effective
 `finalizationConfigVersion` and `finalizationGraceMs` are persisted in the bounded current evidence
 and exposed through the authenticated current-state and compact diagnostics contracts.
 
-The 2s default governs evidence admission: exchange transaction/event time defines the analytical
-boundary, wall clock determines when it is safe to finalize, and
-late observations never rewrite finalized history. Late-after-finalization observations remain
-diagnostic evidence. Changing grace requires the versioned decision and measurements listed above.
+The 2s default governs evidence admission. Binance trade/transaction time `T` defines five-second
+bucket membership. Event time `E` and local receive time are preserved as provenance/diagnostic
+timestamps; they do not determine bucket membership. Wall clock plus finalization grace determines
+when the explicit trade-time boundary is safe to finalize. Late observations never rewrite finalized
+history and remain diagnostic evidence. Changing grace requires the versioned decision and
+measurements listed above.
 
 ## Universe semantics
 
@@ -216,7 +220,6 @@ These are separate correctness/design work, not changes to the current constants
   version label; effective-parameter/config identity needs hardening.
 - The one-worker invariant is documented but not explicitly pinned at every Uvicorn startup;
   deployment settings such as `WEB_CONCURRENCY` may change the worker count.
-- Live accepts zero finalization grace, while historical replay requires a positive value.
 - The collector's exact 5m/2,000-item snapshot sizing lacks a demonstrated consumer-derived invariant.
 
 ## Migration
