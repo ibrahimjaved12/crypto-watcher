@@ -290,9 +290,13 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
         extension_event = execution.HistoricalStudyCandidateEvidence(
             period.study_period_index, period.utc_date.isoformat(), period.phase,
             "EXP-75-11-FUNDING", "funding-v1", "funding", boundary, "EVENT", "ONSET", {})
+        continuous_v1 = execution.HistoricalStudyCandidateEvidence(
+            period.study_period_index, period.utc_date.isoformat(), period.phase,
+            "V1", "market-state-classifier-v1", "v1-config",
+            boundary + 5_000, "CONTINUOUS", "READY", {})
 
         records = execution._event_time_v1_context(
-            prepared, (first, second, other_family, extension_event))
+            prepared, (first, second, other_family, extension_event, continuous_v1))
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["decision_time_ms"], boundary)

@@ -1240,8 +1240,7 @@ def _validate_period_report(payload, manifest, period, code_revision, coverage_s
             raise ValueError("candidate event has no valid exact period boundary")
         expected_times.add(boundary)
     if period.phase == "development":
-        block = _validated_period_hmm_block(payload, period)
-        expected_times.update(row.evaluation_boundary_time_ms for rows in block.feature_blocks for row in rows)
+        _validated_period_hmm_block(payload, period)
     contexts = payload["event_time_v1_context"]
     replay = payload.get("canonical_replay_manifest")
     if (not isinstance(replay, dict)
@@ -1374,12 +1373,12 @@ def _load_source_evidence(period, roots):
 
 
 
-def _event_time_v1_context(prepared_period, candidate_records, additional_boundaries=()):
+def _event_time_v1_context(prepared_period, candidate_records):
     """Persist the exact canonical V1 branch at every causal event boundary."""
     event_times = tuple(sorted({
         item.decision_time_ms for item in candidate_records
         if item.evidence_kind == "EVENT" and item.decision_time_ms is not None
-    } | set(additional_boundaries)))
+    }))
     if not event_times:
         return ()
     branch_by_boundary = prepared_period.canonical_v1_branch_by_boundary
@@ -1573,10 +1572,7 @@ def _execute_period(
     (candidate_records, native_summaries, fixed_identities,
      extension_reports, hmm_block, hmm_model_sha) = extension_results
     candidate_records = tuple((*candidate_records, *v1_records))
-    event_time_v1_context = _event_time_v1_context(
-        prepared_period, candidate_records,
-        (row.evaluation_boundary_time_ms for rows in hmm_block.feature_blocks for row in rows)
-        if hmm_block is not None else ())
+    event_time_v1_context = _event_time_v1_context(prepared_period, candidate_records)
     bocpd_onset_evidence = _bocpd_onset_evidence(candidate_records)
     with _runtime_measure(runtime_metrics, "forward_label_evidence_seconds"):
         forward_evidence = _label_price_evidence(dataset, archive_root, period)

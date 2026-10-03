@@ -57,6 +57,21 @@ def _development_periods(manifest: HistoricalMarketStateStudyManifest):
     return periods
 
 
+def _v1_continuous_times(report, period):
+    """Index persisted minute V1 evidence for exact held-out HMM joins."""
+    times = tuple(
+        item.get("decision_time_ms") for item in report["candidate_evidence"]
+        if item.get("experiment_id") == "V1"
+        and item.get("evidence_kind") == "CONTINUOUS")
+    if (len(times) != len(set(times))
+            or any(type(boundary) is not int
+                   or boundary % HMM_CONFIG_V1.sample_interval_ms
+                   or not period.start_boundary_time_ms <= boundary < period.end_boundary_time_ms
+                   for boundary in times)):
+        raise ValueError("development report has invalid V1 continuous minute evidence")
+    return frozenset(times)
+
+
 def _load_development_inputs(manifest, output_dir: Path, code_revision: str):
     period_dir = output_dir / PERIOD_DIRECTORY
     blocks = []
@@ -74,6 +89,10 @@ def _load_development_inputs(manifest, output_dir: Path, code_revision: str):
         if coverage_sha is None:
             coverage_sha = current_coverage
         block = _validated_period_hmm_block(report, period)
+        v1_times = _v1_continuous_times(report, period)
+        if any(row.evaluation_boundary_time_ms not in v1_times
+               for rows in block.feature_blocks for row in rows):
+            raise ValueError("development HMM feature row lacks exact V1 continuous evidence")
         blocks.append(block)
         reports.append({
             "study_period_index": period.study_period_index,
@@ -81,6 +100,7 @@ def _load_development_inputs(manifest, output_dir: Path, code_revision: str):
             "period_report_sha256": report_sha,
             "training_block_sha256": block.block_sha256,
             "event_time_v1_context": report["event_time_v1_context"],
+            "v1_continuous_times": v1_times,
         })
     return tuple(blocks), tuple(reports), coverage_sha
 
@@ -221,9 +241,13 @@ def validate_hmm_crossfit_index(path: Path | str,
         report = _read_json(period_dir / _period_filename(period))
         report_sha = _validate_period_report(report, manifest, period, code_revision, coverage_sha256)
         block = _validated_period_hmm_block(report, period)
+        v1_times = _v1_continuous_times(report, period)
+        if any(row.evaluation_boundary_time_ms not in v1_times
+               for rows in block.feature_blocks for row in rows):
+            raise ValueError("development HMM feature row lacks exact V1 continuous evidence")
         source_identities[period.study_period_index] = (
             report_sha, block.block_sha256, block,
-            report["event_time_v1_context"])
+            report["event_time_v1_context"], v1_times)
     for offset, (entry, period) in enumerate(zip(entries, periods)):
         if (not isinstance(entry, dict)
                 or entry.get("study_period_index") != offset
@@ -327,9 +351,10 @@ def validate_hmm_crossfit_index(path: Path | str,
                         or item.get("config_version") != HMM_CONFIG_V1.version
                         or item.get("evaluation_boundary_time_ms")
                         != source_row.evaluation_boundary_time_ms
-                        or item.get("evaluation_boundary_time_ms") not in context_times
+                        or item.get("evaluation_boundary_time_ms")
+                        not in source_identities[offset][4]
                         or item.get("raw_feature_vector") != list(source_row.values)):
-                    raise ValueError("HMM held-out evidence/context identity mismatch")
+                    raise ValueError("HMM held-out evidence lacks an exact V1 continuous match")
                 posterior = item.get("posterior_probabilities")
                 if item.get("status") == "HMM_READY":
                     if (not isinstance(posterior, list) or len(posterior) != 3

@@ -63,16 +63,15 @@ class HistoricalMarketStateHMMCrossFitTests(unittest.TestCase):
                  ("BTCUSDT", "ETHUSDT"), "provider", "exchange", "trade"),
                 ((row,),), 1439)
             blocks.append(block)
-            candidate_records = []
+            candidate_records = [report_json_safe(execution.HistoricalStudyCandidateEvidence(
+                period.study_period_index, period.utc_date.isoformat(), period.phase,
+                "V1", "v1-algorithm-fixture", "v1-config-fixture",
+                row.evaluation_boundary_time_ms, "CONTINUOUS", "READY", {}))]
             replay_identity = {"movement_algorithm_version": "movement-v1",
                                "movement_config_version": "config-v1", "universe_id": "universe-v1",
                                "universe_version": "1", "configured_universe": ["BTCUSDT", "ETHUSDT"],
                                "provider": "provider", "exchange": "exchange", "price_type": "trade"}
-            context = [{
-                "decision_time_ms": row.evaluation_boundary_time_ms,
-                "classification": {}, "lifecycle_state": {}, "transitions": [],
-                "provenance": {"source_time_evidence": [], **replay_identity},
-            }]
+            context = []
             body = {
                 "period_report_schema_version": execution.PERIOD_REPORT_SCHEMA_VERSION,
                 "execution_version": execution.EXECUTION_VERSION,
@@ -205,8 +204,20 @@ class HistoricalMarketStateHMMCrossFitTests(unittest.TestCase):
                     coverage_sha256=coverage_sha, code_revision="crossfit-fixture")
             self.assertEqual(len(validated["ordered_folds"]), 10)
             self.assertEqual(first["fold_model"]["training_block_count"], 9)
-            self.assertEqual(first["held_out_v1_context"][0]["decision_time_ms"],
-                             blocks[0].feature_blocks[0][0].evaluation_boundary_time_ms)
+            self.assertEqual(first["held_out_v1_context"], [])
+            self.assertEqual(
+                first["held_out_period"]["study_period_index"], 0)
+            held_out_report_path = (
+                root / execution.PERIOD_DIRECTORY /
+                execution._period_filename(self.manifest.selected_periods[0]))
+            held_out_report = json.loads(held_out_report_path.read_text(encoding="utf-8"))
+            persisted_v1_minute_times = tuple(
+                record["decision_time_ms"] for record in held_out_report["candidate_evidence"]
+                if record["experiment_id"] == "V1"
+                and record["evidence_kind"] == "CONTINUOUS")
+            self.assertIn(
+                blocks[0].feature_blocks[0][0].evaluation_boundary_time_ms,
+                persisted_v1_minute_times)
             with patch.object(crossfit, "train_hmm_regime_model_from_blocks",
                               side_effect=train), patch.object(
                     crossfit, "filter_hmm_regime_feature_blocks",
