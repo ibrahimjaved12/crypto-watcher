@@ -2381,7 +2381,8 @@ def execute_study_periods(
                                       runtime_implementation_revision=runtime_implementation_revision)
         if runtime_metrics is not None:
             artifact_write_started_ns = time.perf_counter_ns()
-        progress("BEFORE_PERIOD_FINALIZATION")
+        if slice_controller is not None:
+            progress("BEFORE_PERIOD_FINALIZATION")
         _write_period_stream(path, payload)
         _period_sidecar(path, manifest, coverage, period, code_revision, payload["report_sha256"])
         progress("PERIOD_ARTIFACT_FINALIZED", {"report_sha256": payload["report_sha256"]})
