@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import calendar
 import csv
+from decimal import Decimal, Inexact, InvalidOperation, Rounded, localcontext
 import gzip
 import io
 import json
@@ -69,12 +70,15 @@ COLUMNS = (
       for field in ("open", "high", "low", "close")),
     "flags",
 )
-FUNDING_COLUMNS = ("calc_time_ms", "funding_interval_hours", "last_funding_rate")
+FUNDING_COLUMNS = ("calc_time_ms", "funding_interval_hours", "last_funding_rate", "last_funding_rate_published")
 
 _MONTH = re.compile(r"(\d{4})-(0[1-9]|1[0-2])\Z")
 _TAG = re.compile(r"rd-(" + "|".join(SYMBOLS) + r")-(\d{4}-(?:0[1-9]|1[0-2]))-r([1-9][0-9]{0,2})\Z")
 _DECIMAL = re.compile(r"(-?)([0-9]+)(?:\.([0-9]+))?\Z")
 _INTEGER = re.compile(r"-?[0-9]+\Z")
+# A finite decimal number as published in kline/funding files, optionally in exponent form.
+_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
+MAX_DECIMAL_EXPONENT = 40
 _CHECKSUM = re.compile(r"\s*([0-9a-fA-F]{64})(?:\s|\Z)")
 _PAD = tuple("0" * (SCALE_DIGITS - n) for n in range(SCALE_DIGITS + 1))
 
@@ -173,7 +177,7 @@ def parse_scaled(text: str, digits: int = SCALE_DIGITS) -> int:
     """Exact integer value of a plain decimal string at scale 10**digits."""
     match = _DECIMAL.match(text)
     if not match:
-        raise ValueError(f"invalid decimal: {text!r}")
+        raise ValueError(f"invalid decimal (plain decimal required, no exponent): {text!r}")
     sign, whole, fraction = match.groups()
     fraction = fraction or ""
     if len(fraction) > digits:
@@ -200,40 +204,73 @@ def render_scaled(value: int, digits: int = SCALE_DIGITS) -> str:
     return f"{sign}{whole}.{fraction_text}" if fraction_text else f"{sign}{whole}"
 
 
-def canonical_decimal(text: str) -> str:
-    """Canonical spelling of a decimal string with any number of fractional digits."""
-    match = _DECIMAL.match(text)
-    if not match:
+def exact_decimal(text: str) -> Decimal:
+    """Exact finite Decimal of a published numeric string (plain or exponent form).
+
+    Outer whitespace is stripped; inner whitespace, NaN/Infinity, hex and
+    absurd exponents are rejected. Decimal(str) is exact (no context rounding).
+    """
+    if not isinstance(text, str):
         raise ValueError(f"invalid decimal: {text!r}")
-    sign, whole, fraction = match.groups()
-    whole = whole.lstrip("0") or "0"
-    fraction = (fraction or "").rstrip("0")
-    if whole == "0" and not fraction:
+    token = text.strip()
+    if not _NUMBER.match(token):
+        raise ValueError(f"invalid decimal: {text!r}")
+    value = Decimal(token)
+    exponent = value.as_tuple().exponent
+    if not value.is_finite() or abs(exponent) > MAX_DECIMAL_EXPONENT or abs(value.adjusted()) > MAX_DECIMAL_EXPONENT:
+        raise ValueError(f"decimal exponent out of range: {text!r}")
+    return value
+
+
+def plain_decimal(text: str) -> str:
+    """Exact canonical plain spelling: "9.8E-7" -> "0.00000098", "1.5e3" -> "1500", "-0.0" -> "0"."""
+    value = exact_decimal(text)
+    if value.is_zero():
         return "0"
-    return f"{sign}{whole}.{fraction}" if fraction else f"{sign}{whole}"
+    with localcontext() as context:
+        # Enough precision for any accepted value; any rounding would raise instead.
+        context.prec = 2 * MAX_DECIMAL_EXPONENT + 20
+        for trap in (InvalidOperation, Inexact, Rounded):
+            context.traps[trap] = True
+        try:
+            rendered = format(value, "f")  # no precision given, so nothing is rounded
+            if "." in rendered:
+                rendered = rendered.rstrip("0").rstrip(".")
+            exact = Decimal(rendered) == value
+        except (InvalidOperation, Inexact, Rounded) as error:
+            raise ValueError(f"decimal cannot be rendered exactly: {text!r}") from error
+    if not exact:
+        raise ValueError(f"decimal cannot be rendered exactly: {text!r}")
+    return rendered
+
+
+def canonical_decimal(text: str) -> str:
+    """Canonical spelling of a published decimal (any fractional digits, exponent allowed)."""
+    return plain_decimal(text)
 
 
 class ExactSum:
-    """Exact sum of decimal strings with any number of fractional digits."""
+    """Exact sum of published decimal strings (plain or exponent form)."""
 
     def __init__(self) -> None:
         self.value = 0
         self.digits = 0
 
     def add(self, text: str) -> None:
-        match = _DECIMAL.match(text)
-        if not match:
-            raise ValueError(f"invalid decimal: {text!r}")
-        sign, whole, fraction = match.groups()
-        fraction = fraction or ""
-        value = int(whole + fraction)
+        sign, digits, exponent = exact_decimal(text).as_tuple()
+        value = int("".join(map(str, digits)) or "0")
         if sign:
             value = -value
-        if len(fraction) > self.digits:
-            self.value *= 10 ** (len(fraction) - self.digits)
-            self.digits = len(fraction)
+        if exponent >= 0:
+            value *= 10 ** exponent
+            fraction_digits = 0
         else:
-            value *= 10 ** (self.digits - len(fraction))
+            fraction_digits = -exponent
+        if fraction_digits > self.digits:
+            self.value *= 10 ** (fraction_digits - self.digits)
+            self.digits = fraction_digits
+        else:
+            value *= 10 ** (self.digits - fraction_digits)
         self.value += value
 
     def text(self) -> str:
@@ -249,30 +286,75 @@ def _integer(text: str, what: str) -> int:
 # ---------------------------------------------------------------- streaming CSV
 
 
-def read_zip_csv(source, columns: int, *, name: str = "archive") -> Iterator[list[str]]:
+class ArchiveFormatError(ValueError):
+    """A structural archive/CSV failure, already located by file and line."""
+
+
+class ZipCsvRows:
+    """Rows of the single CSV member of a zip, tracking the current file line.
+
+    ``name`` and ``line`` (1-based line in the CSV member) let consumers report
+    exactly which line failed.
+    """
+
+    def __init__(self, source, columns: int, name: str) -> None:
+        self.source, self.columns, self.name, self.line = source, columns, name, 0
+
+    def __iter__(self) -> Iterator[list[str]]:
+        with zipfile.ZipFile(self.source) as archive:
+            members = [info for info in archive.infolist() if not info.is_dir()]
+            if len(members) != 1 or not members[0].filename.lower().endswith(".csv"):
+                raise ArchiveFormatError(f"{self.name}: expected exactly one .csv member, found "
+                                         f"{[info.filename for info in members]}")
+            with archive.open(members[0]) as raw:
+                reader = csv.reader(io.TextIOWrapper(raw, encoding="ascii", newline=""))
+                first = True
+                try:
+                    for row in reader:
+                        self.line = reader.line_num
+                        if not row:
+                            continue
+                        if len(row) != self.columns:
+                            raise ArchiveFormatError(f"{self.name} line {self.line}: expected {self.columns} "
+                                                     f"columns, got {len(row)}")
+                        if first:
+                            first = False
+                            if not _INTEGER.match(row[0].strip()):
+                                continue  # header line (Binance added headers to some files)
+                        yield row
+                except (UnicodeError, csv.Error) as error:
+                    raise ArchiveFormatError(f"{self.name} line {reader.line_num}: unreadable CSV "
+                                             f"({type(error).__name__})") from None
+
+
+def read_zip_csv(source, columns: int, *, name: str = "archive") -> ZipCsvRows:
     """Stream the rows of the single CSV member of a zip (path or binary file object).
 
     A first line whose first field is not an integer is a header and is skipped.
     Exactly one ``.csv`` member and exactly ``columns`` fields per line are required.
     """
-    with zipfile.ZipFile(source) as archive:
-        members = [info for info in archive.infolist() if not info.is_dir()]
-        if len(members) != 1 or not members[0].filename.lower().endswith(".csv"):
-            raise ValueError(f"{name}: expected exactly one .csv member, found "
-                             f"{[info.filename for info in members]}")
-        with archive.open(members[0]) as raw:
-            text = io.TextIOWrapper(raw, encoding="ascii", newline="")
-            first = True
-            for row in csv.reader(text):
-                if not row:
-                    continue
-                if len(row) != columns:
-                    raise ValueError(f"{name}: expected {columns} columns, got {len(row)}")
-                if first:
-                    first = False
-                    if not _INTEGER.match(row[0].strip()):
-                        continue  # header line (Binance added headers to some files)
-                yield row
+    return ZipCsvRows(source, columns, name)
+
+
+def _located(rows, count: int, error: Exception, field: str | None = None) -> ValueError:
+    """The error relabelled with the archive name and 1-based line (or row) number."""
+    if isinstance(error, ArchiveFormatError):
+        return error
+    name, line = getattr(rows, "name", None), getattr(rows, "line", 0)
+    where = f"{name} line {line}" if name and line else f"row {count}"
+    return ValueError(f"{where}: {f'field {field}: ' if field else ''}{error}")
+
+
+def _agg_failing_field(row) -> str | None:
+    """Which aggTrades field fails to parse (only evaluated after a failure)."""
+    checks = (("agg_trade_id", int, 0), ("price", _scaled8, 1), ("quantity", _scaled8, 2),
+              ("first_trade_id", int, 3), ("last_trade_id", int, 4), ("transact_time", int, 5))
+    for field, parse, index in checks:
+        try:
+            parse(row[index])
+        except (ValueError, IndexError):
+            return field
+    return "is_buyer_maker"
 
 
 # ---------------------------------------------------------------- aggTrades -> minutes
@@ -360,6 +442,9 @@ class MinuteBars:
                     taker_quote[minute] += quote
                 agg_rows[minute] += 1
                 trades[minute] += last_trade - first_trade + 1
+        except ValueError as error:
+            field = None if isinstance(error, ArchiveFormatError) else _agg_failing_field(row)
+            raise _located(rows, count, error, field) from error
         finally:
             self.rows += count
             self.id_gaps += gaps
@@ -404,27 +489,36 @@ class KlineIndex:
     def consume(self, rows: Iterable[list[str]]) -> "KlineIndex":
         start, end, _ = month_bounds_ms(self.month)
         indexes = _KLINE_SOURCE_INDEXES if self.family == "klines" else _OHLC_SOURCE_INDEXES
-        for row in rows:
-            self.raw_rows += 1
-            open_time = _integer(row[0].strip(), "kline open_time")
-            if open_time < start or open_time >= end:
-                self.rows_outside_month += 1
-                continue
-            if open_time % MINUTE_MS:
-                self.misaligned += 1
-                continue
-            values = tuple(row[index].strip() for index in indexes)
-            existing = self.rows.get(open_time)
-            if existing is not None:
-                self.duplicates += 1
-                if existing != values:
-                    self.duplicate_conflicts += 1
-                continue
-            self.rows[open_time] = values
-            if self.family == "klines":
-                self._volume.add(values[_K_VOLUME])
-                self._taker.add(values[_K_TAKER_VOLUME])
+        count = 0
+        try:
+            for row in rows:
+                count += 1
+                self._consume_row(row, start, end, indexes)
+        except ValueError as error:
+            raise _located(rows, count, error) from error
         return self
+
+    def _consume_row(self, row, start: int, end: int, indexes) -> None:
+        self.raw_rows += 1
+        open_time = _integer(row[0].strip(), "kline open_time")
+        if open_time < start or open_time >= end:
+            self.rows_outside_month += 1
+            return
+        if open_time % MINUTE_MS:
+            self.misaligned += 1
+            return
+        values = tuple(row[index].strip() for index in indexes)  # stored as published
+        existing = self.rows.get(open_time)
+        if existing is not None:
+            self.duplicates += 1
+            if existing != values:
+                self.duplicate_conflicts += 1
+            return
+        self.rows[open_time] = values
+        if self.family == "klines":
+            # Validates exactly (exponent form allowed); the stored strings stay as published.
+            self._volume.add(values[_K_VOLUME])
+            self._taker.add(values[_K_TAKER_VOLUME])
 
     def stats(self) -> dict:
         _, _, days = month_bounds_ms(self.month)
@@ -529,7 +623,12 @@ def write_bars_csv_gz(fileobj, bars: MinuteBars, *, klines: KlineIndex | None = 
 
 
 def write_funding_csv_gz(fileobj, rows: Iterable[list[str]], month: str) -> dict:
-    """Funding rows inside the month, as published; the interval is never assumed."""
+    """Funding rows inside the month; the interval is never assumed.
+
+    ``last_funding_rate`` is the exact plain-decimal value (Binance publishes some
+    rates in exponent form, e.g. 9.8E-7); ``last_funding_rate_published`` keeps
+    the string exactly as published.
+    """
     start, end, _ = month_bounds_ms(month)
     stats = {"raw_rows": 0, "rows_outside_month": 0, "calc_time_not_increasing": 0, "interval_hours": []}
     intervals = set()
@@ -537,21 +636,26 @@ def write_funding_csv_gz(fileobj, rows: Iterable[list[str]], month: str) -> dict
     def lines():
         yield ",".join(FUNDING_COLUMNS) + "\n"
         last = None
-        for row in rows:
-            stats["raw_rows"] += 1
-            calc_time = _integer(row[0].strip(), "funding calc_time")
-            interval = row[1].strip()
-            _integer(interval, "funding interval hours")
-            rate = row[2].strip()
-            canonical_decimal(rate)  # validates the published spelling; stored as published
-            if calc_time < start or calc_time >= end:
-                stats["rows_outside_month"] += 1
-                continue
-            if last is not None and calc_time <= last:
-                stats["calc_time_not_increasing"] += 1
-            last = calc_time if last is None else max(last, calc_time)
-            intervals.add(interval)
-            yield f"{calc_time},{interval},{rate}\n"
+        count = 0
+        try:
+            for row in rows:
+                count += 1
+                stats["raw_rows"] += 1
+                calc_time = _integer(row[0].strip(), "funding calc_time")
+                interval = row[1].strip()
+                _integer(interval, "funding interval hours")
+                published = row[2]
+                rate = plain_decimal(published)
+                if calc_time < start or calc_time >= end:
+                    stats["rows_outside_month"] += 1
+                    continue
+                if last is not None and calc_time <= last:
+                    stats["calc_time_not_increasing"] += 1
+                last = calc_time if last is None else max(last, calc_time)
+                intervals.add(interval)
+                yield f"{calc_time},{interval},{rate},{published}\n"
+        except ValueError as error:
+            raise _located(rows, count, error) from error
 
     stats["rows"] = write_csv_gz(fileobj, lines())
     stats["interval_hours"] = sorted(intervals, key=int)
