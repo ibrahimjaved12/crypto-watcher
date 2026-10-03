@@ -67,7 +67,7 @@ def store_for(root, request, manifest, phase="development"):
     return checkpoints.ReplayCheckpointStore(root, {
         "run_fingerprint": manifest.run_fingerprint, "phase": phase,
         "scientific_producer_revision": PRODUCER,
-        "runtime_implementation_revision": "new-runtime",
+        "runtime_implementation_revision": runtime.current_runtime_implementation_revision(),
         "study_manifest_sha256": "a" * 64,
         "extension_coverage_manifest_sha256": "b" * 64,
         "archive_content_sha256": manifest.dataset_content_sha256,
