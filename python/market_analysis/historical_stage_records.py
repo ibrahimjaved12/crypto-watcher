@@ -253,15 +253,20 @@ def _candidate_decisions(source):
 
     Both streams are read in lockstep and keep their full count/SHA checks.
 
-    The producing worker builds each record as a validated typed object and
-    ``_write_records`` only encodes it (``_canonical_bytes(encode(item))``);
-    nothing on the producing side decodes it back. So the first pass over an
-    unverified reference keeps the full typed decode of every operational
-    line (reusing the canonical check's parse), and every record's decision
-    scalars must match the scientific stream. Once this exact reference and
-    its unchanged files passed ``verify()`` in this process, the canonical
-    check and the cross-check are skipped, and only EXP-75-04B EVENT lines (or
-    lines whose scientific scalars are not plain) are decoded.
+    ``extract_candidate_inputs`` calls ``verify()`` first, so the reference is
+    normally verified (memoized) here and takes the light path: decision
+    scalars come from the scientific stream, and only EXP-75-04B EVENT lines
+    (or lines whose scientific scalars are not plain) are decoded.
+
+    The fallback, for a reference whose verification could not be memoized
+    (e.g. its file identity raised OSError), runs the canonical check and the
+    full typed decode of every operational line (reusing the canonical
+    check's parse), and every record's decision scalars must match the
+    scientific stream. The producing worker only encodes its validated typed
+    records (``_canonical_bytes(encode(item))``) and never decodes them back,
+    so this is the pass that proves the bytes decode. When both streams were
+    fully consumed and the files are unchanged, the reference is memoized as
+    ``verify()`` would.
     """
     if not isinstance(source, StageRecords) or source.scientific_path is None:
         for item in source:
@@ -269,7 +274,8 @@ def _candidate_decisions(source):
                    item.decision_time_ms, item.evidence_kind, item)
         return
     from .historical_study_runtime import decode
-    verified = source._verified()
+    key = source._verification_key()
+    verified = key is not None and key in _VERIFIED
     operational = source._lines(check_canonical=not verified, with_parsed=True)
     try:
         for science in source._lines(scientific=True):
@@ -296,11 +302,17 @@ def _candidate_decisions(source):
             pass  # Longer operational stream fails its own count/SHA check.
     finally:
         operational.close()
+    # Both streams passed every verify() check (canonical ones included):
+    # same success-only, unchanged-files rule as verify().
+    if not verified and key is not None and source._verification_key() == key:
+        _VERIFIED.add(key)
 
 
 def extract_candidate_inputs(records):
     compact, bocpd = [], []
     for source in _leaf_sources(records):
+        if isinstance(source, StageRecords) and source.scientific_path is not None:
+            source.verify()  # memoized; failures raise exactly as verify() does
         for (experiment_id, algorithm_version, config_version, decision_time_ms,
              evidence_kind, item) in _candidate_decisions(source):
             if evidence_kind in ("EVENT", "RETROSPECTIVE"):
