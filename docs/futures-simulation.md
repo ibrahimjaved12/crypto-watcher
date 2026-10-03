@@ -188,6 +188,82 @@ only notional/leverage, not complete exchange order acceptance. Other margin and
 position modes, non-USDT settlement, BNB fee state, trailing stops, authenticated
 operations and real trading remain unsupported. Later #37 parts remain open.
 
+## Implemented execution evidence boundary (#37 Part 2)
+
+`execution_evidence.py`, `binance_execution_evidence.py`, and
+`binance_execution_snapshots.py` add immutable, canonically hashed Python evidence
+for later event resolution. The top-level snapshot references component identities,
+records provenance and limitations, and explicitly represents missing components.
+Its identity binds schema, evidence, policy and Part 1 algorithm versions. It can
+be partial; it contains no wallet, position, fill or ledger state. TanStack retains
+orchestration, validation and persistence boundaries; collector ingestion and the
+existing V1/research calculations remain separate.
+
+- **Exact factual event evidence:** local aggTrades reuse the existing verified
+  archive/checksum/parser semantics, preserving aggregate and first/last trade IDs,
+  exchange timestamp, price, quantity, maker flag, derived BUY/SELL aggressor and
+  relative package path/SHA. Identical duplicates collapse; conflicting IDs fail.
+  IDs do not expand an aggregate into individual trades. AggTrades do not prove
+  passive fill allocation or queue position. Timestamp/ID sorting applies only
+  within the tape and does not prove chronology across streams.
+  `load_execution_trade_tape()` returns an immutable `ExecutionTradeTapeEvidence`
+  manifest containing ordered package identities, parser/tape/ordering/duplicate
+  policies, unique and duplicate counts, first/last event keys and an incremental
+  normalized-row digest. It stores no rows, absolute paths or iteration state.
+  Verification extends the existing temporary SQLite duplicate index with an
+  on-disk canonical-order index; memory scales with package metadata and a bounded
+  page cache, rather than trade count. Tape identity hashes only manifest metadata,
+  including raw package SHAs and the stream digest; the top-level snapshot references
+  that small identity. `iter_execution_trades(root, manifest)` verifies packages and
+  recomputed manifest identity before yielding immutable `ExecutionTrade` rows in
+  `(timestamp_ms, aggregate_trade_id)` order. Its temporary index is removed on
+  exhaustion or explicit iterator close; use `contextlib.closing` when stopping early.
+- **Bounded-resolution evidence:** the existing mark-price loader supplies
+  `ONE_MINUTE_OHLC` risk envelopes and completion availability policy. Package SHA
+  and existing mark-evidence SHA remain bound. Exact intraminute mark and crossing
+  timestamp are unavailable; candles do not prove ordering relative to aggTrades,
+  liquidation-time mark, or an exact funding settlement mark.
+- **Current/fixed assumptions:** frozen exchangeInfo, leverage-bracket and fee
+  JSON bytes normalize into Part 1 contracts, binding raw SHA and actual normalized
+  parameters. Current snapshots are `CURRENT_RULE_ASSUMPTION`; user-configured
+  simulation fees are `FIXED_SIMULATION_ASSUMPTION`. Caller-supplied reduce-only
+  exemptions carry separate policy provenance because exchangeInfo normally omits
+  that field. Bracket callers explicitly declare `BASE_TIERS` or
+  `EFFECTIVE_TIERS`: base tiers scale floor, cap and cumulative maintenance offset
+  by supplied `notionalCoef`; already-effective tiers are preserved. Account
+  specificity, coefficient, declaration and effective table identity are retained.
+- **Unavailable historical evidence:** current rule/bracket snapshots are not
+  automatically historical truth. Historical snapshot classification requires an
+  explicitly supplied factual effective/applicability interval and observation
+  timestamp; the adapter never invents those dates. Unknown inputs can remain
+  `UNAVAILABLE`, and absent top-level components retain explicit reasons.
+
+The existing settled-funding archive adapter preserves rate, interval and package
+provenance. Exact funding cashflow requires the position quantity at settlement
+(supplied later) and an **exact settlement mark**. Without that mark, Part 1 returns
+`UNAVAILABLE_FUNDING_MARK`; the rate event remains valid. Separately supplied marks
+must match symbol, funding timestamp and the complete funding-event identity.
+Current/nearest marks, trades, candle open/close, interpolation and forward fill
+are never substituted. A local frozen official funding-history JSON record can
+supply its factual mark only after exact symbol/time/rate/event matching; supplied
+`rateType` and ancillary facts are preserved and identity-bound. An archive event
+without `rateType` can be enriched from a uniquely matching official record using
+its known symbol, timestamp, exact rate, optional supplied interval and every
+already-known ancillary fact. Missing `rateType` never defaults to `Regular`;
+zero matching records fail explicitly, and multiple matching records fail as
+ambiguous without using `markPrice` to choose. The exact mark binds the enriched
+event identity. Funding collections require every contained event to bind the
+collection's upstream evidence SHA. Archive availability
+surrogates remain distinct from genuinely observed/effective provenance timestamps.
+An exact mark's availability uses its supplied observation time, or explicitly
+remains unknown; joining it never backdates observation to the rate archive's
+availability surrogate.
+
+These adapters perform no hidden acquisition or authenticated API calls. Missing
+historical applicability, exact settlement marks and account/tier-specific fees or
+brackets require supplied frozen evidence. Fill allocation, event ordering,
+conditional execution and liquidation settlement remain later #37 work.
+
 ## Event resolution and ambiguity
 
 Analysis cadence and simulation event resolution are separate. A five-minute
