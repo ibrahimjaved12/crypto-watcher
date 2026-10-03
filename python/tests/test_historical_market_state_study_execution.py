@@ -20,6 +20,7 @@ from market_analysis.historical_market_state_study_execution import (
     load_and_validate_coverage, select_execution_periods,
     freeze_study_hmm_model, validate_hmm_development_cohort,
 )
+from market_analysis.historical_replay import HistoricalReplayDiagnostics
 from market_analysis.historical_liquidation_evidence import daily_liquidation_relative_path
 import market_analysis.historical_market_state_study_execution as execution
 
@@ -385,7 +386,9 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             coverage_path, coverage = self._coverage_fixture(root, revision)
 
             def execute_once(manifest, frozen_coverage, period, archive, roots,
-                             code_revision, hmm_model, runtime_metrics=None):
+                             code_revision, hmm_model, runtime_metrics=None,
+                             checkpoint_root=None, progress=None,
+                             runtime_implementation_revision=None):
                 executed.append(period.study_period_index)
                 if runtime_metrics is not None:
                     for name in execution.RUNTIME_MEASURED_FIELDS:
@@ -434,8 +437,11 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
 
             ticks = iter(range(1000))
             runtime_path = root / "runtime.jsonl"
+            progress_path = root / "progress.jsonl"
             with patch.object(execution.time, "perf_counter_ns",
                               side_effect=lambda: next(ticks)), patch.object(
+                    execution, "_current_code_revision",
+                    side_effect=("runtime-off", "runtime-on")) as current_revision, patch.object(
                     execution, "_execute_period", side_effect=execute_once) as execute:
                 off = execution.execute_study_periods(
                     self.manifest, coverage_path, root / "core", root / "off",
@@ -443,17 +449,26 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                 on = execution.execute_study_periods(
                     self.manifest, coverage_path, root / "core", root / "on",
                     phase="development", period_limit=1, code_revision=revision,
-                    runtime_report_path=runtime_path)
+                    runtime_report_path=runtime_path,
+                    progress_report_path=progress_path)
 
             self.assertEqual(execute.call_count, 2)
+            self.assertEqual(current_revision.call_count, 2)
             self.assertEqual(executed, [0, 0])
+            for invocation, expected_revision in zip(execute.call_args_list,
+                                                     ("runtime-off", "runtime-on")):
+                self.assertIsNotNone(invocation.kwargs["checkpoint_root"])
+                self.assertTrue(callable(invocation.kwargs["progress"]))
+                self.assertEqual(invocation.kwargs["runtime_implementation_revision"],
+                                 expected_revision)
             self.assertEqual(off[0].read_bytes(), on[0].read_bytes())
             scientific_text = on[0].read_text(encoding="utf-8")
             scientific = json.loads(scientific_text)
             self.assertNotIn(str(runtime_path), scientific_text)
             self.assertEqual(scientific["report_sha256"],
                              execution._verify_hashed_payload(
-                                 scientific, "report_sha256", "period report"))
+                                scientific, "report_sha256", "period report"))
+            self.assertNotIn("runtime_implementation_revision", scientific)
 
             lines = runtime_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 1)
@@ -468,6 +483,11 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             self.assertEqual(runtime["period_report_filename"], on[0].name)
             self.assertEqual(runtime["period_report_sha256"], scientific["report_sha256"])
             self.assertEqual(runtime["artifact_size_bytes"], on[0].stat().st_size)
+            progress_records = [json.loads(line) for line in
+                                progress_path.read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(progress_records)
+            self.assertEqual({item["runtime_implementation_revision"]
+                              for item in progress_records}, {"runtime-on"})
             self.assertTrue(set(execution.RUNTIME_REPORT_TIMING_FIELDS).issubset(runtime))
             self.assertGreater(runtime["period_total_seconds"], 0)
             self.assertGreater(runtime["period_artifact_write_seconds"], 0)
@@ -475,6 +495,101 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                 runtime["all_extensions_seconds"],
                 runtime["supplementary_source_load_seconds"]
                 + sum(runtime[name] for name in execution.RUNTIME_EXTENSION_FIELDS))
+
+    def test_materialized_and_bounded_period_payloads_are_identical(self):
+        period = self.manifest.selected_periods[0]
+        revision = "frozen-scientific-producer"
+        coverage = {"coverage_manifest_sha256": "c" * 64, "sources": {}}
+        archive_manifest = SimpleNamespace(
+            dataset_id="fixture-dataset", dataset_version="fixture-v1",
+            content_sha256="a" * 64, archive_files=())
+        diagnostics = SimpleNamespace(
+            archive_file_count=0, verified_archive_file_count=0,
+            aggtrade_archive_count=0, kline_archive_count=0,
+            aggtrade_row_count=1, kline_row_count=0, duplicate_aggtrade_count=0,
+            missing_kline_minute_count=0, symbols_with_kline_gaps=(),
+            earliest_trade_time_ms=period.start_boundary_time_ms,
+            latest_trade_time_ms=period.start_boundary_time_ms,
+            earliest_kline_open_time_ms=None, latest_kline_open_time_ms=None)
+        flow = SimpleNamespace(
+            schema_version="flow-schema-v1", algorithm_version="flow-algorithm-v1",
+            dataset_content_sha256="a" * 64, configured_symbols=("BTCUSDT",),
+            engine_start_boundary_time_ms=period.start_boundary_time_ms,
+            output_end_boundary_time_ms=period.end_boundary_time_ms,
+            bucket_interval_ms=5_000, bucket_rule="right-closed-v1",
+            side_mapping="maker-side-v1", availability_basis="archive-time-v1",
+            finalization_grace_ms=2_000, evidence_sha256="d" * 64)
+        replay_manifest = SimpleNamespace(
+            run_fingerprint="e" * 64,
+            output_start_boundary_time_ms=period.start_boundary_time_ms,
+            output_end_boundary_time_ms=period.end_boundary_time_ms,
+            algorithm_version="replay-v1", policy_version="policy-v1",
+            dataset_id="fixture-dataset", dataset_version="fixture-v1",
+            dataset_content_sha256="a" * 64)
+        replay_diagnostics = HistoricalReplayDiagnostics(
+            period.start_boundary_time_ms, period.start_boundary_time_ms,
+            period.end_boundary_time_ms, 1, 0, 0, 0, (), (), ())
+        replay = SimpleNamespace(manifest=replay_manifest, diagnostics=replay_diagnostics,
+                                 points=())
+        materialized_dataset = SimpleNamespace(
+            archive_manifest=archive_manifest, diagnostics=diagnostics,
+            taker_flow_evidence=flow, ohlc_evidence=SimpleNamespace())
+        bounded_dataset = SimpleNamespace(
+            archive_manifest=archive_manifest, diagnostics=diagnostics,
+            taker_flow_evidence=flow, ohlc_evidence=SimpleNamespace(),
+            trade_stream_manifest=SimpleNamespace(normalized_row_stream_sha256="f" * 64))
+        prepared = [
+            SimpleNamespace(archive_dataset=materialized_dataset,
+                            canonical_replay_result=replay, experiment_points=(),
+                            core_eligibility_sha256="b" * 64),
+            SimpleNamespace(archive_dataset=bounded_dataset,
+                            canonical_replay_result=replay, experiment_points=(),
+                            core_eligibility_sha256="b" * 64),
+        ]
+        forward = SimpleNamespace(
+            evidence_version="forward-v1", evidence_sha256="1" * 64,
+            source_dataset_content_sha256="2" * 64)
+        safe = execution.report_json_safe
+
+        def report_json_safe(value):
+            if isinstance(value, SimpleNamespace):
+                return {key: report_json_safe(item) for key, item in vars(value).items()}
+            if isinstance(value, dict):
+                return {key: report_json_safe(item) for key, item in value.items()}
+            if isinstance(value, (tuple, list)):
+                return [report_json_safe(item) for item in value]
+            return safe(value)
+
+        with patch.object(execution, "report_json_safe", side_effect=report_json_safe), \
+             patch.object(execution, "_prepare_study_period", side_effect=[
+                 (prepared[0], {"sources": {}}, (), {}),
+                 (prepared[1], {"sources": {}}, (), {})]), \
+             patch.object(execution, "_load_source_evidence", return_value={}), \
+             patch.object(execution, "_candidate_execution", return_value=(
+                 (), (), (), {}, None, None)), \
+             patch.object(execution, "_event_time_v1_context", return_value=()), \
+             patch.object(execution, "_bocpd_onset_evidence", return_value=()), \
+             patch.object(execution, "_label_price_evidence", return_value=forward), \
+             patch.object(execution, "_continuous_and_event_outcomes",
+                          return_value=((), (), ())):
+            materialized_payload = execution._execute_period(
+                self.manifest, coverage, period, Path("/synthetic/core"), {},
+                revision, None)
+            metrics = execution.StudyPeriodRuntimeMetrics()
+            bounded_payload = execution._execute_period(
+                self.manifest, coverage, period, Path("/synthetic/core"), {},
+                revision, None, runtime_metrics=metrics,
+                checkpoint_root=Path("/synthetic/checkpoints"),
+                progress=lambda *_args: None,
+                runtime_implementation_revision="runtime-implementation")
+
+        self.assertEqual(execution._canonical(materialized_payload),
+                         execution._canonical(bounded_payload))
+        self.assertEqual(materialized_payload["report_sha256"],
+                         bounded_payload["report_sha256"])
+        for operational_key in ("checkpoint_dir", "progress", "runtime_report",
+                                "runtime_implementation_revision", "timings"):
+            self.assertNotIn(operational_key, bounded_payload)
 
     def test_coverage_only_freeze_binds_ordered_dates_and_semantic_sources(self):
         core = {

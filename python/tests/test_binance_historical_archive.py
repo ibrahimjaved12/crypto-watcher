@@ -6,6 +6,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import hashlib
 import io
+import inspect
 from pathlib import Path
 import tempfile
 import unittest
@@ -196,24 +197,45 @@ class BinanceHistoricalArchiveTests(unittest.TestCase):
         config = _config()
         day = date(2026, 8, 20)
         start = config.engine_start_boundary_time_ms
-        rows = tuple(_agg(start + index * 1_000, index + 1)
-                     for index in range(1_000))
         with tempfile.TemporaryDirectory() as folder:
-            request = _bundle(
-                Path(folder), config,
-                trade_rows={(SYMBOL, day): rows},
-                kline_rows={(SYMBOL, day): (
-                    _kline(historical_candle_start_ms(config)),)})
-            bounded = load_binance_usdm_bounded_historical_replay_dataset(request)
-            try:
-                self.assertFalse(hasattr(bounded, "trades"))
-                self.assertFalse(hasattr(bounded, "replay_request"))
-                self.assertEqual(bounded.trade_stream_manifest.unique_replayable_row_count,
-                                 len(tuple(bounded.iter_trades())))
-                self.assertGreater(bounded.trade_stream_manifest.unique_replayable_row_count,
-                                   500)
-            finally:
-                bounded.close()
+            source_counts = (32, 512)
+            replay_counts = []
+            raw_index_counts = []
+            for source_count in source_counts:
+                root = Path(folder) / str(source_count)
+                rows = tuple(_agg(start - 100_000, index + 1)
+                             for index in range(source_count))
+                rows += (_agg(config.output_start_boundary_time_ms,
+                              source_count + 1),)
+                request = _bundle(
+                    root, config,
+                    trade_rows={(SYMBOL, day): rows},
+                    kline_rows={(SYMBOL, day): (
+                        _kline(historical_candle_start_ms(config)),)})
+                bounded = load_binance_usdm_bounded_historical_replay_dataset(request)
+                try:
+                    self.assertFalse(hasattr(bounded, "trades"))
+                    self.assertFalse(hasattr(bounded, "replay_request"))
+                    retained_collections = [
+                        value for value in vars(bounded).values()
+                        if isinstance(value, (tuple, list))
+                    ]
+                    self.assertFalse(any(
+                        any(isinstance(item, archive_adapter.HistoricalReplayTrade)
+                            for item in value)
+                        for value in retained_collections))
+                    cursor = bounded.iter_trades()
+                    self.assertTrue(inspect.isgenerator(cursor))
+                    self.assertEqual(next(cursor).aggregate_trade_id, source_count + 1)
+                    del cursor
+                    replay_counts.append(bounded._index._connection.execute(
+                        "SELECT COUNT(*) FROM replay_trades").fetchone()[0])
+                    raw_index_counts.append(bounded._index._connection.execute(
+                        "SELECT COUNT(*) FROM aggregate_trade_ids").fetchone()[0])
+                finally:
+                    bounded.close()
+            self.assertEqual(replay_counts, [1, 1])
+            self.assertEqual(raw_index_counts, [count + 1 for count in source_counts])
 
     def test_exact_daily_paths_versions_and_midnight_dates(self):
         day = date(2026, 8, 20)

@@ -2,7 +2,9 @@
 
 from dataclasses import replace
 from decimal import Decimal
+import json
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -92,8 +94,25 @@ class HistoricalReplayTests(unittest.TestCase):
                          trade_time_ms=ENGINE_START + 10_000,
                          aggregate_trade_id=2, received_at_ms=ENGINE_START + 10_000)
         engine.observe((future,))
-        restored = MovementBucketEngine.from_state(engine.snapshot_state())
-        self.assertEqual(restored.snapshot_state(), engine.snapshot_state())
+        snapshot = engine.snapshot_state()
+        for impossible in (
+            replace(snapshot, last_real_observation=future,
+                    carry_observation=future),
+            replace(snapshot, carry_observation=future),
+            replace(snapshot, last_accepted_order_key=(ENGINE_START, 1)),
+            replace(snapshot, pending=(replace(
+                snapshot.pending[0], boundary_time_ms=snapshot.pending[0].boundary_time_ms + 5_000),)),
+        ):
+            with self.assertRaises(ValueError):
+                MovementBucketEngine.from_state(impossible)
+        finalized_snapshot = replace(snapshot, pending=(),
+                                     last_accepted_order_key=(ENGINE_START, 2))
+        self.assertEqual(MovementBucketEngine.from_state(finalized_snapshot)
+                         .snapshot_state().last_accepted_order_key,
+                         finalized_snapshot.last_accepted_order_key)
+        # Normal accepted state remains resumable.
+        restored = MovementBucketEngine.from_state(snapshot)
+        self.assertEqual(restored.snapshot_state(), snapshot)
         for boundary, state in ((ENGINE_START + 10_000, "LIVE"),
                                 (ENGINE_START + 15_000, "UNAVAILABLE"),
                                 (ENGINE_START + 20_000, "LIVE")):
@@ -122,6 +141,12 @@ class HistoricalReplayTests(unittest.TestCase):
             "run_fingerprint": full.manifest.run_fingerprint,
             "scientific_producer_revision": "c277011a3c1d3e0db2c5224e49386a375a6afc59",
             "runtime_implementation_revision": "different-runtime-commit",
+            "study_manifest_sha256": "a" * 64,
+            "extension_coverage_manifest_sha256": "b" * 64,
+            "archive_content_sha256": "c" * 64,
+            "finalization_grace_ms": request.config.finalization_grace_ms,
+            "configured_symbols": [SYMBOL],
+            "movement_identity": ["movement-v1", "config-v1"],
         }
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -141,10 +166,22 @@ class HistoricalReplayTests(unittest.TestCase):
             self.assertEqual(
                 run_bounded_historical_market_replay(bounded, runtime_state=state).diagnostics,
                 full.diagnostics)
-            changed = {**identity, "runtime_implementation_revision": "another-commit"}
-            with self.assertRaisesRegex(ValueError, "identity"):
-                ReplayCheckpointStore(root, changed, OUTPUT,
-                                      request.config.output_end_boundary_time_ms).load_latest()
+            changed_identities = (
+                ("scientific_producer_revision", "other-frozen-revision"),
+                ("runtime_implementation_revision", "another-commit"),
+                ("study_manifest_sha256", "1" * 64),
+                ("extension_coverage_manifest_sha256", "2" * 64),
+                ("archive_content_sha256", "3" * 64),
+                ("finalization_grace_ms", request.config.finalization_grace_ms + 1),
+                ("configured_symbols", ["ETHUSDT"]),
+                ("movement_identity", ["different-movement", "config-v1"]),
+            )
+            for key, value in changed_identities:
+                with self.subTest(identity_field=key), self.assertRaisesRegex(
+                        ValueError, "identity"):
+                    ReplayCheckpointStore(
+                        root, {**identity, key: value}, OUTPUT,
+                        request.config.output_end_boundary_time_ms).load_latest()
             chunk = next((root / "chunks").glob("*.jsonl"))
             chunk_bytes = chunk.read_bytes()
             chunk.write_bytes(chunk_bytes[:-1])
@@ -153,6 +190,14 @@ class HistoricalReplayTests(unittest.TestCase):
                                       request.config.output_end_boundary_time_ms).load_latest()
             chunk.write_bytes(chunk_bytes)
             checkpoint = next(root.glob("checkpoint-*.json"))
+            metadata = json.loads(checkpoint.read_text(encoding="utf-8"))
+            state_path = root / "states" / f"{metadata['replay_state_sha256']}.json"
+            state_bytes = state_path.read_bytes()
+            state_path.write_bytes(state_bytes[:-2])
+            with self.assertRaisesRegex(ValueError, "state SHA"):
+                ReplayCheckpointStore(root, identity, OUTPUT,
+                                      request.config.output_end_boundary_time_ms).load_latest()
+            state_path.write_bytes(state_bytes)
             checkpoint.write_text(checkpoint.read_text()[:-2], encoding="utf-8")
             with self.assertRaises(ValueError):
                 ReplayCheckpointStore(root, identity, OUTPUT,
@@ -193,7 +238,9 @@ class HistoricalReplayTests(unittest.TestCase):
         request = _request(end=end, trades=(
             _trade(ENGINE_START, trade_id=1),
             _trade(OUTPUT + 3_600_000, trade_id=2),
-            _trade(OUTPUT + 2 * 3_600_000, trade_id=3)))
+            _trade(OUTPUT + 3_600_000 + 1_000,
+                   first_seen=OUTPUT + 3_600_000 + 2_000, trade_id=3),
+            _trade(OUTPUT + 2 * 3_600_000, trade_id=4)))
         full = run_historical_market_replay(request)
         trades, _, _, _ = replay_module._canonical_inputs(request)
         class Index:
@@ -229,11 +276,55 @@ class HistoricalReplayTests(unittest.TestCase):
                 state = restored.load_latest()
                 self.assertEqual(state.completed_boundary_time_ms,
                                  OUTPUT + hour * 3_600_000)
+                if hour == 1:
+                    pending = dict(state.pending_trades)[SYMBOL]
+                    causal_row = next(row for row in pending
+                                      if row.aggregate_trade_id == 3)
+                    checkpoint_boundary = OUTPUT + 3_600_000
+                    self.assertLessEqual(
+                        causal_row.first_seen_at_ms,
+                        checkpoint_boundary + request.config.finalization_grace_ms)
+                    self.assertGreater(causal_row.trade_time_ms, checkpoint_boundary)
                 remainder = run_bounded_historical_market_replay(
                     bounded, runtime_state=state, boundary_callback=restored.add_point)
                 self.assertEqual(tuple(restored.points), full.points)
                 self.assertEqual(remainder.manifest, full.manifest)
                 self.assertEqual(remainder.diagnostics, full.diagnostics)
+                self.assertEqual(restored.identity, identity)
+                self.assertTrue(restored._complete)
+                self.assertEqual(restored.previous_boundary, end)
+            complete_root = Path(folder) / "2"
+            chain_identity = {
+                "run_fingerprint": full.manifest.run_fingerprint,
+                "scientific_producer_revision": "frozen",
+                "runtime_implementation_revision": "runtime",
+            }
+            checkpoints = sorted(complete_root.glob("checkpoint-*.json"),
+                                 key=lambda path: int(path.stem.split("-")[1]))
+            self.assertGreaterEqual(len(checkpoints), 3)
+
+            gap_root = Path(folder) / "gap"
+            shutil.copytree(complete_root, gap_root)
+            (gap_root / checkpoints[0].name).unlink()
+            with self.assertRaisesRegex(ValueError, "boundary gap"):
+                ReplayCheckpointStore(gap_root, chain_identity, OUTPUT, end).load_latest()
+
+            previous_root = Path(folder) / "wrong-previous"
+            shutil.copytree(complete_root, previous_root)
+            second = previous_root / checkpoints[1].name
+            metadata = json.loads(second.read_text(encoding="utf-8"))
+            metadata["previous_checkpoint_sha256"] = "0" * 64
+            body = {key: value for key, value in metadata.items()
+                    if key != "checkpoint_sha256"}
+            metadata["checkpoint_sha256"] = runtime_module._sha(
+                runtime_module._canonical_bytes(body))
+            second.write_bytes(runtime_module._canonical_bytes(metadata))
+            with self.assertRaisesRegex(ValueError, "identity or SHA"):
+                ReplayCheckpointStore(previous_root, chain_identity, OUTPUT,
+                                      end).load_latest()
+
+            with self.assertRaisesRegex(ValueError, "conflicting replay checkpoint"):
+                runtime_module._atomic_write(checkpoints[-1], b"conflicting bytes")
 
     def test_historical_cache_strict_prior_and_lookback_expiry(self):
         minute = 60_000

@@ -1576,7 +1576,8 @@ def _continuous_and_event_outcomes(evidence, candidate_records, v1_state_by_boun
 def _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
                           runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
                           checkpoint_root: Path | None = None,
-                          progress=None):
+                          progress=None,
+                          runtime_implementation_revision: str | None = None):
     """Load and replay core evidence once, then freeze shared V1 study context."""
     config = study_replay_config(period.utc_date)
     with _runtime_measure(runtime_metrics, "core_archive_load_seconds"):
@@ -1613,7 +1614,10 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
                     "study_manifest_sha256": manifest.manifest_sha256,
                     "extension_coverage_manifest_sha256": coverage["coverage_manifest_sha256"],
                     "scientific_producer_revision": code_revision,
-                    "runtime_implementation_revision": _current_code_revision(),
+                    "runtime_implementation_revision": (
+                        runtime_implementation_revision
+                        if runtime_implementation_revision is not None
+                        else _current_code_revision()),
                     "study_period_index": period.study_period_index,
                     "utc_date": period.utc_date.isoformat(),
                     "phase": period.phase,
@@ -1663,16 +1667,19 @@ def _execute_period(
     manifest, coverage, period, archive_root, roots, code_revision,
     hmm_model, runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
     checkpoint_root: Path | None = None, progress=None,
+    runtime_implementation_revision: str | None = None,
 ):
     if runtime_metrics is None:
         prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
             _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
-                                  checkpoint_root=checkpoint_root, progress=progress))
+                                  checkpoint_root=checkpoint_root, progress=progress,
+                                  runtime_implementation_revision=runtime_implementation_revision))
     else:
         prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
             _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
                                   runtime_metrics=runtime_metrics,
-                                  checkpoint_root=checkpoint_root, progress=progress))
+                                  checkpoint_root=checkpoint_root, progress=progress,
+                                  runtime_implementation_revision=runtime_implementation_revision))
     dataset = prepared_period.archive_dataset
     replay = prepared_period.canonical_replay_result
     points = prepared_period.experiment_points
@@ -1856,8 +1863,10 @@ def _append_runtime_report(path: Path, record: Mapping[str, Any]) -> None:
 
 def _append_progress_report(path: Path, manifest, coverage, period,
                             code_revision: str, event: str,
+                            runtime_implementation_revision: str,
                             details: Mapping[str, Any] | None = None) -> None:
     record = {
+        **(details or {}),
         "progress_version": STUDY_PROGRESS_VERSION,
         "event": event,
         "study_manifest_sha256": manifest.manifest_sha256,
@@ -1866,8 +1875,7 @@ def _append_progress_report(path: Path, manifest, coverage, period,
         "utc_date": period.utc_date.isoformat(),
         "phase": period.phase,
         "scientific_producer_revision": code_revision,
-        "runtime_implementation_revision": _current_code_revision(),
-        **(details or {}),
+        "runtime_implementation_revision": runtime_implementation_revision,
     }
     _append_runtime_report(path, record)
 
@@ -1896,6 +1904,7 @@ def execute_study_periods(
     phase = selected[0].phase if selected else (phase or "development")
     if not isinstance(code_revision, str) or not code_revision:
         raise ValueError("study execution requires code_revision")
+    runtime_implementation_revision = _current_code_revision()
     coverage = load_and_validate_coverage(coverage_path, manifest, code_revision)
     output = Path(output_dir).expanduser().resolve()
     checkpoints = Path(checkpoint_dir or (output / ".runtime-checkpoints")).expanduser().resolve()
@@ -1936,7 +1945,8 @@ def execute_study_periods(
     for period in selected:
         def progress(event, details=None):
             _append_progress_report(progress_report, manifest, coverage, period,
-                                    code_revision, event, details)
+                                    code_revision, event,
+                                    runtime_implementation_revision, details)
         path = period_dir / _period_filename(period)
         if path.exists():
             report_sha = _verify_existing_period(
@@ -1957,12 +1967,14 @@ def execute_study_periods(
         if runtime_metrics is None:
             payload = _execute_period(manifest, coverage, period, archive, roots,
                                       code_revision, hmm_model,
-                                      checkpoint_root=checkpoints, progress=progress)
+                                      checkpoint_root=checkpoints, progress=progress,
+                                      runtime_implementation_revision=runtime_implementation_revision)
         else:
             payload = _execute_period(manifest, coverage, period, archive, roots,
                                       code_revision, hmm_model,
                                       runtime_metrics=runtime_metrics,
-                                      checkpoint_root=checkpoints, progress=progress)
+                                      checkpoint_root=checkpoints, progress=progress,
+                                      runtime_implementation_revision=runtime_implementation_revision)
         if runtime_metrics is not None:
             artifact_write_started_ns = time.perf_counter_ns()
         content = _canonical(payload)

@@ -206,8 +206,17 @@ class MovementBucketEngine:
             _timestamp(finalized, "last finalized boundary")
             if finalized % BUCKET_INTERVAL_MS:
                 raise ValueError("unaligned finalized movement boundary")
+        if (type(state.buckets) is not tuple or type(state.pending) is not tuple
+                or any(not isinstance(item, MovementBucket) for item in state.buckets)
+                or any(not isinstance(item, MovementPendingBucketState)
+                       for item in state.pending)):
+            raise ValueError("movement state must contain immutable bucket tuples")
         if len(state.buckets) > state.capacity or len(state.pending) > state.capacity:
             raise ValueError("movement state exceeds capacity")
+        for bucket in state.buckets:
+            _timestamp(bucket.boundary_time_ms, "retained bucket boundary")
+            if bucket.boundary_time_ms % BUCKET_INTERVAL_MS:
+                raise ValueError("unaligned retained movement bucket")
         bucket_times = tuple(item.boundary_time_ms for item in state.buckets)
         if (any(not isinstance(item, MovementBucket)
                 or (item.provider, item.instrument_id, item.price_type)
@@ -219,6 +228,8 @@ class MovementBucketEngine:
                 or (bucket_times and bucket_times[-1] != finalized)
                 or (finalized is None and bucket_times)):
             raise ValueError("invalid finalized movement bucket sequence")
+        for item in state.pending:
+            _timestamp(item.boundary_time_ms, "pending bucket boundary")
         pending_times = tuple(item.boundary_time_ms for item in state.pending)
         if (pending_times != tuple(sorted(set(pending_times)))
                 or any(value % BUCKET_INTERVAL_MS or value < 0
@@ -234,8 +245,32 @@ class MovementBucketEngine:
                 raise ValueError("movement observation provenance mismatch")
         for value in (state.last_real_observation, state.carry_observation):
             observation(value)
+        last_accepted = state.last_accepted_order_key
+        if (last_accepted is not None
+                and (type(last_accepted) is not tuple
+                     or len(last_accepted) != 2
+                     or tuple(map(type, last_accepted)) != (int, int)
+                     or min(last_accepted) < 0)):
+            raise ValueError("invalid movement accepted order key")
+        if last_accepted is not None:
+            _timestamp(last_accepted[0], "accepted observation time")
+            _aggregate_id(last_accepted[1])
+        last_real = state.last_real_observation
+        if last_real is not None:
+            if (finalized is None
+                    or cls._bucket_boundary(last_real.trade_time_ms) > finalized):
+                raise ValueError("last real observation is later than finalized state")
+            if (last_accepted is None
+                    or (last_real.trade_time_ms, last_real.aggregate_trade_id) > last_accepted):
+                raise ValueError("last real observation exceeds accepted order state")
         if state.carry_observation is not None and state.carry_observation != state.last_real_observation:
             raise ValueError("invalid movement carry state")
+        carry = state.carry_observation
+        if carry is not None and (finalized is None
+                or cls._bucket_boundary(carry.trade_time_ms) > finalized
+                or last_accepted is None
+                or (carry.trade_time_ms, carry.aggregate_trade_id) > last_accepted):
+            raise ValueError("carry observation chronology exceeds engine state")
         for item in state.pending:
             if (not isinstance(item, MovementPendingBucketState)
                     or type(item.trade_count) is not int or item.trade_count <= 0
@@ -245,18 +280,17 @@ class MovementBucketEngine:
             if (item.latest is None
                     or cls._bucket_boundary(item.latest.trade_time_ms) != item.boundary_time_ms):
                 raise ValueError("pending movement latest observation mismatch")
-        if (state.last_accepted_order_key is not None
-                and (type(state.last_accepted_order_key) is not tuple
-                     or len(state.last_accepted_order_key) != 2
-                     or tuple(map(type, state.last_accepted_order_key)) != (int, int)
-                     or min(state.last_accepted_order_key) < 0)):
-            raise ValueError("invalid movement accepted order key")
         latest_keys = [(item.latest.trade_time_ms, item.latest.aggregate_trade_id)
                        for item in state.pending]
-        if (state.last_accepted_order_key is None) != (state.last_real_observation is None and not latest_keys):
+        if (state.last_accepted_order_key is None) != (last_real is None and carry is None and not latest_keys):
             raise ValueError("inconsistent movement accepted order key")
-        if latest_keys and max(latest_keys) > state.last_accepted_order_key:
-            raise ValueError("movement accepted key precedes pending observation")
+        retained_keys = list(latest_keys)
+        if last_real is not None:
+            retained_keys.append((last_real.trade_time_ms, last_real.aggregate_trade_id))
+        if carry is not None:
+            retained_keys.append((carry.trade_time_ms, carry.aggregate_trade_id))
+        if retained_keys and (last_accepted is None or max(retained_keys) > last_accepted):
+            raise ValueError("movement accepted key precedes retained observation")
         if (type(state.rejected_late_observations) is not int
                 or state.rejected_late_observations < 0):
             raise ValueError("invalid movement late rejection count")
