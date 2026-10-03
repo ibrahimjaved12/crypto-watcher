@@ -271,7 +271,7 @@ def control_action(record, spec, action, run_id):
             record['reason'] = 'active-claimed-run; wait for safe publication or explicitly cancel first'
             return
         record['stop_requested'] = False
-        if record['state'] == 'STOPPED' and record['handoff'] and record['handoff']['state'] in ('INTENT', 'DISPATCHED', 'AMBIGUOUS'):
+        if record['state'] in ('STOPPED', 'STOP_REQUESTED') and record['handoff'] and record['handoff']['state'] in ('INTENT', 'DISPATCHED', 'AMBIGUOUS'):
             record['state'] = 'HANDOFF_PENDING'
     if record['stop_requested']:
         return
@@ -305,6 +305,8 @@ def schedule(record, spec):
             record.update(state='INTEGRITY_FAILED', reason='no-ready-declared-task')
         return
     parent = next((r for r in reversed(record['receipts']) if r['task_id'] == task['id']), None)
+    if h and h['state'] == 'INTERRUPTED' and h['task'] == task:
+        parent = h['parent']
     sequence = record['sequence'] + 1
     binding = {'identity_sha256': digest(record['identity']), 'task': task, 'sequence': sequence,
                'parent': parent, 'allocation_minutes': allocation}
@@ -398,11 +400,11 @@ def failure_state(operation, reason):
             'SCIENTIFIC_FAILED' if operation in ('run', 'validate-parents') else 'SETUP_FAILED')
 
 
-def study_outcome(record, spec, key, conclusion, steps):
+def study_outcome(record, spec, key, conclusion, steps, *, run_id, attempt):
     """Trusted transport supplies only the completed owned study job/step outcomes."""
     validate(record, spec)
     h = record['handoff']
-    if not h or h['key'] != key or h['state'] not in ('CLAIMED', 'DISPATCHED', 'AMBIGUOUS', 'INTENT') or record['state'] in TERMINAL:
+    if not h or h['key'] != key or h['state'] not in ('CLAIMED', 'DISPATCHED', 'AMBIGUOUS', 'INTENT') or h['run_id'] != run_id or h.get('attempt') != attempt or record['state'] in TERMINAL:
         return
     outcome = h.get('outcome', {})
     operation, reason = outcome.get('failure_operation'), outcome.get('reason')
@@ -413,12 +415,18 @@ def study_outcome(record, spec, key, conclusion, steps):
         state = 'INTEGRITY_FAILED' if reason == 'INTEGRITY' else 'OUTCOME_UNRESOLVED'
     elif operation:
         state = failure_state(operation, reason)
+    elif steps.get('parents') == 'failure' and reason in ('PROCESS', 'INTEGRITY', 'CONTROL'):
+        state = 'SCIENTIFIC_FAILED'
+    elif steps.get('parents') == 'failure' and reason not in ('SETUP_BUDGET', 'CANCELLED'):
+        state = 'OUTCOME_UNRESOLVED'
+    elif steps.get('entry') == 'failure' and reason == 'INTEGRITY':
+        state = 'INTEGRITY_FAILED'
     elif steps.get('science') == 'failure' and reason not in ('OWNER_STOP', 'SETUP_BUDGET', 'CANCELLED') and conclusion not in ('cancelled', 'timed_out'):
         state = 'SCIENTIFIC_FAILED'
     if state:
-        record.update(state=state, reason='owned-study-established-failure')
-    elif reason in ('OWNER_STOP', 'SETUP_BUDGET', 'CANCELLED') or record['stop_requested'] or conclusion in ('cancelled', 'timed_out') or steps.get('entry') == 'failure' and h['state'] != 'CLAIMED':
-        termination = 'setup-budget' if reason == 'SETUP_BUDGET' else 'owner-stop' if record['stop_requested'] or reason == 'OWNER_STOP' else 'external-cancellation'
+        record.update(state=state, reason='owned-study-unclassified-failure' if state == 'OUTCOME_UNRESOLVED' else 'owned-study-established-failure')
+    elif reason in ('OWNER_STOP', 'SETUP_BUDGET', 'CANCELLED', 'CAPTURE_UNAVAILABLE') or record['stop_requested'] or conclusion in ('cancelled', 'timed_out'):
+        termination = 'setup-budget' if reason == 'SETUP_BUDGET' else 'owner-stop' if record['stop_requested'] or reason == 'OWNER_STOP' else 'claim-capture-unavailable' if reason == 'CAPTURE_UNAVAILABLE' else 'external-cancellation'
         typed = {'operation': h['task']['operation'], 'setup': outcome.get('setup', 'unknown'),
                  'scientific': outcome.get('scientific', 'not-started'), 'publication': outcome.get('publication', 'not-verified'),
                  'job_conclusion': conclusion, 'reason': termination}

@@ -157,7 +157,7 @@ DIAGNOSTIC_OPERATIONS = {'claim', 'dispatch', 'start', 'stop', 'resume', 'run', 
     'diagnostic', 'bootstrap', 'validate', 'validate-settings', 'retention-plan', 'retention-apply',
     'cache-restore', 'cache-publish', 'dependency-key', 'setup'}
 DIAGNOSTIC_CATEGORIES = {'OWNER_STOP', 'SETUP_BUDGET', 'CANCELLED', 'DEADLINE', 'HTTP', 'NETWORK',
-    'AMBIGUOUS_WRITE', 'CAS_LIMIT', 'INTEGRITY', 'PROCESS', 'CONTROL', 'CONFLICT'}
+    'AMBIGUOUS_WRITE', 'CAS_LIMIT', 'INTEGRITY', 'PROCESS', 'CONTROL', 'CONFLICT', 'CAPTURE_UNAVAILABLE', 'EVIDENCE_UNAVAILABLE'}
 
 
 def safe_diagnostic(details):
@@ -180,19 +180,22 @@ def safe_error(exc, operation):
 def diagnostic(spec, details):
     """Only allowlisted typed data; never exception messages or worker output."""
     locator = None
+    binding = {k: details[k] for k in ('handoff_key', 'claim_mutation_id')
+               if re.fullmatch('[0-9a-f]{64}', str(details.get(k, '')))}
     details = safe_diagnostic(details)
     try:
         run = control.identifier(os.environ['GITHUB_RUN_ID'])
         attempt = control.identifier(os.environ['GITHUB_RUN_ATTEMPT'])
         operation = details['operation']
         control.identifier(operation)
-        locator = 'campaigns/' + control.identifier(spec['campaign_id']) + '/diagnostics/' + run + '-' + attempt + '-' + operation + '.json'
+        suffix = '-' + binding['claim_mutation_id'] if operation in ('claim', 'validate-parents') and 'claim_mutation_id' in binding else ''
+        locator = 'campaigns/' + control.identifier(spec['campaign_id']) + '/diagnostics/' + run + '-' + attempt + '-' + operation + suffix + '.json'
         api = API(os.environ.get('RESEARCH_DATA_REPOSITORY'), os.environ.get('RESEARCH_DATA_TOKEN'), private=True, allowance=6)
         api.timeout = 2
         path = '/contents/' + locator
         old = api.request(path + '?ref=' + urllib.parse.quote(api.branch, safe=''), missing=True)
         body = {'message': 'Bounded private campaign diagnostic', 'branch': api.branch,
-                'content': base64.b64encode((control.canonical({**details, 'run_id': run, 'attempt': attempt}) + '\n').encode()).decode()}
+                'content': base64.b64encode((control.canonical({**details, **binding, 'run_id': run, 'attempt': attempt}) + '\n').encode()).decode()}
         if old:
             body['sha'] = old['sha']
         api.request(path, 'PUT', body)
@@ -370,6 +373,20 @@ def reconcile(store, actions, h):
     return matches[0] if matches else None
 
 
+def observe_dispatch(store, h, found):
+    """Bind the first dispatched attempt without changing Stop or ownership."""
+    def confirmed(r):
+        current = r['handoff']
+        if (not current or current['key'] != h['key'] or current['state'] not in ('INTENT', 'DISPATCHED', 'AMBIGUOUS')
+                or r['state'] in control.TERMINAL or current.get('run_id') not in (None, str(found['id']))):
+            return
+        current.update(state='DISPATCHED', run_id=str(found['id']), attempt='1')
+        if not any(e['kind'] == 'DISPATCH_CONFIRMED' and e['key'] == h['key'] and e['run_id'] == str(found['id']) for e in r['ledger']):
+            control.append(r, 'DISPATCH_CONFIRMED', key=h['key'], run_id=str(found['id']))
+    record, _ = store.update(confirmed)
+    return record
+
+
 def dispatch(store):
     record, _ = store.get()
     if record is None or record['stop_requested'] or record['state'] != 'HANDOFF_PENDING':
@@ -381,8 +398,20 @@ def dispatch(store):
         try:
             latest_receipt = record['receipts'][-1]
             verify_receipt(store, latest_receipt)
-        except (KeyError, ValueError, RuntimeError):
-            store.update(lambda r: r.update(state='INTEGRITY_FAILED', reason='handoff-publication-or-finalized-closure-verification-failed'))
+        except (TransportError, Conflict):
+            # Missing/inaccessible evidence is not proof of corrupt evidence.
+            def unavailable(r):
+                current = r['handoff']
+                if current and current['key'] == h['key'] and current['state'] == h['state'] and r['state'] == 'HANDOFF_PENDING' and not r['stop_requested']:
+                    r.update(state='STOPPED', reason='proof-verification-unavailable; explicit-Resume-required')
+            store.update(unavailable)
+            raise
+        except (KeyError, ValueError):
+            def invalid(r):
+                current = r['handoff']
+                if current and current['key'] == h['key'] and current['state'] == h['state'] and r['state'] == 'HANDOFF_PENDING' and not r['stop_requested']:
+                    r.update(state='INTEGRITY_FAILED', reason='handoff-publication-or-finalized-closure-verification-failed')
+            store.update(invalid)
             raise
     record, permitted = store.update(lambda r: control.dispatch_permitted(r, store.spec, h['key']))
     if not permitted:
@@ -391,14 +420,14 @@ def dispatch(store):
     actions = API(os.environ['GITHUB_REPOSITORY'], os.environ.get('GH_TOKEN'))
     found = reconcile(store, actions, h)
     if found:
-        def confirmed(r):
-            if r['state'] == 'HANDOFF_PENDING' and not r['stop_requested'] and r['handoff']['key'] == h['key'] and r['handoff']['state'] in ('INTENT', 'DISPATCHED', 'AMBIGUOUS') and not any(e['kind'] == 'DISPATCH_CONFIRMED' and e['key'] == h['key'] and e['run_id'] == str(found['id']) for e in r['ledger']):
-                r['handoff'].update(state='DISPATCHED', run_id=str(found['id']))
-                control.append(r, 'DISPATCH_CONFIRMED', key=h['key'], run_id=str(found['id']))
-        store.update(confirmed)
+        observe_dispatch(store, h, found)
         return
     if h['state'] != 'INTENT':
-        store.update(lambda r: r.update(reason='dispatch-ambiguous; bounded reconciliation found no run; owner intervention required'))
+        def ambiguous(r):
+            current = r['handoff']
+            if current and current['key'] == h['key'] and current['state'] in ('DISPATCHED', 'AMBIGUOUS') and r['state'] == 'HANDOFF_PENDING':
+                r.update(reason='dispatch-ambiguous; bounded reconciliation found no run; owner intervention required')
+        store.update(ambiguous)
         return
     mutation_id = invocation(h['key'], 'dispatch-attempt')
     # Write attempt BEFORE POST; no blind POST retry after an uncertain response.
@@ -433,7 +462,7 @@ def dispatch(store):
     def finish(r):
         if r['state'] != 'HANDOFF_PENDING' or r['stop_requested'] or r['handoff']['key'] != h['key'] or r['handoff']['state'] not in ('INTENT', 'AMBIGUOUS', 'DISPATCHED') or any(e['kind'] == 'DISPATCH_OUTCOME' and e['key'] == h['key'] for e in r['ledger']):
             return
-        r['handoff'].update(state='DISPATCHED' if found else 'AMBIGUOUS', run_id=str(found['id']) if found else None)
+        r['handoff'].update(state='DISPATCHED' if found else 'AMBIGUOUS', run_id=str(found['id']) if found else None, attempt='1' if found else None)
         control.append(r, 'DISPATCH_OUTCOME', key=h['key'], run_id=str(found['id']) if found else None,
                        outcome='confirmed' if found else 'ambiguous')
         r['reason'] = None if found else 'dispatch-ambiguous; use Resume to reconcile; no blind redispatch'
@@ -450,16 +479,31 @@ def claim(store):
     # Validate exact dispatch arguments before *any* authoritative mutation.
     control.entry_bindings(record, store.spec, key, os.environ)
     mutation_id = invocation(key, 'claim')
+    # This route survives independently of the immutable scientific proof.
+    routing = {'handoff_key': key, 'claim_mutation_id': mutation_id}
+    Path('/tmp/crypto-study/transfers/entry-routing.json').write_text(control.canonical(routing) + '\n')
+    with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+        output.write('claim_mutation_id=' + mutation_id + '\n')
     record, entered = store.update(lambda r: control.claim(r, store.spec, key, run_id, attempt,
                                                           mutation_id, os.environ), mutation_id=mutation_id)
     if not entered:
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             output.write('managed=true\nclaimed=false\n')
         raise ValueError('duplicate/stale/stopped child refused before downloads')
-    # Capture an immutable Git accounting proof of this exact owned claim.
-    record, _ = store.get()
-    if record['handoff'].get('mutation_id') != mutation_id:
+    # Bounded rereads use this same claim identity, never a fresh reservation.
+    # get() anchors the returned record and blob to the same immutable commit.
+    for capture_attempt in range(4):
+        try:
+            record, _ = store.get()
+            break
+        except (Conflict, TransportError):
+            if capture_attempt == 3:
+                raise
+    h = record['handoff'] if record else None
+    if not h or h['key'] != key or h['state'] != 'CLAIMED' or h.get('mutation_id') != mutation_id or h['run_id'] != run_id or h.get('attempt') != attempt:
         raise ValueError('claim changed before local proof capture')
+    if not any(e['kind'] == 'CLAIM' and e.get('mutation_id') == mutation_id and e['key'] == key and e['run_id'] == run_id and e.get('attempt') == attempt for e in record['ledger']):
+        raise ValueError('owned claim accounting missing before local proof capture')
     Path('/tmp/crypto-study/transfers/control-claim-reference.json').write_text(control.canonical({'control_commit': store.control_commit, 'control_blob_sha': store.control_blob_sha}) + '\n')
     local = Path('/tmp/crypto-study/transfers/control-claim.json')
     local.write_text(control.canonical(record) + '\n')
@@ -469,6 +513,8 @@ def claim(store):
 
 
 def remote_manifest(store, asset):
+    if time.monotonic() >= store.api.end:
+        raise TransportError('DEADLINE', 'GET')
     request = urllib.request.Request(store.api.prefix + '/releases/assets/' + str(asset['id']), headers={
         'Authorization': 'Bearer ' + store.api.token, 'Accept': 'application/octet-stream', 'User-Agent': 'crypto-campaign-control'})
     # Standard GitHub asset redirects require an unauthenticated second request.
@@ -485,6 +531,8 @@ def remote_manifest(store, asset):
             parsed = urllib.parse.urlparse(url)
             if parsed.scheme != 'https' or parsed.username or parsed.password or not (parsed.hostname or '').endswith('.githubusercontent.com'):
                 raise ValueError('untrusted asset redirect')
+            if time.monotonic() >= store.api.end:
+                raise TransportError('DEADLINE', 'GET')
             response = store.api.opener.open(urllib.request.Request(url), timeout=max(1, min(30, store.api.end - time.monotonic())))
         with response:
             value = read(response.read(MAX + 1))
@@ -531,8 +579,12 @@ def receipt_manifest(store, receipt):
     # requires GitHub's current digests as independent immutable asset confirmation.
     for part in value['assets']:
         remote = assets[part['asset']]
-        if remote['state'] != 'uploaded' or remote['size'] != part['size'] or remote.get('digest') != 'sha256:' + part['sha256']:
-            raise ValueError('remote asset digest unavailable/mismatch; halt rather than infer proof')
+        if remote['state'] != 'uploaded' or remote['size'] != part['size']:
+            raise ValueError('remote asset state/size mismatch')
+        if not remote.get('digest'):
+            raise TransportError('EVIDENCE_UNAVAILABLE', 'GET')
+        if remote['digest'] != 'sha256:' + part['sha256']:
+            raise ValueError('remote asset digest mismatch')
     return value
 
 
@@ -630,6 +682,7 @@ def measure_short_job(store, command):
 
 
 STUDY_STEPS = {'science': 'Run credential-free science with private supervisor status transport',
+               'parents': 'Validate frozen phase parents before raw/test input access',
                'snapshot': 'Validate and snapshot committed recovery with ownership held',
                'publication': 'Publish private parts then sealed manifest and verify publication',
                'entry': 'Claim new-campaign handoff before dependencies or input acquisition'}
@@ -637,28 +690,43 @@ STUDY_STEPS = {'science': 'Run credential-free science with private supervisor s
 
 def study_job(actions, run_id, attempt):
     rows = actions.request('/actions/runs/' + run_id + '/attempts/' + attempt + '/jobs?per_page=100')['jobs']
-    matches = [j for j in rows if j['name'] == 'study' and str(j['run_id']) == run_id]
+    matches = [j for j in rows if j['name'] == 'study' and str(j['run_id']) == run_id and str(j.get('run_attempt', attempt)) == attempt]
     if len(matches) != 1 or matches[0]['status'] != 'completed':
         return None
-    return matches[0]
+    return {**matches[0], 'run_attempt': attempt}
+
+
+def capture_reason(category):
+    return ('CAPTURE_UNAVAILABLE' if category in {'NETWORK', 'DEADLINE', 'HTTP', 'AMBIGUOUS_WRITE',
+            'CAS_LIMIT', 'CONFLICT', 'CAPTURE_UNAVAILABLE', 'EVIDENCE_UNAVAILABLE'} else category)
 
 
 def finalizer(store):
     """Pinned stdlib only. Step outcomes are trusted YAML, diagnostics allowlisted."""
     record, _ = store.get()
     h = record['handoff'] if record else None
-    if not h or h['state'] != 'CLAIMED' or h['run_id'] != os.environ['GITHUB_RUN_ID'] or h.get('attempt') != os.environ['GITHUB_RUN_ATTEMPT']:
+    if not h or h['key'] != os.environ.get('STUDY_HANDOFF_KEY') or h['state'] != 'CLAIMED' or h['run_id'] != os.environ['GITHUB_RUN_ID'] or h.get('attempt') != os.environ['GITHUB_RUN_ATTEMPT'] or h.get('mutation_id') != os.environ.get('STUDY_CLAIM_MUTATION_ID'):
         return
     allowed = {'success', 'failure', 'cancelled', 'skipped', 'unknown'}
-    outcome = {k: os.environ.get('STUDY_' + k.upper() + '_OUTCOME', 'unknown') for k in ('setup', 'scientific', 'snapshot', 'publication')}
+    outcome = {k: os.environ.get('STUDY_' + k.upper() + '_OUTCOME', 'unknown') for k in ('entry', 'setup', 'parents', 'scientific', 'snapshot', 'publication')}
     if any(v not in allowed for v in outcome.values()):
         raise ValueError('untrusted outcome contract')
     path = Path('/tmp/crypto-study/transfers/operation-outcomes.json')
     details = read(path.read_bytes()) if path.exists() else []
+    entry_path = Path('/tmp/crypto-study/transfers/entry-outcome.json')
+    if entry_path.exists():
+        entry = read(entry_path.read_bytes())
+        if entry.get('handoff_key') == h['key'] and entry.get('claim_mutation_id') == h['mutation_id']:
+            details.append(entry)
     # No arbitrary private exception strings enter control or public summaries.
     safe = [safe_diagnostic(d) for d in details if isinstance(d, dict)]
     required = [d for d in safe if d['operation'] not in ('cache-restore', 'cache-publish', 'dependency-key')]
-    failure = next((d for d in required if d['category'] not in {'OWNER_STOP', 'SETUP_BUDGET', 'CANCELLED'}), None)
+    if outcome['entry'] == 'failure' and outcome['scientific'] == 'skipped':
+        required = [{**d, 'category': capture_reason(d['category'])} if d['operation'] == 'claim' else d for d in required]
+    entry_category = os.environ.get('STUDY_ENTRY_CATEGORY')
+    if outcome['entry'] == 'failure' and outcome['scientific'] == 'skipped' and entry_category in DIAGNOSTIC_CATEGORIES:
+        required.append(safe_diagnostic({'operation': 'claim', 'category': capture_reason(entry_category)}))
+    failure = next((d for d in required if d['category'] not in {'OWNER_STOP', 'SETUP_BUDGET', 'CANCELLED', 'CAPTURE_UNAVAILABLE'}), None)
     if failure is None and not required and outcome['setup'] == 'failure':
         failure = safe_diagnostic({'operation': 'install-dependencies', 'category': 'PROCESS'})
     outcome['reason'] = failure['category'] if failure else next((d['category'] for d in reversed(required)), 'job-outcome-pending')
@@ -666,7 +734,7 @@ def finalizer(store):
     key = h['key']
     def save(r):
         current = r['handoff']
-        if not current or current['key'] != key or current['state'] != 'CLAIMED':
+        if not current or current['key'] != key or current['state'] != 'CLAIMED' or current['run_id'] != h['run_id'] or current.get('attempt') != h['attempt'] or current.get('mutation_id') != h.get('mutation_id'):
             return
         if current.get('outcome') == outcome:
             return
@@ -687,6 +755,8 @@ def reconcile_study(store, actions, record, job):
     if not h or h['state'] not in ('CLAIMED', 'DISPATCHED', 'AMBIGUOUS', 'INTENT'):
         return
     key = h['key']
+    if job is not None and (str(job['run_id']) != h.get('run_id') or str(job.get('run_attempt')) != h.get('attempt')):
+        return
     if h['state'] == 'CLAIMED':
         tag = 'recovery-' + store.spec['campaign_id'][:20] + '-' + h['run_id'] + '-' + h['attempt']
         release = store.api.request('/releases/tags/' + control.identifier(tag), missing=True)
@@ -698,7 +768,8 @@ def reconcile_study(store, actions, record, job):
             accounting = sealed_accounting(store, proof['metadata']['consolidation'])
             if job is None and record['state'] not in control.TERMINAL:
                 def unresolved(r):
-                    if r['handoff']['key'] == key and r['state'] not in control.TERMINAL:
+                    current = r['handoff']
+                    if current and current['key'] == key and current['state'] == 'CLAIMED' and current['run_id'] == h['run_id'] and current.get('attempt') == h['attempt'] and r['state'] not in control.TERMINAL:
                         r['handoff']['verified_publication'] = {k: receipt[k] for k in ('generation', 'manifest_sha256')}
                         r.update(state='OUTCOME_UNRESOLVED', reason='owned-study-job-outcome-unavailable; verified-publication-retained')
                 current, _ = store.update(unresolved)
@@ -710,7 +781,36 @@ def reconcile_study(store, actions, record, job):
         return
     remote_steps = {s['name']: s.get('conclusion') for s in job.get('steps', [])}
     steps = {key: remote_steps.get(name) for key, name in STUDY_STEPS.items()}
-    record, _ = store.update(lambda r: control.study_outcome(r, store.spec, key, job['conclusion'], steps))
+    entry_details = None
+    validation_details = None
+    diagnostic_operation = ('claim' if steps['entry'] == 'failure' and steps['science'] == 'skipped'
+                            else 'validate-parents' if steps['parents'] in ('failure', 'cancelled') else None)
+    if h['state'] == 'CLAIMED' and diagnostic_operation and (not h.get('outcome') or h['outcome'].get('reason') == 'job-outcome-pending'):
+        # An independent stdlib diagnostic can survive failed local capture or
+        # finalization. Missing diagnostic evidence must remain unresolved.
+        path = '/contents/campaigns/' + control.identifier(store.spec['campaign_id']) + '/diagnostics/' + h['run_id'] + '-' + h['attempt'] + '-' + diagnostic_operation + '-' + h['mutation_id'] + '.json'
+        row = store.api.request(path, missing=True)
+        if row:
+            details = read(base64.b64decode(row['content'], validate=True))
+            if details.get('run_id') == h['run_id'] and details.get('attempt') == h['attempt'] and details.get('operation') == diagnostic_operation and details.get('handoff_key') == key and details.get('claim_mutation_id') == h.get('mutation_id'):
+                if diagnostic_operation == 'claim':
+                    entry_details = safe_diagnostic(details)
+                else:
+                    validation_details = safe_diagnostic(details)
+    def completed(r):
+        current = r['handoff']
+        if not current or current['key'] != key or current['state'] not in ('CLAIMED', 'DISPATCHED', 'AMBIGUOUS', 'INTENT') or current['run_id'] != str(job['run_id']) or current.get('attempt') != str(job['run_attempt']):
+            return
+        details = entry_details or validation_details
+        if details and (not current.get('outcome') or current['outcome'].get('reason') == 'job-outcome-pending'):
+            reason = capture_reason(details['category']) if entry_details else details['category']
+            outcome = {'reason': reason, 'failure_operation': None if reason in ('CAPTURE_UNAVAILABLE', 'CANCELLED', 'SETUP_BUDGET', 'OWNER_STOP') else details['operation'],
+                       'setup': 'not-started', 'scientific': 'not-started', 'publication': 'not-verified'}
+            control.append(r, 'STUDY_OUTCOME', key=key, run_id=current['run_id'], attempt=current['attempt'], outcome_sha256=control.digest(outcome))
+            current['outcome'] = outcome
+        control.study_outcome(r, store.spec, key, job['conclusion'], steps,
+                              run_id=str(job['run_id']), attempt=str(job['run_attempt']))
+    record, _ = store.update(completed)
     store.view(record)
 
 
@@ -756,7 +856,7 @@ def main():
             actions = API(os.environ['GITHUB_REPOSITORY'], os.environ.get('GH_TOKEN'))
             job = study_job(actions, os.environ['STUDY_PARENT_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'])
             h = record['handoff']
-            if h and h['run_id'] == os.environ['STUDY_PARENT_RUN_ID']:
+            if h and h['run_id'] == os.environ['STUDY_PARENT_RUN_ID'] and h.get('attempt') == os.environ['GITHUB_RUN_ATTEMPT']:
                 reconcile_study(store, actions, record, job)
             elif h and any(r.get('run_id') == os.environ['STUDY_PARENT_RUN_ID'] and r.get('attempt') == os.environ['GITHUB_RUN_ATTEMPT'] for r in record['receipts']) and (job is None or job['conclusion'] in ('cancelled', 'timed_out')):
                 def cancelled_after_acceptance(r):
@@ -808,10 +908,17 @@ def main():
                     record, _ = store.get()
             if record and record['handoff'] and record['handoff']['state'] in ('CLAIMED', 'DISPATCHED', 'AMBIGUOUS', 'INTENT'):
                 actions = API(os.environ['GITHUB_REPOSITORY'], os.environ.get('GH_TOKEN'))
-                found = reconcile(store, actions, record['handoff'])
-                if found:
-                    job = study_job(actions, str(found['id']), str(found.get('run_attempt', 1)))
+                owned = record['handoff']
+                if owned['state'] == 'CLAIMED':
+                    job = study_job(actions, owned['run_id'], owned['attempt'])
                     reconcile_study(store, actions, record, job)
+                else:
+                    found = reconcile(store, actions, owned)
+                    if found:
+                        record = observe_dispatch(store, owned, found)
+                        # A rerun is not evidence about the original dispatch.
+                        job = study_job(actions, str(found['id']), '1')
+                        reconcile_study(store, actions, record, job)
         record, _ = store.update(lambda r: control.control_action(r, spec, args.command, os.environ['GITHUB_RUN_ID'] + ':' + os.environ['GITHUB_RUN_ATTEMPT']), create=args.command == 'start')
         view = store.view(record)
         if args.command != 'stop':
@@ -827,8 +934,22 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except Exception as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         details = safe_error(exc, sys.argv[1] if len(sys.argv) > 1 else 'setup')
+        if len(sys.argv) > 1 and sys.argv[1] == 'claim':
+            if isinstance(exc, OSError) and not isinstance(exc, InterruptedError):
+                details['category'] = 'CAPTURE_UNAVAILABLE'
+            # No scientific imports or control-claim.json are needed to record
+            # capture failure, even when the claim PUT committed ambiguously.
+            try:
+                route_path = Path('/tmp/crypto-study/transfers/entry-routing.json')
+                routing = read(route_path.read_bytes()) if route_path.exists() else {}
+                details.update({k: routing[k] for k in ('handoff_key', 'claim_mutation_id') if k in routing})
+                Path('/tmp/crypto-study/transfers/entry-outcome.json').write_text(control.canonical(details) + '\n')
+            except (OSError, ValueError, KeyError):
+                pass
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+                output.write('entry_category=' + details['category'] + '\n')
         locator = None
         try:
             locator = diagnostic(pinned_spec(), details)

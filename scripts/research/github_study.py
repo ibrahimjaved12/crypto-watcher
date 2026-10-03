@@ -381,6 +381,18 @@ def retain_outcome(details):
         execution._replace_atomic(path, execution._canonical((records + [details])[-16:]))
     except (OSError, ValueError, KeyError):
         pass
+    if details.get('operation') == 'validate-parents':
+        # The supervisor is authenticated transport; the validator child still
+        # receives token_free_environment(). Preserve typed evidence separately
+        # when the later finalizer cannot write authority.
+        from github_campaign import diagnostic
+        try:
+            spec = execution._read_json(BASE / 'transfers/campaign.json')
+            if 'control' in spec:
+                owned = checked_claim(spec, allow_stop=True)['handoff']
+                diagnostic(spec, {**details, 'handoff_key': owned['key'], 'claim_mutation_id': owned['mutation_id']})
+        except (OSError, ValueError, KeyError, RuntimeError):
+            pass
 
 
 def checked_claim(spec, *, remote=False, allow_stop=False):
@@ -759,6 +771,7 @@ def supervise(validate_only=False):
     event_path = operations / (log_name + '.events.jsonl')
     arguments = batch_arguments('validate-parents' if validate_only else operation, spec, phase, index, epoch, event_path)
     termination = None
+    supervision_failure = None
     if not validate_only:
         checked_claim(spec, remote=True)
         if deadline.remaining() <= 30:
@@ -808,12 +821,15 @@ def supervise(validate_only=False):
                     break
                 except subprocess.TimeoutExpired:
                     continue
-        except (InterruptedError, KeyboardInterrupt):
-            termination = 'external-cancellation'
+        except (InterruptedError, KeyboardInterrupt) as exc:
+            termination = 'compute-deadline' if isinstance(exc, OperationalInterruption) and exc.code == 'SETUP_BUDGET' else 'external-cancellation'
             stop_group(child)
             result = 1
-        except BaseException:
+        except BaseException as exc:
             termination = 'supervision-error'
+            if validate_only:
+                from github_campaign import safe_error
+                supervision_failure = safe_error(exc, 'validate-parents')['category']
             stop_group(child)
             result = 1
         finally:
@@ -826,6 +842,17 @@ def supervise(validate_only=False):
                 pass
             offset = relay(event_path, offset)
     status_path = operations / 'status.json'
+    if validate_only and result:
+        # Validation has no scientific recovery tree. Preserve a failure already
+        # reported by the child even if cancellation/deadline followed it.
+        status = execution._read_json(status_path) if status_path.exists() else {}
+        prior_failure = status.get('failure_category')
+        genuine = prior_failure not in (None, 'InterruptedError')
+        category = ('INTEGRITY' if prior_failure in ('ValueError', 'KeyError') else 'PROCESS' if genuine
+                    else supervision_failure or ('SETUP_BUDGET' if termination == 'compute-deadline'
+                    else 'CANCELLED' if termination == 'external-cancellation' or prior_failure == 'InterruptedError' else 'PROCESS'))
+        retain_outcome({'version': 'historical-campaign-diagnostic-v1', 'operation': 'validate-parents',
+                        'category': category, 'http_status': None, 'exit_code': result})
     if not validate_only:
         status = execution._read_json(status_path) if status_path.exists() else {}
         prior_failure = status.get('failure_category')
@@ -1319,6 +1346,17 @@ def main():
             details['category'] = exc.code
         elif isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) and (args.command not in ('run', 'snapshot', 'publish', 'record-receipt', 'cache-publish') or args.command == 'run' and not (BASE / 'transfers/science-started').exists()):
             details['category'] = 'SETUP_BUDGET'
+        if args.command == 'validate-parents' and 'spec' in locals():
+            # Cleanup/relay may itself be cancelled after the validator has
+            # already established a genuine failure. Do not erase that evidence.
+            try:
+                status_path = BASE / 'campaigns' / spec['campaign_id'] / 'operations/status.json'
+                status = execution._read_json(status_path) if status_path.exists() else {}
+                prior_failure = status.get('failure_category')
+                if prior_failure not in (None, 'InterruptedError'):
+                    details['category'] = 'INTEGRITY' if prior_failure in ('ValueError', 'KeyError') else 'PROCESS'
+            except (OSError, ValueError, KeyError):
+                details['category'] = 'INTEGRITY'
         retain_outcome(details)
         if events._sink is not None:
             events.emit('OPERATION_FAILED', reason=details['category'])

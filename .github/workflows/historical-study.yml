@@ -108,12 +108,16 @@ jobs:
         run: |
           set -euo pipefail
           if grep -q '"control"' /tmp/crypto-study/transfers/campaign.json; then
+            # Routing is not ownership: proof capture must still emit claimed=true.
+            echo "managed=true" >> "$GITHUB_OUTPUT"
+            echo "claimed=false" >> "$GITHUB_OUTPUT"
             python /tmp/crypto-study/repo/scripts/research/github_campaign.py claim
           else
             test -z "$STUDY_HANDOFF_KEY"
             echo "managed=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Detect capabilities of the exact pinned orchestration
+        if: always() && steps.pins.outcome == 'success'
         id: platform
         shell: bash
         run: |
@@ -156,6 +160,9 @@ jobs:
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py metadata
       - name: Validate frozen phase parents before raw/test input access
         id: parents
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ steps.entry.outputs.managed == 'true' && secrets.RESEARCH_DATA_TOKEN || '' }}
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py validate-parents
       - name: Acquire explicit verified recovery generation to staging
         env:
@@ -175,6 +182,7 @@ jobs:
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py cache-restore
       - name: Run credential-free science with private supervisor status transport
+        if: steps.entry.outputs.managed == 'false' || steps.entry.outputs.claimed == 'true'
         id: scientific
         env:
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
@@ -206,6 +214,10 @@ jobs:
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
           STUDY_SETUP_OUTCOME: ${{ steps.install.outcome }}
+          STUDY_ENTRY_OUTCOME: ${{ steps.entry.outcome }}
+          STUDY_ENTRY_CATEGORY: ${{ steps.entry.outputs.entry_category }}
+          STUDY_CLAIM_MUTATION_ID: ${{ steps.entry.outputs.claim_mutation_id }}
+          STUDY_PARENTS_OUTCOME: ${{ steps.parents.outcome }}
           STUDY_SCIENTIFIC_OUTCOME: ${{ steps.scientific.outcome }}
           STUDY_SNAPSHOT_OUTCOME: ${{ steps.snapshot.outcome }}
           STUDY_PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}
