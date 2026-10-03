@@ -4,14 +4,17 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
-from .market_episode_lifecycle import _digest
+from .canonical_identity import canonical_digest
+from .exact_scalar import ExactScalar, Scalar, exact_scalar
 
 
-ALGORITHM_VERSION = "binance-usdm-execution-math-v1:exact-decimal"
+ALGORITHM_VERSION = "binance-usdm-execution-math-v2:exact-rational"
 POLICY = (
     "base-unit-quantity:isolated-one-way:half-open-brackets:"
     "quantity-floor:passive-buy-floor-sell-ceil:explicit-adjustment:"
-    "stop-buy-ge-sell-le:tp-buy-le-sell-ge:adverse-bps-10000"
+    "stop-buy-ge-sell-le:tp-buy-le-sell-ge:adverse-bps-10000:exact-rational:"
+    "percent-buy-upper-sell-lower-mark:market-min-notional-mark:"
+    "price-filter-zero-disabled-origin-min:integer-leverage-1-125"
 )
 
 
@@ -48,11 +51,19 @@ class PriceReference(str, Enum):
 
 
 def number(value, name, *, minimum=None, positive=False):
-    """Require Decimal, rejecting bool, float, NaN and infinities at the boundary."""
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise ValueError(f"{name} must be a finite Decimal")
-    if positive and value <= 0 or minimum is not None and value < minimum:
+    """Require finite Decimal or exact scalar; never accept bool or floats."""
+    try:
+        exact = exact_scalar(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a finite Decimal or ExactScalar") from exc
+    if positive and exact <= 0 or minimum is not None and exact < minimum:
         raise ValueError(f"{name} is outside its permitted range")
+    return value
+
+
+def leverage_value(value):
+    if type(value) is not int or not 1 <= value <= 125:
+        raise ValueError("Binance leverage must be an integer in [1, 125] (no bool)")
     return value
 
 
@@ -71,8 +82,8 @@ class Identified:
     def identity(self):
         # Reuse the existing lossless domain serializer/hash; bind parameters,
         # metadata, contract type and fixed algorithm/policy semantics.
-        return _digest({"algorithm": ALGORITHM_VERSION, "policy": POLICY,
-                        "contract": type(self).__name__, "parameters": self})
+        return canonical_digest({"algorithm": ALGORITHM_VERSION, "policy": POLICY,
+                                 "contract": type(self).__name__, "parameters": self})
 
 
 @dataclass(frozen=True)
@@ -119,11 +130,11 @@ class Scope(Identified):
 
 @dataclass(frozen=True)
 class Grid(Identified):
-    minimum: Decimal
-    maximum: Decimal
-    increment: Decimal
+    minimum: Scalar
+    maximum: Scalar
+    increment: Scalar
     evidence: Evidence
-    origin: Decimal = Decimal(0)
+    origin: Scalar = Decimal(0)
 
     def __post_init__(self):
         if not isinstance(self.evidence, Evidence):
@@ -133,8 +144,34 @@ class Grid(Identified):
 
 
 @dataclass(frozen=True)
+class PriceFilter(Identified):
+    min_price: Scalar
+    max_price: Scalar
+    tick_size: Scalar
+    evidence: Evidence
+
+    def __post_init__(self):
+        if not isinstance(self.evidence, Evidence):
+            raise ValueError("price-filter evidence required")
+        for name in ("min_price", "max_price", "tick_size"):
+            number(getattr(self, name), name)
+
+
+@dataclass(frozen=True)
+class RuleEvaluationContext(Identified):
+    mark_price: Scalar | None
+    evidence: Evidence
+
+    def __post_init__(self):
+        if not isinstance(self.evidence, Evidence):
+            raise ValueError("mark evidence required")
+        if self.mark_price is not None:
+            number(self.mark_price, "mark_price", positive=True)
+
+
+@dataclass(frozen=True)
 class MinNotional(Identified):
-    minimum: Decimal
+    minimum: Scalar
     reduce_only_exempt: bool
     evidence: Evidence
 
@@ -148,8 +185,8 @@ class MinNotional(Identified):
 
 @dataclass(frozen=True)
 class PercentPrice(Identified):
-    multiplier_down: Decimal
-    multiplier_up: Decimal
+    multiplier_down: Scalar
+    multiplier_up: Scalar
     evidence: Evidence
 
     def __post_init__(self):
@@ -165,18 +202,20 @@ class ContractRules(Identified):
     evidence: Evidence
     status: str | None
     contract_type: str | None
-    price: Grid | None
+    price: PriceFilter | None
     lot: Grid | None
     market_lot: Grid | None
     min_notional: MinNotional | None
     percent_price: PercentPrice | None = None
     percent_price_required: bool = False
-    trigger_protect: Decimal | None = None
+    trigger_protect: Scalar | None = None
 
     def __post_init__(self):
         if not isinstance(self.scope, Scope) or not isinstance(self.evidence, Evidence):
             raise ValueError("scope and evidence required")
-        for value in (self.price, self.lot, self.market_lot):
+        if self.price is not None and not isinstance(self.price, PriceFilter):
+            raise ValueError("explicit PriceFilter or None required")
+        for value in (self.lot, self.market_lot):
             if value is not None and not isinstance(value, Grid):
                 raise ValueError("explicit Grid or None required")
         for value, kind in ((self.min_notional, MinNotional), (self.percent_price, PercentPrice)):
@@ -194,27 +233,24 @@ class ContractRules(Identified):
 @dataclass(frozen=True)
 class OrderIntent(Identified):
     side: OrderSide
-    quantity: Decimal
-    price: Decimal | None
+    quantity: Scalar
+    price: Scalar | None
     market: bool = False
     reduce_only: bool = False
-    notional_price: Decimal | None = None
-    percent_reference_price: Decimal | None = None
 
     def __post_init__(self):
         enum_value(self.side, OrderSide)
         number(self.quantity, "quantity", positive=True)
-        for value in (self.price, self.notional_price, self.percent_reference_price):
-            if value is not None:
-                number(value, "price", positive=True)
+        if self.price is not None:
+            number(self.price, "price", positive=True)
         if type(self.market) is not bool or type(self.reduce_only) is not bool:
             raise ValueError("intent flags must be boolean")
 
 
 @dataclass(frozen=True)
 class FeePolicy(Identified):
-    maker_rate: Decimal
-    taker_rate: Decimal
+    maker_rate: Scalar
+    taker_rate: Scalar
     evidence: Evidence
 
     def __post_init__(self):
@@ -227,16 +263,17 @@ class FeePolicy(Identified):
 @dataclass(frozen=True)
 class Bracket(Identified):
     bracket_id: str
-    floor: Decimal
-    cap: Decimal
-    max_initial_leverage: Decimal
-    maintenance_rate: Decimal
-    cum: Decimal
+    floor: Scalar
+    cap: Scalar
+    max_initial_leverage: int
+    maintenance_rate: Scalar
+    cum: Scalar
 
     def __post_init__(self):
         if not isinstance(self.bracket_id, str):
             raise ValueError("bracket id must be a string")
-        for name in ("floor", "cap", "max_initial_leverage", "maintenance_rate", "cum"):
+        leverage_value(self.max_initial_leverage)
+        for name in ("floor", "cap", "maintenance_rate", "cum"):
             number(getattr(self, name), name)
 
 
@@ -258,7 +295,7 @@ class Trigger(Identified):
     side: OrderSide
     kind: TriggerType
     reference: PriceReference
-    price: Decimal
+    price: Scalar
     price_protect: bool = False
 
     def __post_init__(self):
@@ -272,7 +309,7 @@ class Trigger(Identified):
 
 @dataclass(frozen=True)
 class FixedBpsPolicy(Identified):
-    bps: Decimal
+    bps: Scalar
     evidence: Evidence
 
     def __post_init__(self):
@@ -287,25 +324,31 @@ class Result(Identified):
     reasons: tuple[str, ...]
     calculation: str
     inputs_identity: str
-    value: Decimal | bool | None = None
+    value: Scalar | bool | None = None
     bracket_identity: str | None = None
-    # Exact ratio is retained for divisions which have no finite Decimal value.
-    numerator: Decimal | None = None
-    denominator: Decimal | None = None
+
+    @property
+    def exact_value(self):
+        return exact_scalar(self.value) if isinstance(self.value, (Decimal, ExactScalar)) else None
+
+    @property
+    def decimal_value(self):
+        exact = self.exact_value
+        return exact.decimal_value if exact is not None else None
 
 
 @dataclass(frozen=True)
 class PositionCalculation(Identified):
-    quantity: Decimal
-    entry: Decimal | None
-    realized_pnl: Decimal
+    quantity: Scalar
+    entry: Scalar | None
+    realized_pnl: Scalar
     inputs_identity: str
 
 
 @dataclass(frozen=True)
 class Adjustment(Identified):
-    original: Decimal
-    proposed: Decimal
+    original: Scalar
+    proposed: Scalar
     policy: str
     grid_identity: str
     # Suggestions always require acceptance and full order revalidation later.
@@ -316,5 +359,5 @@ class Adjustment(Identified):
 
 @dataclass(frozen=True)
 class IncreaseCalculation(Identified):
-    quantity: Decimal
+    quantity: Scalar
     entry_result: Result

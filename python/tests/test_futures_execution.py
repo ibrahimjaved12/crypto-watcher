@@ -8,28 +8,57 @@ from market_analysis import futures_execution as f
 from market_analysis.futures_execution_contracts import (
     ALGORITHM_VERSION, Bracket, BracketTable, ContractRules, Evidence, FeePolicy, FeeRole,
     FixedBpsPolicy, Grid, MinNotional, OrderIntent, OrderSide, PercentPrice,
+    PriceFilter, RuleEvaluationContext,
     PositionSide, PriceReference, Provenance, Scope, Trigger, TriggerType,
 )
+
+from market_analysis.exact_scalar import ExactScalar
 
 D = Decimal
 LONG, SHORT = PositionSide.LONG, PositionSide.SHORT
 BUY, SELL = OrderSide.BUY, OrderSide.SELL
 EVIDENCE = Evidence(Provenance.FIXED_SIMULATION_ASSUMPTION, "fixture", "v1")
 SCOPE = Scope("binance-usdm:BTCUSDT")
-PRICE = Grid(D('1'), D('10000'), D('.25'), EVIDENCE)
+PRICE = PriceFilter(D('1'), D('10000'), D('.25'), EVIDENCE)
 LOT = Grid(D('.1'), D('100'), D('.1'), EVIDENCE)
 MARKET_LOT = replace(LOT, minimum=D('.2'), maximum=D('10'), increment=D('.2'))
 RULES = ContractRules(SCOPE, EVIDENCE, "TRADING", "PERPETUAL", PRICE, LOT,
                       MARKET_LOT, MinNotional(D('5'), True, EVIDENCE))
 TABLE = BracketTable(SCOPE, (
-    Bracket('1', D(0), D(1000), D(20), D('.01'), D(0)),
-    Bracket('2', D(1000), D(10000), D(10), D('.02'), D(10)),
+    Bracket('1', D(0), D(1000), 20, D('.01'), D(0)),
+    Bracket('2', D(1000), D(10000), 10, D('.02'), D(10)),
 ), EVIDENCE)
 FEES = FeePolicy(D('.0002'), D('.0005'), EVIDENCE)
 
 
 def intent(**changes):
     return replace(OrderIntent(BUY, D('1'), D('100')), **changes)
+
+
+class ExactScalarTests(unittest.TestCase):
+    def test_reduced_identity_finite_views_and_safe_boundaries(self):
+        self.assertEqual(ExactScalar(2, -6), ExactScalar(-1, 3))
+        self.assertEqual(ExactScalar(0, -6).as_integer_ratio(), (0, 1))
+        self.assertEqual(ExactScalar(2, 6).identity, ExactScalar(1, 3).identity)
+        self.assertNotEqual(ExactScalar(1, 3).identity, ExactScalar(2, 3).identity)
+        for decimal in (D('12345.123456789'), D('-0.125'), D('1E+100'), D(0)):
+            self.assertEqual(ExactScalar.from_decimal(decimal).decimal_value, decimal)
+        self.assertIsNone(ExactScalar(1, 3).decimal_value)
+        self.assertEqual(ExactScalar(1, 3) + ExactScalar(2, 3), D(1))
+        self.assertEqual(D(1) - ExactScalar(1, 3), ExactScalar(2, 3))
+        self.assertEqual(ExactScalar(1, 3) * D(3), D(1))
+        self.assertEqual(D(1) / ExactScalar(3), ExactScalar(1, 3))
+        self.assertEqual(hash(ExactScalar(1, 2)), hash(D('.5')))
+        for n, d in ((True, 1), (1, True), (1.0, 3), (1, D(3)), (1, 0)):
+            with self.assertRaises(ValueError):
+                ExactScalar(n, d)
+        with self.assertRaises(FrozenInstanceError):
+            ExactScalar(1, 3).numerator = 2
+        with self.assertRaises(TypeError):
+            ExactScalar(1, 3) + 0.5
+        with localcontext() as context:
+            context.prec = 1
+            self.assertEqual(ExactScalar(123456789, 8).decimal_value, D('15432098.625'))
 
 
 class PnlTests(unittest.TestCase):
@@ -53,15 +82,42 @@ class PnlTests(unittest.TestCase):
 
     def test_exact_division_and_context_independence(self):
         result = f.increase(D(2), D(100), D(1), D(101)).entry_result
-        self.assertIsNone(result.value)
-        self.assertEqual(result.reasons, ('NON_TERMINATING_DECIMAL',))
-        self.assertEqual((result.numerator, result.denominator), (D(301), D(3)))
+        self.assertEqual(result.status, 'VALID')
+        self.assertEqual(result.value, ExactScalar(301, 3))
+        self.assertEqual(result.exact_value, ExactScalar(301, 3))
+        self.assertIsNone(result.decimal_value)
         with localcontext() as context:
             context.prec = 2
             context.rounding = 'ROUND_UP'
             self.assertEqual(f.notional(D('123456789.123456789'), D('10.25')).value,
                              D('1265432088.51543208725'))
-            self.assertEqual(f.initial_margin(D('10'), D('8')).value, D('1.25'))
+            self.assertEqual(f.initial_margin(D('10'), 8).value, D('1.25'))
+
+    def test_repeating_entry_flows_through_downstream_arithmetic(self):
+        increase = f.increase(D(2), D(100), D(1), D(101))
+        entry = increase.entry_result.value
+        self.assertEqual(entry, ExactScalar(301, 3))
+        self.assertEqual(increase.entry_result.status, 'VALID')
+        self.assertEqual(f.unrealized_pnl(LONG, D(3), entry, D(110)).value, D(29))
+        self.assertEqual(f.unrealized_pnl(SHORT, D(3), entry, D(110)).value, D(-29))
+        reduction = f.reduce(LONG, D(3), entry, D(1), D(110))
+        self.assertEqual(reduction.realized_pnl, ExactScalar(29, 3))
+        self.assertEqual(reduction.entry, entry)
+        self.assertEqual(f.reduce(SHORT, D(3), entry, D(1), D(110)).realized_pnl, ExactScalar(-29, 3))
+        next_increase = f.increase(D(3), entry, D(1), D(103))
+        self.assertEqual((next_increase.quantity, next_increase.entry_result.value), (D(4), D(101)))
+        self.assertEqual(f.isolated_equity(LONG, D(3), entry, D(110), D(20)).value, D(49))
+        root = f.liquidation_threshold(LONG, D(3), entry, D(30), TABLE)
+        self.assertEqual(root.status, 'VALID')
+        self.assertEqual(root.value, ExactScalar(27100, 297))
+        equity = f.isolated_equity(LONG, D(3), entry, root.value, D(30)).value
+        maintenance = f.maintenance_margin(f.notional(D(3), root.value).value, TABLE).value
+        self.assertEqual(equity, maintenance)
+        with localcontext() as context:
+            context.prec = 1
+            context.rounding = 'ROUND_DOWN'
+            self.assertEqual(root, f.liquidation_threshold(LONG, D(3), entry, D(30), TABLE))
+            self.assertEqual(f.increase(D(3), entry, D(1), D(103)), next_increase)
 
     def test_financial_inputs_reject_bool_float_nonfinite(self):
         for invalid in (True, 1, 1.2, D('NaN'), D('Infinity'), D('-Infinity')):
@@ -100,25 +156,36 @@ class CostTests(unittest.TestCase):
 class RuleTests(unittest.TestCase):
     def test_grids_bounds_and_non_power_of_ten(self):
         self.assertEqual(f.validate_order(intent(), RULES).status, 'VALID')
-        self.assertEqual(f.grid_reasons(D('100.1'), PRICE), ('OFF_GRID',))
-        shifted = replace(PRICE, origin=D('.1'))
-        self.assertEqual(f.grid_reasons(D('100.1'), shifted), ())
-        self.assertEqual(f.grid_reasons(D('100'), shifted), ('OFF_GRID',))
+        self.assertEqual(f.price_filter_reasons(D('100.1'), PRICE), ('OFF_GRID',))
+        shifted = replace(PRICE, min_price=D('.1'))
+        self.assertEqual(f.price_filter_reasons(D('100.1'), shifted), ())
+        self.assertEqual(f.price_filter_reasons(D('100'), shifted), ('OFF_GRID',))
         for value, expected in (('0', 'BELOW_MINIMUM'), ('10000.25', 'ABOVE_MAXIMUM')):
-            self.assertIn(expected, f.grid_reasons(D(value), PRICE))
+            self.assertIn(expected, f.price_filter_reasons(D(value), PRICE))
         self.assertEqual(f.validate_order(intent(quantity=D('.15'), price=D('100.1')), RULES).reasons,
                          ('LOT_SIZE:OFF_GRID', 'PRICE_FILTER:OFF_GRID'))
         self.assertIn('LOT_SIZE:ABOVE_MAXIMUM', f.validate_order(intent(quantity=D(101)), RULES).reasons)
 
-    def test_market_lot_and_explicit_notional_reference(self):
-        order = intent(quantity=D('.3'), market=True, price=None, notional_price=D(100))
-        self.assertIn('MARKET_LOT_SIZE:OFF_GRID', f.validate_order(order, RULES).reasons)
-        self.assertEqual(f.validate_order(replace(order, quantity=D('.4')), RULES).status, 'VALID')
-        self.assertIn('UNAVAILABLE_NOTIONAL_PRICE', f.validate_order(
-            replace(order, quantity=D('.4'), notional_price=None), RULES).reasons)
+    def test_market_lot_and_explicit_mark_context(self):
+        order = intent(quantity=D('.3'), market=True, price=None)
+        context = RuleEvaluationContext(D(100), EVIDENCE)
+        self.assertIn('MARKET_LOT_SIZE:OFF_GRID', f.validate_order(order, RULES, context).reasons)
+        self.assertEqual(f.validate_order(replace(order, quantity=D('.4')), RULES, context).status, 'VALID')
+        self.assertIn('UNAVAILABLE_MARK_PRICE', f.validate_order(
+            replace(order, quantity=D('.4')), RULES).reasons)
         self.assertIn('MARKET_LOT_SIZE:ABOVE_MAXIMUM', f.validate_order(
-            replace(order, quantity=D(11)), RULES).reasons)
-        self.assertEqual(f.validate_order(order, replace(RULES, market_lot=None)).status, 'UNAVAILABLE_RULE')
+            replace(order, quantity=D(11)), RULES, context).reasons)
+        self.assertEqual(f.validate_order(order, replace(RULES, market_lot=None), context).status, 'UNAVAILABLE_RULE')
+        low_mark = replace(context, mark_price=D(10))
+        self.assertIn('BELOW_MIN_NOTIONAL', f.validate_order(replace(order, quantity=D('.4')), RULES, low_mark).reasons)
+        self.assertNotEqual(f.validate_order(order, RULES, context).identity,
+                            f.validate_order(order, RULES, low_mark).identity)
+        # Even a supplied price does not replace the mark for MARKET admission.
+        self.assertIn('BELOW_MIN_NOTIONAL', f.validate_order(replace(order, quantity=D('.4'), price=D(100)), RULES, low_mark).reasons)
+        self.assertEqual(f.validate_order(replace(order, quantity=D('.4'), reduce_only=True), RULES).status, 'VALID')
+        for field in ('notional_price', 'percent_reference_price'):
+            with self.assertRaises(TypeError):
+                intent(**{field: D(100)})
 
     def test_min_notional_exception_only(self):
         order = intent(quantity=D('.1'), price=D(10))
@@ -130,12 +197,12 @@ class RuleTests(unittest.TestCase):
             replace(order, quantity=D('.05'), reduce_only=True), RULES).reasons)
 
     def test_malformed_missing_and_unsupported_rules(self):
-        for increment in (D(0), D(-1)):
-            self.assertEqual(f.validate_order(intent(), replace(RULES, price=replace(PRICE, increment=increment))).status,
+        for increment in (D(-1),):
+            self.assertEqual(f.validate_order(intent(), replace(RULES, price=replace(PRICE, tick_size=increment))).status,
                              'REJECTED_RULE')
         for increment in (D('NaN'), True):
             with self.assertRaises(ValueError):
-                replace(PRICE, increment=increment)
+                replace(PRICE, tick_size=increment)
         self.assertEqual(f.validate_order(intent(), replace(RULES, price=None)).status, 'UNAVAILABLE_RULE')
         self.assertIn('UNSUPPORTED_STATUS', f.validate_order(intent(), replace(RULES, status='HALT')).reasons)
         self.assertIn('UNSUPPORTED_CONTRACT_TYPE', f.validate_order(intent(), replace(RULES, contract_type='DELIVERY')).reasons)
@@ -145,13 +212,66 @@ class RuleTests(unittest.TestCase):
             self.assertEqual(f.validate_order(intent(), replace(RULES, scope=replace(SCOPE, **changes))).status,
                              'UNSUPPORTED_SCOPE')
 
-    def test_percent_price_evidence(self):
+    def test_percent_price_directional_mark_evidence(self):
         rule = PercentPrice(D('.9'), D('1.1'), EVIDENCE)
         rules = replace(RULES, percent_price=rule, percent_price_required=True)
-        self.assertEqual(f.validate_order(intent(percent_reference_price=D(100)), rules).status, 'VALID')
-        self.assertIn('OUTSIDE_PERCENT_PRICE', f.validate_order(intent(price=D(120), percent_reference_price=D(100)), rules).reasons)
-        self.assertIn('UNAVAILABLE_PERCENT_REFERENCE', f.validate_order(intent(), rules).reasons)
-        self.assertIn('UNAVAILABLE_PERCENT_PRICE', f.validate_order(intent(), replace(rules, percent_price=None)).reasons)
+        context = RuleEvaluationContext(D(100), EVIDENCE)
+        for side, price, allowed in ((BUY, '80', True), (BUY, '120', False),
+                                      (SELL, '120', True), (SELL, '80', False),
+                                      (BUY, '110', True), (SELL, '90', True)):
+            result = f.validate_order(intent(side=side, price=D(price)), rules, context)
+            self.assertEqual('OUTSIDE_PERCENT_PRICE' not in result.reasons, allowed)
+            self.assertEqual(result.status, 'VALID' if allowed else 'REJECTED_RULE')
+        for missing in (None, replace(context, mark_price=None),
+                        replace(context, evidence=replace(EVIDENCE, classification=Provenance.UNAVAILABLE))):
+            result = f.validate_order(intent(), rules, missing)
+            self.assertEqual(result.status, 'UNAVAILABLE_RULE')
+            self.assertIn('UNAVAILABLE_MARK_PRICE', result.reasons)
+        self.assertIn('UNAVAILABLE_PERCENT_PRICE', f.validate_order(intent(), replace(rules, percent_price=None), context).reasons)
+        self.assertIn('PRICE_FILTER:OFF_GRID', f.validate_order(intent(price=D('80.1')), rules, context).reasons)
+        self.assertNotEqual(f.validate_order(intent(), rules, context).identity,
+                            f.validate_order(intent(), rules, replace(context, mark_price=D(101))).identity)
+
+    def test_price_filter_disabled_components_independent(self):
+        # All eight combinations are valid normalized snapshots. Only enabled
+        # components constrain the original submitted order.
+        for minimum in (D(0), D('1.1')):
+            for maximum in (D(0), D(100)):
+                for tick in (D(0), D('.25')):
+                    rule = PriceFilter(minimum, maximum, tick, EVIDENCE)
+                    rules = replace(RULES, price=rule)
+                    expected = []
+                    price = D('100.1')
+                    if maximum:
+                        expected.append('ABOVE_MAXIMUM')
+                    if tick:
+                        if minimum == 0:
+                            expected.append('OFF_GRID')
+                    self.assertEqual(f.price_filter_reasons(price, rule), tuple(expected))
+                    result = f.validate_order(intent(price=price), rules)
+                    self.assertEqual(result.reasons, tuple('PRICE_FILTER:' + r for r in expected))
+                    self.assertEqual(result.status, 'REJECTED_RULE' if expected else 'VALID')
+        disabled_min = replace(PRICE, min_price=D(0), tick_size=D(0))
+        self.assertEqual(f.price_filter_reasons(D('.1'), disabled_min), ())
+        self.assertEqual(f.price_filter_reasons(D('.1'), replace(disabled_min, min_price=D(1))), ('BELOW_MINIMUM',))
+        disabled_max = replace(PRICE, max_price=D(0))
+        self.assertEqual(f.price_filter_reasons(D(10001), disabled_max), ())
+        no_tick = replace(PRICE, tick_size=D(0))
+        for side in (BUY, SELL):
+            suggestion = f.suggest_passive_limit(D('100.1'), side, no_tick)
+            self.assertEqual(suggestion.proposed, suggestion.original)
+            self.assertEqual(suggestion.status, 'UNCHANGED')
+            self.assertEqual(suggestion.reasons, ('PRICE_TICK_DISABLED',))
+        no_rules = PriceFilter(D(0), D(0), D(0), EVIDENCE)
+        self.assertEqual(f.validate_order(intent(price=D('100.12345')), replace(RULES, price=no_rules)).status, 'VALID')
+        shifted = replace(PRICE, min_price=D('1.1'))
+        self.assertEqual(f.suggest_passive_limit(D('100.2'), BUY, shifted).proposed, D('100.1'))
+        self.assertEqual(f.suggest_passive_limit(D('100.2'), SELL, shifted).proposed, D('100.35'))
+        # Quantity filters retain strict nonzero increments and maxima.
+        for bad in (replace(LOT, increment=D(0)), replace(LOT, maximum=D(0))):
+            self.assertEqual(f.validate_order(intent(), replace(RULES, lot=bad)).status, 'REJECTED_RULE')
+        bad = replace(PRICE, min_price=D(2), max_price=D(1))
+        self.assertEqual(f.validate_order(intent(), replace(RULES, price=bad)).status, 'REJECTED_RULE')
 
     def test_suggestions_require_acceptance_and_revalidation(self):
         self.assertEqual(f.suggest_passive_limit(D('100.1'), BUY, PRICE).proposed, D(100))
@@ -168,18 +288,40 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(tiny.reasons, ("BELOW_MINIMUM",))
         self.assertIn('BELOW_MINIMUM', f.grid_reasons(tiny.proposed, LOT))
         with self.assertRaises(ValueError):
-            f.suggest_grid(D(100), PRICE, rounding='AUTO_STOP')
+            f.suggest_price(D(100), PRICE, rounding='AUTO_STOP')
 
 
 class MarginTests(unittest.TestCase):
     def test_initial_maintenance_and_leverage(self):
-        self.assertEqual(f.initial_margin(D(1000), D(10)).value, D(100))
+        self.assertEqual(f.initial_margin(D(1000), 10).value, D(100))
         self.assertEqual(f.maintenance_margin(D(2000), TABLE).value, D(30))
         self.assertEqual(f.maintenance_margin(D(2000), TABLE).bracket_identity, TABLE.rows[1].identity)
-        self.assertEqual(f.leverage_admissibility(D(999), D(20), TABLE).status, 'VALID')
-        self.assertEqual(f.leverage_admissibility(D(1000), D(20), TABLE).status, 'REJECTED_RULE')
+        self.assertEqual(f.leverage_admissibility(D(999), 20, TABLE).status, 'VALID')
+        self.assertEqual(f.leverage_admissibility(D(1000), 20, TABLE).status, 'REJECTED_RULE')
         self.assertEqual(f.select_bracket(D(1000), TABLE).bracket_identity, TABLE.rows[1].identity)
         self.assertEqual(f.select_bracket(D(10000), TABLE).status, 'UNAVAILABLE_BRACKETS')
+
+    def test_integer_leverage_domain_and_repeating_initial_margin(self):
+        result = f.initial_margin(D(100), 3)
+        self.assertEqual(result.status, 'VALID')
+        self.assertEqual(result.value, ExactScalar(100, 3))
+        self.assertIsNone(result.decimal_value)
+        self.assertEqual(f.initial_margin(D(100), 8).decimal_value, D('12.5'))
+        for invalid in (True, False, 0, -1, 126, 2.5, D('2.5'), D(2), '2'):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    f.initial_margin(D(100), invalid)
+                with self.assertRaises(ValueError):
+                    f.leverage_admissibility(D(100), invalid, TABLE)
+                with self.assertRaises(ValueError):
+                    replace(TABLE.rows[0], max_initial_leverage=invalid)
+        maximum = replace(TABLE, rows=(replace(TABLE.rows[0], max_initial_leverage=125), TABLE.rows[1]))
+        self.assertEqual(f.leverage_admissibility(D(999), 125, maximum).status, 'VALID')
+        self.assertEqual(f.leverage_admissibility(D(1000), 125, maximum).status, 'REJECTED_RULE')
+        self.assertEqual(f.leverage_admissibility(D(100), 1, TABLE).status, 'VALID')
+        with localcontext() as context:
+            context.prec = 1
+            self.assertEqual(result, f.initial_margin(D(100), 3))
 
     def test_bracket_malformed_tables(self):
         first, second = TABLE.rows
@@ -187,7 +329,7 @@ class MarginTests(unittest.TestCase):
                      (first, replace(second, floor=D(999))), (second, first),
                      (first, replace(second, maintenance_rate=D(-1))),
                      (first, replace(second, cum=D(11))), (first, replace(second, cum=D(100))),
-                     (first, replace(second, cap=D(1000))), (first, replace(second, max_initial_leverage=D(30))),
+                     (first, replace(second, cap=D(1000))), (first, replace(second, max_initial_leverage=30)),
                      (first, replace(second, bracket_id='1'))):
             with self.subTest(rows=rows):
                 self.assertEqual(f.validate_brackets(replace(TABLE, rows=rows)), ('INVALID_BRACKET_TABLE',))
@@ -231,11 +373,14 @@ class MarginTests(unittest.TestCase):
         broken = replace(TABLE, rows=(TABLE.rows[0], replace(TABLE.rows[1], cum=D(9))))
         self.assertEqual(f.liquidation_threshold(LONG, D(1), D(100), D(10), broken).status, 'INVALID_BRACKET_TABLE')
 
-    def test_nonterminating_root_is_not_fabricated(self):
+    def test_repeating_root_is_valid_and_composable(self):
         result = f.liquidation_threshold(LONG, D(1), D(100), D(10), TABLE)
-        self.assertIsNone(result.value)
-        self.assertEqual(result.reasons, ('NON_TERMINATING_DECIMAL',))
-        self.assertEqual((result.numerator, result.denominator), (D(90), D('.99')))
+        self.assertEqual(result.status, 'VALID')
+        self.assertEqual(result.value, ExactScalar(1000, 11))
+        self.assertIsNone(result.decimal_value)
+        equity = f.isolated_equity(LONG, D(1), D(100), result.value, D(10)).value
+        mm = f.maintenance_margin(f.notional(D(1), result.value).value, TABLE).value
+        self.assertEqual(equity, mm)
         with localcontext() as context:
             context.prec = 2
             self.assertEqual(result, f.liquidation_threshold(LONG, D(1), D(100), D(10), TABLE))
@@ -269,14 +414,14 @@ class TriggerAndPolicyTests(unittest.TestCase):
 
     def test_parameter_metadata_and_result_identity(self):
         self.assertNotEqual(FEES.identity, replace(FEES, maker_rate=D('.0003')).identity)
-        self.assertNotEqual(PRICE.identity, replace(PRICE, increment=D('.5')).identity)
+        self.assertNotEqual(PRICE.identity, replace(PRICE, tick_size=D('.5')).identity)
         self.assertNotEqual(TABLE.identity, replace(TABLE, rows=(TABLE.rows[0], replace(TABLE.rows[1], maintenance_rate=D('.03')))).identity)
         bps = FixedBpsPolicy(D(10), EVIDENCE)
         self.assertNotEqual(bps.identity, replace(bps, bps=D(11)).identity)
-        self.assertNotEqual(f.suggest_grid(D('100.1'), PRICE, rounding='FLOOR').identity,
-                            f.suggest_grid(D('100.1'), PRICE, rounding='CEIL').identity)
+        self.assertNotEqual(f.suggest_price(D('100.1'), PRICE, rounding='FLOOR').identity,
+                            f.suggest_price(D('100.1'), PRICE, rounding='CEIL').identity)
         self.assertNotEqual(TABLE.identity, replace(TABLE, rows=(TABLE.rows[0], replace(TABLE.rows[1], cum=D(11)))).identity)
-        self.assertNotEqual(TABLE.identity, replace(TABLE, rows=(replace(TABLE.rows[0], max_initial_leverage=D(19)), TABLE.rows[1])).identity)
+        self.assertNotEqual(TABLE.identity, replace(TABLE, rows=(replace(TABLE.rows[0], max_initial_leverage=19), TABLE.rows[1])).identity)
         for field, value in (('version', 'v2'), ('source', 'another'), ('effective_at', '2020-01-01'),
                              ('observed_at', '2021-01-01'), ('classification', Provenance.CURRENT_RULE_ASSUMPTION)):
             self.assertNotEqual(FEES.identity, replace(FEES, evidence=replace(EVIDENCE, **{field: value})).identity)
@@ -289,7 +434,7 @@ class TriggerAndPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(SCOPE, margin_mode=[])
         with self.assertRaises(ValueError):
-            replace(PRICE, increment=[])
+            replace(PRICE, tick_size=[])
         with self.assertRaises(FrozenInstanceError):
             FEES.maker_rate = D(1)
         with self.assertRaises(ValueError):

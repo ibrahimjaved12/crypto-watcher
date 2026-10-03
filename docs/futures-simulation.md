@@ -145,7 +145,7 @@ at the exchange's relevant settlement events.
 ## Implemented execution-math foundation (#37 Part 1)
 
 `python/market_analysis/futures_execution{,_contracts}.py` provides stateless,
-versioned Decimal calculations for P&L and position increases/reductions, fill fees,
+versioned exact calculations for P&L and position increases/reductions, fill fees,
 settlement funding amounts, filter-grid validation and explicit adjustment
 suggestions, leverage/maintenance brackets, margin, piecewise isolated liquidation
 risk thresholds, explicit STOP/TAKE_PROFIT references, and fixed-bps adverse prices.
@@ -157,16 +157,23 @@ is the detailed contract.
 
 Submitted intents are validated without modification. Suggestions require explicit
 acceptance and full order revalidation; quantities never round upward. Market
-quantities satisfy both supplied LOT_SIZE and MARKET_LOT_SIZE filters. Brackets
+quantities satisfy both supplied LOT_SIZE and MARKET_LOT_SIZE filters. Dynamic
+mark evidence is supplied separately from order intent: MARKET MIN_NOTIONAL uses
+mark price; price-bearing orders use their submitted price. PERCENT_PRICE checks
+only the BUY upper bound or SELL lower bound against mark. PRICE_FILTER components
+are independently disabled by zero; enabled ticks use minPrice as grid origin.
+Leverage is an integer in 1–125, further limited by the supplied effective bracket.
+Brackets
 are contiguous, maintenance-continuous `[floor, cap)` intervals; notional outside
 the supplied table is unavailable, never extrapolated. Missing settlement marks
 are unavailable and requested price protection is unsupported.
 
-Finite arithmetic is exact and independent of the caller's Decimal context.
-Nonterminating quotients retain an exact Decimal numerator/denominator and return
-`UNAVAILABLE_CALCULATION` / `NON_TERMINATING_DECIMAL` with no rounded value.
-Liquidation candidates are checked against their own brackets and the equity/MM
-equality using exact cross multiplication, including nonterminating roots.
+Arithmetic is independent of the caller's Decimal context. Reduced integer
+`ExactScalar` values make repeating quotients VALID and usable by subsequent P&L,
+entry, margin and liquidation calculations. Finite results retain an exact Decimal
+view; no rounding assumption is introduced. Liquidation candidates are checked
+against their own brackets and exact equity/MM equality, including repeating roots.
+Shared neutral canonical hashing preserves existing lifecycle identities unchanged.
 
 This foundation does not provide wallet/ledger state (#36), account admission,
 funding entitlement or postings, network/historical acquisition, fill/event ordering,

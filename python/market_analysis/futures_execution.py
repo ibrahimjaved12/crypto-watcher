@@ -1,86 +1,50 @@
 """Stateless Binance USD-M math. No I/O, account admission or settlement.
 
-Finite operations are exact and independent of the ambient Decimal context.
-Nonterminating quotients return an explicit unavailable result with an exact
-numerator/denominator, rather than silently rounding a financial value.
+Arithmetic uses reduced exact rational scalars, independent of Decimal context.
+Finite results expose exact Decimal values; repeating results remain valid,
+composable ExactScalar values without introducing a rounding assumption.
 """
 
-from decimal import (
-    Context, Decimal, Inexact, InvalidOperation, MAX_EMAX, MIN_EMIN, Overflow,
-    Underflow, localcontext,
-)
-from math import gcd
+from decimal import Decimal
+
+from .canonical_identity import canonical_digest
+from .exact_scalar import exact_scalar, finite_or_exact
 
 from .futures_execution_contracts import (
     Adjustment, BracketTable, ContractRules, Evidence, FeePolicy, FeeRole,
     FixedBpsPolicy, Grid, IncreaseCalculation, OrderIntent, OrderSide, PositionCalculation,
+    PriceFilter, RuleEvaluationContext,
     PositionSide, PriceReference, Provenance, Result, Scope, Trigger,
-    TriggerType, enum_value, number,
+    TriggerType, enum_value, leverage_value, number,
 )
-from .market_episode_lifecycle import _digest
 
 
 ONE = Decimal(1)
 
 
-def _exact(operation, *values):
-    # Sufficient for every sum/product in this module, including exponent gaps.
-    extent = sum(len(v.as_tuple().digits) + abs(v.as_tuple().exponent) for v in values)
-    with localcontext(Context(prec=max(28, 2 * extent + 10),
-                              Emax=MAX_EMAX, Emin=MIN_EMIN,
-                              traps=[Inexact, InvalidOperation, Overflow, Underflow])):
-        return operation(*values)
-
-
 def _add(a, b):
-    return _exact(lambda x, y: x + y, a, b)
+    return finite_or_exact(exact_scalar(a) + exact_scalar(b))
 
 
 def _sub(a, b):
-    return _exact(lambda x, y: x - y, a, b)
+    return finite_or_exact(exact_scalar(a) - exact_scalar(b))
 
 
 def _mul(a, b):
-    return _exact(lambda x, y: x * y, a, b)
+    return finite_or_exact(exact_scalar(a) * exact_scalar(b))
 
 
 def _divide(a, b):
-    """Exact finite Decimal quotient, or None (no rounding / ambient context)."""
-    an, ad = a.as_integer_ratio()
-    bn, bd = b.as_integer_ratio()
-    n, d = an * bd, ad * bn
-    if not d:
-        raise ValueError("zero denominator")
-    if d < 0:
-        n, d = -n, -d
-    factor = gcd(n, d)
-    n, d = n // factor, d // factor
-    twos = fives = 0
-    while d % 2 == 0:
-        twos += 1
-        d //= 2
-    while d % 5 == 0:
-        fives += 1
-        d //= 5
-    if d != 1:
-        return None
-    scale = max(twos, fives)
-    coefficient = abs(n) * 2 ** (scale - twos) * 5 ** (scale - fives)
-    return Decimal((int(n < 0), tuple(map(int, str(coefficient))), -scale))
+    return finite_or_exact(exact_scalar(a) / exact_scalar(b))
 
 
-def _result(calculation, inputs, value=None, *, status="VALID", reasons=(),
-            bracket=None, numerator=None, denominator=None):
-    return Result(status, reasons, calculation, _digest(inputs), value,
-                  bracket.identity if bracket is not None else None, numerator, denominator)
+def _result(calculation, inputs, value=None, *, status="VALID", reasons=(), bracket=None):
+    return Result(status, reasons, calculation, canonical_digest(inputs), value,
+                  bracket.identity if bracket is not None else None)
 
 
 def _quotient(calculation, inputs, numerator, denominator, bracket=None):
-    value = _divide(numerator, denominator)
-    return _result(calculation, inputs, value,
-                   status="VALID" if value is not None else "UNAVAILABLE_CALCULATION",
-                   reasons=() if value is not None else ("NON_TERMINATING_DECIMAL",),
-                   bracket=bracket, numerator=numerator, denominator=denominator)
+    return _result(calculation, inputs, _divide(numerator, denominator), bracket=bracket)
 
 
 def _sign(side):
@@ -145,7 +109,7 @@ def reduce(side, quantity, entry, closed_quantity, fill):
     remaining = _sub(quantity, closed_quantity)
     pnl = unrealized_pnl(side, closed_quantity, entry, fill).value
     return PositionCalculation(remaining, entry if remaining else None, pnl,
-                               _digest((side, quantity, entry, closed_quantity, fill)))
+                               canonical_digest((side, quantity, entry, closed_quantity, fill)))
 
 
 def fee(quantity, fill, role, policy):
@@ -233,15 +197,71 @@ def suggest_quantity(quantity, grid):
     return suggest_grid(quantity, grid, rounding="FLOOR")
 
 
-def suggest_passive_limit(price, side, grid):
+def _price_filter_errors(rule):
+    if not isinstance(rule, PriceFilter):
+        return ("UNAVAILABLE_PRICE_FILTER",)
+    try:
+        for name in ("min_price", "max_price", "tick_size"):
+            number(getattr(rule, name), name, minimum=0)
+    except ValueError:
+        return ("INVALID_PRICE_FILTER",)
+    if rule.max_price and rule.min_price > rule.max_price:
+        return ("INVALID_PRICE_FILTER_BOUNDS",)
+    if not _evidence_available(rule.evidence):
+        return ("UNAVAILABLE_PRICE_FILTER",)
+    return ()
+
+
+def price_filter_reasons(price, rule):
+    number(price, "price", minimum=0)
+    errors = _price_filter_errors(rule)
+    if errors:
+        return errors
+    reasons = []
+    if rule.min_price and price < rule.min_price:
+        reasons.append("BELOW_MINIMUM")
+    if rule.max_price and price > rule.max_price:
+        reasons.append("ABOVE_MAXIMUM")
+    if rule.tick_size:
+        n, d = _divide(_sub(price, rule.min_price), rule.tick_size).as_integer_ratio()
+        if n % d:
+            reasons.append("OFF_GRID")
+    return tuple(reasons)
+
+
+def suggest_price(price, rule, *, rounding):
+    """Explicit price/stop/target proposal; no tick means no invented adjustment."""
+    number(price, "price", minimum=0)
+    if _price_filter_errors(rule):
+        raise ValueError("unavailable/invalid price filter")
+    if rounding not in ("FLOOR", "CEIL"):
+        raise ValueError("explicit FLOOR or CEIL required")
+    if rule.tick_size == 0:
+        errors = price_filter_reasons(price, rule)
+        return Adjustment(price, price, "NO_ENABLED_TICK", rule.identity,
+                          status="REJECTED_RULE" if errors else "UNCHANGED",
+                          reasons=errors or ("PRICE_TICK_DISABLED",))
+    n, d = _divide(_sub(price, rule.min_price), rule.tick_size).as_integer_ratio()
+    steps = n // d if rounding == "FLOOR" else -(-n // d)
+    proposed = _add(rule.min_price, _mul(Decimal(steps), rule.tick_size))
+    errors = price_filter_reasons(proposed, rule) if proposed >= 0 else ("BELOW_MINIMUM",)
+    return Adjustment(price, proposed, rounding, rule.identity,
+                      status="REJECTED_RULE" if errors else "SUGGESTED", reasons=errors)
+
+
+def suggest_passive_limit(price, side, rule):
     enum_value(side, OrderSide)
-    return suggest_grid(price, grid, rounding="FLOOR" if side is OrderSide.BUY else "CEIL")
+    return suggest_price(price, rule, rounding="FLOOR" if side is OrderSide.BUY else "CEIL")
 
 
-def validate_order(intent, rules):
+def validate_order(intent, rules, context=None):
     if not isinstance(intent, OrderIntent) or not isinstance(rules, ContractRules):
         raise ValueError("explicit intent and contract rules required")
-    inputs = (intent, rules)
+    if context is not None and not isinstance(context, RuleEvaluationContext):
+        raise ValueError("explicit RuleEvaluationContext or None required")
+    inputs = (intent, rules, context)
+    mark = (context.mark_price if context is not None
+            and _evidence_available(context.evidence) else None)
     unsupported = scope_reasons(rules.scope)
     if unsupported:
         return _result("validate_order", inputs, status="UNSUPPORTED_SCOPE", reasons=unsupported)
@@ -251,7 +271,8 @@ def validate_order(intent, rules):
 
     def add(code, *, missing=False, malformed=False):
         nonlocal unavailable, invalid
-        reasons.append(code)
+        if code not in reasons:
+            reasons.append(code)
         unavailable |= missing
         invalid |= malformed
 
@@ -275,8 +296,6 @@ def validate_order(intent, rules):
     grids = [("LOT_SIZE", rules.lot, intent.quantity)]
     if intent.market:
         grids.append(("MARKET_LOT_SIZE", rules.market_lot, intent.quantity))
-    # PRICE_FILTER applies to submitted prices, never an invented market price.
-    grids.append(("PRICE_FILTER", rules.price, intent.price))
     for name, grid, value in grids:
         errors = _grid_errors(grid)
         if not errors and value is not None:
@@ -284,9 +303,16 @@ def validate_order(intent, rules):
         for error in errors:
             add(name + ":" + error, missing=error.startswith("UNAVAILABLE"),
                 malformed=error.startswith("INVALID"))
+    # Disabled price components remain independent of the strict quantity grids.
+    price_errors = _price_filter_errors(rules.price)
+    if not price_errors and intent.price is not None:
+        price_errors = price_filter_reasons(intent.price, rules.price)
+    for error in price_errors:
+        add("PRICE_FILTER:" + error, missing=error.startswith("UNAVAILABLE"),
+            malformed=error.startswith("INVALID"))
     if not intent.market and intent.price is None:
         add("UNAVAILABLE_LIMIT_PRICE", missing=True)
-    reference = intent.notional_price if intent.market else intent.price
+    reference = mark if intent.market else intent.price
     minimum = rules.min_notional
     if minimum is None or not _evidence_available(minimum.evidence):
         add("UNAVAILABLE_MIN_NOTIONAL", missing=True)
@@ -300,7 +326,7 @@ def validate_order(intent, rules):
         else:
             if not (intent.reduce_only and minimum.reduce_only_exempt):
                 if reference is None:
-                    add("UNAVAILABLE_NOTIONAL_PRICE", missing=True)
+                    add("UNAVAILABLE_MARK_PRICE" if intent.market else "UNAVAILABLE_LIMIT_PRICE", missing=True)
                 elif _mul(intent.quantity, reference) < minimum.minimum:
                     add("BELOW_MIN_NOTIONAL")
     percent = rules.percent_price
@@ -319,12 +345,17 @@ def validate_order(intent, rules):
             if not _evidence_available(percent.evidence):
                 add("UNAVAILABLE_PERCENT_PRICE", missing=True)
             elif intent.price is not None:
-                if intent.percent_reference_price is None:
-                    add("UNAVAILABLE_PERCENT_REFERENCE", missing=True)
-                elif not (_mul(intent.percent_reference_price, percent.multiplier_down)
-                          <= intent.price <= _mul(intent.percent_reference_price, percent.multiplier_up)):
+                if mark is None:
+                    add("UNAVAILABLE_MARK_PRICE", missing=True)
+                elif ((intent.side is OrderSide.BUY and intent.price > _mul(mark, percent.multiplier_up))
+                      or (intent.side is OrderSide.SELL and intent.price < _mul(mark, percent.multiplier_down))):
                     add("OUTSIDE_PERCENT_PRICE")
-    status = "REJECTED_RULE" if invalid else "UNAVAILABLE_RULE" if unavailable else "REJECTED_RULE" if reasons else "VALID"
+    if invalid:
+        status = "REJECTED_RULE"
+    elif unavailable:
+        status = "UNAVAILABLE_RULE"
+    else:
+        status = "REJECTED_RULE" if reasons else "VALID"
     return _result("validate_order", inputs, status=status, reasons=tuple(reasons))
 
 
@@ -343,7 +374,7 @@ def validate_brackets(table):
         try:
             number(row.floor, "floor", minimum=0)
             number(row.cap, "cap", positive=True)
-            number(row.max_initial_leverage, "max leverage", minimum=1)
+            leverage_value(row.max_initial_leverage)
             number(row.maintenance_rate, "maintenance rate", minimum=0)
             number(row.cum, "cum", minimum=0)
         except ValueError:
@@ -385,7 +416,7 @@ def _selected_row(result, table):
 
 
 def leverage_admissibility(notional_value, leverage, table):
-    number(leverage, "leverage", minimum=1)
+    leverage_value(leverage)
     selected = select_bracket(notional_value, table)
     if selected.status != "VALID":
         return _result("leverage_admissibility", (notional_value, leverage, table),
@@ -399,8 +430,8 @@ def leverage_admissibility(notional_value, leverage, table):
 
 def initial_margin(notional_value, leverage):
     number(notional_value, "notional", minimum=0)
-    number(leverage, "leverage", minimum=1)
-    return _quotient("initial_margin", (notional_value, leverage), notional_value, leverage)
+    leverage_value(leverage)
+    return _quotient("initial_margin", (notional_value, leverage), notional_value, Decimal(leverage))
 
 
 def maintenance_margin(notional_value, table):
@@ -445,12 +476,10 @@ def liquidation_threshold(side, quantity, entry, isolated_wallet_collateral, tab
             positive_outside = True
         if not (_mul(row.floor, denominator) <= implied_numerator < _mul(row.cap, denominator)):
             continue
-        # Exact Decimal cross multiplication verifies equity(P) == MM(P),
-        # including roots which cannot be represented by a finite Decimal.
-        equity_scaled = _add(_mul(isolated_wallet_collateral, denominator),
-                             _mul(s, _mul(quantity, _sub(numerator, _mul(entry, denominator)))))
-        mm_scaled = _sub(_mul(implied_numerator, row.maintenance_rate), _mul(row.cum, denominator))
-        if equity_scaled != mm_scaled:
+        root = _divide(numerator, denominator)
+        equity = isolated_equity(side, quantity, entry, root, isolated_wallet_collateral).value
+        maintenance = _sub(_mul(_mul(quantity, root), row.maintenance_rate), row.cum)
+        if equity != maintenance:
             return _result("liquidation_threshold", inputs, status="INVALID_BRACKET_TABLE",
                            reasons=("LIQUIDATION_EQUALITY_FAILED",))
         candidates.append((row, numerator, denominator))

@@ -4,12 +4,11 @@ All time and evidence arrive in the classification or explicit prior state. This
 module neither acquires market data nor persists its results.
 """
 
-from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import dataclass, fields, replace
 from decimal import Decimal
-from hashlib import sha256
-import json
 import math
+
+from .canonical_identity import canonical_digest as _digest, canonical_value as _canonical
 
 from .movement_classifier import (
     IsolatedOutlier, MarketClassificationEvaluation, MarketWindowClassification,
@@ -50,30 +49,6 @@ def _boundary(value):
 def _nonempty(value, name):
     if not isinstance(value, str) or not value:
         raise ValueError(f"{name} must be a nonempty string")
-
-
-def _canonical(value):
-    """Lossless, stable JSON-compatible representation of pure domain values."""
-    if is_dataclass(value):
-        return {field.name: _canonical(getattr(value, field.name)) for field in fields(value)}
-    if isinstance(value, Mapping):
-        return {str(key): _canonical(item) for key, item in
-                sorted(value.items(), key=lambda pair: str(pair[0]))}
-    if isinstance(value, (tuple, list)):
-        return [_canonical(item) for item in value]
-    if isinstance(value, Decimal):
-        return str(value)
-    if value is None or isinstance(value, (str, bool, int, float)):
-        if isinstance(value, float) and not math.isfinite(value):
-            raise ValueError("canonical evidence must contain only finite numbers")
-        return value
-    raise ValueError(f"unsupported canonical evidence type: {type(value).__name__}")
-
-
-def _digest(payload):
-    encoded = json.dumps(_canonical(payload), sort_keys=True, separators=(",", ":"),
-                         ensure_ascii=False, allow_nan=False).encode("utf-8")
-    return sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
