@@ -10,6 +10,7 @@ from unittest.mock import patch
 from market_analysis.experiments.market_state_hmm_regimes import (
     HMMDevelopmentTrainingBlock,
     HMMFeatureRow,
+    HMMTrainingDiagnostics,
 )
 from market_analysis.historical_experiment_batch import report_json_safe
 from market_analysis.historical_market_state_study import (
@@ -64,13 +65,11 @@ class HistoricalMarketStateHMMCrossFitTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             blocks, coverage_sha = self._write_development_reports(root)
-            diagnostics = SimpleNamespace(
-                status="HMM_TRAINING_READY", reason=None,
-                usable_row_count=9, unavailable_row_count=0,
-                block_count=9, transition_count=0,
-                first_usable_boundary_time_ms=blocks[0].start_boundary_time_ms,
-                last_usable_boundary_time_ms=blocks[-1].start_boundary_time_ms,
-                training_data_sha256="b" * 64)
+            diagnostics = HMMTrainingDiagnostics(
+                "HMM_TRAINING_READY", None, 9, 0, 9, 0,
+                blocks[0].start_boundary_time_ms,
+                blocks[-1].start_boundary_time_ms,
+                "b" * 64)
             trained_inputs = []
 
             def train(training_blocks, config):
