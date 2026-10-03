@@ -253,6 +253,45 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                       "funding_seconds", "liquidation_seconds"):
             self.assertGreater(timings[field], 0)
 
+    def test_event_time_v1_context_is_exact_and_deduplicated(self):
+        period = self.manifest.selected_periods[0]
+        boundary = period.start_boundary_time_ms + 5_000
+        movement = SimpleNamespace(
+            evaluation_boundary_time_ms=boundary,
+            algorithm_version="movement-v1", config_version="movement-config-v1",
+            universe_id="universe-v1", universe_version="1",
+            configured_universe=("BTCUSDT", "ETHUSDT"),
+            provider="provider", exchange="exchange", price_type="trade")
+        replay_point = SimpleNamespace(
+            evaluation_boundary_time_ms=boundary,
+            movement_evaluation=movement,
+            source_time_evidence=({"symbol": "BTCUSDT", "observed_at_ms": boundary},))
+        lifecycle = SimpleNamespace(
+            next_state={"active_episode": None},
+            transitions=({"transition": "STARTED",
+                          "evaluation_boundary_time_ms": boundary},))
+        prepared = SimpleNamespace(
+            canonical_v1_branch_by_boundary={
+                boundary: ({"windows": {"5": {"direction_state": "BROAD_RISE"}}},
+                           lifecycle)},
+            canonical_replay_result=SimpleNamespace(points=(replay_point,)))
+        first = execution.HistoricalStudyCandidateEvidence(
+            period.study_period_index, period.utc_date.isoformat(), period.phase,
+            "EXP-75-02", "cusum-v1", "a", boundary, "EVENT", "ONSET", {})
+        second = execution.HistoricalStudyCandidateEvidence(
+            period.study_period_index, period.utc_date.isoformat(), period.phase,
+            "EXP-75-04B", "bocpd-v1", "b", boundary, "EVENT", "ONSET",
+            {"causal_onset_observation": {
+                "evaluation_boundary_time_ms": boundary}})
+
+        records = execution._event_time_v1_context(prepared, (first, second))
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["decision_time_ms"], boundary)
+        self.assertEqual(records[0]["provenance"]["movement_config_version"],
+                         "movement-config-v1")
+        self.assertEqual(records[0]["transitions"][0]["transition"], "STARTED")
+
     def test_execute_period_times_source_and_outcome_paths_once(self):
         period = self.manifest.selected_periods[0]
         revision = "runtime-path-fixture"
