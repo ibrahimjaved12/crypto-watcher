@@ -426,6 +426,12 @@ class ScientificStageParityTests(unittest.TestCase):
                 safe = execution.report_json_safe
                 def fixture_safe(value):
                     return safe(vars(value)) if isinstance(value, SimpleNamespace) else safe(value)
+                # The replay fixture is 60 seconds; outcome reports still use
+                # the production contract of a complete UTC day.
+                day_start = (OUTPUT // 86_400_000) * 86_400_000
+                execution_period = SimpleNamespace(**vars(prepared.period))
+                execution_period.start_boundary_time_ms = day_start
+                execution_period.end_boundary_time_ms = day_start + 86_400_000
                 # Only archive preparation/label acquisition are substituted;
                 # both complete scientific pipelines and subprocesses run unchanged.
                 with patch.object(execution, "_prepare_study_period", side_effect=[
@@ -433,9 +439,9 @@ class ScientificStageParityTests(unittest.TestCase):
                      patch.object(execution, "_load_source_evidence", return_value=supplementary), \
                      patch.object(execution, "_label_price_evidence", return_value=forward), \
                      patch.object(execution, "report_json_safe", side_effect=fixture_safe):
-                    legacy = execution._execute_period(manifest, coverage, prepared.period,
+                    legacy = execution._execute_period(manifest, coverage, execution_period,
                                 root, {}, PRODUCER, model)
-                    staged = execution._execute_period(manifest, coverage, prepared.period,
+                    staged = execution._execute_period(manifest, coverage, execution_period,
                                 root, {}, PRODUCER, model)
                 self.assertEqual(legacy, staged)
                 self.assertEqual(legacy["report_sha256"], staged["report_sha256"])
