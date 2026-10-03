@@ -204,7 +204,6 @@ class HistoricalMarketStateHMMCrossFitTests(unittest.TestCase):
                     coverage_sha256=coverage_sha, code_revision="crossfit-fixture")
             self.assertEqual(len(validated["ordered_folds"]), 10)
             self.assertEqual(first["fold_model"]["training_block_count"], 9)
-            self.assertEqual(first["held_out_v1_context"], [])
             self.assertEqual(
                 first["held_out_period"]["study_period_index"], 0)
             held_out_report_path = (

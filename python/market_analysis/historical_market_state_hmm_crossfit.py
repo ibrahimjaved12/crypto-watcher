@@ -99,7 +99,6 @@ def _load_development_inputs(manifest, output_dir: Path, code_revision: str):
             "utc_date": period.utc_date.isoformat(),
             "period_report_sha256": report_sha,
             "training_block_sha256": block.block_sha256,
-            "event_time_v1_context": report["event_time_v1_context"],
             "v1_continuous_times": v1_times,
         })
     return tuple(blocks), tuple(reports), coverage_sha
@@ -131,7 +130,6 @@ def _fold_payload(manifest, coverage_sha, code_revision, held_out, training_bloc
         "fold_model": report_json_safe(model),
         "held_out_feature_block_count": len(held_out.feature_blocks),
         "held_out_evidence": report_json_safe(held_out_evidence),
-        "held_out_v1_context": report_identity["event_time_v1_context"],
         "filter_semantics": (
             "causal-forward-filter over stored held-out HMM feature blocks; "
             "state resets at day start and actual feature gaps; held-out day never enters fold training"
@@ -246,8 +244,7 @@ def validate_hmm_crossfit_index(path: Path | str,
                for rows in block.feature_blocks for row in rows):
             raise ValueError("development HMM feature row lacks exact V1 continuous evidence")
         source_identities[period.study_period_index] = (
-            report_sha, block.block_sha256, block,
-            report["event_time_v1_context"], v1_times)
+            report_sha, block.block_sha256, block, v1_times)
     for offset, (entry, period) in enumerate(zip(entries, periods)):
         if (not isinstance(entry, dict)
                 or entry.get("study_period_index") != offset
@@ -328,13 +325,6 @@ def validate_hmm_crossfit_index(path: Path | str,
                 or not isinstance(evidence, list)
                 or len(evidence) != fold["held_out_feature_block_count"]):
             raise ValueError("HMM fold held-out evidence block count mismatch")
-        context = fold.get("held_out_v1_context")
-        if (not isinstance(context, list) or any(not isinstance(item, dict) for item in context)):
-            raise ValueError("HMM fold held-out V1 context is malformed")
-        context_times = tuple(item.get("decision_time_ms") for item in context)
-        if (context != source_identities[offset][3]
-                or len(context_times) != len(set(context_times))):
-            raise ValueError("HMM fold contains duplicate held-out V1 context")
         source_feature_blocks = source_identities[offset][2].feature_blocks
         if (len(evidence) != len(source_feature_blocks)
                 or any(not isinstance(items, list) or len(items) != len(source_rows)
@@ -352,7 +342,7 @@ def validate_hmm_crossfit_index(path: Path | str,
                         or item.get("evaluation_boundary_time_ms")
                         != source_row.evaluation_boundary_time_ms
                         or item.get("evaluation_boundary_time_ms")
-                        not in source_identities[offset][4]
+                        not in source_identities[offset][3]
                         or item.get("raw_feature_vector") != list(source_row.values)):
                     raise ValueError("HMM held-out evidence lacks an exact V1 continuous match")
                 posterior = item.get("posterior_probabilities")
