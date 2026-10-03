@@ -8,6 +8,9 @@ Nothing is forward-filled or repaired: differences are marked.
 
 All stored numbers are exact decimal strings. Prices and quantities are parsed
 to integers at scale 10**8 (quote amounts at 10**16); no floats are used.
+Binance sometimes publishes numbers in exponent form (funding rates such as
+9.8E-7, large DOGE quantities such as 2.1845367E7); those are converted exactly,
+and any value finer than the target scale fails instead of being rounded.
 """
 from __future__ import annotations
 
@@ -186,12 +189,36 @@ def parse_scaled(text: str, digits: int = SCALE_DIGITS) -> int:
     return -value if sign else value
 
 
-def _scaled8(text: str) -> int:
-    # Hot path for aggTrades; anything unusual goes through the strict parser.
+def parse_published_scaled(text: str, digits: int = SCALE_DIGITS) -> int:
+    """Exact integer at scale 10**digits of a published number, plain or exponent form.
+
+    Binance archives occasionally write large values in exponent form (e.g. DOGE
+    quantity "2.1845367E7"). The value is converted exactly; anything finer than
+    10**-digits still raises instead of being rounded.
+    """
+    sign, digit_tuple, exponent = exact_decimal(text).as_tuple()
+    value = int("".join(map(str, digit_tuple)) or "0")
+    shift = exponent + digits
+    if shift >= 0:
+        value *= 10 ** shift
+    else:
+        value, remainder = divmod(value, 10 ** -shift)
+        if remainder:
+            raise ValueError(f"more than {digits} fractional digits: {text!r}")
+    return -value if sign else value
+
+
+def _plain_scaled8(text: str) -> int | None:
+    """Hot path for aggTrades: a plain unsigned decimal at scale 10**8, else None."""
     whole, dot, fraction = text.partition(".")
     if whole.isdigit() and len(fraction) <= SCALE_DIGITS and (fraction.isdigit() if dot else not fraction):
         return int(whole + fraction + _PAD[len(fraction)])
-    return parse_scaled(text)
+    return None
+
+
+def _scaled8(text: str) -> int:
+    value = _plain_scaled8(text)
+    return parse_published_scaled(text) if value is None else value
 
 
 def render_scaled(value: int, digits: int = SCALE_DIGITS) -> str:
@@ -384,6 +411,7 @@ class MinuteBars:
         self.id_gaps = 0
         self.id_not_increasing = 0
         self.rows_outside_month = 0
+        self.non_plain_numeric_values = 0
         self._last_id: int | None = None
 
     def consume(self, rows: Iterable[list[str]]) -> None:
@@ -395,7 +423,7 @@ class MinuteBars:
         taker_volume, taker_quote = self.taker_buy_volume, self.taker_buy_quote_volume
         agg_rows, trades = self.agg_rows, self.trades
         last_id = self._last_id
-        count = gaps = not_increasing = outside = 0
+        count = gaps = not_increasing = outside = non_plain = 0
         try:
             for row in rows:
                 count += 1
@@ -407,8 +435,14 @@ class MinuteBars:
                         gaps += 1
                 if last_id is None or agg_id > last_id:
                     last_id = agg_id
-                price = _scaled8(row[1])
-                quantity = _scaled8(row[2])
+                price = _plain_scaled8(row[1])
+                if price is None:  # rare: exponent form etc., converted exactly
+                    price = parse_published_scaled(row[1])
+                    non_plain += 1
+                quantity = _plain_scaled8(row[2])
+                if quantity is None:
+                    quantity = parse_published_scaled(row[2])
+                    non_plain += 1
                 first_trade, last_trade = int(row[3]), int(row[4])
                 transact = int(row[5])
                 maker = row[6].strip().lower()
@@ -450,6 +484,7 @@ class MinuteBars:
             self.id_gaps += gaps
             self.id_not_increasing += not_increasing
             self.rows_outside_month += outside
+            self.non_plain_numeric_values += non_plain
             self._last_id = last_id
 
     def stats(self) -> dict:
@@ -458,6 +493,8 @@ class MinuteBars:
             "id_gaps": self.id_gaps,
             "id_not_increasing": self.id_not_increasing,
             "rows_outside_month": self.rows_outside_month,
+            # price/quantity fields published in a non-plain form (e.g. exponent), converted exactly
+            "non_plain_numeric_values": self.non_plain_numeric_values,
             "minutes_without_trades": sum(1 for count in self.agg_rows if not count),
             "total_volume": render_scaled(sum(self.volume)),
             "total_quote_volume": render_scaled(sum(self.quote_volume), QUOTE_DIGITS),
