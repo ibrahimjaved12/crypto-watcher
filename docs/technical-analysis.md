@@ -87,6 +87,23 @@ request names its target candle, so catch-up uses only history available through
 that candle while preserving the actual source-event, evaluation, and detection
 times.
 
+## History policies
+
+These existing bounds have different owners and purposes:
+
+| Value | Owner and purpose |
+| --- | --- |
+| 200 completed candles | Python TA minimum valid calculation history |
+| Newest 260 completed candles per canonical series | Operational DB protected storage floor, an availability/resource margin independent of age-based retention |
+| 300 klines per frame | Collector bootstrap request where implemented; the developing candle is excluded |
+| 260 completed candles | Application TA read horizon where implemented |
+
+Changing only stored surplus while consumers receive identical inputs is science-neutral. Changing
+the actual read/input prefix can change EMA/Wilder-style recursive indicators through initialization
+history. Storage-floor changes need history/catch-up evidence; input-prefix changes also need output
+impact validation. These numbers and TA input semantics remain unchanged. The floor does not establish
+seven-day movement normalization coverage; see [candle retention](./operational-database.md#reads-retention-and-synchronization).
+
 ## Persistence and outcomes
 
 Each saved snapshot includes canonical and source contract identities, provider

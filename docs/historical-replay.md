@@ -14,6 +14,12 @@ analogue; it does not claim to reconstruct an original WebSocket receive time.
 Trades arriving after a bucket finalized are passed to canonical #70 for its
 late-observation rejection and are never used to revise an earlier point.
 
+Canonical five-second bucket membership uses `trade_time_ms` (Binance trade/transaction time `T`).
+`event_time_ms` (event time `E`) and receive/first-seen timestamps remain provenance/diagnostic
+evidence, not bucket identity. Live orchestration uses wall clock plus grace to decide when the
+explicit trade-time boundary is safe to finalize; replay uses the deterministic processing clock
+above, and Python owns permanent explicit-boundary finalization in both paths.
+
 One canonical `MovementBucketEngine` runs per configured symbol. Every boundary
 from the derived warm-up start through the output end advances once, including
 quiet periods. Source state must explicitly cover every symbol and boundary;
@@ -47,6 +53,26 @@ point ID, rebuilds canonical engine state from warm-up, then emits only points
 after the checkpoint. No private engine state is serialized. Trade processing,
 late-rejection, source-state, and market-wide eligibility counts remain visible
 in replay diagnostics.
+
+## Archive research and live history
+
+Official Binance historical archives can support reproducible causal research when each
+symbol/date/partition's availability, checksum, schema and gaps are individually validated.
+Historical aggregate trades are therefore recoverable for verified partitions. Archive data is
+not an exact record of the original WebSocket receive stream: it does not reconstruct local
+receive timing, delivery anomalies or reconnect history. Availability must be checked per partition.
+
+[Issue #120](https://github.com/ibrahimjaved12/crypto-watcher/issues/120) used official Binance USD-M
+archives for BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT and DOGEUSDT on 2026-09-19 and 2026-09-20:
+10 checksum-verified aggTrade archives, 4,786,579 parsed archive rows and 1,202,462 causally processed
+trades. [Issue #123](https://github.com/ibrahimjaved12/crypto-watcher/issues/123) uses the same
+archive/manifest model for its frozen corpus. Research files live outside transactional PostgreSQL;
+live state retains only bounded processing/recovery/current-consumer needs. This does not justify
+long-term storage of every raw aggTrade or five-second bucket in PostgreSQL. See
+[persistence proposal requirements](./market-movement-engine.md#operational-state-and-research-history).
+
+The 2,000ms grace remains a versioned evidence-admission policy in the replay fingerprint, even
+though it does not change the return formula.
 
 ## Part 2: verified local Binance USD-M daily archives
 
