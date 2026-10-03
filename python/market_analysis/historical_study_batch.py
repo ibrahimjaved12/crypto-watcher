@@ -5,6 +5,7 @@ Budgets/status/lineage are separate from scientific requests and report hashes.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -13,9 +14,10 @@ import shutil
 import time
 
 from . import historical_market_state_study_execution as execution
+from . import historical_operational_events as events
 from .historical_study_bundles import (
     BASE, SOURCES, identifier, sha, file_sha, regular, read_bundle, safe_relative,
-    install_files, verify_recovery_tree, classify_recovery_inventory,
+    install_files, verify_recovery_tree, classify_recovery_inventory, last_verified_unit,
 )
 from .historical_study_runtime import current_runtime_implementation_revision
 
@@ -34,6 +36,8 @@ def campaign_spec(path):
     spec = execution._read_json(Path(path))
     if spec.get('version') != CAMPAIGN_VERSION:
         raise ValueError('unsupported campaign schema')
+    if spec.get('template_only'):
+        raise ValueError('production template is non-dispatchable; owner must create a new pinned campaign')
     identifier(spec['campaign_id'])
     sha(spec['runtime_sha'], 40)
     sha(spec['orchestration_sha'], 40)
@@ -53,6 +57,9 @@ def campaign_spec(path):
         positive(spec['budget'][name], name)
     if spec['budget']['ceiling_minutes'] > 120 and not spec.get('expanded_budget_authorized', False):
         raise ValueError('campaign beyond pilot ceiling requires explicit expanded budget authorization')
+    if spec.get('prepared_cache', {}).get('enabled') is True:
+        for name in ('max_bytes', 'headroom_bytes', 'upload_max_seconds'):
+            positive(spec['prepared_cache'][name], 'prepared_cache.' + name)
     return spec
 
 
@@ -135,11 +142,15 @@ class SliceYield(Exception):
 
 
 class SliceController:
-    def __init__(self, max_new_stages, max_elapsed_seconds, status_path, identity, root, headroom):
+    def __init__(self, max_new_stages, max_elapsed_seconds, status_path, identity, root, headroom, *, started=None, deadline_epoch=None):
         positive(max_new_stages, 'max_new_stages')
         positive(max_elapsed_seconds, 'max_elapsed_seconds')
         self.limit, self.seconds = max_new_stages, max_elapsed_seconds
-        self.started = time.monotonic()
+        self.started = started if started is not None else time.monotonic()
+        self.deadline = (time.monotonic() + deadline_epoch - time.time() if deadline_epoch else self.started + self.seconds)
+        self.absolute_deadline = deadline_epoch is not None
+        self.next_disk_sample = 0
+        self.disk = None
         self.path, self.root, self.headroom = Path(status_path), root, headroom
         self.new, self.reused, self.checkpoints = [], [], []
         self.last, self.pending = None, None
@@ -152,18 +163,24 @@ class SliceController:
     def reason(self):
         if len(self.new) >= self.limit:
             return 'max-new-stages'
-        if time.monotonic() - self.started >= self.seconds:
-            return 'max-elapsed-seconds'
+        if time.monotonic() >= self.deadline - (30 if self.absolute_deadline else 0):
+            return 'compute-deadline' if self.absolute_deadline else 'max-elapsed-seconds'
         if shutil.disk_usage(BASE).free < self.headroom:
             return 'disk-headroom'
         return None
 
     def save(self):
-        disk = disk_sample(self.root)
+        # Full recursive scans are expensive; boundary/progress events share the
+        # last sample. Heartbeats use only /proc and disk_usage.
+        if time.monotonic() >= self.next_disk_sample or self.disk is None:
+            self.disk = disk_sample(self.root)
+            self.next_disk_sample = time.monotonic() + 60
+        disk = self.disk
         self.high_water = max(self.high_water, disk['used_bytes'])
         self.status.update(last_verified_unit=self.last, newly_completed_stages=self.new,
                            reused_stages=self.reused, newly_written_checkpoints=self.checkpoints,
                            monotonic_elapsed_seconds=time.monotonic() - self.started,
+                           remaining_compute_seconds=max(0, self.deadline - time.monotonic()),
                            observed_at_utc=datetime.now(timezone.utc).isoformat(),
                            disk=disk, sampled_disk_high_water_bytes=self.high_water)
         execution._replace_atomic(self.path, execution._canonical(self.status))
@@ -174,6 +191,21 @@ class SliceController:
         raise SliceYield(reason)
 
     def observe(self, event, details):
+        details = dict(details)
+        duration = details.get('monotonic_duration_seconds')
+        parent_memory = details.get('parent_memory') or {}
+        worker_memory = (details.get('worker_observations') or {}).get('worker_memory') or {}
+        events.emit(event, **{**details, 'duration_seconds': duration,
+                    'parent_rss_bytes': parent_memory.get('current_rss_bytes'),
+                    'parent_peak_rss_bytes': parent_memory.get('peak_rss_bytes'),
+                    'worker_rss_bytes': worker_memory.get('current_rss_bytes'),
+                    'worker_peak_rss_bytes': worker_memory.get('peak_rss_bytes'),
+                    'boundary_time_ms': details.get('completed_boundary'),
+                    'durable_boundaries': details.get('completed_output_boundaries') if event == 'REPLAY_CHECKPOINT_WRITTEN' else None})
+        if event in ('REPLAY_CURRENT_PROGRESS', 'REPLAY_RESUMED'):
+            self.status['computed_replay_progress'] = details
+        if event == 'REPLAY_RESUMED' and details.get('checkpoint_sha256'):
+            self.last = {'kind': 'checkpoint', **details}
         if event == 'REPLAY_CHECKPOINT_WRITTEN':
             self.last = {'kind': 'checkpoint', **details}
             self.checkpoints.append(details['checkpoint_sha256'])
@@ -195,10 +227,11 @@ class SliceController:
                 self.stop(self.reason())
         elif event in ('PERIOD_ARTIFACT_FINALIZED', 'SKIPPED_EXISTING_ARTIFACT'):
             self.last = {'kind': 'period', **details}
-        self.save()
+        if event != 'REPLAY_CURRENT_PROGRESS':
+            self.save()
 
 
-def preflight(spec, manifest, coverage, period, inventory):
+def preflight(spec, manifest, coverage, period, inventory, *, parse_sources=True):
     expected = {'study_manifest_sha256': manifest.manifest_sha256,
                 'coverage_manifest_sha256': coverage['coverage_manifest_sha256'],
                 'producer_revision': spec['producer_revision'], 'period': execution.report_json_safe(period),
@@ -246,14 +279,23 @@ def preflight(spec, manifest, coverage, period, inventory):
         elif regular(path).st_size != row['size'] or file_sha(path) != row['sha256']:
             raise ValueError('installed input byte identity mismatch')
     roots = {name: BASE / 'inputs' / folder for name, folder in SOURCES.items() if name != 'core'}
-    sources = execution._load_source_evidence(period, roots)
-    frozen = coverage['periods'][period.study_period_index]['sources']
-    for name, value in sources.items():
-        if execution._canonical(value['coverage']) != execution._canonical(frozen[name]):
-            raise ValueError('selected source coverage differs from original frozen facts')
+    # An execute slice validates exact source bytes here and performs its single
+    # supplementary decode after replay, where that evidence is consumed. Do not
+    # keep a second full source graph alive throughout core preparation/replay.
+    sources = None
+    if parse_sources:
+        sources = execution._load_source_evidence(period, roots)
+        frozen = coverage['periods'][period.study_period_index]['sources']
+        for name, value in sources.items():
+            if execution._canonical(value['coverage']) != execution._canonical(frozen[name]):
+                raise ValueError('selected source coverage differs from original frozen facts')
     # No aggTrade pre-scan: raw trade scientific validation belongs to execution.
     if shutil.disk_usage(BASE).free < spec['limits']['headroom_bytes']:
         raise ValueError('insufficient disk for SQLite/spool/recovery headroom')
+    from .historical_owned_validation import SourceValidation, signature
+    return SourceValidation(period.study_period_index, coverage['coverage_manifest_sha256'], sources,
+        tuple((BASE / row['path'], None if row['absent'] else signature(BASE / row['path'])) for row in inventory['files']
+              if row['path'].startswith('inputs/')))
 
 
 def aggregate(spec, manifest, coverage, phase, root):
@@ -278,20 +320,28 @@ def aggregate(spec, manifest, coverage, phase, root):
 
 def run(args):
     from .historical_run_directory import owned_run_directory
+    args.slice_started = time.monotonic()
     spec = campaign_spec(args.campaign_spec)
     root = BASE / 'campaigns' / spec['campaign_id']
+    events.configure(args.events_path or root / 'operations/events.jsonl', operation=args.operation,
+                     phase=args.phase, period=args.period_index, deadline_epoch=args.compute_deadline_epoch)
     with owned_run_directory(root, cleanup=False):
+        previous = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(InterruptedError('supervisor cancellation')))
         try:
             return _run_owned(args)
         except BaseException as exc:
             import traceback
             execution._replace_atomic(root / 'operations/last-failure.txt', traceback.format_exc())
-            execution._replace_atomic(root / 'operations/status.json', execution._canonical({
+            prior_path = root / 'operations/status.json'
+            prior = execution._read_json(prior_path) if prior_path.exists() else {}
+            execution._replace_atomic(prior_path, execution._canonical({
                 'version': STATUS_VERSION, 'identity': campaign_identity(spec),
                 'phase': args.phase, 'requested_period_index': args.period_index,
                 'scientific_state': 'FAILED', 'failure_category': type(exc).__name__,
-                'remote_published': False, 'last_verified_unit': None, 'disk': disk_sample(root)}))
+                'remote_published': False, 'last_verified_unit': prior.get('last_verified_unit'), 'disk': disk_sample(root)}))
             return 1
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def _run_owned(args):
@@ -325,19 +375,31 @@ def _run_owned(args):
             prerequisites(spec, manifest, coverage, 'test', args.allow_test)
         if 'validation' in phases and args.phase == 'development':
             raise ValueError('later validation evidence requires its explicit phase prerequisites')
-        _, work = verify_recovery_tree(args.restore_staging, spec['campaign_id'], manifest, coverage,
-                                       campaign_identity(spec))
+        validated = {}
+        with events.span('recovery-validation'):
+            restored_files, work = verify_recovery_tree(args.restore_staging, spec['campaign_id'], manifest, coverage,
+                                           campaign_identity(spec), validated=validated)
+        restored_unit = last_verified_unit(restored_files, work, args.period_index)
         if work != recovery['metadata']['completed_work']:
             raise ValueError('recovery committed-work inventory mismatch')
-        install_files(recovery, args.restore_staging)
+        from .historical_owned_validation import adopt_complete
+        from .historical_run_directory import owned_run_directory
+        from .historical_study_bundles import period_root
+        with ExitStack() as stack, events.span('recovery-install'):
+            for restored_period in included:
+                stack.enter_context(owned_run_directory(period_root(spec['campaign_id'], restored_period), cleanup=False))
+            install_files(recovery, args.restore_staging)
+            adopt_complete(validated, BASE)
+        shutil.rmtree(args.restore_staging)
+        shutil.rmtree(BASE / 'transfers/recovery-parts', ignore_errors=True)
     identity = {**campaign_identity(spec), 'phase': args.phase,
                 'period': execution.report_json_safe(period) if period else None}
     controller = SliceController(args.max_new_stages, args.max_elapsed_seconds,
-                root / 'operations/status.json', identity, root, spec['limits']['headroom_bytes'])
+                root / 'operations/status.json', identity, root, spec['limits']['headroom_bytes'],
+                started=args.slice_started, deadline_epoch=args.compute_deadline_epoch)
     if args.restore_manifest:
         controller.status['restored_completed_work'] = recovery['metadata']['completed_work']
-        previous_status = execution._read_json(root / 'operations/status.json') if (root / 'operations/status.json').exists() else {}
-        controller.last = previous_status.get('last_verified_unit')
+        controller.last = restored_unit
     controller.save()
     previous = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(InterruptedError('supervisor deadline')))
     try:
@@ -347,7 +409,13 @@ def _run_owned(args):
         else:
             locator = spec['inputs'][str(args.period_index)]
             inventory = read_bundle(BASE / 'transfers/input-manifest.json', locator['manifest_sha256'])
-            preflight(spec, manifest, coverage, period, inventory)
+            with events.span('preflight'):
+                source_validation = preflight(spec, manifest, coverage, period, inventory,
+                                              parse_sources=args.operation == 'preflight')
+            from .historical_prepared_core import configure
+            configure(BASE / 'prepared-cache', spec, inventory)
+            if controller.reason():
+                controller.stop(controller.reason())
             if args.operation == 'execute-period':
                 execution.execute_study_periods(manifest, BASE / 'manifests/coverage.json', BASE / 'inputs/core',
                     root / 'outputs', phase=args.phase, period_index=args.period_index, allow_test=args.allow_test,
@@ -355,7 +423,8 @@ def _run_owned(args):
                     open_interest_archive_root=BASE / 'inputs/open-interest', funding_archive_root=BASE / 'inputs/funding',
                     liquidation_archive_root=BASE / 'inputs/liquidation', hmm_model_path=model,
                     checkpoint_dir=root / 'checkpoints', runtime_report_path=root / 'operations/runtime.jsonl',
-                    progress_report_path=root / 'operations/progress.jsonl', slice_controller=controller)
+                    progress_report_path=root / 'operations/progress.jsonl', slice_controller=controller,
+                    source_validation=source_validation)
                 controller.status['scientific_state'] = 'FINALIZED_PERIOD'
             else:
                 controller.status.update(scientific_state='YIELDED', yield_reason='preflight-only')
@@ -382,6 +451,8 @@ def main():
     parser.add_argument('--allow-test', action='store_true')
     parser.add_argument('--max-new-stages', type=int, default=1)
     parser.add_argument('--max-elapsed-seconds', type=int, default=2400)
+    parser.add_argument('--compute-deadline-epoch', type=float)
+    parser.add_argument('--events-path', type=Path)
     parser.add_argument('--restore-manifest', type=Path)
     parser.add_argument('--restore-sha')
     parser.add_argument('--restore-staging', type=Path)

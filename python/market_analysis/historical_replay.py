@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import time
 from typing import Callable, Iterable
 
 from .movement import (
@@ -574,6 +575,7 @@ def _run_replay_core(
                               - config.output_start_boundary_time_ms)
                              // BUCKET_INTERVAL_MS + 1)
     reported_progress_step = 0
+    last_progress_time = time.monotonic()
     for boundary in range(start_boundary, config.output_end_boundary_time_ms + 1,
                           BUCKET_INTERVAL_MS):
         replay_clock = boundary + config.finalization_grace_ms
@@ -645,9 +647,10 @@ def _run_replay_core(
             completed = ((boundary - config.output_start_boundary_time_ms)
                          // BUCKET_INTERVAL_MS + 1)
             step = completed * 20 // output_boundary_count
-            if step > reported_progress_step:
+            if step > reported_progress_step or time.monotonic() - last_progress_time >= 45:
                 progress_callback(completed, output_boundary_count)
                 reported_progress_step = step
+                last_progress_time = time.monotonic()
         if checkpoint is not None and boundary <= checkpoint.last_emitted_boundary_time_ms:
             continue
         for window in WINDOWS:

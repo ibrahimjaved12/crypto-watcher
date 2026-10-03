@@ -65,7 +65,7 @@ PYTHONPATH=python python3 -m market_analysis.historical_study_bundles prepare-in
   --core-root /owner/archives/core --mark-trade-root /owner/archives/mark \
   --open-interest-root /owner/archives/open-interest \
   --funding-root /owner/archives/funding --liquidation-root /owner/archives/liquidation \
-  --output /owner/bundles/development-0-v1
+  --output /owner/bundles/development-0-v2
 ```
 
 This inventories/packs existing files; it never runs replay, generates a new frozen
@@ -141,7 +141,7 @@ budget yielding is deferred until COMPLETE spool and prepared replay publication
 New stage limits count **verified durable results**, including unavailable-source
 stages. Reused results do not consume the new-stage budget. Stage lookup/reuse
 precedes the new-work check, permitting final assembly on a later fresh slice.
-The elapsed budget uses a parent monotonic clock; budgets never enter scientific
+The hosted elapsed budget maps the recorded job start to one absolute compute deadline, converted to a monotonic deadline before restoration/preflight; budgets never enter scientific
 configs, input descriptors, algorithm identities or scientific hashes.
 
 Between-stage budgets do not bound indexing, one large calculation, spool creation,
@@ -150,7 +150,7 @@ cancellation before the 15-minute reserve, reaps the scientific child, and kills
 its process group if required. Recovery acquires campaign/period ownership and
 refuses to snapshot an active/orphan worker. Only previously committed valid units
 survive an interrupted calculation. A hard hosted-job kill is not recovery.
-Partial replay currently rebuilds the disposable SQLite trade index on resume.
+Partial replay rebuilds the disposable SQLite trade index by default. An explicitly enabled, exact prepared-core cache can avoid archive decoding and index construction; raw-source verification still runs.
 A unit that repeatedly cannot finish within the deadline needs a longer explicitly
 budgeted job, genuine unit resume work, or a VM; changing study dates/algorithms is
 not a workaround.
@@ -225,8 +225,7 @@ A private recovery generation is unique to campaign/run/attempt. Parts upload fi
 sealed manifest last, then API size/digests (or streaming readback hashes) verify
 before the private draft is published. Partial drafts and failed uploads are not
 resumable completion. Do not delete older good generations. The small public summary
-contains only an allowlisted receipt: state, sizes, allocation, exact tag and sealed
-manifest SHA. Raw inputs, detailed evidence, spools, failed job/request diagnostics
+contains allowlisted operational observations and the exact verified continuation receipt. Computed replay progress is separate from committed checkpoint/stage progress. Raw inputs, detailed evidence, spools, failed job/request diagnostics
 and logs stay in the private data repository. Publication failure fails the workflow;
 a successful saved recovery does not change a `FAILED` scientific status to success.
 
@@ -313,3 +312,186 @@ remains #152.
 Primary platform contracts: [manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch),
 [hosted limits](https://docs.github.com/en/actions/reference/limits), and
 [Release asset API/digests and authenticated redirects](https://docs.github.com/en/rest/releases/assets).
+
+
+## Operational events and deadline outcomes (new pinned runtime)
+
+The private `operations/*-RUN-ATTEMPT.events.jsonl` channel uses
+`historical-study-operational-event-v1`: UTC timestamp, monotonic elapsed time,
+operation, phase, exact period, stage/category and remaining compute seconds.
+Records are limited to 4 KiB, with a 16 MiB ceiling per channel. Transport emits
+request/asset completion, actual downloaded bytes (including retries), selected
+file bytes and unique required asset bytes (including packing overfetch).
+Download, hash, reconstruction, installation, recovery validation, core
+preparation, replay and stage timing observations are incremental. An interrupted
+span records elapsed time without claiming completion. Nested timing spans are
+not additive whole-job percentages.
+
+Only allowlisted identifiers and finite counters are relayed as `study-event`
+JSON in Actions stdout. The relay never reads child stdout/stderr, request
+payloads or private traceback files. Event strings cannot introduce workflow
+commands. Heartbeats occur about every 45 seconds during long preparation/replay
+spans and worker waits. They sample parent/worker RSS, cumulative CPU activity and
+free disk; stage completion also flattens the existing `_observation` memory
+measurements. CPU counters describe each observed process, not summed campaign
+CPU. Directory size scans remain at most once per minute in the slice controller,
+including its existing `/tmp/binance-core-verify-*` SQLite sampling. Disk/RSS
+high-water observations are sampled values, not guaranteed process-exit peaks.
+
+`REPLAY_RESUMED` identifies validated restored boundaries and checkpoint SHA.
+`REPLAY_CURRENT_PROGRESS` describes computed boundaries, including work not yet
+checkpointed; it does not serialize state. `REPLAY_CHECKPOINT_WRITTEN` identifies
+durable hourly work. Stage STARTED, COMPLETED and REUSED are distinct: a heartbeat
+in a running stage does not mean that stage is committed. Stage count and replay
+percentages describe those units only, never whole-campaign completion.
+
+Hosted compute ends at **actual job start + job_minutes - 15 minutes**. The child
+receives that epoch, so dependency setup, downloads, restoration and preflight
+cannot restart its budget. It cooperatively checks 30 seconds before the compute
+cutoff at existing durable checkpoint/stage boundaries and before new work. Final
+replay yielding is still deferred until the COMPLETE spool and prepared replay
+are published. Standalone `--max-elapsed-seconds` remains available, starting
+before restoration; hosted `--compute-deadline-epoch` takes precedence.
+
+If science cannot unwind cooperatively, the supervisor signals the entire process
+group, allows up to 10 seconds to unwind, then kills/reaps it. It acquires campaign
+and period ownership, cleans only recognized abandoned runtime temporaries,
+validates the complete recovery closure and verifies retention of the exact
+parent's committed work. Only a verified budget termination becomes `YIELDED`
+with `supervisor-budget-termination`. The last durable unit is derived from the
+validated artifacts, not a progress log. Calculation/subprocess failures,
+external cancellation and integrity failures stay `FAILED`; successful recovery
+publication cannot turn them into successful computation. An unfinished stage
+has no fabricated resumable stage state.
+
+The scientific step retains its failure exit code. The publication step succeeds
+when its remote bytes/publication are verified, including a `FAILED` scientific
+slice; the overall job still fails through the scientific step. A verified budget
+yield succeeds without claiming period completion. The final summary runs with
+`always()` while job time remains, even after setup, computation, snapshot or
+publication failure. It reports scientific/publication states separately,
+new/reused stages, computed versus committed progress, phase/stage timings,
+transfer/resource samples and the exact receipt when available. A hard platform
+kill can still prevent any summary or upload.
+
+## Packed transfer format v2
+
+New input and recovery bundles use `historical-study-file-bundle-v2`. Their sealed
+inventory contains a top-level asset table (`asset`, byte size, SHA-256 and
+partition) and full-file inventory with exact size/SHA, original source facts,
+explicit absence and `extents`: `asset`, `asset_offset`, `file_offset`, `length`.
+Packing is deterministic, streams bounded buffers and caps each raw asset at
+1 GiB. ZIP/GZ source bytes are not recompressed. Multiple small files share one
+asset; a large file may span assets. Metadata assets are separate from raw inputs,
+and incompatible period/phase partitions cannot share assets. Unknown or
+later-phase prerequisite metadata is rejected before metadata asset acquisition.
+
+Each required asset downloads once and is verified. Files reconstruct atomically
+using bounded reads and whole-file hashes. Readers reject unsafe paths, duplicate
+membership, overlapping/out-of-range extents, incomplete file/asset coverage,
+wrong hashes and configured byte/headroom limits. Selected reconstruction bytes
+and unique downloaded asset bytes are measured separately: packing can require
+extra asset bytes even when only a subset of files is selected.
+
+Original v1 inventories and recovery remain readable with their original bytes
+and hashes. Do not edit manifests, relabel runtime identities or overwrite Release
+tags. The workflow detects the exact pinned helper's capabilities; old pilot pins
+skip the new dependency-key/cache/summary commands and retain their original
+execution behavior. New campaigns must use new exact runtime/orchestration pins.
+The existing pilot and saved evidence are not migrated or modified.
+
+Transfer/staging copies are deleted only after verified installation and after
+semantic recovery validation has consumed the staging tree. Within one owned,
+unchanged tree, in-process typed receipts reuse full replay/spool validation and
+source-byte preflight results. Execute slices defer supplementary decoding to its post-replay consumer instead of retaining a second evidence graph through replay; preflight-only still validates semantic source coverage. They bind installed file identities,
+including explicit absences, and never persist a cross-job "verified" flag.
+Changed trees/new trust boundaries require full validation again.
+
+## Optional private prepared-core cache
+
+Caching is off unless a **new pinned campaign** sets `prepared_cache.enabled`
+with positive `max_bytes`, `headroom_bytes` and `upload_max_seconds`. The production
+template demonstrates bounds; choose them from measured runner headroom. It uses
+separate content-addressed private data Releases, tagged
+`prepared-core-<first 48 characters of exact identity SHA-256>`, with the full
+identity checked inside the sealed inventory. There is no mutable latest locator.
+
+The identity binds the exact input inventory and raw-package hashes/absences,
+frozen study/coverage/period/universe/configuration, entire campaign, runtime and
+both dependency locks, numerical correction, cache schema, Python patch version,
+SQLite version, OS/architecture and byte order. The local immutable cache contains
+a closed committed SQLite index and all typed dataset metadata: archive and
+normalized-stream manifests, instruments, source intervals, candles, diagnostics,
+OHLC and taker-flow evidence. JSON preserves Decimal strings, tuples and versioned
+scientific dataclasses; no pickle or lossy numeric decoding is allowed.
+
+Python validates the cache seal, exact identity, database content hash, schema,
+read-only SQLite integrity, bounded row count/order/normalized-stream hash,
+duplicate identities and typed scientific metadata relationships. The canonical
+trade cursor, including last-source-trade-key resume ordering, is unchanged.
+Closing a cache reader closes its connection without deleting shared immutable
+files; transient raw preparation retains its existing temporary cleanup. Cache
+construction copies only a closed committed database and atomically seals the
+complete metadata/database directory after successful raw preparation.
+
+Complete prepared replay and point-spool reuse run first. A completed replay does
+not fetch an index. Absent/incompatible/corrupt/oversized optional caches or
+inadequate download headroom emit misses and fall back to verified raw loading;
+scientific input/checkpoint corruption remains fatal. A rejected immutable cache
+is not overwritten in place. Repair requires a new reviewed identity/publication,
+not changing saved evidence.
+
+Authenticated cache lookup/download/publication stays in `github_study.py`;
+scientific subprocesses receive only local paths and remain token-free. Cache
+publication is optional and happens **after verified mandatory recovery**, with
+an explicit size/headroom limit and bounded upload window leaving final job grace.
+A cache upload failure cannot fail a successful recovery publication. Download,
+validation, build and upload costs are reported separately. A cache can cost more
+to transfer/validate than it saves: measure before enabling it broadly.
+
+This does not eliminate all raw downloads: original bytes are still verified,
+forward labels load their candle tail and supplementary evidence still uses raw
+packages. Private datasets/caches/scientific evidence never enter public Actions
+cache. Only pip download/wheel files are cached; the key uses OS/architecture,
+Python version and hashes of **both actual pinned requirements files after
+bootstrap**, not `hashFiles` paths outside `GITHUB_WORKSPACE`. Dependency cache
+restore/save is optional; installation remains deadline-bounded.
+
+## Longer jobs and owner-initiated acceptance
+
+`research/campaigns/github-production.template.json` is deliberately rejected
+while `template_only` is true and pins/membership/total budgets are empty. It
+illustrates a 300-minute allocation, 15-minute publication reserve and
+`max_new_stages=64`. To use it, the owner creates a new campaign file/ID, supplies
+new main-reachable exact runtime/orchestration/dependency pins, original frozen
+manifest/coverage/input locators, authorized scientific membership and explicit
+campaign minute/run/no-progress budgets; explicitly authorizes expanded budget;
+and removes the template guard. Dispatch `job_minutes=300` explicitly. Do not
+edit `research/campaigns/pilot.json` to continue a production run. Longer jobs do
+not alter mathematics or authorize validation/test work or expand membership.
+
+After each successful publication, copy **both** `continuation.resume_generation`
+and `continuation.resume_manifest_sha` from the summary into the next manual
+dispatch's `resume_generation` / `resume_manifest_sha`. Use the same pinned
+campaign, phase and exact period for continuation. A locator without its inventory
+hash, a draft generation, a different campaign/runtime or unverified publication
+is not a resume receipt. Existing allocation/run/no-progress ceilings still apply.
+Dispatch remains manual-only, serialized, with `cancel-in-progress: false` and the
+actual whole-job timeout. No automated redispatch is added.
+
+The following are owner-initiated hosted follow-ups, **not implementation checks**:
+
+1. Under a newly authorized bounded campaign, verify cooperative and hard budget
+   stops, process-group/lease cleanup, parent-work retention, exact continuation,
+   last durable checkpoint/stage, and FAILED-versus-YIELDED/publication semantics.
+2. On copied inputs under new immutable tags, verify v2 multi-file/split-file
+   reconstruction and corruption rejection, v1 restore compatibility, phase
+   separation, exact source hashes/absence and unique-byte/overfetch accounting.
+   Repack/publish real private input Releases only as a separate owner operation.
+3. Compare pinned uninterrupted/resumed and cache-hit/miss scientific outputs,
+   including Decimal correction, five-second boundaries, frozen phase/HMM
+   dependencies, source absence, warm-up and forward outcomes.
+4. Measure cache build/transfer/validation/upload against raw preparation, longest
+   stage, disk/RSS and complete setup/compute/publication timings on small hosted
+   runs before authorizing a larger campaign. No full-study completion is inferred
+   from source review, a saved slice or a small hosted pilot.

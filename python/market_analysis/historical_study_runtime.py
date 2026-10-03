@@ -191,7 +191,8 @@ def create_study_point_stream(store):
                 "first_boundary": store.start_boundary, "last_boundary": store.end_boundary}
     if root.exists():
         existing = StudyPointStream(root, identity)
-        existing.validate()
+        if getattr(store, "_validated_spool_identity", None) != identity:
+            existing.validate()
         return existing
     temporary = Path(tempfile.mkdtemp(prefix=".study-points-", dir=store.root))
     try:
@@ -515,7 +516,7 @@ def run_stage(stream, stage_id, request=None, *, descriptor=None, prepare=None,
         package_root = str(Path(__file__).resolve().parents[1])
         environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
             package_root, environment.get("PYTHONPATH"))))
-        _run_owned_worker(job_path, environment, worker_lease)
+        _run_owned_worker(job_path, environment, worker_lease, stage_id=stage_id)
     result, sha, measurements = _load_stage(path, identity)
     # Completion and record hashes have been verified after durable publication.
     for suffix in ("request.json", "job.json"):
@@ -527,7 +528,7 @@ def run_stage(stream, stage_id, request=None, *, descriptor=None, prepare=None,
     return result
 
 
-def _run_owned_worker(job_path, environment, lease):
+def _run_owned_worker(job_path, environment, lease, *, stage_id=None):
     """Inherit only the lease, and reap an interrupted child before returning."""
     lease.validate(Path(job_path).parent.parent)
     arguments = [sys.executable, "-m", "market_analysis.historical_study_runtime",
@@ -536,7 +537,16 @@ def _run_owned_worker(job_path, environment, lease):
     child = subprocess.Popen(arguments, env=environment, close_fds=True,
                              pass_fds=(lease.descriptor,))
     try:
-        returncode = child.wait()
+        from . import historical_operational_events as events
+        wait_started = time.monotonic()
+        while True:
+            try:
+                returncode = child.wait(timeout=45)
+                break
+            except subprocess.TimeoutExpired:
+                events.emit("HEARTBEAT", stage=stage_id, duration_seconds=time.monotonic() - wait_started, **events.resources(child.pid))
+        if returncode:
+            events.emit("WORKER_FAILED", stage=stage_id, returncode=returncode)
         if returncode:
             raise subprocess.CalledProcessError(returncode, arguments)
     except BaseException:
