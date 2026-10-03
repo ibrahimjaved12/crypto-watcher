@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -85,13 +86,13 @@ def bootstrap():
 
 
 class API:
-    def __init__(self, repository, token, *, private=False):
+    def __init__(self, repository, token, *, private=False, allowance=240):
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository or '') or not token:
             raise ValueError('scoped repository credential required')
         self.repository, self.token = repository, token
         self.prefix = 'https://api.github.com/repos/' + repository
         self.opener = urllib.request.build_opener(NoRedirect())
-        self.end = time.monotonic() + 240
+        self.end = time.monotonic() + allowance
         self.timeout = 30
         details = self.request('')
         if private and (details.get('private') is not True or repository.lower() == os.environ['GITHUB_REPOSITORY'].lower()):
@@ -100,7 +101,7 @@ class API:
 
     def request(self, path, method='GET', body=None, missing=False):
         if time.monotonic() >= self.end:
-            raise TimeoutError('bounded control deadline')
+            raise TransportError('DEADLINE', method)
         if (path and not path.startswith('/')) or '://' in path:
             raise ValueError('repository-relative API path required')
         raw = control.canonical(body).encode() if body is not None else None
@@ -110,17 +111,24 @@ class API:
         try:
             with self.opener.open(request, timeout=max(1, min(self.timeout, self.end - time.monotonic()))) as response:
                 payload = response.read(MAX + 1)
-                return read(payload) if payload else None
+                try:
+                    return read(payload) if payload else None
+                except ValueError:
+                    if method != 'GET':
+                        raise TransportError('AMBIGUOUS_WRITE', method, response.status) from None
+                    raise
         except urllib.error.HTTPError as exc:
             code = exc.code
             exc.close()
             if code == 404 and missing:
                 return None
             if code in (409, 422):
-                raise Conflict() from None
-            raise RuntimeError('control API HTTP %d' % code) from None
+                raise Conflict(code) from None
+            raise TransportError('HTTP', method, code) from None
+        except InterruptedError:
+            raise
         except (urllib.error.URLError, OSError):
-            raise RuntimeError('control API response ambiguous') from None
+            raise TransportError('AMBIGUOUS_WRITE' if method != 'GET' else 'NETWORK', method) from None
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -128,8 +136,73 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class TransportError(RuntimeError):
+    def __init__(self, code, operation, status=None):
+        self.code, self.operation, self.status = code, operation, status
+        super().__init__(code)
+
+
 class Conflict(Exception):
-    pass
+    def __init__(self, status=None):
+        self.status = status
+
+
+def invocation(key, operation):
+    return control.digest({'key': key, 'operation': operation, 'run_id': os.environ['GITHUB_RUN_ID'],
+                           'attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'nonce': uuid.uuid4().hex})
+
+
+DIAGNOSTIC_OPERATIONS = {'claim', 'dispatch', 'start', 'stop', 'resume', 'run', 'metadata', 'inputs', 'restore',
+    'snapshot', 'publish', 'record-receipt', 'install-dependencies', 'validate-parents', 'finalize-study',
+    'diagnostic', 'bootstrap', 'validate', 'validate-settings', 'retention-plan', 'retention-apply',
+    'cache-restore', 'cache-publish', 'dependency-key', 'setup'}
+DIAGNOSTIC_CATEGORIES = {'OWNER_STOP', 'SETUP_BUDGET', 'CANCELLED', 'DEADLINE', 'HTTP', 'NETWORK',
+    'AMBIGUOUS_WRITE', 'CAS_LIMIT', 'INTEGRITY', 'PROCESS', 'CONTROL', 'CONFLICT'}
+
+
+def safe_diagnostic(details):
+    status, code = details.get('http_status'), details.get('exit_code')
+    return {'version': 'historical-campaign-diagnostic-v1',
+            'operation': details.get('operation') if details.get('operation') in DIAGNOSTIC_OPERATIONS else 'setup',
+            'category': details.get('category') if details.get('category') in DIAGNOSTIC_CATEGORIES else 'CONTROL',
+            'http_status': status if type(status) is int and 100 <= status <= 599 else None,
+            'exit_code': code if type(code) is int and -255 <= code <= 255 else None}
+
+
+def safe_error(exc, operation):
+    return safe_diagnostic({'version': 'historical-campaign-diagnostic-v1',
+            'operation': operation if operation in DIAGNOSTIC_OPERATIONS else 'setup',
+            'category': exc.code if isinstance(exc, TransportError) else 'CONFLICT' if isinstance(exc, Conflict) else 'CANCELLED' if isinstance(exc, (InterruptedError, KeyboardInterrupt)) else 'DEADLINE' if isinstance(exc, TimeoutError) else 'INTEGRITY' if isinstance(exc, (ValueError, KeyError)) else 'PROCESS' if isinstance(exc, subprocess.CalledProcessError) else 'CONTROL',
+            'http_status': getattr(exc, 'status', None),
+            'exit_code': exc.returncode if isinstance(exc, subprocess.CalledProcessError) else None})
+
+
+def diagnostic(spec, details):
+    """Only allowlisted typed data; never exception messages or worker output."""
+    locator = None
+    details = safe_diagnostic(details)
+    try:
+        run = control.identifier(os.environ['GITHUB_RUN_ID'])
+        attempt = control.identifier(os.environ['GITHUB_RUN_ATTEMPT'])
+        operation = details['operation']
+        control.identifier(operation)
+        locator = 'campaigns/' + control.identifier(spec['campaign_id']) + '/diagnostics/' + run + '-' + attempt + '-' + operation + '.json'
+        api = API(os.environ.get('RESEARCH_DATA_REPOSITORY'), os.environ.get('RESEARCH_DATA_TOKEN'), private=True, allowance=6)
+        api.timeout = 2
+        path = '/contents/' + locator
+        old = api.request(path + '?ref=' + urllib.parse.quote(api.branch, safe=''), missing=True)
+        body = {'message': 'Bounded private campaign diagnostic', 'branch': api.branch,
+                'content': base64.b64encode((control.canonical({**details, 'run_id': run, 'attempt': attempt}) + '\n').encode()).decode()}
+        if old:
+            body['sha'] = old['sha']
+        api.request(path, 'PUT', body)
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception:
+        # Signals and KeyboardInterrupt inherit BaseException and propagate.
+        print('Campaign warning: DIAGNOSTIC_UNAVAILABLE', file=sys.stderr)
+    return locator
+
 
 
 class Store:
@@ -160,10 +233,11 @@ class Store:
             prior = self.api.request(self.path + '?ref=' + history[1]['sha'])
             previous = control.validate(read(base64.b64decode(prior['content'])), self.spec)
             control.validate(current, self.spec, previous)
+        self.control_commit, self.control_blob_sha = history[0]['sha'], row['sha']
         return current, row['sha']
 
-    def update(self, mutate, *, create=False):
-        previous = None
+    def update(self, mutate, *, create=False, mutation_id=None):
+        previous, candidate, result, last_write_error = None, None, None, None
         for _ in range(4):
             try:
                 record, revision = self.get()
@@ -174,8 +248,15 @@ class Store:
                     raise ValueError('campaign has not been deliberately started')
                 record = control.initial(self.spec)
             control.validate(record, self.spec, previous)
+            if record['version'] != control.VERSION:
+                raise ValueError('legacy authority requires its original pinned writer; no migration')
+            if mutation_id:
+                committed = next((e for e in record['ledger'] if e.get('mutation_id') == mutation_id), None)
+                if committed is not None:
+                    return record, committed['result']
             previous = deepcopy(record)
             result = mutate(record)
+            candidate = record
             control.validate(record, self.spec, previous)
             if record == previous and revision:
                 return record, result
@@ -189,11 +270,27 @@ class Store:
             try:
                 self.api.request(self.path, 'PUT', payload)
                 return record, result
-            except (Conflict, RuntimeError):
+            except Conflict as exc:
+                last_write_error = exc
+                continue
+            except TransportError as exc:
+                if exc.code == 'HTTP' and exc.status is not None and exc.status < 500:
+                    raise
+                last_write_error = exc
                 # An ambiguous Contents write is reconciled by rereading. A claim
                 # caller can prove its own exact run identity before entering.
                 continue
-        raise RuntimeError('control CAS conflict/reconciliation limit reached')
+        # Even the last ambiguous PUT receives one bounded reconciliation read.
+        current, _ = self.get()
+        if current is not None:
+            control.validate(current, self.spec, previous)
+            if mutation_id:
+                committed = next((e for e in current['ledger'] if e.get('mutation_id') == mutation_id), None)
+                if committed:
+                    return current, committed['result']
+            if candidate is not None and current == candidate:
+                return current, result
+        raise TransportError('CAS_LIMIT', 'PUT', getattr(last_write_error, 'status', None))
 
     def view(self, record, activity=None):
         h = record['handoff']
@@ -205,20 +302,37 @@ class Store:
                   'budget': self.spec['budget'], 'tasks': record['tasks'], 'latest_verified_receipt': record['receipts'][-1] if record['receipts'] else None,
                   'finalized_results': [r for r in record['receipts'] if r['task_complete']],
                   'activity': activity, 'updated_epoch': time.time(),
-                  'active_run': 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + h['run_id'] if h and h['run_id'] else None}
+                  'active_run': 'https://github.com/' + os.environ.get('GITHUB_REPOSITORY', '') + '/actions/runs/' + h['run_id'] if h and h['run_id'] and os.environ.get('GITHUB_REPOSITORY') else None}
+        # Derive a useful view first; all optional I/O and rendering is isolated.
+        view_api = object.__new__(API)
+        view_api.__dict__ = self.api.__dict__.copy()
+        view_api.end, view_api.timeout = time.monotonic() + 6, 2
+        try:
+            self.write_view(view_api, status, record, activity)
+        except (InterruptedError, KeyboardInterrupt):
+            raise
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, Conflict):
+            status['activity'] = activity
+            print('Campaign warning: STATUS_VIEW_UNAVAILABLE', file=sys.stderr)
+        return status
+
+    def write_view(self, view_api, status, record, activity):
         path = self.path.replace('control.json', 'status.json')
-        old = self.api.request(path + '?ref=' + urllib.parse.quote(self.api.branch, safe=''), missing=True)
+        old = view_api.request(path + '?ref=' + urllib.parse.quote(self.api.branch, safe=''), missing=True)
         if activity is None and old and old.get('encoding') == 'base64':
-            activity = read(base64.b64decode(old['content'])).get('activity')
+            old_status = read(base64.b64decode(old['content'], validate=True))
+            activity = old_status.get('activity')
+            if old_status.get('identity') != record['identity'] or len(control.canonical(activity)) > 24000:
+                raise ValueError('invalid optional activity metadata')
             status['activity'] = activity
         body = {'message': 'Campaign status view', 'branch': self.api.branch,
                 'content': base64.b64encode((control.canonical(status) + '\n').encode()).decode()}
         if old:
             body['sha'] = old['sha']
         try:
-            self.api.request(path, 'PUT', body)
+            view_api.request(path, 'PUT', body)
         except (Conflict, RuntimeError):
-            pass # Non-authoritative view failure cannot undo durable accounting.
+            print('Campaign warning: STATUS_VIEW_UNAVAILABLE', file=sys.stderr)
         task = status['task'] or {}
         receipt = status['latest_verified_receipt'] or {}
         markdown = ('# Campaign ' + self.spec['campaign_id'] + '\n\nState: **' + status['state'] + '**. Stop requested: ' + str(status['stop_requested'])
@@ -229,27 +343,26 @@ class Store:
             + '\n\nFinalized result references: ' + ', '.join('`' + r['generation'] + '`' for r in status['finalized_results'])
             + '\n\nLive observations (computed progress is separate from committed work):\n\n```json\n' + json.dumps(activity, indent=2) + '\n```\n\nThis view is informational; control.json and sealed inventories remain authoritative.\n')
         view_path = self.path.replace('control.json', 'status.md')
-        old_view = self.api.request(view_path + '?ref=' + urllib.parse.quote(self.api.branch, safe=''), missing=True)
+        old_view = view_api.request(view_path + '?ref=' + urllib.parse.quote(self.api.branch, safe=''), missing=True)
         view_body = {'message': 'Readable campaign status view', 'branch': self.api.branch, 'content': base64.b64encode(markdown.encode()).decode()}
         if old_view:
             view_body['sha'] = old_view['sha']
         try:
-            self.api.request(view_path, 'PUT', view_body)
+            view_api.request(view_path, 'PUT', view_body)
         except (Conflict, RuntimeError):
-            pass
-        return status
+            print('Campaign warning: STATUS_VIEW_UNAVAILABLE', file=sys.stderr)
 
 
-def run_name(h):
+def run_name(h, campaign_id):
     t = h['task']
-    return 'Campaign ' + h['identity']['campaign_id'] + ' / ' + t['id'] + ' / slice ' + str(h['sequence']) + ' / ' + t['phase'] + ' ' + str(t['period_index'] if t['period_index'] is not None else 0) + ' / ' + h['key']
+    return 'Campaign ' + campaign_id + ' / ' + t['id'] + ' / slice ' + str(h['sequence']) + ' / ' + t['phase'] + ' ' + str(t['period_index'] if t['period_index'] is not None else 0) + ' / ' + h['key']
 
 
 def reconcile(store, actions, h):
     matches = []
     for page in range(1, 4):
         rows = actions.request('/actions/workflows/historical-study.yml/runs?event=workflow_dispatch&per_page=100&page=' + str(page))['workflow_runs']
-        matches.extend(r for r in rows if r.get('display_title') == run_name(h))
+        matches.extend(r for r in rows if r.get('display_title') == run_name(h, store.spec['campaign_id']))
         if len(rows) < 100:
             break
     if len(matches) > 1:
@@ -259,7 +372,7 @@ def reconcile(store, actions, h):
 
 def dispatch(store):
     record, _ = store.get()
-    if record is None or record['stop_requested'] or record['state'] in control.TERMINAL:
+    if record is None or record['stop_requested'] or record['state'] != 'HANDOFF_PENDING':
         return
     h = record['handoff']
     if not h or h['state'] not in ('INTENT', 'AMBIGUOUS', 'DISPATCHED'):
@@ -267,20 +380,19 @@ def dispatch(store):
     if record['receipts']:
         try:
             latest_receipt = record['receipts'][-1]
-            value = verify_receipt(store, latest_receipt)
-            for finalized in value['metadata']['consolidation']['finalized_receipts']:
-                verify_receipt(store, finalized)
+            verify_receipt(store, latest_receipt)
         except (KeyError, ValueError, RuntimeError):
             store.update(lambda r: r.update(state='INTEGRITY_FAILED', reason='handoff-publication-or-finalized-closure-verification-failed'))
             raise
-    if record['reserved_minutes'] + h['allocation_minutes'] > store.spec['budget']['ceiling_minutes'] or record['run_count'] >= store.spec['budget']['max_runs'] or record['no_progress_runs'] >= store.spec['budget']['no_progress_cap']:
-        store.update(lambda r: r.update(state='BUDGET_EXHAUSTED', reason='dispatch-transition-cap'))
+    record, permitted = store.update(lambda r: control.dispatch_permitted(r, store.spec, h['key']))
+    if not permitted:
+        store.view(record)
         return
     actions = API(os.environ['GITHUB_REPOSITORY'], os.environ.get('GH_TOKEN'))
     found = reconcile(store, actions, h)
     if found:
         def confirmed(r):
-            if r['handoff']['key'] == h['key'] and r['handoff']['state'] != 'CLAIMED':
+            if r['state'] == 'HANDOFF_PENDING' and not r['stop_requested'] and r['handoff']['key'] == h['key'] and r['handoff']['state'] in ('INTENT', 'DISPATCHED', 'AMBIGUOUS') and not any(e['kind'] == 'DISPATCH_CONFIRMED' and e['key'] == h['key'] and e['run_id'] == str(found['id']) for e in r['ledger']):
                 r['handoff'].update(state='DISPATCHED', run_id=str(found['id']))
                 control.append(r, 'DISPATCH_CONFIRMED', key=h['key'], run_id=str(found['id']))
         store.update(confirmed)
@@ -288,18 +400,16 @@ def dispatch(store):
     if h['state'] != 'INTENT':
         store.update(lambda r: r.update(reason='dispatch-ambiguous; bounded reconciliation found no run; owner intervention required'))
         return
+    mutation_id = invocation(h['key'], 'dispatch-attempt')
     # Write attempt BEFORE POST; no blind POST retry after an uncertain response.
     def attempted(r):
-        if r['stop_requested'] or r['handoff']['key'] != h['key'] or r['handoff']['state'] != 'INTENT':
-            return False
-        r['handoff']['state'] = 'AMBIGUOUS'
-        control.append(r, 'DISPATCH_ATTEMPT', key=h['key'])
-        return True
-    _, allowed = store.update(attempted)
+        return control.dispatch_attempt(r, store.spec, h['key'], os.environ['GITHUB_RUN_ID'],
+                                        os.environ['GITHUB_RUN_ATTEMPT'], mutation_id)
+    _, allowed = store.update(attempted, mutation_id=mutation_id)
     if not allowed:
         return
-    latest, _ = store.get()
-    if latest['stop_requested']:
+    latest, permitted = store.update(lambda r: control.dispatch_permitted(r, store.spec, h['key']))
+    if not permitted:
         return
     task = h['task']
     parent = h['parent']
@@ -321,7 +431,7 @@ def dispatch(store):
             break
         time.sleep(2)
     def finish(r):
-        if r['handoff']['key'] != h['key'] or r['handoff']['state'] == 'CLAIMED':
+        if r['state'] != 'HANDOFF_PENDING' or r['stop_requested'] or r['handoff']['key'] != h['key'] or r['handoff']['state'] not in ('INTENT', 'AMBIGUOUS', 'DISPATCHED') or any(e['kind'] == 'DISPATCH_OUTCOME' and e['key'] == h['key'] for e in r['ledger']):
             return
         r['handoff'].update(state='DISPATCHED' if found else 'AMBIGUOUS', run_id=str(found['id']) if found else None)
         control.append(r, 'DISPATCH_OUTCOME', key=h['key'], run_id=str(found['id']) if found else None,
@@ -333,37 +443,66 @@ def dispatch(store):
 
 def claim(store):
     key, run_id = os.environ.get('STUDY_HANDOFF_KEY'), os.environ['GITHUB_RUN_ID']
-    record, entered = store.update(lambda r: control.claim(r, store.spec, key, run_id))
-    h = record['handoff']
-    # An ambiguous successful CAS may already contain our claim. A rerun is never
-    # allowed: its attempt differs; the first invocation persists a local receipt.
-    local = Path('/tmp/crypto-study/transfers/control-claim.json')
+    attempt = os.environ['GITHUB_RUN_ATTEMPT']
+    record, _ = store.get()
+    if record is None:
+        raise ValueError('campaign has not been started')
+    # Validate exact dispatch arguments before *any* authoritative mutation.
+    control.entry_bindings(record, store.spec, key, os.environ)
+    mutation_id = invocation(key, 'claim')
+    record, entered = store.update(lambda r: control.claim(r, store.spec, key, run_id, attempt,
+                                                          mutation_id, os.environ), mutation_id=mutation_id)
     if not entered:
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write('managed=true\nclaimed=false\n')
         raise ValueError('duplicate/stale/stopped child refused before downloads')
-    t, parent = h['task'], h['parent']
-    expected = {'STUDY_OPERATION': t['operation'], 'STUDY_PHASE': t['phase'],
-                'STUDY_JOB_MINUTES': str(store.spec['job_minutes']),
-                'STUDY_PERIOD_INDEX': str(t['period_index'] if t['period_index'] is not None else 0),
-                'STUDY_ALLOW_TEST': str(t['phase'] == 'test' and store.spec['control']['allow_test']).lower(),
-                'STUDY_RESUME_GENERATION': parent['generation'] if parent else '',
-                'STUDY_RESUME_SHA': parent['manifest_sha256'] if parent else ''}
-    if any(os.environ.get(k, '') != v for k, v in expected.items()):
-        raise ValueError('dispatch inputs differ from claimed pinned task')
+    # Capture an immutable Git accounting proof of this exact owned claim.
+    record, _ = store.get()
+    if record['handoff'].get('mutation_id') != mutation_id:
+        raise ValueError('claim changed before local proof capture')
+    Path('/tmp/crypto-study/transfers/control-claim-reference.json').write_text(control.canonical({'control_commit': store.control_commit, 'control_blob_sha': store.control_blob_sha}) + '\n')
+    local = Path('/tmp/crypto-study/transfers/control-claim.json')
     local.write_text(control.canonical(record) + '\n')
     with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
         output.write('claimed=true\nmanaged=true\n')
     store.view(record)
 
 
-def verify_receipt(store, receipt):
-    """Independently reread immutable publication before accepting its transition."""
-    tag = control.identifier(receipt['generation'])
-    release = store.api.request('/releases/tags/' + urllib.parse.quote(tag, safe=''))
-    if release['draft']:
-        raise ValueError('unpublished receipt')
+def remote_manifest(store, asset):
+    request = urllib.request.Request(store.api.prefix + '/releases/assets/' + str(asset['id']), headers={
+        'Authorization': 'Bearer ' + store.api.token, 'Accept': 'application/octet-stream', 'User-Agent': 'crypto-campaign-control'})
+    # Standard GitHub asset redirects require an unauthenticated second request.
+    try:
+        try:
+            response = store.api.opener.open(request, timeout=max(1, min(30, store.api.end - time.monotonic())))
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (301, 302, 303, 307, 308):
+                status = exc.code
+                exc.close()
+                raise TransportError('HTTP', 'GET', status) from None
+            url = exc.headers.get('Location', '')
+            exc.close()
+            parsed = urllib.parse.urlparse(url)
+            if parsed.scheme != 'https' or parsed.username or parsed.password or not (parsed.hostname or '').endswith('.githubusercontent.com'):
+                raise ValueError('untrusted asset redirect')
+            response = store.api.opener.open(urllib.request.Request(url), timeout=max(1, min(30, store.api.end - time.monotonic())))
+        with response:
+            value = read(response.read(MAX + 1))
+    except InterruptedError:
+        raise
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        exc.close()
+        raise TransportError('HTTP', 'GET', status) from None
+    except (urllib.error.URLError, OSError):
+        raise TransportError('NETWORK', 'GET') from None
+    return value
+
+
+def release_assets(store, release_id):
     assets = {}
     for page in range(1, 12):
-        rows = store.api.request('/releases/' + str(release['id']) + '/assets?per_page=100&page=' + str(page))
+        rows = store.api.request('/releases/' + str(release_id) + '/assets?per_page=100&page=' + str(page))
         for row in rows:
             if row['name'] in assets:
                 raise ValueError('duplicate remote asset')
@@ -372,37 +511,22 @@ def verify_receipt(store, receipt):
             break
     else:
         raise ValueError('bounded asset inventory exceeded')
-    # Manifest only, with bearer restricted to api.github.com; no signed redirects.
-    asset = assets['manifest.json']
-    request = urllib.request.Request(store.api.prefix + '/releases/assets/' + str(asset['id']), headers={
-        'Authorization': 'Bearer ' + store.api.token, 'Accept': 'application/octet-stream', 'User-Agent': 'crypto-campaign-control'})
-    # Standard GitHub asset redirects require an unauthenticated second request.
-    try:
-        response = store.api.opener.open(request, timeout=30)
-    except urllib.error.HTTPError as exc:
-        if exc.code not in (301, 302, 303, 307, 308):
-            raise RuntimeError('manifest readback failed') from None
-        url = exc.headers.get('Location', '')
-        exc.close()
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme != 'https' or parsed.username or parsed.password or not (parsed.hostname or '').endswith('.githubusercontent.com'):
-            raise ValueError('untrusted asset redirect')
-        response = store.api.opener.open(urllib.request.Request(url), timeout=30)
-    with response:
-        value = read(response.read(MAX + 1))
+    return assets
+
+
+def receipt_manifest(store, receipt):
+    """Independently reread immutable publication before accepting its transition."""
+    tag = control.identifier(receipt['generation'])
+    release = store.api.request('/releases/tags/' + urllib.parse.quote(tag, safe=''))
+    if release['draft']:
+        raise ValueError('unpublished receipt')
+    assets = release_assets(store, release['id'])
+    value = remote_manifest(store, assets['manifest.json'])
     body = {k: v for k, v in value.items() if k != 'bundle_sha256'}
     if control.digest(body) != receipt['manifest_sha256'] or value['bundle_sha256'] != receipt['manifest_sha256']:
         raise ValueError('remote sealed inventory mismatch')
     if value.get('version') != 'historical-study-file-bundle-v2' or value.get('kind') != 'recovery' or value['metadata']['generation'] != tag:
         raise ValueError('new-campaign receipt requires exact recovery/result v2 inventory')
-    closure = control.consolidation(value, control.identity(store.spec))
-    control.validate(closure['accounting'], store.spec)
-    task = closure['accounting']['handoff']['task']
-    if receipt['task_complete'] and (receipt['verified_outputs'] != task['expected_outputs'] or receipt['scientific_state'] == 'FAILED'):
-        raise ValueError('final output contract mismatch')
-    typed = value['metadata']['task_receipt']
-    if any(typed[k] != receipt[k] for k in ('task_id', 'handoff_key', 'task_complete', 'verified_outputs', 'scientific_state')) or value['metadata']['completed_work'] != receipt['completed_work']:
-        raise ValueError('receipt output/committed-work binding mismatch')
     # Publication helper verifies every upload digest/readback. Cross-job control
     # requires GitHub's current digests as independent immutable asset confirmation.
     for part in value['assets']:
@@ -412,10 +536,74 @@ def verify_receipt(store, receipt):
     return value
 
 
+def sealed_accounting(store, closure):
+    proof = closure['accounting']
+    if closure['version'] != control.COMPACT_LINEAGE:
+        return control.validate(proof, store.spec)
+    key = (proof['control_commit'], proof['control_blob_sha'])
+    if not hasattr(store, '_accounting_cache'):
+        store._accounting_cache = {}
+    if key not in store._accounting_cache:
+        if len(store._accounting_cache) >= store.spec['budget']['max_runs']:
+            raise ValueError('bounded accounting proof closure exceeded')
+        row = store.api.request(store.path + '?ref=' + proof['control_commit'])
+        if row['sha'] != proof['control_blob_sha'] or row['encoding'] != 'base64':
+            raise ValueError('immutable accounting blob reference mismatch')
+        record = control.validate(read(base64.b64decode(row['content'], validate=True)), store.spec)
+        store._accounting_cache[key] = record
+    record = store._accounting_cache[key]
+    expected = control.accounting_reference(record, {k: proof[k] for k in ('control_commit', 'control_blob_sha')})
+    if expected != proof or closure['parent_receipt'] != record['handoff']['parent'] or closure['finalized_receipts'] != [r for r in record['receipts'] if r['task_complete']]:
+        raise ValueError('sealed accounting summary/finalized references mismatch')
+    return record
+
+
+def verify_receipt(store, receipt, cache=None, visiting=None):
+    """Validate sealed references once, including monotonic work/accounting closure."""
+    cache = {} if cache is None else cache
+    visiting = set() if visiting is None else visiting
+    key = (receipt['generation'], receipt['manifest_sha256'])
+    if key in cache:
+        value = cache[key]
+    else:
+        if key in visiting or len(visiting) >= store.spec['budget']['max_runs'] or len(cache) > store.spec['budget']['max_runs']:
+            raise ValueError('cyclic or unbounded sealed proof closure')
+        visiting.add(key)
+        value = receipt_manifest(store, receipt)
+        closure = control.consolidation(value, control.identity(store.spec))
+        accounting = sealed_accounting(store, closure)
+        if closure['version'] == control.COMPACT_LINEAGE:
+            parent = closure['parent_receipt']
+            refs = closure['finalized_receipts'] + ([parent] if parent else [])
+            for ref in refs:
+                previous = verify_receipt(store, ref, cache, visiting)
+                prior = sealed_accounting(store, previous['metadata']['consolidation'])
+                if accounting['ledger'][:len(prior['ledger'])] != prior['ledger'] or accounting['receipts'][:len(prior['receipts'])] != prior['receipts']:
+                    raise ValueError('compact proof removed committed accounting/references')
+                if ref is parent and not set(previous['metadata']['local_completed_work']).issubset(value['metadata']['local_completed_work']):
+                    raise ValueError('compact sealed parent work was discarded')
+            if receipt != control.receipt_reference(value, receipt['measured_minutes']):
+                raise ValueError('compact receipt counters/output/proof binding mismatch')
+        else:
+            typed = value['metadata']['task_receipt']
+            if any(typed[k] != receipt[k] for k in ('task_id', 'handoff_key', 'task_complete', 'verified_outputs', 'scientific_state')) or value['metadata']['completed_work'] != receipt['completed_work']:
+                raise ValueError('legacy output/work binding mismatch')
+        task = accounting['handoff']['task']
+        if receipt['task_complete'] and (receipt['verified_outputs'] != task['expected_outputs'] or receipt['scientific_state'] == 'FAILED'):
+            raise ValueError('final output contract mismatch')
+        visiting.remove(key)
+        cache[key] = value
+    if value['metadata']['consolidation']['version'] == control.COMPACT_LINEAGE and receipt != control.receipt_reference(value, receipt['measured_minutes']):
+        raise ValueError('reused reference differs from sealed proof')
+    return value
+
+
+
 def publish_receipt(spec, receipt):
     store = Store(spec)
-    verify_receipt(store, receipt)
-    record, _ = store.update(lambda r: control.accept(r, spec, os.environ['STUDY_HANDOFF_KEY'], os.environ['GITHUB_RUN_ID'], receipt))
+    proof = verify_receipt(store, receipt)
+    accounting = sealed_accounting(store, proof['metadata']['consolidation'])
+    record, _ = store.update(lambda r: control.accept(r, spec, os.environ['STUDY_HANDOFF_KEY'], os.environ['GITHUB_RUN_ID'], receipt, proof, accounting=accounting))
     store.view(record)
 
 
@@ -440,9 +628,108 @@ def measure_short_job(store, command):
     record, _ = store.update(measured)
     store.view(record)
 
+
+STUDY_STEPS = {'science': 'Run credential-free science with private supervisor status transport',
+               'snapshot': 'Validate and snapshot committed recovery with ownership held',
+               'publication': 'Publish private parts then sealed manifest and verify publication',
+               'entry': 'Claim new-campaign handoff before dependencies or input acquisition'}
+
+
+def study_job(actions, run_id, attempt):
+    rows = actions.request('/actions/runs/' + run_id + '/attempts/' + attempt + '/jobs?per_page=100')['jobs']
+    matches = [j for j in rows if j['name'] == 'study' and str(j['run_id']) == run_id]
+    if len(matches) != 1 or matches[0]['status'] != 'completed':
+        return None
+    return matches[0]
+
+
+def finalizer(store):
+    """Pinned stdlib only. Step outcomes are trusted YAML, diagnostics allowlisted."""
+    record, _ = store.get()
+    h = record['handoff'] if record else None
+    if not h or h['state'] != 'CLAIMED' or h['run_id'] != os.environ['GITHUB_RUN_ID'] or h.get('attempt') != os.environ['GITHUB_RUN_ATTEMPT']:
+        return
+    allowed = {'success', 'failure', 'cancelled', 'skipped', 'unknown'}
+    outcome = {k: os.environ.get('STUDY_' + k.upper() + '_OUTCOME', 'unknown') for k in ('setup', 'scientific', 'snapshot', 'publication')}
+    if any(v not in allowed for v in outcome.values()):
+        raise ValueError('untrusted outcome contract')
+    path = Path('/tmp/crypto-study/transfers/operation-outcomes.json')
+    details = read(path.read_bytes()) if path.exists() else []
+    # No arbitrary private exception strings enter control or public summaries.
+    safe = [safe_diagnostic(d) for d in details if isinstance(d, dict)]
+    required = [d for d in safe if d['operation'] not in ('cache-restore', 'cache-publish', 'dependency-key')]
+    failure = next((d for d in required if d['category'] not in {'OWNER_STOP', 'SETUP_BUDGET', 'CANCELLED'}), None)
+    if failure is None and not required and outcome['setup'] == 'failure':
+        failure = safe_diagnostic({'operation': 'install-dependencies', 'category': 'PROCESS'})
+    outcome['reason'] = failure['category'] if failure else next((d['category'] for d in reversed(required)), 'job-outcome-pending')
+    outcome['failure_operation'] = failure['operation'] if failure else None
+    key = h['key']
+    def save(r):
+        current = r['handoff']
+        if not current or current['key'] != key or current['state'] != 'CLAIMED':
+            return
+        if current.get('outcome') == outcome:
+            return
+        control.append(r, 'STUDY_OUTCOME', key=key, run_id=h['run_id'], attempt=h['attempt'], outcome_sha256=control.digest(outcome))
+        current['outcome'] = outcome
+        if failure and failure['operation'] != 'record-receipt' and r['state'] not in control.TERMINAL:
+            state = control.failure_state(failure['operation'], failure['category'])
+            r.update(state=state, reason='typed-established-study-failure')
+    record, _ = store.update(save)
+    if failure or required:
+        diagnostic(store.spec, failure or required[-1])
+    store.view(record)
+
+
+def reconcile_study(store, actions, record, job):
+    """Only a completed owned STUDY job proves timeout/cancellation, never workflow status."""
+    h = record['handoff']
+    if not h or h['state'] not in ('CLAIMED', 'DISPATCHED', 'AMBIGUOUS', 'INTENT'):
+        return
+    key = h['key']
+    if h['state'] == 'CLAIMED':
+        tag = 'recovery-' + store.spec['campaign_id'][:20] + '-' + h['run_id'] + '-' + h['attempt']
+        release = store.api.request('/releases/tags/' + control.identifier(tag), missing=True)
+        if release and not release['draft']:
+            # Acceptance may have been cancelled after immutable publication.
+            value = receipt_manifest(store, {'generation': tag, 'manifest_sha256': release_manifest_sha(store, release)})
+            receipt = control.receipt_reference(value, value['metadata']['measured_minutes'])
+            proof = verify_receipt(store, receipt)
+            accounting = sealed_accounting(store, proof['metadata']['consolidation'])
+            if job is None and record['state'] not in control.TERMINAL:
+                def unresolved(r):
+                    if r['handoff']['key'] == key and r['state'] not in control.TERMINAL:
+                        r['handoff']['verified_publication'] = {k: receipt[k] for k in ('generation', 'manifest_sha256')}
+                        r.update(state='OUTCOME_UNRESOLVED', reason='owned-study-job-outcome-unavailable; verified-publication-retained')
+                current, _ = store.update(unresolved)
+                store.view(current)
+                return
+            store.update(lambda r: control.accept(r, store.spec, key, h['run_id'], receipt, proof, accounting=accounting, interruption='external-cancellation' if job and job['conclusion'] in ('cancelled', 'timed_out') else None))
+            return
+    if job is None or record['state'] in control.TERMINAL:
+        return
+    remote_steps = {s['name']: s.get('conclusion') for s in job.get('steps', [])}
+    steps = {key: remote_steps.get(name) for key, name in STUDY_STEPS.items()}
+    record, _ = store.update(lambda r: control.study_outcome(r, store.spec, key, job['conclusion'], steps))
+    store.view(record)
+
+
+def release_manifest_sha(store, release):
+    # Exact seal is independently read, not inferred from a mutable Release body.
+    assets = release_assets(store, release['id'])
+    manifests = [a for a in assets.values() if a['name'] == 'manifest.json']
+    if len(manifests) != 1:
+        raise ValueError('publication has no unique sealed manifest')
+    value = remote_manifest(store, manifests[0])
+    expected = value['bundle_sha256']
+    if control.digest({k: v for k, v in value.items() if k != 'bundle_sha256'}) != expected:
+        raise ValueError('discovered receipt seal mismatch')
+    return expected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['bootstrap', 'validate', 'start', 'stop', 'resume', 'claim', 'dispatch', 'retention-plan', 'retention-apply'])
+    parser.add_argument('command', choices=['bootstrap', 'validate', 'start', 'stop', 'resume', 'claim', 'dispatch', 'retention-plan', 'retention-apply', 'finalize-study', 'diagnostic'])
     args = parser.parse_args()
     if args.command == 'bootstrap':
         bootstrap()
@@ -450,31 +737,38 @@ def main():
     spec = pinned_spec()
     if args.command == 'validate':
         return
+    if args.command == 'diagnostic':
+        diagnostic(spec, {'version': 'historical-campaign-diagnostic-v1', 'operation': 'diagnostic', 'category': 'CONTROL', 'http_status': None, 'exit_code': 1})
+        return
     store = Store(spec)
+    if args.command == 'finalize-study':
+        store.api.end = min(store.api.end, time.monotonic() + 30)
+        store.api.timeout = 3
+        finalizer(store)
+        return
     if args.command == 'claim':
         claim(store)
     elif args.command == 'dispatch':
         if int(os.environ['GITHUB_RUN_ATTEMPT']) > 1:
             store.update(lambda r: control.control_action(r, spec, 'handoff-rerun', os.environ['GITHUB_RUN_ID'] + ':handoff:' + os.environ['GITHUB_RUN_ATTEMPT']))
         record, _ = store.get()
-        if record and record['handoff'] and record['handoff']['state'] == 'CLAIMED' and record['handoff']['run_id'] == os.environ.get('STUDY_PARENT_RUN_ID'):
-            # A child that never published cannot be made successful by green YAML.
-            failed_key = record['handoff']['key']
-            def failed(r):
-                if r['handoff']['key'] != failed_key or r['handoff']['state'] != 'CLAIMED' or r['handoff']['run_id'] != os.environ.get('STUDY_PARENT_RUN_ID'):
-                    return
-                if r['stop_requested']:
-                    r['handoff']['state'] = 'INTERRUPTED'
-                    r.update(state='STOPPED', reason='stopped-before-publication; reservation-retained')
-                else:
-                    r.update(state='PUBLICATION_FAILED', reason='slice-ended-without-verified-publication')
-            record, _ = store.update(failed)
-            store.view(record)
+        if record and os.environ.get('STUDY_PARENT_RUN_ID'):
+            actions = API(os.environ['GITHUB_REPOSITORY'], os.environ.get('GH_TOKEN'))
+            job = study_job(actions, os.environ['STUDY_PARENT_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'])
+            h = record['handoff']
+            if h and h['run_id'] == os.environ['STUDY_PARENT_RUN_ID']:
+                reconcile_study(store, actions, record, job)
+            elif h and any(r.get('run_id') == os.environ['STUDY_PARENT_RUN_ID'] and r.get('attempt') == os.environ['GITHUB_RUN_ATTEMPT'] for r in record['receipts']) and (job is None or job['conclusion'] in ('cancelled', 'timed_out')):
+                def cancelled_after_acceptance(r):
+                    if r['state'] not in control.TERMINAL and r['handoff'] and r['handoff']['key'] == h['key']:
+                        r.update(state='STOPPED' if job else 'OUTCOME_UNRESOLVED', reason='external-cancellation-after-verified-publication; explicit-Resume-required' if job else 'owned-study-job-outcome-unavailable-after-acceptance')
+                store.update(cancelled_after_acceptance)
         dispatch(store)
     elif args.command in ('retention-plan', 'retention-apply'):
         record, _ = store.update(lambda r: control.control_action(r, spec, 'retention', os.environ['GITHUB_RUN_ID'] + ':' + os.environ['GITHUB_RUN_ATTEMPT']))
         deleted_tags = {e['generation'] for e in record['ledger'] if e['kind'] == 'RETENTION_CONFIRMED'}
-        manifests = {r['generation']: verify_receipt(store, r) for r in record['receipts'] if r['generation'] not in deleted_tags}
+        proof_cache = {}
+        manifests = {r['generation']: verify_receipt(store, r, proof_cache) for r in record['receipts'] if r['generation'] not in deleted_tags}
         candidates = control.retention_candidates(record, manifests)
         deleted = 0
         if args.command == 'retention-apply':
@@ -500,26 +794,24 @@ def main():
         print(control.canonical({'dry_run_only': args.command == 'retention-plan', 'candidates': candidates,
                                  'drafts': 'retain; no proven draft closure', 'deletions_performed': deleted}))
     else:
-        # Resolve an interrupted claimed child before Resume, retaining reservation.
+        # Resume reconciles the exact owned study job and publication first.
         if args.command == 'resume':
+            store.update(lambda r: control.reserve_control(r, spec, 'resume', os.environ['GITHUB_RUN_ID'] + ':' + os.environ['GITHUB_RUN_ATTEMPT']))
             record, _ = store.get()
-            if record and record['handoff'] and record['handoff']['state'] in ('CLAIMED', 'DISPATCHED', 'AMBIGUOUS'):
+            if record and record['state'] == 'OUTCOME_UNRESOLVED' and record['handoff'] and record['handoff']['state'] in ('INTENT', 'DISPATCHED', 'AMBIGUOUS') and record['receipts']:
+                prior = record['receipts'][-1]
+                actions = API(os.environ['GITHUB_REPOSITORY'], os.environ.get('GH_TOKEN'))
+                job = study_job(actions, prior['run_id'], prior['attempt'])
+                if job and job['conclusion'] in ('success', 'cancelled', 'timed_out'):
+                    pending_key = record['handoff']['key']
+                    store.update(lambda r: r.update(state='HANDOFF_PENDING' if job['conclusion'] == 'success' else 'STOPPED', reason=None) if r['handoff']['key'] == pending_key and r['state'] == 'OUTCOME_UNRESOLVED' else None)
+                    record, _ = store.get()
+            if record and record['handoff'] and record['handoff']['state'] in ('CLAIMED', 'DISPATCHED', 'AMBIGUOUS', 'INTENT'):
                 actions = API(os.environ['GITHUB_REPOSITORY'], os.environ.get('GH_TOKEN'))
                 found = reconcile(store, actions, record['handoff'])
-                if found and found['status'] == 'completed' and (found['conclusion'] in ('cancelled', 'timed_out') or record['stop_requested'] and record['handoff']['state'] != 'CLAIMED') and record['state'] not in control.TERMINAL:
-                    key = record['handoff']['key']
-                    def interrupted(r):
-                        if r['handoff']['key'] == key:
-                            r['handoff']['state'] = 'INTERRUPTED'
-                            r['state'] = 'STOPPED'
-                            r['no_progress_runs'] += 1
-                            control.append(r, 'INTERRUPTED', key=key, run_id=str(found['id']))
-                    store.update(interrupted)
-                elif found and found['status'] == 'completed' and record['state'] not in control.TERMINAL:
-                    def missing_publication(r):
-                        if r['handoff']['key'] == record['handoff']['key'] and r['handoff']['state'] in ('CLAIMED', 'DISPATCHED', 'AMBIGUOUS'):
-                            r.update(state='PUBLICATION_FAILED', reason='completed-child-without-verified-receipt; Resume-cannot-clear-failure')
-                    store.update(missing_publication)
+                if found:
+                    job = study_job(actions, str(found['id']), str(found.get('run_attempt', 1)))
+                    reconcile_study(store, actions, record, job)
         record, _ = store.update(lambda r: control.control_action(r, spec, args.command, os.environ['GITHUB_RUN_ID'] + ':' + os.environ['GITHUB_RUN_ATTEMPT']), create=args.command == 'start')
         view = store.view(record)
         if args.command != 'stop':
@@ -536,5 +828,11 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        print('Campaign control halted: ' + type(exc).__name__, file=sys.stderr)
+        details = safe_error(exc, sys.argv[1] if len(sys.argv) > 1 else 'setup')
+        locator = None
+        try:
+            locator = diagnostic(pinned_spec(), details)
+        except Exception:
+            pass # Untrusted pins never execute a finalizer or write diagnostics.
+        print('Campaign control halted: ' + control.canonical({**details, 'diagnostic_locator': locator}), file=sys.stderr)
         sys.exit(1)

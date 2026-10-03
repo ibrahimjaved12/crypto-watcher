@@ -63,9 +63,12 @@ stopping. It does not kill the process. Force cancellation through the Actions U
 can lose the latest uncommitted work or prevent publication. Reservations remain
 charged. Resume uses the latest verified receipt for the current task and remaining
 budget; no hash copying is required. It refuses to clear scientific, integrity or
-publication failure. An interrupted/cancelled run can be reconciled by its exact
-handoff/run identity, retaining the old reservation and counting no progress. A
-queued stopped child can be resumed under the same handoff. Resume during an active
+publication or setup failure. An interrupted/cancelled run is reconciled using the
+completed **study job**, not the still-running workflow conclusion. A timeout,
+cancellation or owner Stop retains its reservation and latest exact verified parent.
+Cancellation requires explicit Resume; planned setup/compute budget yields can
+continue automatically within every cap. A queued child refused because of Stop
+remains resumable even when Resume overlaps shutdown. Resume during an active
 claimed run leaves that run alone and reports intervention guidance.
 
 Both workflows are `workflow_dispatch` only. Pushes, PRs, schedules and visibility
@@ -82,8 +85,21 @@ status transport, and its child environment explicitly strips all credentials.
 The **private data repository's actual default branch** contains:
 
 - `campaigns/<id>/control.json`: versioned CAS authority, task states, stop flag,
-  deterministic handoff, verified receipts and sealed append-only ledger;
-- `campaigns/<id>/status.json` and `status.md`: convenient non-authoritative views.
+  deterministic handoff, compact verified receipt references and sealed append-only ledger;
+- `campaigns/<id>/status.json` and `status.md`: convenient non-authoritative views;
+- `campaigns/<id>/diagnostics/<run>-<attempt>-<operation>.json`: small private,
+  allowlisted setup/transport records independent of scientific recovery. Public
+  logs and summaries contain only category, operation, safe HTTP/exit status and
+  locator. Exception messages, credentials, signed URLs and worker output are excluded.
+
+The entire view path (GET, decoding, prior activity, rendering and PUT) is optional
+with a separate six-second allowance. Failure returns a view derived from authority
+and a bounded warning. It cannot undo a claim, reservation or receipt acceptance;
+cancellation and authoritative integrity errors still propagate. Pinned stdlib
+finalizers need no scientific installation, run after mandatory recovery, and use
+short diagnostic deadlines. Untrusted pins do not execute a diagnostic finalizer.
+This overhead remains inside the existing study allocation and five-minute control/
+handoff allocations; routine diagnostics never create Releases.
 
 Claims and reservations update the same Contents record using its SHA. Four bounded
 conflict/reconciliation attempts reread and revalidate identity and committed ledger
@@ -95,8 +111,13 @@ The handoff key binds the complete campaign identity/spec digest, exact task,
 sequence, verified parent receipt and next allocation. A child claims that key and
 its run ID **before dependency installation, private inputs or scientific work**.
 Duplicate/stale dispatches and workflow reruns refuse entry and do not reserve the
-same slice twice. A lost CAS response may conservatively refuse entry despite a
-persisted reservation; it never permits unclaimed work.
+same slice twice. Exact operation/phase/period, test authorization, allocation and
+resume bindings are validated before reservation and again inside CAS. Each claim
+and dispatch-attempt invocation has a nonce bound to handoff, run and attempt. A
+lost Contents PUT response rereads the sealed ledger and returns that invocation’s
+original result, including after the last bounded retry; a different invocation or
+rerun cannot borrow the claim. Terminal failures cannot be overwritten by entry or
+a late receipt. Late verified evidence may be retained without reviving execution.
 
 Dispatch intent and attempt are persisted before the Actions POST. The response
 may be ambiguous. Reconciliation scans at most three recent 100-run pages by the
@@ -146,28 +167,55 @@ it is a presentation asset, not evidence or a substitute for manifest validation
 Partial recovery remains labelled recovery. Terminal aggregation bundles hold the
 execution index and exact references to every retained finalized input.
 
-New-campaign slices restore only the current task's active recovery. Earlier
-finalized work remains explicit externalized hashes plus exact finalized receipts.
-Aggregation downloads only the declared finalized reports and sidecars, not every
-old replay spool. Later-phase prerequisite artifacts still come from the exact
-frozen authorized metadata inventory. New consolidation manifests embed sealed
-active-parent inventories and append-only accounting ancestry, and bind every
-external finalized reference. Full scientific validation checks the local closure;
-its work plus externalized work must equal the monotonic committed-work contract.
-Legacy v1/v2 recovery continues through its original parent-generation validator.
+New-campaign slices restore only the current task's active recovery. The v2
+operational receipt stores exact generation/inventory SHA, task/handoff/run/attempt,
+outcome, local-work count/digest and sampled minutes. Full local committed hashes
+remain in the immutable sealed bundle; campaign-wide work is the validated union of
+local work and exact finalized proof references. No receipt, handoff or view repeats
+that cumulative set. Aggregation restores declared reports/sidecars and verifies all
+finalized evidence references, without restoring earlier replay spools. Five-second
+chronology, original absences, scientific hashes, phase gates and cache identities
+are unchanged.
 
-Retention defaults to retaining anything whose closure cannot be proved. It never
-removes inputs, final results/evidence, current/pending recovery, prerequisite
-references or accounting. Abandoned drafts remain retained because this controller
-cannot prove an adequate sealed draft closure. The owner can later request
-`operation=retention-plan` for a dry-run list. Explicit `operation=retention-apply`
-revalidates retained manifests and remote asset digests, requires campaign COMPLETED,
-checks terminal finalized work covers the redundant recovery, rechecks control CAS,
-and records deletion intent/outcome. Only redundant **new-campaign** recovery
-Releases qualify; legacy allocation/pilot Releases cannot enter this deletion path.
-Embedded sealed ancestry permits new validation without deleted parent assets.
-No retention command, Release deletion, dataset publication, or workflow dispatch
-was run during this implementation session.
+Consolidation v2 references the active parent and finalized bundles by exact sealed
+inventory SHA. Accounting uses an immutable Git commit **and blob SHA**, ledger tip/
+length, receipt digest and counters, instead of embedding a full record or recursive
+parent manifest. Remote verification checks that exact Git record, append-only
+accounting prefixes, local-parent work inclusion and every retained finalized asset
+closure. Mutable status or summary counts never prove work retention. Original
+pinned pilot, v1 transfer readers and legacy consolidation readers remain available;
+this implementation neither migrates live records nor rewrites Releases.
+
+New control-v2 campaigns admit at most 128 slices and 256 manual controls, 1,536
+ledger entries of at most 512 bytes, 128 receipt references of at most 1,024 bytes,
+32 KiB identity, 16 KiB task state and 4 KiB active handoff. Those component ceilings
+sum to 970,752 bytes; JSON separators and fixed counters remain below the existing
+one-MiB authority limit. Thirty daily preflights plus executions and three phase
+aggregates use 63 slices, leaving 65 permitted extra yields/retries within that
+storage envelope (the pinned minute and no-progress caps can authorize fewer).
+Bundle operational metadata is linear: up to 128 compact finalized references,
+one parent/reference, one Git accounting reference and local membership. It does
+not multiply complete ledgers, identities or 30-period work sets through ancestry;
+the existing eight-MiB manifest limit still applies to each actual file inventory.
+These are source-derived bounds, not benchmark or full-campaign execution results.
+
+An owner Stop or pre-launch budget cutoff retains the exact already verified remote
+parent. Uninstalled staging is never represented as a new snapshot. With no parent,
+a separately reserved, authorized retry starts from original pinned inputs. A running
+slice may finish and publish after Stop; no mid-stage algorithm snapshot is added.
+Interruption accounting records one event/no-progress increment per handoff and never
+refunds a reservation. Actual calculation, subprocess, source/checkpoint integrity
+and upload/verification failures stay failed even after cancellation. Unknown outcomes
+halt as OUTCOME_UNRESOLVED; green YAML alone proves no completion. Reconciliation
+prefers independently verified publication if receipt acceptance was interrupted.
+
+Retention is conservative. Immutable accounting Git history, exact parent manifests
+and their required assets are part of the retained proof closure. Control-v2 retention
+planning verifies that graph and currently proposes **no deletions**: these parents
+are required by subsequent proof validation. Inputs, finalized evidence, drafts,
+legacy allocations and pilot history stay retained. `retention-apply` cannot delete
+an ancestor still needed by a compact proof. No retention command, Release deletion,
+dataset publication or workflow dispatch was run during implementation.
 
 ## Owner-triggered hosted verification and runner comparison
 
@@ -177,18 +225,25 @@ Hosted behavior below remains unverified and must be owner-triggered after integ
 1. Use a small new private campaign to check passed preflight advances; forced
    budget/stage yielding publishes a verified receipt and resumes the same task;
    finalized periods advance and aggregate only exact declared membership.
-2. Duplicate a handoff and simulate lost dispatch/CAS responses, crashes and
-   cancellation. Confirm one claim, retained reservations, bounded reconciliation,
-   caps, no-progress stops and no scientific work from stale children.
-3. Stop an active and queued campaign; confirm responsive control, safe publication,
-   refusal on queued entry, exact automatic Resume, and failure/budget preservation.
+2. Exercise terminal entry and wrong dispatch bindings; lose claim and attempt PUT
+   responses on each retry including the last; duplicate children and rerun attempts.
+   Confirm one invocation enters, one reservation, no dispatch POST duplication and
+   bounded ambiguity. Inject status GET/decode/render/PUT failures and verify durable
+   claim outputs, dispatch and receipt/accounting remain usable.
+3. Stop during preparation and active science, exhaust preparation time before
+   launch, time out/cancel the study job, overlap Resume with queued refusal, and
+   interrupt receipt acceptance after verified publication. Confirm exact parent
+   retention, fresh pinned-input retries when no parent exists, one interruption
+   event, retained/replacement reservations and all caps. Genuine scientific,
+   integrity and upload/verification failures must survive later cancellation.
+   Check bounded private diagnostics when dependencies/science never start.
 4. Compare uninterrupted/resumed evidence and prepared-cache hit/miss results,
    Decimal/numerical versions, checkpoint/spool/stage/source hashes and phase gates.
    Validate report/evidence bundles and externalized committed-work retention.
-5. Review retention-plan first. Verify all retained result assets and terminal
-   closure before explicitly exercising deletion of a disposable new recovery;
-   demonstrate restoration/aggregation without deleted parent assets. Keep drafts,
-   inputs, pilot/allocation history and required evidence intact.
+5. Inspect a compact 30-period proof graph with bounded permitted yields. Verify
+   authority/manifest bounds, immutable Git accounting anchors, monotonic local/
+   finalized membership, exact aggregation, ancestry/asset closure and conservative
+   retention refusal. Keep every required parent, input, result and legacy artifact.
 6. Deliberately make the **code repository** public only after the private run;
    the **data repository stays private**. Run a comparable new public campaign with
    a different ID and exact repaired code/dependency/frozen input pins. Use the same

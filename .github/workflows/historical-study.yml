@@ -97,6 +97,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: Validate main-reachable full pins and checkout exact runtime
+        id: pins
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py bootstrap
       - name: Claim new-campaign handoff before dependencies or input acquisition
         id: entry
@@ -120,6 +121,11 @@ jobs:
             echo "extended=true" >> "$GITHUB_OUTPUT"
           else
             echo "extended=false" >> "$GITHUB_OUTPUT"
+          fi
+          if grep -q "'finalize-study'" /tmp/crypto-study/repo/scripts/research/github_campaign.py; then
+            echo "control_v2=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "control_v2=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Hash both actual pinned requirements after bootstrap
         if: steps.platform.outputs.extended == 'true'
@@ -149,6 +155,7 @@ jobs:
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py metadata
       - name: Validate frozen phase parents before raw/test input access
+        id: parents
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py validate-parents
       - name: Acquire explicit verified recovery generation to staging
         env:
@@ -174,12 +181,14 @@ jobs:
           RESEARCH_DATA_TOKEN: ${{ steps.entry.outputs.managed == 'true' && secrets.RESEARCH_DATA_TOKEN || '' }}
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py run
       - name: Validate and snapshot committed recovery with ownership held
-        if: always() && steps.scientific.outcome != 'skipped'
+        if: always() && steps.pins.outcome == 'success' && (steps.entry.outputs.claimed == 'true' || steps.entry.outputs.managed == 'false' && steps.scientific.outcome != 'skipped')
         id: snapshot
+        env:
+          STUDY_SETUP_OUTCOME: ${{ steps.scientific.outcome != 'skipped' && 'success' || 'unknown' }}
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py snapshot
       - name: Publish private parts then sealed manifest and verify publication
         id: publication
-        if: always() && steps.snapshot.outcome == 'success'
+        if: always() && steps.snapshot.outcome == 'success' && (steps.snapshot.outputs.ready == 'true' || steps.platform.outputs.control_v2 != 'true')
         env:
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
@@ -191,6 +200,16 @@ jobs:
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py record-receipt
+      - name: Retain bounded setup and control outcomes without scientific dependencies
+        if: always() && steps.pins.outcome == 'success' && steps.entry.outputs.managed == 'true' && steps.platform.outputs.control_v2 == 'true'
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+          STUDY_SETUP_OUTCOME: ${{ steps.install.outcome }}
+          STUDY_SCIENTIFIC_OUTCOME: ${{ steps.scientific.outcome }}
+          STUDY_SNAPSHOT_OUTCOME: ${{ steps.snapshot.outcome }}
+          STUDY_PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}
+        run: python /tmp/crypto-study/repo/scripts/research/github_campaign.py finalize-study
       - name: Publish optional prepared cache after mandatory recovery
         if: always() && steps.platform.outputs.extended == 'true' && steps.publication.outcome == 'success'
         continue-on-error: true
@@ -216,7 +235,7 @@ jobs:
 
   handoff:
     needs: study
-    if: always() && needs.study.outputs.managed == 'true' && needs.study.outputs.claimed == 'true' && github.ref == 'refs/heads/main'
+    if: always() && needs.study.outputs.managed == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -235,10 +254,25 @@ jobs:
         with:
           python-version: '3.10'
       - name: Re-enter pinned stdlib control helper
+        id: pins
         run: python scripts/research/github_campaign.py bootstrap
+      - name: Detect bounded diagnostics in the exact pinned stdlib helper
+        id: capabilities
+        shell: bash
+        run: |
+          if grep -q "'diagnostic'" scripts/research/github_campaign.py; then
+            echo "diagnostics=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Dispatch only from verified receipt and atomic campaign intent
+        id: dispatch
         env:
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
           GH_TOKEN: ${{ github.token }}
         run: python scripts/research/github_campaign.py dispatch
+      - name: Retain bounded handoff diagnostics after failure
+        if: failure() && steps.pins.outcome == 'success' && steps.capabilities.outputs.diagnostics == 'true'
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: python scripts/research/github_campaign.py diagnostic

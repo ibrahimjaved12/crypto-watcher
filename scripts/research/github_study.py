@@ -87,6 +87,7 @@ class GitHub:
 
     def response(self, url, *, accept='application/vnd.github+json', method='GET',
                  body=None, content_type=None, size=None):
+        last_status = None
         for attempt in range(3):
             self.deadline.check()
             current = url
@@ -119,24 +120,30 @@ class GitHub:
                             exc.close()
                             continue
                         code = exc.code
+                        last_status = code
                         exc.close()
                         # Mutations are not blindly retried: an ambiguous draft or
                         # upload must remain uncommitted, not silently overwrite.
                         if method != 'GET' or code not in (429, 500, 502, 503, 504):
-                            raise RuntimeError('GitHub request failed (HTTP %d)' % code) from None
+                            from github_campaign import TransportError
+                            raise TransportError('HTTP', method, code) from None
                         break
                 else:
                     raise ValueError('too many download redirects')
+            except InterruptedError:
+                raise
             except (urllib.error.URLError, TimeoutError, OSError):
                 if method != 'GET':
-                    raise RuntimeError('GitHub mutation interrupted; draft is not verified recovery') from None
+                    from github_campaign import TransportError
+                    raise TransportError('AMBIGUOUS_WRITE', method) from None
             finally:
                 if upload:
                     upload.close()
             if attempt < 2:
                 events.emit("TRANSFER_RETRY", retries=1)
                 time.sleep(min(2 ** attempt, max(0, self.deadline.remaining())))
-        raise RuntimeError('GitHub read failed after bounded retries')
+        from github_campaign import TransportError
+        raise TransportError('HTTP' if last_status else 'NETWORK', method, last_status)
 
     def json(self, url, method='GET', value=None):
         raw = execution._canonical(value).encode() if value is not None else None
@@ -240,11 +247,14 @@ class GitHub:
             if not hasattr(self, '_verified_finalized'):
                 self._verified_finalized = {}
                 self._control_store = Store(spec)
-            for receipt in closure['finalized_receipts']:
-                key = (receipt['generation'], receipt['manifest_sha256'])
-                if key not in self._verified_finalized:
-                    self._control_store.api.end = min(time.monotonic() + 240, self.deadline.end)
-                    self._verified_finalized[key] = verify_receipt(self._control_store, receipt)
+            from market_analysis.historical_campaign_control import receipt_reference, COMPACT_LINEAGE
+            if closure['version'] == COMPACT_LINEAGE:
+                reference = receipt_reference(value, value['metadata']['measured_minutes'])
+                self._control_store.api.end = min(time.monotonic() + 240, self.deadline.end)
+                verify_receipt(self._control_store, reference, self._verified_finalized)
+            else:
+                for receipt in closure['finalized_receipts']:
+                    verify_receipt(self._control_store, receipt, self._verified_finalized)
             return
         seen = set()
         for depth in range(spec['budget']['max_runs']):
@@ -358,16 +368,38 @@ class GitHub:
 
 
 
-def checked_claim(spec, *, remote=False):
-    from market_analysis.historical_campaign_control import validate
-    record = validate(execution._read_json(BASE / 'transfers/control-claim.json'), spec)
+class OperationalInterruption(InterruptedError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def retain_outcome(details):
+    try:
+        path = BASE / 'transfers/operation-outcomes.json'
+        records = execution._read_json(path) if path.exists() else []
+        execution._replace_atomic(path, execution._canonical((records + [details])[-16:]))
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def checked_claim(spec, *, remote=False, allow_stop=False):
+    from market_analysis.historical_campaign_control import validate, entry_bindings, TERMINAL
+    local = validate(execution._read_json(BASE / 'transfers/control-claim.json'), spec)
+    record = local
     if remote:
         from github_campaign import Store
         record, _ = Store(spec).get()
-    h = record['handoff']
-    if (record['stop_requested'] or h['key'] != os.environ.get('STUDY_HANDOFF_KEY')
-            or h['run_id'] != os.environ['GITHUB_RUN_ID'] or h['state'] != 'CLAIMED'):
-        raise ValueError('stale or stopped campaign claim')
+        if record is None:
+            raise ValueError('claimed authority disappeared')
+    h = entry_bindings(record, spec, os.environ.get('STUDY_HANDOFF_KEY'), os.environ)
+    owner = local['handoff']
+    if (record['state'] in TERMINAL | {'OUTCOME_UNRESOLVED'} or h['run_id'] != os.environ['GITHUB_RUN_ID']
+            or h.get('attempt') != os.environ['GITHUB_RUN_ATTEMPT'] or h['state'] != 'CLAIMED'
+            or h.get('mutation_id') != owner.get('mutation_id')):
+        raise ValueError('stale or terminal campaign claim')
+    if record['stop_requested'] and not allow_stop:
+        raise OperationalInterruption('OWNER_STOP')
     return record
 
 
@@ -421,7 +453,7 @@ def release_presentation(tag, directory):
     body = ('Purpose: ' + purpose + '\nScientific state: ' + str(metadata.get('scientific_state', 'not scientific completion'))
             + '\nSymbols: ' + ', '.join(display.get('symbols', sorted({r.get('facts', {}).get('symbol') for r in value['files'] if r.get('facts', {}).get('symbol')})))
             + '\nSources: ' + ', '.join({'core': 'Binance futures aggTrades', 'mark': 'Binance mark price', 'open-interest': 'Binance open interest', 'funding': 'Binance funding', 'liquidation': 'Tardis liquidations'}.get(source, source) for source in display.get('sources', sorted({r.get('facts', {}).get('source') for r in value['files'] if r.get('facts', {}).get('source')})))
-            + '\nCommitted units: ' + str(len(metadata.get('completed_work', []))) + '\nTransfer bytes: ' + str(value['transfer_bytes'])
+            + '\nLocal committed units: ' + str(len(metadata.get('completed_work', []))) + '\nTransfer bytes: ' + str(value['transfer_bytes'])
             + '\nRuntime: `' + str(value['identity'].get('runtime_sha', 'input producer')) + '`\nOrigin: ' + run
             + '\nInventory: `' + value['bundle_sha256'] + '`\nUse the sealed inventory, not this description, for validation.')
     index = ['# ' + title, body, '', '| File | Bytes | SHA-256 |', '| --- | ---: | --- |']
@@ -523,6 +555,8 @@ def shutil_free():
 def fetch_inputs(command):
     spec, operation, phase, index, minutes, start = settings()
     deadline = Deadline(start + (minutes - 15) * 60)
+    if 'control' in spec:
+        checked_claim(spec, remote=True)
     if command == 'inputs':
         manifest, coverage = frozen_inputs(spec)
         prerequisites(spec, manifest, coverage, phase, os.environ.get('STUDY_ALLOW_TEST') == 'true')
@@ -715,17 +749,21 @@ def supervise(validate_only=False):
     status_store = None
     last_status = 0
     if 'control' in spec:
-        checked_claim(spec, remote=not validate_only)
+        checked_claim(spec)
         if not validate_only:
             from github_campaign import Store, Conflict
             status_store = Store(spec)
-    deadline.check()
     if deadline.remaining() <= 30:
-        raise TimeoutError('insufficient launch time; preceding remote generation remains authoritative')
+        raise OperationalInterruption('SETUP_BUDGET')
     log_name = ('parents' if validate_only else 'batch') + '-' + identifier(os.environ['GITHUB_RUN_ID']) + '-' + identifier(os.environ['GITHUB_RUN_ATTEMPT'])
     event_path = operations / (log_name + '.events.jsonl')
     arguments = batch_arguments('validate-parents' if validate_only else operation, spec, phase, index, epoch, event_path)
     termination = None
+    if not validate_only:
+        checked_claim(spec, remote=True)
+        if deadline.remaining() <= 30:
+            raise OperationalInterruption('SETUP_BUDGET')
+        (BASE / 'transfers/science-started').write_text('started\n')
     offset = 0
     with (operations / (log_name + '.log')).open('wb') as log:
         child = subprocess.Popen(arguments, cwd=REPO / 'python', env=token_free_environment(),
@@ -750,7 +788,9 @@ def supervise(validate_only=False):
                             activity['remaining_stages'] = [stage for stage in declared if stage not in done]
                         activity['timings_seconds'] = {r.get('stage', r.get('operation', 'operation')) + ':' + r.get('category', ''): r['duration_seconds'] for r in observations if 'duration_seconds' in r}
                         status_store.view(remote, activity)
-                    except (OSError, ValueError, RuntimeError, TimeoutError, Conflict):
+                    except (InterruptedError, ValueError, KeyError):
+                        raise # Cancellation and authoritative integrity are never optional.
+                    except (OSError, RuntimeError, TimeoutError, Conflict):
                         events.emit('STATUS_VIEW_UNAVAILABLE')
                     last_status = time.monotonic()
                 already_exited = child.poll()
@@ -792,10 +832,20 @@ def supervise(validate_only=False):
         if termination or not status_path.exists() or (result and (status.get('scientific_state') != 'FAILED' or not status.get('failure_category'))):
             status.update(version=STATUS_VERSION, identity=campaign_identity(spec), scientific_state='FAILED',
                           failure_category=termination or 'ProcessFailure', returncode=result, remote_published=False)
-            if termination == 'compute-deadline':
+            if termination in ('compute-deadline', 'external-cancellation'):
                 try:
+                    if prior_failure in (None, 'InterruptedError') and (BASE / 'transfers/recovery-staging').exists():
+                        # Installation/validation was interrupted before launch.
+                        # Retain the already verified exact remote receipt instead
+                        # of calling an uninstalled parent a scientific failure.
+                        (BASE / 'transfers/retain-parent-only').write_text('retained\n')
+                        retain_outcome({'version': 'historical-campaign-diagnostic-v1', 'operation': 'run',
+                            'category': 'SETUP_BUDGET' if termination == 'compute-deadline' else 'CANCELLED', 'http_status': None, 'exit_code': result})
+                        status.update(scientific_state='NOT_STARTED', yield_reason='setup-budget' if termination == 'compute-deadline' else 'external-cancellation', failure_category=None)
+                        execution._replace_atomic(status_path, execution._canonical(status))
+                        return 0 if termination == 'compute-deadline' else 1
                     manifest, coverage = frozen_inputs(spec)
-                    files, work = verified_tree(spec, manifest, coverage, recovery, Deadline(epoch + 90))
+                    files, work = verified_tree(spec, manifest, coverage, recovery, Deadline(min(epoch + 90, time.time() + 90)))
                     last = last_verified_unit(files, work, index)
                     if last is not None:
                         status['last_verified_unit'] = last
@@ -804,14 +854,16 @@ def supervise(validate_only=False):
                     if prior_failure not in (None, 'InterruptedError'):
                         status['failure_category'] = prior_failure
                     if prior_failure in (None, 'InterruptedError'):
-                        status.update(scientific_state='YIELDED', yield_reason='supervisor-budget-termination', failure_category=None)
-                        result = 0
+                        status.update(scientific_state='YIELDED', yield_reason='supervisor-budget-termination' if termination == 'compute-deadline' else 'external-cancellation', failure_category=None)
+                        result = 0 if termination == 'compute-deadline' else 1
                 except BaseException as exc:
                     status.update(scientific_state='FAILED', failure_category=prior_failure if prior_failure not in (None, 'InterruptedError') else type(exc).__name__,
                                   verification_failure_category=type(exc).__name__, failure_operation='recovery-verification')
-                    import traceback
-                    execution._replace_atomic(operations / 'supervisor-failure.txt', traceback.format_exc())
+                    execution._replace_atomic(operations / 'supervisor-failure.json', execution._canonical({'category': 'INTEGRITY', 'operation': 'recovery-verification'}))
             execution._replace_atomic(status_path, execution._canonical(status))
+        if status.get('scientific_state') == 'FAILED' or termination == 'external-cancellation':
+            retain_outcome({'version': 'historical-campaign-diagnostic-v1', 'operation': 'run',
+                'category': 'PROCESS' if status.get('scientific_state') == 'FAILED' else 'CANCELLED', 'http_status': None, 'exit_code': result})
         events.emit('SCIENTIFIC_STOP', scientific_state=status.get('scientific_state'), reason=termination, returncode=result)
     return result
 
@@ -819,6 +871,12 @@ def supervise(validate_only=False):
 def snapshot():
     spec, operation, phase, index, minutes, start = settings()
     deadline = Deadline(start + minutes * 60 - 120)
+    if 'control' in spec and (not (BASE / 'transfers/science-started').exists() or (BASE / 'transfers/retain-parent-only').exists()):
+        # Never fabricate a new saved tree from uninstalled staged parent work.
+        # The finalizer retains the exact remote parent in the authoritative intent.
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write('ready=false\n')
+        return
     manifest, coverage = frozen_inputs(spec)
     prerequisites(spec, manifest, coverage, phase, os.environ.get('STUDY_ALLOW_TEST') == 'true')
     recovery = (read_bundle(BASE / 'transfers/recovery-manifest.json', os.environ['STUDY_RESUME_SHA'])
@@ -838,9 +896,8 @@ def snapshot():
         status = execution._read_json(status_path) if status_path.exists() else {'scientific_state': 'FAILED'}
         previous_work = (recovery['metadata']['local_completed_work'] if 'control' in spec else recovery['metadata']['completed_work']) if recovery else []
         local_work = work
-        record = checked_claim(spec) if 'control' in spec else None
+        record = checked_claim(spec, allow_stop=True) if 'control' in spec else None
         finalized = [r for r in record['receipts'] if r['task_complete']] if record else []
-        external_work = {unit for receipt in finalized for unit in receipt['completed_work']}
         if not set(previous_work).issubset(local_work):
             raise ValueError('snapshot cannot discard parent committed work after failed restore')
         last = last_verified_unit(files, work, index)
@@ -877,16 +934,21 @@ def snapshot():
                 else:
                     aggregate_result = status.get('aggregation', {})
                     complete = status['scientific_state'] == 'FINALIZED_PERIOD' and aggregate_result.get('expected_membership') == spec['expected_membership'][phase] and (root / 'outputs' / execution.EXECUTION_INDEX_FILENAME) in files
-            campaign_work = sorted(set(local_work) | external_work)
-            prior_campaign_work = record['receipts'][-1]['completed_work'] if record['receipts'] else []
-            lineage['no_progress_runs'] = record['no_progress_runs'] + 1 if campaign_work == prior_campaign_work and not complete else 0
-            metadata.update(completed_work=campaign_work, local_completed_work=local_work,
-                task_receipt={'receipt_contract': 'historical-campaign-task-receipt-v1', 'task_id': task['id'], 'handoff_key': record['handoff']['key'],
+            from market_analysis.historical_campaign_control import digest, RECEIPT, COMPACT_LINEAGE, accounting_reference
+            parent = record['handoff']['parent']
+            progress = complete or parent is None and bool(local_work) or parent is not None and digest(local_work) != parent['work_sha256']
+            lineage['no_progress_runs'] = 0 if progress else record['no_progress_runs'] + 1
+            metadata.update(completed_work=local_work, local_completed_work=local_work,
+                measured_minutes=(time.time() - start) / 60,
+                task_receipt={'receipt_contract': RECEIPT, 'task_id': task['id'], 'handoff_key': record['handoff']['key'],
+                              'operation': task['operation'], 'run_id': record['handoff']['run_id'], 'attempt': record['handoff']['attempt'],
                               'task_complete': complete, 'campaign_complete': complete and all(state == 'DONE' or task_id == task['id'] for task_id, state in record['tasks'].items()),
                               'verified_outputs': task['expected_outputs'] if complete else [],
-                              'scientific_state': status['scientific_state']},
-                consolidation={'version': 'historical-campaign-consolidation-v1', 'finalized_receipts': finalized,
-                               'sealed_parent': recovery, 'accounting': record},
+                              'setup_outcome': os.environ.get('STUDY_SETUP_OUTCOME', 'unknown'),
+                              'scientific_state': status['scientific_state'],
+                              'termination_reason': 'external-cancellation' if status.get('yield_reason') == 'external-cancellation' else 'budget-yield' if status['scientific_state'] == 'YIELDED' else 'completed' if complete else 'failed'},
+                consolidation={'version': COMPACT_LINEAGE, 'finalized_receipts': finalized,
+                               'parent_receipt': parent, 'accounting': accounting_reference(record, execution._read_json(BASE / 'transfers/control-claim-reference.json'))},
                 presentation={'phase': phase, 'period_index': index, 'operation': operation,
                               'date': period.utc_date.isoformat() if period else None,
                               'symbols': sorted({symbol for packages in planned_packages(period).values() for _, symbol in packages}) if period else [],
@@ -900,6 +962,8 @@ def snapshot():
         if value['transfer_bytes'] > spec['limits']['max_transfer_bytes']:
             raise BundleFootprintError('recovery-transfer-limit', transfer_bytes=value['transfer_bytes'],
                                        limit_bytes=spec['limits']['max_transfer_bytes'])
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write('ready=true\n')
 
 
 def publish():
@@ -931,10 +995,9 @@ def record_receipt():
     from github_campaign import publish_receipt
     receipt = execution._read_json(BASE / 'transfers/publication-receipt.json')
     value = read_bundle(BASE / 'transfers/publication/manifest.json', receipt['manifest_sha256'])
-    receipt.update(identity=campaign_identity(spec), **value['metadata']['task_receipt'],
-                   completed_work=value['metadata']['completed_work'], measured_minutes=receipt['sampled_job_elapsed_minutes'])
-    publish_receipt(spec, receipt)
-    execution._replace_atomic(BASE / 'transfers/publication-receipt.json', execution._canonical(receipt))
+    from market_analysis.historical_campaign_control import receipt_reference
+    reference = receipt_reference(value, value['metadata']['measured_minutes'])
+    publish_receipt(spec, reference)
 
 def dependency_key():
     import platform
@@ -1015,6 +1078,8 @@ def cache_restore():
                 raise ValueError('optional immutable cache already exists')
             os.rename(candidate, destination)
             events.emit('CACHE_DOWNLOADED', cache_identity=key)
+    except InterruptedError:
+        raise
     except (OSError, ValueError, RuntimeError, KeyError, TimeoutError):
         events.emit('CACHE_MISS', reason='optional-cache-unavailable', cache_identity=key)
     finally:
@@ -1153,6 +1218,15 @@ def summary():
                 'sequence': control_record['sequence'], 'reserved_minutes': control_record['reserved_minutes'],
                 'budget': spec['budget'], 'private_status_path': 'campaigns/' + spec['campaign_id'] + '/status.json',
                 'result_location': 'private data repository Releases; exact references in control.json'}
+    try:
+        from github_campaign import safe_diagnostic
+        path = BASE / 'transfers/operation-outcomes.json'
+        details = execution._read_json(path) if path.exists() else []
+        public['diagnostics'] = [safe_diagnostic(d) for d in details[-8:] if isinstance(d, dict)]
+        if 'spec' in locals():
+            public['diagnostic_location'] = 'campaigns/' + identifier(spec['campaign_id']) + '/diagnostics/' + identifier(os.environ['GITHUB_RUN_ID']) + '-' + identifier(os.environ['GITHUB_RUN_ATTEMPT']) + '-<operation>.json'
+    except (OSError, ValueError, KeyError):
+        pass
     public.update(events.allowlisted({'reason': status.get('yield_reason'), 'category': status.get('failure_category')}))
     progress = status.get('computed_replay_progress', {})
     public['computed_replay'] = events.allowlisted(progress)
@@ -1189,13 +1263,15 @@ def main():
         reserve = 30 if args.command in ('summary', 'cache-publish') else 60 if args.command in ('publish', 'record-receipt') else 120 if args.command == 'snapshot' else 780 if args.command in ('run', 'validate-parents') else 900
         remaining = float(os.environ['STUDY_JOB_STARTED_EPOCH']) + minutes * 60 - reserve - time.time()
         if remaining <= 0:
+            if args.command not in ('snapshot', 'publish', 'record-receipt', 'cache-publish'):
+                raise OperationalInterruption('SETUP_BUDGET')
             raise TimeoutError('no operational time remains')
-        signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError('operational deadline')))
+        signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(OperationalInterruption('SETUP_BUDGET') if args.command not in ('run', 'snapshot', 'publish', 'record-receipt', 'cache-publish') else TimeoutError('operational deadline')))
         signal.setitimer(signal.ITIMER_REAL, remaining)
         if args.command != 'bootstrap':
             spec, operation, phase, index, _, start = settings()
             if 'control' in spec and args.command != 'validate-settings':
-                checked_claim(spec)
+                checked_claim(spec, allow_stop=True)
             event_path = BASE / 'campaigns' / spec['campaign_id'] / 'operations' / (args.command + '-' + identifier(os.environ['GITHUB_RUN_ID']) + '-' + identifier(os.environ['GITHUB_RUN_ATTEMPT']) + '.events.jsonl')
             events.configure(event_path, operation=args.command, phase=phase, period=index, deadline_epoch=start + (minutes - 15) * 60, public=True)
         if args.command == 'bootstrap':
@@ -1221,11 +1297,11 @@ def main():
             _, _, _, _, minutes, start = settings()
             remaining = start + (minutes - 15) * 60 - time.time()
             if remaining <= 0:
-                raise TimeoutError('no setup time remains')
+                raise OperationalInterruption('SETUP_BUDGET')
             with events.span('dependency-install'):
                 subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', str(REPO / 'python/requirements.txt'),
                                 '-r', str(REPO / 'python/requirements-research.txt')], check=True,
-                               timeout=remaining)
+                               timeout=remaining, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         elif args.command in ('run', 'validate-parents'):
             return supervise(args.command == 'validate-parents')
         elif args.command == 'snapshot':
@@ -1237,15 +1313,16 @@ def main():
                 return publish()
         return 0
     except BaseException as exc:
+        from github_campaign import safe_error
+        details = safe_error(exc, args.command)
+        if isinstance(exc, OperationalInterruption):
+            details['category'] = exc.code
+        elif isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) and (args.command not in ('run', 'snapshot', 'publish', 'record-receipt', 'cache-publish') or args.command == 'run' and not (BASE / 'transfers/science-started').exists()):
+            details['category'] = 'SETUP_BUDGET'
+        retain_outcome(details)
         if events._sink is not None:
-            import traceback
-            execution._replace_atomic(events._sink.with_suffix('.failure.txt'), traceback.format_exc())
-            events.emit('OPERATION_FAILED', reason=type(exc).__name__)
-        # Never expose urllib exceptions, signed URLs, tokens or source rows.
-        if isinstance(exc, BundleFootprintError):
-            events.emit('FOOTPRINT_REJECTED', reason=exc.measurements.get('reason'))
-        print('Historical platform operation failed: ' + type(exc).__name__ +
-              '. Check configured pins, original private bundles, budget and disk limits.')
+            events.emit('OPERATION_FAILED', reason=details['category'])
+        print('Historical platform halted: ' + json.dumps(details, sort_keys=True))
         return 1
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
