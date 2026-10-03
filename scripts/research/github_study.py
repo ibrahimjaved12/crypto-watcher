@@ -32,7 +32,7 @@ from market_analysis.historical_study_batch import (
 from market_analysis.historical_study_bundles import (
     BLOCK, PART_LIMIT, BundleFootprintError, identifier, sha, safe_relative, regular, file_sha,
     read_bundle, unpack_files, install_files, pack_files, verify_recovery_tree,
-    classify_recovery_inventory, asset_table, validate_bundle, last_verified_unit, metadata_paths,
+    classify_recovery_inventory, asset_table, validate_bundle, last_verified_unit, metadata_paths, planned_packages, period_root,
 )
 from market_analysis.historical_run_directory import owned_run_directory
 from market_analysis import historical_operational_events as events
@@ -233,6 +233,19 @@ class GitHub:
         events.emit('TRANSFER_SELECTED', transfer_bytes=value['transfer_bytes'], selected_bytes=value['uncompressed_bytes'])
 
     def verify_lineage(self, value, spec):
+        if 'control' in spec:
+            from market_analysis.historical_campaign_control import consolidation
+            from github_campaign import Store, verify_receipt
+            closure = consolidation(value, campaign_identity(spec))
+            if not hasattr(self, '_verified_finalized'):
+                self._verified_finalized = {}
+                self._control_store = Store(spec)
+            for receipt in closure['finalized_receipts']:
+                key = (receipt['generation'], receipt['manifest_sha256'])
+                if key not in self._verified_finalized:
+                    self._control_store.api.end = min(time.monotonic() + 240, self.deadline.end)
+                    self._verified_finalized[key] = verify_receipt(self._control_store, receipt)
+            return
         seen = set()
         for depth in range(spec['budget']['max_runs']):
             metadata = value['metadata']
@@ -329,10 +342,11 @@ class GitHub:
     def publish(self, tag, directory):
         identifier(tag)
         # Creation conflicts fail. No existing generation is replaced or cleaned.
+        title, body = release_presentation(tag, directory)
         release = self.json(self.prefix + '/releases', 'POST', {
-            'tag_name': tag, 'target_commitish': self.branch, 'name': tag,
+            'tag_name': tag, 'target_commitish': self.branch, 'name': title,
             'draft': True, 'prerelease': True, 'make_latest': 'false',
-            'body': 'Private operational recovery; use exact locator and sealed inventory hash.'})
+            'body': body})
         for path in sorted(Path(directory).iterdir()):
             if path.name != 'manifest.json':
                 self.upload_verified(release, path)
@@ -342,6 +356,78 @@ class GitHub:
             raise ValueError('remote generation publication was not verified')
         return result
 
+
+
+def checked_claim(spec, *, remote=False):
+    from market_analysis.historical_campaign_control import validate
+    record = validate(execution._read_json(BASE / 'transfers/control-claim.json'), spec)
+    if remote:
+        from github_campaign import Store
+        record, _ = Store(spec).get()
+    h = record['handoff']
+    if (record['stop_requested'] or h['key'] != os.environ.get('STUDY_HANDOFF_KEY')
+            or h['run_id'] != os.environ['GITHUB_RUN_ID'] or h['state'] != 'CLAIMED'):
+        raise ValueError('stale or stopped campaign claim')
+    return record
+
+
+def restore_finalized(spec, github=None):
+    """Aggregation restores exact declared reports/sidecars, never earlier spools."""
+    record = checked_claim(spec, remote=True)
+    _, _, phase, _, minutes, start = settings()
+    manifest, coverage = frozen_inputs(spec)
+    prerequisites(spec, manifest, coverage, phase, os.environ.get('STUDY_ALLOW_TEST') == 'true')
+    github = github or GitHub(os.environ.get('RESEARCH_DATA_REPOSITORY'), Deadline(start + (minutes - 15) * 60))
+    task = record['handoff']['task']
+    wanted = {t['id']: t for t in spec['control']['tasks'] if t['id'] in task['depends_on'] and t['operation'] == 'execute-period'}
+    receipts = {r['task_id']: r for r in record['receipts'] if r['task_complete'] and r['task_id'] in wanted}
+    if set(receipts) != set(wanted):
+        raise ValueError('aggregate lacks exact finalized dependency receipts')
+    for task_id, receipt in receipts.items():
+        value, assets = github.manifest(receipt['generation'], receipt['manifest_sha256'], BASE / 'transfers' / ('final-' + identifier(task_id) + '.json'))
+        github.verify_lineage(value, spec)
+        period, = execution.select_execution_periods(manifest, phase, period_index=wanted[task_id]['period_index'], allow_test=phase == 'test')
+        name = execution._period_filename(period)
+        prefix = 'campaigns/' + spec['campaign_id'] + '/outputs/'
+        paths = {prefix + execution.PERIOD_DIRECTORY + '/' + name, prefix + '.period-manifests/' + name}
+        selected = subset(value, lambda row: row['path'] in paths)
+        if {r['path'] for r in selected['files']} != paths:
+            raise ValueError('finalized result closure lacks report/sidecar')
+        limits(spec, selected)
+        parts, stage = BASE / 'transfers/final-parts', BASE / 'transfers/final-staging'
+        github.fetch_parts(selected, assets, parts)
+        unpack_files(selected, parts, stage, max_bytes=spec['limits']['max_uncompressed_bytes'], headroom_bytes=spec['limits']['headroom_bytes'], check=github.deadline.check)
+        install_files(selected, stage)
+        shutil.rmtree(stage)
+        shutil.rmtree(parts)
+    verify_recovery_tree(BASE, spec['campaign_id'], manifest, coverage, campaign_identity(spec), check=github.deadline.check)
+
+
+def release_presentation(tag, directory):
+    """Human presentation is derived from a sealed inventory, never proof itself."""
+    path = Path(directory) / 'manifest.json'
+    value = execution._read_json(path)
+    if 'bundle_sha256' not in value:
+        return tag, 'Private legacy allocation record; retained accounting.'
+    read_bundle(path, value['bundle_sha256'])
+    metadata = value.get('metadata', {})
+    display = metadata.get('presentation', value.get('identity', {}).get('period', {}))
+    typed = metadata.get('task_receipt', {})
+    purpose = ('Finalized results/evidence' if typed.get('task_complete') and display.get('operation') == 'execute-period'
+               else ('Campaign terminal results' if typed.get('campaign_complete') else 'Finalized aggregate results') if typed.get('task_complete') and display.get('operation') == 'aggregate'
+               else 'Inputs' if value['kind'] == 'inputs' else 'Study recovery' if value['kind'] == 'recovery' else 'Prepared core cache')
+    title = purpose + (' — Slice ' + str(display['sequence']) if 'sequence' in display else '') + ' — ' + str(display.get('phase', '')) + ' ' + str(display.get('period_index', display.get('study_period_index', ''))) + ' — ' + str(display.get('date', display.get('utc_date', '')) or '')
+    run = 'https://github.com/' + os.environ.get('GITHUB_REPOSITORY', '') + '/actions/runs/' + os.environ.get('GITHUB_RUN_ID', '')
+    body = ('Purpose: ' + purpose + '\nScientific state: ' + str(metadata.get('scientific_state', 'not scientific completion'))
+            + '\nSymbols: ' + ', '.join(display.get('symbols', sorted({r.get('facts', {}).get('symbol') for r in value['files'] if r.get('facts', {}).get('symbol')})))
+            + '\nSources: ' + ', '.join({'core': 'Binance futures aggTrades', 'mark': 'Binance mark price', 'open-interest': 'Binance open interest', 'funding': 'Binance funding', 'liquidation': 'Tardis liquidations'}.get(source, source) for source in display.get('sources', sorted({r.get('facts', {}).get('source') for r in value['files'] if r.get('facts', {}).get('source')})))
+            + '\nCommitted units: ' + str(len(metadata.get('completed_work', []))) + '\nTransfer bytes: ' + str(value['transfer_bytes'])
+            + '\nRuntime: `' + str(value['identity'].get('runtime_sha', 'input producer')) + '`\nOrigin: ' + run
+            + '\nInventory: `' + value['bundle_sha256'] + '`\nUse the sealed inventory, not this description, for validation.')
+    index = ['# ' + title, body, '', '| File | Bytes | SHA-256 |', '| --- | ---: | --- |']
+    index.extend('| ' + row['path'] + ' | ' + str(row.get('size', 0)) + ' | ' + str(row.get('sha256', 'recorded absence')) + ' |' for row in value['files'])
+    (Path(directory) / 'bundle-index.md').write_text('\n'.join(index) + '\n')
+    return title[:200], body
 
 def settings():
     spec = campaign_spec(BASE / 'transfers/campaign.json')
@@ -392,6 +478,15 @@ def bootstrap():
 
 
 def budget_parent(spec, minutes, recovery=None):
+    if 'control' in spec:
+        path = BASE / 'transfers/control-claim.json'
+        if not path.exists():
+            # Pin validation precedes the remote claim; it never allocates work.
+            return {'reserved_minutes': 0, 'run_count': 0, 'no_progress_runs': 0, 'sampled_cumulative_runner_minutes': 0}
+        from market_analysis.historical_campaign_control import validate
+        record = validate(execution._read_json(path), spec)
+        return {'reserved_minutes': record['reserved_minutes'], 'run_count': record['run_count'] - 1,
+                'no_progress_runs': record['no_progress_runs'], 'sampled_cumulative_runner_minutes': record['measured_minutes']}
     old = recovery['metadata']['lineage'] if recovery else {'reserved_minutes': 0, 'run_count': 0, 'no_progress_runs': 0,
                                                           'sampled_cumulative_runner_minutes': 0}
     if (old['reserved_minutes'] + minutes > spec['budget']['ceiling_minutes']
@@ -433,6 +528,8 @@ def fetch_inputs(command):
         prerequisites(spec, manifest, coverage, phase, os.environ.get('STUDY_ALLOW_TEST') == 'true')
     github = GitHub(os.environ.get('RESEARCH_DATA_REPOSITORY'), deadline)
     if command == 'metadata':
+        if 'control' in spec:
+            checked_claim(spec, remote=True)
         tag = os.environ.get('STUDY_RESUME_GENERATION', '')
         expected = os.environ.get('STUDY_RESUME_SHA', '')
         if bool(tag) != bool(expected):
@@ -443,7 +540,8 @@ def fetch_inputs(command):
                 raise ValueError('recovery identity mismatch before allocation')
             github.verify_lineage(recovery, spec)
             budget_parent(spec, minutes, recovery)
-        github.reserve_allocation(spec, minutes)
+        if 'control' not in spec:
+            github.reserve_allocation(spec, minutes)
     # Aggregation uses an explicit period input locator for frozen metadata only;
     # never obtains raw archives merely to assemble reports.
     locator_index = index if index is not None else next(
@@ -489,6 +587,8 @@ def restore():
         raise ValueError('resume requires both exact generation and manifest SHA')
     if not tag:
         budget_parent(spec, minutes)
+        if 'control' in spec and operation == 'aggregate':
+            restore_finalized(spec, github=None)
         return
     sha(expected)
     deadline = Deadline(start + (minutes - 15) * 60)
@@ -503,6 +603,14 @@ def restore():
     manifest, coverage = frozen_inputs(spec)
     prerequisites(spec, manifest, coverage, phase, os.environ.get('STUDY_ALLOW_TEST') == 'true')
     included = classify_recovery_inventory(value, manifest, spec['campaign_id'], spec['expected_membership'])
+    if 'control' in spec:
+        record = checked_claim(spec, remote=True)
+        if value['metadata']['task_receipt']['task_id'] != record['handoff']['task']['id']:
+            raise ValueError('active recovery names a different declared task')
+        if operation != 'aggregate' and any(p.study_period_index != index or p.phase != phase for p in included):
+            raise ValueError('active recovery contains an earlier finalized period')
+        if operation == 'aggregate' and any('/checkpoints/' in row['path'] for row in value['files']):
+            raise ValueError('aggregate recovery must not restore replay spools')
     phases = {item.phase for item in included}
     if ('test' in phases and phase != 'test'
             or 'validation' in phases and phase == 'development'):
@@ -569,7 +677,8 @@ def verified_tree(spec, manifest, coverage, recovery, deadline):
             files, work = verify_recovery_tree(BASE, spec['campaign_id'], manifest, coverage,
                 campaign_identity(spec), check=deadline.check, locks_held=True)
         deadline.check()
-        if not set(recovery['metadata']['completed_work'] if recovery else []).issubset(work):
+        prior_work = (recovery['metadata']['local_completed_work'] if 'control' in spec else recovery['metadata']['completed_work']) if recovery else []
+        if not set(prior_work).issubset(work):
             raise ValueError('verified recovery lost previously committed work')
         return files, work
 
@@ -603,6 +712,13 @@ def supervise(validate_only=False):
     recovery = (read_bundle(BASE / 'transfers/recovery-manifest.json', os.environ['STUDY_RESUME_SHA'])
                 if (BASE / 'transfers/recovery-manifest.json').exists() else None)
     budget_parent(spec, minutes, recovery)
+    status_store = None
+    last_status = 0
+    if 'control' in spec:
+        checked_claim(spec, remote=not validate_only)
+        if not validate_only:
+            from github_campaign import Store, Conflict
+            status_store = Store(spec)
     deadline.check()
     if deadline.remaining() <= 30:
         raise TimeoutError('insufficient launch time; preceding remote generation remains authoritative')
@@ -617,6 +733,26 @@ def supervise(validate_only=False):
         try:
             while True:
                 offset = relay(event_path, offset)
+                if status_store is not None and not validate_only and time.monotonic() - last_status >= 120:
+                    try:
+                        status_store.api.end = time.monotonic() + 12
+                        status_store.api.timeout = 2
+                        remote, _ = status_store.get()
+                        observations = list(current_events(root))
+                        activity = {'last_heartbeat_epoch': time.time(), 'observations': observations[-8:],
+                                    'computed_replay': next((r for r in reversed(observations) if r.get('category') in ('REPLAY_CURRENT_PROGRESS', 'REPLAY_RESUMED')), None)}
+                        status_path = operations / 'status.json'
+                        if status_path.exists():
+                            local_status = execution._read_json(status_path)
+                            activity['science'] = {k: local_status.get(k) for k in ('scientific_state', 'current_stage', 'newly_completed_stages', 'reused_stages', 'last_verified_unit')}
+                            declared = ['v1', *execution._candidate_stage_selectors(), 'event-context', 'outcomes'] if operation == 'execute-period' else []
+                            done = {r['stage_id'] for r in local_status.get('newly_completed_stages', []) + local_status.get('reused_stages', [])}
+                            activity['remaining_stages'] = [stage for stage in declared if stage not in done]
+                        activity['timings_seconds'] = {r.get('stage', r.get('operation', 'operation')) + ':' + r.get('category', ''): r['duration_seconds'] for r in observations if 'duration_seconds' in r}
+                        status_store.view(remote, activity)
+                    except (OSError, ValueError, RuntimeError, TimeoutError, Conflict):
+                        events.emit('STATUS_VIEW_UNAVAILABLE')
+                    last_status = time.monotonic()
                 already_exited = child.poll()
                 if already_exited is not None:
                     result = already_exited
@@ -700,8 +836,12 @@ def snapshot():
                                              campaign_identity(spec), check=deadline.check, locks_held=True)
         status_path = root / 'operations/status.json'
         status = execution._read_json(status_path) if status_path.exists() else {'scientific_state': 'FAILED'}
-        previous_work = recovery['metadata']['completed_work'] if recovery else []
-        if not set(previous_work).issubset(work):
+        previous_work = (recovery['metadata']['local_completed_work'] if 'control' in spec else recovery['metadata']['completed_work']) if recovery else []
+        local_work = work
+        record = checked_claim(spec) if 'control' in spec else None
+        finalized = [r for r in record['receipts'] if r['task_complete']] if record else []
+        external_work = {unit for receipt in finalized for unit in receipt['completed_work']}
+        if not set(previous_work).issubset(local_work):
             raise ValueError('snapshot cannot discard parent committed work after failed restore')
         last = last_verified_unit(files, work, index)
         if last is not None:
@@ -710,19 +850,53 @@ def snapshot():
         status['verified_new_work_count'] = len(set(work) - set(previous_work))
         execution._replace_atomic(status_path, execution._canonical(status))
         files.add(status_path)
-        lineage = {'reserved_minutes': execution._read_json(BASE / 'transfers/allocation-total.json')['reserved_minutes'], 'run_count': old['run_count'] + 1,
+        lineage = {'reserved_minutes': record['reserved_minutes'] if record else execution._read_json(BASE / 'transfers/allocation-total.json')['reserved_minutes'], 'run_count': old['run_count'] + 1,
                    'no_progress_runs': old['no_progress_runs'] + 1 if work == previous_work else 0,
                    'sampled_cumulative_runner_minutes': old['sampled_cumulative_runner_minutes'] + (time.time() - start) / 60}
         tag = f"recovery-{spec['campaign_id'][:20]}-{int(os.environ['GITHUB_RUN_ID'])}-{int(os.environ['GITHUB_RUN_ATTEMPT'])}"
         identifier(tag)
-        value = pack_files([(str(path.relative_to(BASE)), path, {'role': 'committed-recovery'}) for path in files],
+        metadata = {'generation': tag, 'parent': {'generation': os.environ.get('STUDY_RESUME_GENERATION'),
+                    'manifest_sha256': os.environ.get('STUDY_RESUME_SHA')} if recovery else None,
+                    'lineage': lineage, 'completed_work': work, 'scientific_state': status['scientific_state'],
+                    'source_identities': coverage['source_identities'], 'disk': disk_sample(root),
+                    'runner_time_sampling_boundary': 'before pack/upload; allocation covers full requested job'}
+        if record:
+            task = record['handoff']['task']
+            period = None
+            if index is not None:
+                period, = execution.select_execution_periods(manifest, phase, period_index=index, allow_test=phase == 'test')
+            complete = False
+            if status['scientific_state'] != 'FAILED':
+                if operation == 'preflight':
+                    complete = status.get('preflight_passed') is True
+                elif operation == 'execute-period':
+                    required_evidence = {period_root(spec['campaign_id'], period) / 'prepared-replay.json',
+                                         period_root(spec['campaign_id'], period) / 'study-points/manifest.json',
+                                         *(period_root(spec['campaign_id'], period) / 'post-replay' / (stage + '.json') for stage in ['v1', *execution._candidate_stage_selectors(), 'event-context', 'outcomes'])}
+                    complete = status['scientific_state'] == 'FINALIZED_PERIOD' and (root / 'outputs' / execution.PERIOD_DIRECTORY / execution._period_filename(period)) in files and required_evidence.issubset(files)
+                else:
+                    aggregate_result = status.get('aggregation', {})
+                    complete = status['scientific_state'] == 'FINALIZED_PERIOD' and aggregate_result.get('expected_membership') == spec['expected_membership'][phase] and (root / 'outputs' / execution.EXECUTION_INDEX_FILENAME) in files
+            campaign_work = sorted(set(local_work) | external_work)
+            prior_campaign_work = record['receipts'][-1]['completed_work'] if record['receipts'] else []
+            lineage['no_progress_runs'] = record['no_progress_runs'] + 1 if campaign_work == prior_campaign_work and not complete else 0
+            metadata.update(completed_work=campaign_work, local_completed_work=local_work,
+                task_receipt={'receipt_contract': 'historical-campaign-task-receipt-v1', 'task_id': task['id'], 'handoff_key': record['handoff']['key'],
+                              'task_complete': complete, 'campaign_complete': complete and all(state == 'DONE' or task_id == task['id'] for task_id, state in record['tasks'].items()),
+                              'verified_outputs': task['expected_outputs'] if complete else [],
+                              'scientific_state': status['scientific_state']},
+                consolidation={'version': 'historical-campaign-consolidation-v1', 'finalized_receipts': finalized,
+                               'sealed_parent': recovery, 'accounting': record},
+                presentation={'phase': phase, 'period_index': index, 'operation': operation,
+                              'date': period.utc_date.isoformat() if period else None,
+                              'symbols': sorted({symbol for packages in planned_packages(period).values() for _, symbol in packages}) if period else [],
+                              'sources': sorted({row['facts']['source'] for row in execution._read_json(BASE / 'transfers/input-manifest.json')['files'] if 'source' in row.get('facts', {})}), 'sequence': record['sequence']})
+        value = pack_files([(str(path.relative_to(BASE)), path, {'role': 'committed-recovery', **({'partition_version': 'period-results-v1'} if record else {})}) for path in files],
             BASE / 'transfers/publication', kind='recovery', identity=campaign_identity(spec),
-            metadata={'generation': tag, 'parent': {'generation': os.environ.get('STUDY_RESUME_GENERATION'),
-                        'manifest_sha256': os.environ.get('STUDY_RESUME_SHA')} if recovery else None,
-                      'lineage': lineage, 'completed_work': work, 'scientific_state': status['scientific_state'],
-                      'source_identities': coverage['source_identities'], 'disk': disk_sample(root),
-                      'runner_time_sampling_boundary': 'before pack/upload; allocation covers full requested job'},
+            metadata=metadata,
             check=deadline.check, max_bytes=spec['limits']['max_uncompressed_bytes'])
+        if regular(BASE / 'transfers/publication/manifest.json').st_size > 8 * BLOCK:
+            raise ValueError('sealed ancestry inventory exceeds bounded manifest size')
         if value['transfer_bytes'] > spec['limits']['max_transfer_bytes']:
             raise BundleFootprintError('recovery-transfer-limit', transfer_bytes=value['transfer_bytes'],
                                        limit_bytes=spec['limits']['max_transfer_bytes'])
@@ -747,6 +921,20 @@ def publish():
     events.emit("PUBLICATION_VERIFIED", publication_state="VERIFIED")
     return 0
 
+
+
+def record_receipt():
+    """Control acceptance is distinct from verified remote publication."""
+    spec, _, _, _, _, _ = settings()
+    if 'control' not in spec:
+        return
+    from github_campaign import publish_receipt
+    receipt = execution._read_json(BASE / 'transfers/publication-receipt.json')
+    value = read_bundle(BASE / 'transfers/publication/manifest.json', receipt['manifest_sha256'])
+    receipt.update(identity=campaign_identity(spec), **value['metadata']['task_receipt'],
+                   completed_work=value['metadata']['completed_work'], measured_minutes=receipt['sampled_job_elapsed_minutes'])
+    publish_receipt(spec, receipt)
+    execution._replace_atomic(BASE / 'transfers/publication-receipt.json', execution._canonical(receipt))
 
 def dependency_key():
     import platform
@@ -957,6 +1145,14 @@ def summary():
               'reused_stages': len(status.get('reused_stages', [])),
               'verified_committed_units': status.get('verified_committed_work_count'),
               'verified_new_units': status.get('verified_new_work_count'), **measurements}
+    if 'control' in locals().get('spec', {}):
+        claim_path = BASE / 'transfers/control-claim.json'
+        if claim_path.exists():
+            control_record = execution._read_json(claim_path)
+            public['campaign'] = {'campaign_id': spec['campaign_id'], 'task': control_record['handoff']['task'],
+                'sequence': control_record['sequence'], 'reserved_minutes': control_record['reserved_minutes'],
+                'budget': spec['budget'], 'private_status_path': 'campaigns/' + spec['campaign_id'] + '/status.json',
+                'result_location': 'private data repository Releases; exact references in control.json'}
     public.update(events.allowlisted({'reason': status.get('yield_reason'), 'category': status.get('failure_category')}))
     progress = status.get('computed_replay_progress', {})
     public['computed_replay'] = events.allowlisted(progress)
@@ -967,6 +1163,11 @@ def summary():
         public['continuation'] = {'resume_generation': identifier(receipt['generation']),
                                   'resume_manifest_sha': sha(receipt['manifest_sha256'])}
     with open(destination, 'a') as output:
+        if 'campaign' in public:
+            campaign_view = public['campaign']
+            output.write('Campaign **' + campaign_view['campaign_id'] + '** — task `' + campaign_view['task']['id'] + '`, slice ' + str(campaign_view['sequence']) + '.\n\n')
+            output.write('Scientific state: **' + public['scientific_state'] + '**; publication: **' + public['publication_state'] + '**. New/reused stages: ' + str(public['new_stages']) + '/' + str(public['reused_stages']) + '. Reserved budget: ' + str(campaign_view['reserved_minutes']) + '/' + str(spec['budget']['ceiling_minutes']) + ' minutes.\n\n')
+            output.write('Private live view: `campaigns/' + spec['campaign_id'] + '/status.md`. Finalized outputs and exact receipts are in `control.json` and private Releases.\n\n')
         output.write('Historical slice (operational observations, not whole-campaign completion).\n\n')
         output.write('Replay counters describe computed boundaries; committed progress describes verified durable units. Stage counts do not imply period or campaign completion.\n\n```json\n')
         output.write(json.dumps(public, sort_keys=True, indent=2)[:24000] + '\n```\n')
@@ -975,7 +1176,7 @@ def summary():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['bootstrap', 'validate-settings', 'metadata', 'inputs', 'restore',
-                                            'validate-parents', 'install-dependencies', 'dependency-key', 'cache-restore', 'cache-publish', 'summary', 'run', 'snapshot', 'publish'])
+                                            'validate-parents', 'install-dependencies', 'dependency-key', 'cache-restore', 'cache-publish', 'summary', 'run', 'snapshot', 'publish', 'record-receipt'])
     args = parser.parse_args()
     previous = signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(InterruptedError('platform cancellation')))
     try:
@@ -985,7 +1186,7 @@ def main():
         minutes = int(os.environ['STUDY_JOB_MINUTES'])
         if not 16 <= minutes <= 350:
             raise ValueError('job budget must be 16..350 minutes')
-        reserve = 30 if args.command in ('summary', 'cache-publish') else 60 if args.command == 'publish' else 120 if args.command == 'snapshot' else 780 if args.command in ('run', 'validate-parents') else 900
+        reserve = 30 if args.command in ('summary', 'cache-publish') else 60 if args.command in ('publish', 'record-receipt') else 120 if args.command == 'snapshot' else 780 if args.command in ('run', 'validate-parents') else 900
         remaining = float(os.environ['STUDY_JOB_STARTED_EPOCH']) + minutes * 60 - reserve - time.time()
         if remaining <= 0:
             raise TimeoutError('no operational time remains')
@@ -993,6 +1194,8 @@ def main():
         signal.setitimer(signal.ITIMER_REAL, remaining)
         if args.command != 'bootstrap':
             spec, operation, phase, index, _, start = settings()
+            if 'control' in spec and args.command != 'validate-settings':
+                checked_claim(spec)
             event_path = BASE / 'campaigns' / spec['campaign_id'] / 'operations' / (args.command + '-' + identifier(os.environ['GITHUB_RUN_ID']) + '-' + identifier(os.environ['GITHUB_RUN_ATTEMPT']) + '.events.jsonl')
             events.configure(event_path, operation=args.command, phase=phase, period=index, deadline_epoch=start + (minutes - 15) * 60, public=True)
         if args.command == 'bootstrap':
@@ -1027,6 +1230,8 @@ def main():
             return supervise(args.command == 'validate-parents')
         elif args.command == 'snapshot':
             snapshot()
+        elif args.command == 'record-receipt':
+            record_receipt()
         else:
             with events.span('publication'):
                 return publish()

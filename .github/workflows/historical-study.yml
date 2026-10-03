@@ -1,4 +1,5 @@
 name: Manual frozen historical study
+run-name: 'Campaign ${{ inputs.task_label || inputs.campaign_spec }} / ${{ inputs.phase }} ${{ inputs.period_index }} / ${{ inputs.handoff_key || inputs.operation }}'
 
 on:
   workflow_dispatch:
@@ -31,6 +32,12 @@ on:
       resume_manifest_sha:
         description: Trusted sealed recovery inventory SHA (required with tag)
         type: string
+      handoff_key:
+        description: Controller-issued deterministic identity; empty for legacy manual slices
+        type: string
+      task_label:
+        description: Controller campaign/task/sequence label
+        type: string
       job_minutes:
         description: Whole-job allocation; includes 15-minute setup/upload reserve
         type: choice
@@ -49,9 +56,13 @@ concurrency:
 jobs:
   study:
     if: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["16","20","30","50","60","120","180","240","300","350"]'), inputs.job_minutes) }}
+    outputs:
+      managed: ${{ steps.entry.outputs.managed }}
+      claimed: ${{ steps.entry.outputs.claimed }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ fromJSON(inputs.job_minutes) }}
     env:
+      STUDY_HANDOFF_KEY: ${{ inputs.handoff_key }}
       STUDY_OPERATION: ${{ inputs.operation }}
       STUDY_CAMPAIGN_SPEC: ${{ inputs.campaign_spec }}
       STUDY_PHASE: ${{ inputs.phase }}
@@ -87,6 +98,20 @@ jobs:
           python-version: '3.10'
       - name: Validate main-reachable full pins and checkout exact runtime
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py bootstrap
+      - name: Claim new-campaign handoff before dependencies or input acquisition
+        id: entry
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q '"control"' /tmp/crypto-study/transfers/campaign.json; then
+            python /tmp/crypto-study/repo/scripts/research/github_campaign.py claim
+          else
+            test -z "$STUDY_HANDOFF_KEY"
+            echo "managed=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Detect capabilities of the exact pinned orchestration
         id: platform
         shell: bash
@@ -142,8 +167,11 @@ jobs:
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py cache-restore
-      - name: Run portable supervised operation without data credentials
+      - name: Run credential-free science with private supervisor status transport
         id: scientific
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ steps.entry.outputs.managed == 'true' && secrets.RESEARCH_DATA_TOKEN || '' }}
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py run
       - name: Validate and snapshot committed recovery with ownership held
         if: always() && steps.scientific.outcome != 'skipped'
@@ -156,6 +184,13 @@ jobs:
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: python /tmp/crypto-study/repo/scripts/research/github_study.py publish
+      - name: Accept independently verified publication in campaign control
+        id: receipt
+        if: always() && steps.entry.outputs.managed == 'true' && steps.publication.outcome == 'success'
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: python /tmp/crypto-study/repo/scripts/research/github_study.py record-receipt
       - name: Publish optional prepared cache after mandatory recovery
         if: always() && steps.platform.outputs.extended == 'true' && steps.publication.outcome == 'success'
         continue-on-error: true
@@ -178,3 +213,32 @@ jobs:
           fi
       # No upload-artifact: raw data, requests, logs and scientific evidence stay
       # private. Only the allowlisted publication receipt enters the job summary.
+
+  handoff:
+    needs: study
+    if: always() && needs.study.outputs.managed == 'true' && needs.study.outputs.claimed == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    env:
+      STUDY_CAMPAIGN_SPEC: ${{ inputs.campaign_spec }}
+      STUDY_PARENT_RUN_ID: ${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Re-enter pinned stdlib control helper
+        run: python scripts/research/github_campaign.py bootstrap
+      - name: Dispatch only from verified receipt and atomic campaign intent
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/research/github_campaign.py dispatch

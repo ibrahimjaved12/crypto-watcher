@@ -1,7 +1,7 @@
-# Manual GitHub execution of the frozen study
+# Start, Stop and Resume a frozen historical campaign
 
-This implements the initial platform for #163. The hosted pilot is **not yet run**.
-Source review cannot establish scientific parity, full-day memory requirements,
+This extends the existing #163 platform. Earlier pilot evidence does not verify
+this repaired implementation. Source review cannot establish scientific parity, full-day memory requirements,
 longest-stage fit, or three-period acceptance (#152). No visibility changes, input
 uploads, Release creation, secret creation or workflow dispatch are performed by
 this implementation PR. `verify.yml` remains unchanged.
@@ -13,15 +13,200 @@ orchestration pin and runtime pin must be the same trusted implementation commit
 both are recorded independently. The frozen coverage's producer revision remains
 the scientific producer. Never substitute the new runtime SHA for that producer.
 
+## New campaigns: the normal operating interface
+
+After this PR is integrated, create a **new** pinned campaign from
+`research/campaigns/github-production.template.json`. The template is deliberately
+non-dispatchable: its real pins, frozen membership/input locators, total budget and
+expanded-budget authorization must be supplied and reviewed by the owner. Do not
+edit `research/campaigns/pilot.json`, migrate its allocations or reuse its ID.
+
+Choose **Historical campaign Start Stop Resume** in Actions, select the main branch,
+and supply the trusted campaign path. These future owner commands are equivalent:
+
+```sh
+gh workflow run historical-study-control.yml --ref main \
+  -f operation=start -f campaign_spec=research/campaigns/OWNER_NEW_CAMPAIGN.json
+
+gh workflow run historical-study-control.yml --ref main \
+  -f operation=stop -f campaign_spec=research/campaigns/OWNER_NEW_CAMPAIGN.json
+
+gh workflow run historical-study-control.yml --ref main \
+  -f operation=resume -f campaign_spec=research/campaigns/OWNER_NEW_CAMPAIGN.json
+```
+
+Start validates the owner-approved typed task plan, creates or validates its control
+record, and schedules the first ready task. Repeated Start preserves identity,
+receipts, claims and reservations. The supported operations are only `preflight`,
+`execute-period` and `aggregate`; each task has an ID, phase, exact period (null for
+aggregate), earlier dependency IDs and exact supported output kinds. Dependencies
+must be topologically ordered; cycles, undeclared membership, duplicate period
+execution and arbitrary commands are rejected. Each executed phase requires its
+explicit terminal aggregate with the exact finalized period dependencies. No
+untouched test phase can be entered without pinned authorization and the existing
+scientific prerequisite validators.
+
+A passed preflight has an explicit verified `preflight_passed` receipt even though
+its legacy scientific state is YIELDED; it advances rather than looping. A verified
+budget/stage yield continues the **same** execution task and its exact sealed
+published generation/hash. A finalized period advances only after its report and
+full evidence closure are validated and its immutable private bundle is remotely
+verified. Aggregation verifies the exact declared reports/sidecars and publishes its
+execution index before advancing. Only all terminal task receipts yield campaign
+COMPLETED. This means the **declared plan** completed; a selected-period subset is
+not the entire frozen study, HMM study, or #152 acceptance.
+
+Stop is a short job outside the scientific concurrency queue. Its atomic flag
+prevents dispatch and queued child entry. It is a **safe stop request**: active
+computation may finish its current bounded slice and publish verified work before
+stopping. It does not kill the process. Force cancellation through the Actions UI
+can lose the latest uncommitted work or prevent publication. Reservations remain
+charged. Resume uses the latest verified receipt for the current task and remaining
+budget; no hash copying is required. It refuses to clear scientific, integrity or
+publication failure. An interrupted/cancelled run can be reconciled by its exact
+handoff/run identity, retaining the old reservation and counting no progress. A
+queued stopped child can be resumed under the same handoff. Resume during an active
+claimed run leaves that run alone and reports intervention guidance.
+
+Both workflows are `workflow_dispatch` only. Pushes, PRs, schedules and visibility
+changes never start science. The scientific workflow remains globally serialized
+with `cancel-in-progress: false`. A short post-publication job dispatches the next
+slice and exits; no runner polls until a child finishes. Only trusted main-branch
+control/handoff jobs have `actions: write`. The companion credential is separately
+scoped; control uses the stdlib-only pinned helper without installing scientific
+dependencies. The scientific supervisor may receive the private token solely for
+status transport, and its child environment explicitly strips all credentials.
+
+## Authority, budgets and ambiguous dispatch
+
+The **private data repository's actual default branch** contains:
+
+- `campaigns/<id>/control.json`: versioned CAS authority, task states, stop flag,
+  deterministic handoff, verified receipts and sealed append-only ledger;
+- `campaigns/<id>/status.json` and `status.md`: convenient non-authoritative views.
+
+Claims and reservations update the same Contents record using its SHA. Four bounded
+conflict/reconciliation attempts reread and revalidate identity and committed ledger
+prefixes against the preceding Git version; deletion of a previously committed
+control file refuses reinitialization; mismatches or removed/modified entries halt. Never manually edit/delete
+control history or treat a status pointer as scientific completion proof.
+
+The handoff key binds the complete campaign identity/spec digest, exact task,
+sequence, verified parent receipt and next allocation. A child claims that key and
+its run ID **before dependency installation, private inputs or scientific work**.
+Duplicate/stale dispatches and workflow reruns refuse entry and do not reserve the
+same slice twice. A lost CAS response may conservatively refuse entry despite a
+persisted reservation; it never permits unclaimed work.
+
+Dispatch intent and attempt are persisted before the Actions POST. The response
+may be ambiguous. Reconciliation scans at most three recent 100-run pages by the
+exact campaign/task/period/sequence/key run name, with three short attempts after
+POST. It never blindly repeats the POST or promises exactly-once delivery. Resume
+can reconcile a visible run. If no matching run appears within the bound, the
+record retains AMBIGUOUS and an intervention reason; inspect the recorded intent
+and Actions history rather than deleting the ledger or starting an unlimited chain.
+
+Each 300-minute scientific claim reserves **305 minutes**, including its five-minute
+post-publication handoff job. Each manual control invocation reserves five more
+minutes, including repeated Start/Resume/Stop and retention operations. The total
+ceiling must cover setup, transfer, preparation, computation, publication and all
+orchestration, plus any planned retries. A crash, cancellation or early finish does
+not release a reservation. Scientific run count and verified no-progress caps apply
+at scheduling, dispatch and child entry. Manual controls still record their cost at
+an exhausted ceiling (especially Stop); they cannot authorize another scientific
+allocation. Sampled measured usage includes scientific job elapsed time and actual
+short-job start-to-final-status measurements, separately from conservative reserved
+minutes. Sampling stops before the final write/job exit; it is not billing precision.
+
+The non-dispatchable production template demonstrates 300-minute jobs, a 15-minute
+publication reserve, 64 new stages, explicit conservative retention and an example
+preflight → exact period → aggregate task plan. It grants no real budget or pins.
+Contents authority is bounded to one MiB, sealed manifests to eight MiB and ancestry
+to 200 active parents; oversized control
+metadata halts rather than dropping accounting or scientific work.
+
+## Live campaign view, results and retention
+
+Open the stable private `campaigns/<id>/status.md` for task/phase/period, state,
+latest activity, current run link, computed replay versus committed progress,
+new/reused stages, resource/timing observations, reserved/measured/remaining budget,
+exact recovery and finalized output references, and intervention reason. The
+supervisor updates these views approximately every two minutes; transitions also
+update them. Heartbeats update small Contents records, never publish bundles or
+create Releases. View-write failures cannot undo accounting or imply completion.
+Actions summaries contain allowlisted measurements and exact receipts, with no
+invented whole-campaign percentage or private worker output.
+
+Each finalized period's recovery generation is also its immutable **result/evidence
+bundle**, with typed finalized report/evidence output proof and its exact tag/hash
+in control.json. Readable Release titles/bodies describe purpose, date, symbols,
+sources, scientific state, committed unit count, size, code pin and originating run.
+`bundle-index.md` lists authoritative inventory files/sizes/hashes for navigation;
+it is a presentation asset, not evidence or a substitute for manifest validation.
+Partial recovery remains labelled recovery. Terminal aggregation bundles hold the
+execution index and exact references to every retained finalized input.
+
+New-campaign slices restore only the current task's active recovery. Earlier
+finalized work remains explicit externalized hashes plus exact finalized receipts.
+Aggregation downloads only the declared finalized reports and sidecars, not every
+old replay spool. Later-phase prerequisite artifacts still come from the exact
+frozen authorized metadata inventory. New consolidation manifests embed sealed
+active-parent inventories and append-only accounting ancestry, and bind every
+external finalized reference. Full scientific validation checks the local closure;
+its work plus externalized work must equal the monotonic committed-work contract.
+Legacy v1/v2 recovery continues through its original parent-generation validator.
+
+Retention defaults to retaining anything whose closure cannot be proved. It never
+removes inputs, final results/evidence, current/pending recovery, prerequisite
+references or accounting. Abandoned drafts remain retained because this controller
+cannot prove an adequate sealed draft closure. The owner can later request
+`operation=retention-plan` for a dry-run list. Explicit `operation=retention-apply`
+revalidates retained manifests and remote asset digests, requires campaign COMPLETED,
+checks terminal finalized work covers the redundant recovery, rechecks control CAS,
+and records deletion intent/outcome. Only redundant **new-campaign** recovery
+Releases qualify; legacy allocation/pilot Releases cannot enter this deletion path.
+Embedded sealed ancestry permits new validation without deleted parent assets.
+No retention command, Release deletion, dataset publication, or workflow dispatch
+was run during this implementation session.
+
+## Owner-triggered hosted verification and runner comparison
+
+Source/diff review and `git diff --check` are the only implementation validation.
+Hosted behavior below remains unverified and must be owner-triggered after integration:
+
+1. Use a small new private campaign to check passed preflight advances; forced
+   budget/stage yielding publishes a verified receipt and resumes the same task;
+   finalized periods advance and aggregate only exact declared membership.
+2. Duplicate a handoff and simulate lost dispatch/CAS responses, crashes and
+   cancellation. Confirm one claim, retained reservations, bounded reconciliation,
+   caps, no-progress stops and no scientific work from stale children.
+3. Stop an active and queued campaign; confirm responsive control, safe publication,
+   refusal on queued entry, exact automatic Resume, and failure/budget preservation.
+4. Compare uninterrupted/resumed evidence and prepared-cache hit/miss results,
+   Decimal/numerical versions, checkpoint/spool/stage/source hashes and phase gates.
+   Validate report/evidence bundles and externalized committed-work retention.
+5. Review retention-plan first. Verify all retained result assets and terminal
+   closure before explicitly exercising deletion of a disposable new recovery;
+   demonstrate restoration/aggregation without deleted parent assets. Keep drafts,
+   inputs, pilot/allocation history and required evidence intact.
+6. Deliberately make the **code repository** public only after the private run;
+   the **data repository stays private**. Run a comparable new public campaign with
+   a different ID and exact repaired code/dependency/frozen input pins. Use the same
+   period, work selection, allocation and cache policy; compare equivalent fresh
+   work, not a fresh slice against an almost-finished continuation. Label cold/cache
+   differences and separate setup/download, recovery/preparation, scientific compute,
+   publication and orchestration; record completed work, CPU/RAM, disk and bundle
+   size. Rough estimates suffice. No CPU speedup or full-study completion is promised.
+
 ## Owner setup
 
 1. Create/configure a **private companion repository** for restricted research
-   data. Set `RESEARCH_DATA_REPOSITORY=owner/private-data-repo` as a repository
+   data, with an initialized default branch. Set `RESEARCH_DATA_REPOSITORY=owner/private-data-repo` as a repository
    variable in the code repository. The workflow refuses public or same-repository
    data storage through the GitHub API before download or upload.
 2. Create `RESEARCH_DATA_TOKEN`, a fine-grained Contents read/write token restricted
    to that companion repository, as a code-repository Actions secret. Transport
-   steps alone receive it. Scientific subprocesses receive a small allowlisted
+   steps and the new-campaign status supervisor alone receive it. Scientific subprocesses receive a small allowlisted
    environment with no data or code token. Code checkout uses `contents:read`; `actions:read` reads only the owned job start timestamp, and
    does not persist its credential. There is no public Actions artifact upload.
 3. Confirm permitted provider access and redistribution terms for supplied inputs.
@@ -39,7 +224,8 @@ the scientific producer. Never substitute the new runtime SHA for that producer.
    inventory SHA from the tool and its explicit tag in the campaign JSON. Do not
    edit these input Releases after pinning. Upload all `part-*` files and
    `manifest.json`. No public code Release should contain these restricted bytes.
-6. Copy `research/campaigns/github-pilot.example.json` to a real campaign spec,
+6. For new automatic campaigns copy `research/campaigns/github-production.template.json`;
+   the legacy manual example remains `research/campaigns/github-pilot.example.json`. Create a real campaign spec,
    fill the missing owner values, and commit the spec to main normally. The example
    intentionally contains null pins and will fail validation. Use a safe campaign
    ID of at most 64 alphanumeric/underscore/hyphen characters. Never reuse an ID to
@@ -50,8 +236,9 @@ the scientific producer. Never substitute the new runtime SHA for that producer.
 Do not launch a workflow from a PR, fork or arbitrary ref with the data token. The
 campaign supplies configuration, never shell commands or repositories to execute.
 GitHub storage permissions must allow the token to enumerate private drafts and
-upload/publish private Releases. The workflow creates allocation reservations and
-recovery Releases only when the owner manually dispatches it later.
+upload/publish private Releases. New campaigns reserve work in private Contents records. The original pilot keeps
+its allocation Releases. A deliberate manual Start authorizes the pinned task plan;
+subsequent scientific workflow dispatches are bounded automatic handoffs.
 
 ## Offline bundle preparation (future owner command)
 
@@ -155,9 +342,10 @@ A unit that repeatedly cannot finish within the deadline needs a longer explicit
 budgeted job, genuine unit resume work, or a VM; changing study dates/algorithms is
 not a workaround.
 
-## First dispatch and bounded manual continuation
+## Legacy pilot: first dispatch and bounded manual continuation
 
-No automatic continuation, matrix or schedule exists. Global workflow concurrency
+The unchanged pilot has no automatic continuation. New typed campaigns use the
+Start/Stop/Resume interface below. Global scientific workflow concurrency
 serializes the initial platform with `cancel-in-progress:false`. Do not cancel a
 working job casually. The workflow validates each restored unit in staging using
 the existing replay/spool/stage/report validators. Validation resolves references
@@ -241,7 +429,7 @@ request/job diagnostics remain intact; arbitrary remaining hardlinks, symlinks
 and non-regular files still fail strict validation. Active/orphan ownership still
 blocks snapshot acquisition. Forced-kill recovery has not been executed or verified.
 
-## Aggregation and scientific sequence
+## Legacy aggregation and scientific prerequisites
 
 The campaign declares exact expected membership per phase. To aggregate the declared
 development subset after every required report exists, dispatch:
@@ -262,7 +450,8 @@ duplicate/conflict rules before `_update_execution_index` is used. Partial nativ
 indexes remain operational partial indexes. Missing/unexpected reports fail exact
 membership validation; never concatenate JSON or delete conflicts to force success.
 
-The scientific sequence remains manual and owned by existing modules:
+The broader scientific sequence remains owned by existing modules; HMM/freeze and
+Part-C operations are not controller tasks:
 
 1. Development Part-B reports for all ten frozen development periods.
 2. `historical_market_state_hmm_crossfit` plus Part-B `freeze-hmm`.
@@ -272,8 +461,10 @@ The scientific sequence remains manual and owned by existing modules:
 6. Untouched test Part-B with `--allow-test` and the validated chain.
 7. Part-C test.
 
-Those modules' existing CLIs own the science. The platform neither automatically
-advances phases nor refactors or bypasses their gates. Exact period indexes are
+Those modules' existing CLIs own the science. The controller supports only explicitly declared preflight, exact-period Part-B
+execution and aggregation. It cannot generate HMM/freeze/Part-C prerequisites or
+bypass their gates. Explicitly declared later-phase tasks still need their already
+frozen, validated prerequisite artifacts before any raw or test evidence is read. Exact period indexes are
 0–9 development, 10–17 validation and 18–29 test, with an explicit matching phase;
 `--period-index` cannot combine with `--period-limit`.
 
@@ -466,18 +657,18 @@ illustrates a 300-minute allocation, 15-minute publication reserve and
 new main-reachable exact runtime/orchestration/dependency pins, original frozen
 manifest/coverage/input locators, authorized scientific membership and explicit
 campaign minute/run/no-progress budgets; explicitly authorizes expanded budget;
-and removes the template guard. Dispatch `job_minutes=300` explicitly. Do not
+and removes the template guard. Start it through the short control workflow; the
+controller dispatches its pinned `job_minutes=300` allocation. Do not
 edit `research/campaigns/pilot.json` to continue a production run. Longer jobs do
 not alter mathematics or authorize validation/test work or expand membership.
 
-After each successful publication, copy **both** `continuation.resume_generation`
-and `continuation.resume_manifest_sha` from the summary into the next manual
-dispatch's `resume_generation` / `resume_manifest_sha`. Use the same pinned
-campaign, phase and exact period for continuation. A locator without its inventory
-hash, a draft generation, a different campaign/runtime or unverified publication
-is not a resume receipt. Existing allocation/run/no-progress ceilings still apply.
-Dispatch remains manual-only, serialized, with `cancel-in-progress: false` and the
-actual whole-job timeout. No automated redispatch is added.
+New campaigns hand off automatically using independently verified sealed receipts
+and the authoritative ledger. Use Start/Stop/Resume above. Advanced exact-generation
+manual continuation remains available for **legacy** campaign specs without a typed
+control plan; copy both generation and sealed SHA, never use a mutable latest pointer.
+Scientific execution remains serialized with `cancel-in-progress: false` and the
+actual whole-job timeout. Automatic redispatch is restricted to deliberate new
+campaign starts, their declared tasks and remaining pinned budgets.
 
 The following are owner-initiated hosted follow-ups, **not implementation checks**:
 

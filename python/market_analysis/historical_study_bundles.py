@@ -96,6 +96,10 @@ def _partition(path, facts, identity):
     if path.startswith('inputs/'):
         period = identity.get('period', {})
         return 'inputs:' + str(period.get('phase', 'unspecified')) + ':' + str(facts.get('partition', period.get('study_period_index', 'unspecified')))
+    if facts.get('partition_version') == 'period-results-v1' and len(parts) > 4 and parts[0] == 'campaigns' and parts[2] == 'outputs':
+        # Reports/sidecars never share transfer assets with another period.
+        # Existing immutable v1/v2 inventories retain their original partition.
+        return 'outputs:' + parts[3] + ':' + parts[4]
     if len(parts) > 3 and parts[0] == 'campaigns' and parts[2] in ('checkpoints', 'outputs'):
         return parts[2] + ':' + parts[3]
     return 'operational'

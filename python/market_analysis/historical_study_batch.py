@@ -60,6 +60,9 @@ def campaign_spec(path):
     if spec.get('prepared_cache', {}).get('enabled') is True:
         for name in ('max_bytes', 'headroom_bytes', 'upload_max_seconds'):
             positive(spec['prepared_cache'][name], 'prepared_cache.' + name)
+    if 'control' in spec:
+        from .historical_campaign_control import plan
+        plan(spec)
     return spec
 
 
@@ -195,7 +198,9 @@ class SliceController:
         duration = details.get('monotonic_duration_seconds')
         parent_memory = details.get('parent_memory') or {}
         worker_memory = (details.get('worker_observations') or {}).get('worker_memory') or {}
-        events.emit(event, **{**details, 'duration_seconds': duration,
+        if details.get('stage_id'):
+            self.status['current_stage'] = details['stage_id']
+        events.emit(event, **{**details, 'stage': details.get('stage_id', details.get('stage')), 'duration_seconds': duration,
                     'parent_rss_bytes': parent_memory.get('current_rss_bytes'),
                     'parent_peak_rss_bytes': parent_memory.get('peak_rss_bytes'),
                     'worker_rss_bytes': worker_memory.get('current_rss_bytes'),
@@ -380,7 +385,11 @@ def _run_owned(args):
             restored_files, work = verify_recovery_tree(args.restore_staging, spec['campaign_id'], manifest, coverage,
                                            campaign_identity(spec), validated=validated)
         restored_unit = last_verified_unit(restored_files, work, args.period_index)
-        if work != recovery['metadata']['completed_work']:
+        expected_work = recovery['metadata']['local_completed_work'] if 'control' in spec else recovery['metadata']['completed_work']
+        if 'control' in spec:
+            from .historical_campaign_control import consolidation
+            consolidation(recovery, campaign_identity(spec))
+        if work != expected_work:
             raise ValueError('recovery committed-work inventory mismatch')
         from .historical_owned_validation import adopt_complete
         from .historical_run_directory import owned_run_directory
@@ -414,6 +423,8 @@ def _run_owned(args):
                                               parse_sources=args.operation == 'preflight')
             from .historical_prepared_core import configure
             configure(BASE / 'prepared-cache', spec, inventory)
+            if args.operation == 'preflight':
+                controller.status['preflight_passed'] = True
             if controller.reason():
                 controller.stop(controller.reason())
             if args.operation == 'execute-period':
