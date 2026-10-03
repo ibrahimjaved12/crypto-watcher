@@ -3,6 +3,8 @@
 The caller owns observation ordering and supplies every finalization boundary.
 This module has no clock, network, persistence, or scheduler access.
 """
+from __future__ import annotations
+
 from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
