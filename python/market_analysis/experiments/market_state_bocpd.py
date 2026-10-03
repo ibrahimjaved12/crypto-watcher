@@ -7,6 +7,7 @@ with uninterrupted history, so it is not wired into indefinite live retention.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 from statistics import median
 from types import MappingProxyType
@@ -162,6 +163,16 @@ class BOCPDRunLengthHypothesis:
             raise ValueError("BOCPD posterior mean variance must be finite and positive")
 
 
+@lru_cache(maxsize=32)
+def _validated_config(version, expected, prior_mean, prior_variance, observation_variance):
+    return BOCPDConfig(version, expected, prior_mean, prior_variance, observation_variance)
+
+
+@lru_cache(maxsize=32)
+def _hazard_logs(hazard):
+    return math.log(hazard), math.log1p(-hazard)
+
+
 @dataclass(frozen=True)
 class BOCPDCandidateState:
     """Immutable exact posterior and scope identity for deterministic replay."""
@@ -187,7 +198,7 @@ class BOCPDCandidateState:
     def __post_init__(self):
         if self.candidate_algorithm_version != BOCPD_ALGORITHM_VERSION:
             raise ValueError("BOCPD candidate algorithm version is invalid")
-        config = BOCPDConfig(
+        config = _validated_config(
             self.candidate_config_version,
             self.expected_run_length_points,
             self.prior_mean,
@@ -213,9 +224,9 @@ class BOCPDCandidateState:
         if not hypotheses or any(not isinstance(item, BOCPDRunLengthHypothesis)
                                  for item in hypotheses):
             raise ValueError("BOCPD hypotheses must be a nonempty tuple of run-length states")
-        expected_run_lengths = tuple(range(self.observations_since_reset + 1))
-        actual_run_lengths = tuple(item.run_length_steps for item in hypotheses)
-        if actual_run_lengths != expected_run_lengths:
+        if (len(hypotheses) != self.observations_since_reset + 1
+                or any(item.run_length_steps != index
+                       for index, item in enumerate(hypotheses))):
             raise ValueError("BOCPD run lengths must be contiguous from zero through history length")
         if abs(_logsumexp(item.log_probability for item in hypotheses)) > BOCPD_NUMERICAL_TOL:
             raise ValueError("BOCPD log posterior must already be normalized")
@@ -492,8 +503,7 @@ def transform_market_movement_with_bocpd(
         previous_count = 0
 
     hazard = config.hazard
-    log_hazard = math.log(hazard)
-    log_survival = math.log1p(-hazard)
+    log_hazard, log_survival = _hazard_logs(hazard)
     log_predictives = tuple(
         _log_normal_density(
             value,

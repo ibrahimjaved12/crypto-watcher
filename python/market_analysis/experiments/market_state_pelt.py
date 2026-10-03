@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from statistics import median
 from types import MappingProxyType
@@ -254,9 +254,16 @@ def _pelt_optimal_partition(
         return None
     prefix_sum, prefix_sq = _prefix_sums(values)
     objective: list[float | None] = [None] * (n + 1)
-    paths: list[tuple[int, ...] | None] = [None] * (n + 1)
+    predecessors: list[int | None] = [None] * (n + 1)
     objective[0] = -beta
-    paths[0] = ()
+    predecessors[0] = 0
+
+    def path_for(start):
+        path = []
+        while start:
+            path.append(start)
+            start = predecessors[start]
+        return tuple(reversed(path))
     admissible = [0]
     scheduled_removal: dict[int, int] = {}
 
@@ -272,7 +279,7 @@ def _pelt_optimal_partition(
                 del scheduled_removal[start]
 
         newly_eligible = end - min_segment_points
-        if (paths[newly_eligible] is not None
+        if (predecessors[newly_eligible] is not None
                 and newly_eligible not in admissible):
             admissible.append(newly_eligible)
         admissible.sort()
@@ -280,19 +287,19 @@ def _pelt_optimal_partition(
             start for start in admissible
             if end - start >= min_segment_points and objective[start] is not None
         )
-        best = None
+        costs = {start: _segment_cost(prefix_sum, prefix_sq, start, end)
+                 for start in candidates}
+        best_objective = best_start = None
         for start in candidates:
-            candidate_objective = (
-                objective[start]
-                + _segment_cost(prefix_sum, prefix_sq, start, end)
-                + beta
-            )
-            previous_path = paths[start]
-            candidate_path = previous_path + ((start,) if start > 0 else ())
-            best = _choose_candidate(best, (candidate_objective, candidate_path))
-        if best is None:
+            candidate_objective = objective[start] + costs[start] + beta
+            if (best_start is None
+                    or candidate_objective < best_objective - PELT_NUMERICAL_TOL
+                    or (abs(candidate_objective - best_objective) <= PELT_NUMERICAL_TOL
+                        and path_for(start) < path_for(best_start))):
+                best_objective, best_start = candidate_objective, start
+        if best_start is None:
             continue
-        objective[end], paths[end] = best
+        objective[end], predecessors[end] = best_objective, best_start
 
         # A dominated candidate stays active until this endpoint can itself
         # serve as a legal previous changepoint after a minimum-length segment.
@@ -300,15 +307,15 @@ def _pelt_optimal_partition(
         removal_end = end + min_segment_points
         for start in candidates:
             if (objective[start]
-                    + _segment_cost(prefix_sum, prefix_sq, start, end)
+                    + costs[start]
                     > objective[end] + PELT_NUMERICAL_TOL):
                 scheduled_removal[start] = min(
                     scheduled_removal.get(start, removal_end), removal_end
                 )
 
-    if objective[n] is None or paths[n] is None:
+    if objective[n] is None or predecessors[n] is None:
         return None
-    return objective[n], paths[n]
+    return objective[n], path_for(predecessors[n])
 
 
 def _segment_mean(prefix_sum, start: int, end: int) -> float:
@@ -596,11 +603,15 @@ def run_market_state_pelt_experiment(
         partition: observed_points_for_partition(baseline_points, partition)
         for partition in ("all", "development", "validation", "test")
     }
-    segmentations = {
-        partition: _make_segmentation_view(
-            partition, observed_by_partition[partition], config)
-        for partition in ("all", "development", "validation", "test")
-    }
+    segmentations = {}
+    views_by_cutoff = {}
+    for partition in ("all", "development", "validation", "test"):
+        observed = observed_by_partition[partition]
+        cutoff = observed[-1].evaluation_boundary_time_ms if observed else None
+        if cutoff not in views_by_cutoff:
+            views_by_cutoff[cutoff] = _make_segmentation_view(partition, observed, config)
+        segmentations[partition] = replace(views_by_cutoff[cutoff], partition=partition)
+
     summaries = {
         partition: _summary(
             partition,
