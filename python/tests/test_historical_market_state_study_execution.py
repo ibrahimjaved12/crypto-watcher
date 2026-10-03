@@ -84,7 +84,7 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             content_sha256=content_sha, archive_files=(),
             dataset_id="fixture-dataset", dataset_version="fixture-v1")
         dataset = SimpleNamespace(
-            archive_manifest=archive_manifest, replay_request=object())
+            archive_manifest=archive_manifest, close=lambda: None)
         replay = SimpleNamespace(
             manifest=SimpleNamespace(dataset_content_sha256=content_sha,
                                      dataset_id="fixture-dataset",
@@ -103,9 +103,9 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
         runtime_metrics = execution.StudyPeriodRuntimeMetrics()
         with patch.object(execution.time, "perf_counter_ns",
                           side_effect=lambda: next(ticks)), patch.object(
-                execution, "load_binance_usdm_historical_replay_dataset",
+                execution, "load_binance_usdm_bounded_historical_replay_dataset",
                           return_value=dataset) as loader, patch.object(
-                execution, "run_historical_market_replay", return_value=replay) as runner, patch.object(
+                execution, "run_bounded_historical_market_replay", return_value=replay) as runner, patch.object(
                 execution, "_frozen_eligibility", return_value=eligibility), patch.object(
                 execution, "_study_experiment_points", return_value=()), patch.object(
                 execution, "_build_v1_evidence", return_value=((), {}, {})), patch.object(
@@ -119,7 +119,7 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
         self.assertIs(frozen, coverage_period)
         self.assertEqual(loader.call_count, 1)
         self.assertEqual(runner.call_count, 1)
-        self.assertIs(runner.call_args.args[0], dataset.replay_request)
+        self.assertIs(runner.call_args.args[0], dataset)
         prepared_type.assert_called_once()
         self.assertGreater(runtime_metrics.report_timings()["core_archive_load_seconds"], 0)
         self.assertGreater(runtime_metrics.report_timings()["canonical_replay_seconds"], 0)
@@ -736,6 +736,19 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                     runtime_report_path=runtime_path)
                 execute.assert_called_once()
                 self.assertEqual(resumed, first)
+                progress_rows = [json.loads(line) for line in
+                                 (root / "output" / "study-progress.jsonl").read_text(
+                                     encoding="utf-8").splitlines()]
+                self.assertEqual([row["event"] for row in progress_rows],
+                                 ["PERIOD_STARTED", "PERIOD_ARTIFACT_FINALIZED",
+                                  "SKIPPED_EXISTING_ARTIFACT",
+                                  "SKIPPED_EXISTING_ARTIFACT"])
+                self.assertTrue(all(row["scientific_producer_revision"] == revision
+                                    for row in progress_rows))
+                self.assertTrue(all(row["runtime_implementation_revision"] != revision
+                                    for row in progress_rows))
+                self.assertEqual(report_payload["code_revision"], revision)
+                self.assertNotIn("runtime_implementation_revision", report_payload)
                 skipped = json.loads(runtime_path.read_text(encoding="utf-8"))
                 self.assertEqual(skipped["execution_status"],
                                  "SKIPPED_EXISTING_ARTIFACT")

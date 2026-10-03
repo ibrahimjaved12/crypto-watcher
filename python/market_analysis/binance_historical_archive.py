@@ -8,7 +8,7 @@ health. No acquisition or replay calculation occurs in this adapter.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -250,6 +250,67 @@ class BinanceHistoricalReplayDataset:
                         config.output_end_boundary_time_ms,
                         config.finalization_grace_ms)):
                 raise ValueError("taker flow evidence replay range or grace mismatch")
+
+
+TRADE_STREAM_ORDERING_VERSION = "replay-availability-symbol-time-numeric-id-v1"
+TRADE_STREAM_DUPLICATE_VERSION = "symbol-aggregate-id-exact-factual-row-v1"
+
+
+@dataclass(frozen=True)
+class HistoricalReplayTradeStreamManifest:
+    dataset_id: str
+    dataset_version: str
+    archive_content_sha256: str
+    configured_symbols: tuple[str, ...]
+    adapter_version: str
+    ordering_policy_version: str
+    duplicate_policy_version: str
+    unique_replayable_row_count: int
+    duplicate_row_count: int
+    first_canonical_trade_key: tuple | None
+    last_canonical_trade_key: tuple | None
+    normalized_row_stream_sha256: str
+
+
+@dataclass(frozen=True)
+class BinanceBoundedHistoricalReplayDataset:
+    archive_manifest: BinanceArchiveBundleManifest
+    trade_stream_manifest: HistoricalReplayTradeStreamManifest
+    dataset: HistoricalReplayDatasetManifest
+    universe: MarketUniverseInput
+    instruments: tuple[HistoricalReplayInstrument, ...]
+    source_intervals: tuple[HistoricalReplaySourceInterval, ...]
+    candles: tuple[HistoricalReplayMovementCandle, ...]
+    config: HistoricalReplayConfig
+    diagnostics: BinanceArchiveDiagnostics
+    ohlc_evidence: BinanceTradeOHLCEvidence
+    taker_flow_evidence: HistoricalTakerFlowEvidence
+    _index: _AggTradeDuplicateIndex = field(compare=False, repr=False)
+
+    def __post_init__(self):
+        identity = (self.archive_manifest.dataset_id,
+                    self.archive_manifest.dataset_version,
+                    self.archive_manifest.content_sha256)
+        if (identity != (self.dataset.dataset_id, self.dataset.dataset_version,
+                         self.dataset.content_sha256)
+                or identity != (self.ohlc_evidence.dataset_id,
+                                self.ohlc_evidence.dataset_version,
+                                self.ohlc_evidence.dataset_content_sha256)
+                or identity != (self.trade_stream_manifest.dataset_id,
+                                self.trade_stream_manifest.dataset_version,
+                                self.trade_stream_manifest.archive_content_sha256)
+                or self.trade_stream_manifest.configured_symbols != self.universe.symbols
+                or self.ohlc_evidence.configured_symbols != self.universe.symbols
+                or not self.taker_flow_evidence.matches_dataset(*identity,
+                                                                self.universe.symbols)
+                or tuple(item.symbol for item in self.instruments) != self.universe.symbols):
+            raise ValueError("bounded archive, replay, OHLC, and flow identities differ")
+
+    def iter_trades(self):
+        return self._index.iter_replay_trades(self.universe.symbols)
+
+    def close(self):
+        self._index.__exit__(None, None, None)
 
 
 @dataclass(frozen=True)
@@ -610,6 +671,159 @@ def _decimal_identity(value: Decimal) -> str:
     return f"{sign}:{''.join(str(digit) for digit in digits)}:{exponent}"
 
 
+def load_binance_usdm_bounded_historical_replay_dataset(
+    request: BinanceUSDMArchiveRequest,
+) -> BinanceBoundedHistoricalReplayDataset:
+    """Verify local packages while indexing only replayable trades on disk."""
+    if not isinstance(request, BinanceUSDMArchiveRequest):
+        raise ValueError("request must be BinanceUSDMArchiveRequest")
+    config = request.replay_config
+    candle_start = historical_candle_start_ms(config)
+    trade_dates = required_aggtrade_dates(config)
+    kline_dates = required_kline_dates(config)
+    files, candles, ohlc_candles, gap_symbols = [], [], [], []
+    missing_minutes = duplicate_trades = trade_rows = kline_rows = replayable = 0
+    earliest_trade = latest_trade = earliest_kline = latest_kline = None
+    flow_builder = HistoricalTakerFlowEvidenceBuilder(
+        dataset_id=BINANCE_ARCHIVE_DATASET_ID,
+        dataset_version=BINANCE_ARCHIVE_DATASET_VERSION,
+        dataset_content_sha256=None,
+        configured_symbols=request.universe.symbols,
+        engine_start_boundary_time_ms=config.engine_start_boundary_time_ms,
+        output_end_boundary_time_ms=config.output_end_boundary_time_ms,
+        finalization_grace_ms=config.finalization_grace_ms)
+    index = _AggTradeDuplicateIndex(replay=True)
+    index.__enter__()
+    try:
+        for symbol_index, symbol in enumerate(request.universe.symbols):
+            kline_by_open = {}
+            for family, dates, path_builder, schema, parser in (
+                ("aggTrades", trade_dates, daily_aggtrades_relative_path,
+                 _AGG_HEADER, _agg_row),
+                ("klines/1m", kline_dates, daily_kline_relative_path,
+                 _KLINE_HEADER, _kline_row),
+            ):
+                for day in dates:
+                    relative = path_builder(symbol, day)
+                    sha256 = _checksum(request.archive_root, relative, symbol,
+                                       family, day)
+                    files.append(BinanceArchiveFileIdentity(
+                        relative.as_posix(), family, symbol, day, sha256))
+                    for row in _iter_archive_rows(request.archive_root, relative,
+                                                  schema, parser, day):
+                        if family == "aggTrades":
+                            trade_rows += 1
+                            earliest_trade = (row.timestamp_ms if earliest_trade is None
+                                              else min(earliest_trade, row.timestamp_ms))
+                            latest_trade = (row.timestamp_ms if latest_trade is None
+                                            else max(latest_trade, row.timestamp_ms))
+                            if not index.add(symbol, row):
+                                duplicate_trades += 1
+                                continue
+                            flow_builder.add_trade(
+                                symbol, row.timestamp_ms, row.timestamp_ms,
+                                row.price, row.quantity, row.buyer_is_maker)
+                            if (MovementBucketEngine._bucket_boundary(row.timestamp_ms)
+                                    >= config.engine_start_boundary_time_ms
+                                    and row.timestamp_ms <= config.output_end_boundary_time_ms):
+                                index.add_replay_trade(symbol, symbol_index, row)
+                                replayable += 1
+                        else:
+                            kline_rows += 1
+                            earliest_kline = (row.open_time_ms if earliest_kline is None
+                                              else min(earliest_kline, row.open_time_ms))
+                            latest_kline = (row.open_time_ms if latest_kline is None
+                                            else max(latest_kline, row.open_time_ms))
+                            prior = kline_by_open.get(row.open_time_ms)
+                            if prior is not None and prior != row:
+                                raise ValueError(
+                                    f"conflicting kline open {row.open_time_ms} for {symbol}")
+                            kline_by_open[row.open_time_ms] = row
+                    if family == "aggTrades":
+                        index.commit()
+            openings = sorted(kline_by_open)
+            gaps = sum((right - left) // MINUTE_MS - 1
+                       for left, right in zip(openings, openings[1:]))
+            missing_minutes += gaps
+            if gaps:
+                gap_symbols.append(symbol)
+            for opening in openings:
+                row = kline_by_open[opening]
+                if candle_start <= opening <= config.output_end_boundary_time_ms:
+                    movement = HistoricalReplayMovementCandle(
+                        symbol, opening, row.close, row.volume, row.quote_volume,
+                        row.close_time_ms + 1)
+                    ohlc = CompletedTradeOHLCCandle(
+                        symbol, f"binance-usdm:{symbol}", opening, row.close_time_ms,
+                        row.open, row.high, row.low, row.close, row.close_time_ms + 1)
+                    _check_ohlc_movement_parity(ohlc, movement)
+                    candles.append(movement)
+                    ohlc_candles.append(ohlc)
+        if not replayable:
+            raise ValueError("dataset lacks raw replayable trade evidence")
+        index.commit()
+        sorted_files = tuple(sorted(files, key=lambda item: item.relative_path))
+        content_sha256 = _content_sha256(sorted_files)
+        manifest = BinanceArchiveBundleManifest(
+            BINANCE_ARCHIVE_ADAPTER_VERSION, BINANCE_ARCHIVE_DATASET_ID,
+            BINANCE_ARCHIVE_DATASET_VERSION, ARCHIVE_FIRST_SEEN_POLICY,
+            ARCHIVE_SOURCE_STATE_POLICY, sorted_files, content_sha256)
+        digest = hashlib.sha256()
+        first_key = last_key = None
+        indexed_count = 0
+        for trade in index.iter_replay_trades(request.universe.symbols):
+            indexed_count += 1
+            key = (trade.first_seen_at_ms,
+                   request.universe.symbols.index(trade.symbol),
+                   trade.trade_time_ms, trade.aggregate_trade_id)
+            if first_key is None:
+                first_key = key
+            last_key = key
+            normalized = (trade.symbol, *key,
+                          _decimal_identity(trade.price),
+                          _decimal_identity(trade.quantity))
+            digest.update(json.dumps(normalized, separators=(",", ":"),
+                                     ensure_ascii=True).encode("ascii") + b"\n")
+        if indexed_count != replayable:
+            raise ValueError("replay trade index row count changed")
+        stream_manifest = HistoricalReplayTradeStreamManifest(
+            BINANCE_ARCHIVE_DATASET_ID, BINANCE_ARCHIVE_DATASET_VERSION,
+            content_sha256, request.universe.symbols,
+            BINANCE_ARCHIVE_ADAPTER_VERSION, TRADE_STREAM_ORDERING_VERSION,
+            TRADE_STREAM_DUPLICATE_VERSION, replayable, duplicate_trades,
+            first_key, last_key, digest.hexdigest())
+        ohlc_evidence = BinanceTradeOHLCEvidence(
+            BINANCE_ARCHIVE_DATASET_ID, BINANCE_ARCHIVE_DATASET_VERSION,
+            content_sha256, request.universe.symbols, tuple(ohlc_candles))
+        flow = flow_builder.build(
+            dataset_id=BINANCE_ARCHIVE_DATASET_ID,
+            dataset_version=BINANCE_ARCHIVE_DATASET_VERSION,
+            dataset_content_sha256=content_sha256)
+        instruments = tuple(HistoricalReplayInstrument(
+            symbol, f"binance-usdm:{symbol}", True)
+            for symbol in request.universe.symbols)
+        intervals = tuple(HistoricalReplaySourceInterval(
+            symbol, config.engine_start_boundary_time_ms,
+            config.output_end_boundary_time_ms, "LIVE")
+            for symbol in request.universe.symbols)
+        diagnostics = BinanceArchiveDiagnostics(
+            len(sorted_files), len(sorted_files),
+            len(trade_dates) * len(request.universe.symbols),
+            len(kline_dates) * len(request.universe.symbols), trade_rows, kline_rows,
+            duplicate_trades, missing_minutes, tuple(gap_symbols),
+            earliest_trade, latest_trade, earliest_kline, latest_kline)
+        return BinanceBoundedHistoricalReplayDataset(
+            manifest, stream_manifest,
+            HistoricalReplayDatasetManifest(BINANCE_ARCHIVE_DATASET_ID,
+                                            BINANCE_ARCHIVE_DATASET_VERSION,
+                                            content_sha256),
+            request.universe, instruments, intervals, tuple(candles), config,
+            diagnostics, ohlc_evidence, flow, index)
+    except BaseException:
+        index.__exit__(None, None, None)
+        raise
+
+
 def _agg_identity(row: _AggRow) -> bytes:
     # Decimal spellings such as 1.0 and 1.00 compare equal in _AggRow; retain
     # that behavior while storing only a compact canonical identity on disk.
@@ -625,6 +839,9 @@ def _agg_identity(row: _AggRow) -> bytes:
 class _AggTradeDuplicateIndex:
     """Disk-backed exact duplicate index with a bounded SQLite page cache."""
 
+    def __init__(self, *, replay: bool = False):
+        self._replay = replay
+
     def __enter__(self):
         self._temporary = tempfile.TemporaryDirectory(prefix="binance-core-verify-")
         try:
@@ -639,6 +856,17 @@ class _AggTradeDuplicateIndex:
                 "symbol TEXT NOT NULL, aggregate_trade_id TEXT NOT NULL, "
                 "identity BLOB NOT NULL, "
                 "PRIMARY KEY (symbol, aggregate_trade_id)) WITHOUT ROWID")
+            if self._replay:
+                self._connection.execute(
+                    "CREATE TABLE replay_trades ("
+                    "symbol TEXT NOT NULL, symbol_index INTEGER NOT NULL, "
+                    "first_seen_at_ms INTEGER NOT NULL, trade_time_ms INTEGER NOT NULL, "
+                    "aggregate_trade_id TEXT NOT NULL, id_length INTEGER NOT NULL, "
+                    "price TEXT NOT NULL, quantity TEXT NOT NULL, "
+                    "PRIMARY KEY (symbol, aggregate_trade_id)) WITHOUT ROWID")
+                self._connection.execute(
+                    "CREATE INDEX replay_canonical_order ON replay_trades "
+                    "(first_seen_at_ms, symbol_index, trade_time_ms, id_length, aggregate_trade_id)")
         except sqlite3.Error as exc:
             self.__exit__(None, None, None)
             raise ValueError("unable to prepare compact aggTrade identity index") from exc
@@ -652,7 +880,7 @@ class _AggTradeDuplicateIndex:
         if temporary is not None:
             temporary.cleanup()
 
-    def add(self, symbol: str, row: _AggRow) -> None:
+    def add(self, symbol: str, row: _AggRow) -> bool:
         identity = _agg_identity(row)
         key = (symbol, str(row.aggregate_trade_id))
         try:
@@ -669,8 +897,40 @@ class _AggTradeDuplicateIndex:
                 if previous[0] != identity:
                     raise ValueError(
                         f"conflicting aggTrade ID {row.aggregate_trade_id} for {symbol}")
+                return False
         except sqlite3.Error as exc:
             raise ValueError("unable to verify compact aggTrade identities") from exc
+        return True
+
+    def add_replay_trade(self, symbol: str, symbol_index: int, row: _AggRow) -> None:
+        if not self._replay:
+            raise ValueError("replay index is not enabled")
+        trade_id = str(row.aggregate_trade_id)
+        self._connection.execute(
+            "INSERT INTO replay_trades VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (symbol, symbol_index, row.timestamp_ms, row.timestamp_ms,
+             trade_id, len(trade_id), str(row.price), str(row.quantity)))
+
+    def iter_replay_trades(self, symbols: tuple[str, ...], after_key=None):
+        if not self._replay:
+            raise ValueError("replay index is not enabled")
+        statement = ("SELECT symbol, symbol_index, first_seen_at_ms, trade_time_ms, "
+                     "aggregate_trade_id, price, quantity FROM replay_trades")
+        parameters = ()
+        if after_key is not None:
+            seen, symbol_index, trade_time, trade_id = after_key
+            statement += (" WHERE (first_seen_at_ms, symbol_index, trade_time_ms, "
+                          "id_length, aggregate_trade_id) > (?, ?, ?, ?, ?)")
+            parameters = (seen, symbol_index, trade_time, len(str(trade_id)), str(trade_id))
+        statement += (" ORDER BY first_seen_at_ms, symbol_index, trade_time_ms, "
+                      "id_length, aggregate_trade_id")
+        for symbol, index, seen, time_ms, trade_id, price, quantity in self._connection.execute(
+                statement, parameters):
+            if symbols[index] != symbol:
+                raise ValueError("replay index universe order changed")
+            yield HistoricalReplayTrade(
+                symbol, f"binance-usdm:{symbol}", Decimal(price), Decimal(quantity),
+                time_ms, time_ms, int(trade_id), seen)
 
     def commit(self) -> None:
         try:

@@ -11,12 +11,13 @@ from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
-from typing import Callable
+from typing import Callable, Iterable
 
 from .movement import (
     BINANCE_USDM, BUCKET_INTERVAL_MS, COLLECTOR_STATES,
     MAX_LAST_TRADE_AGE_MS, TRADE_PRICE, WINDOW_BUCKETS,
     MarketObservation, MovementBucket, MovementBucketEngine,
+    MovementBucketEngineState,
 )
 from .movement_history import (
     MINUTE_MS, CompletedMovementCandle, build_historical_window_inputs,
@@ -41,6 +42,7 @@ HISTORICAL_REPLAY_POLICY_VERSION = (
     ":equal-time-order-trade-time-aggregate-id"
 )
 DEFAULT_FINALIZATION_GRACE_MS = 2_000
+HISTORICAL_REPLAY_RUNTIME_VERSION = "historical-replay-runtime-v1"
 _MAX_SAFE_TIMESTAMP = 9_007_199_254_740_991
 
 
@@ -299,6 +301,48 @@ class HistoricalReplayCheckpoint:
 
 
 @dataclass(frozen=True)
+class HistoricalReplayRuntimeState:
+    """State immediately after a fully finalized five-second boundary."""
+
+    runtime_version: str
+    run_fingerprint: str
+    completed_boundary_time_ms: int
+    replay_clock_time_ms: int
+    engines: tuple[tuple[str, MovementBucketEngineState], ...]
+    pending_trades: tuple[tuple[str, tuple[HistoricalReplayTrade, ...]], ...]
+    last_source_trade_key: tuple[int, int, int, int] | None
+    processed_trade_count: int
+    source_state_counts: tuple[tuple[str, int], ...]
+    eligible_counts: tuple[tuple[int, int], ...]
+    ineligible_counts: tuple[tuple[int, int], ...]
+    emitted_point_count: int
+
+    def __post_init__(self):
+        if (self.runtime_version != HISTORICAL_REPLAY_RUNTIME_VERSION
+                or not _digest(self.run_fingerprint)
+                or _timestamp(self.completed_boundary_time_ms, "completed boundary")
+                % BUCKET_INTERVAL_MS
+                or _timestamp(self.replay_clock_time_ms, "replay clock")
+                < self.completed_boundary_time_ms
+                or type(self.processed_trade_count) is not int
+                or self.processed_trade_count < 0
+                or type(self.emitted_point_count) is not int
+                or self.emitted_point_count < 0):
+            raise ValueError("invalid runtime replay state")
+        for counts in (self.source_state_counts, self.eligible_counts,
+                       self.ineligible_counts):
+            if (len({key for key, _ in counts}) != len(counts)
+                    or any(type(value) is not int or value < 0
+                           for _, value in counts)):
+                raise ValueError("invalid cumulative replay counts")
+        if self.last_source_trade_key is not None:
+            key = self.last_source_trade_key
+            if (type(key) is not tuple or len(key) != 4
+                    or any(type(item) is not int or item < 0 for item in key)):
+                raise ValueError("invalid replay source cursor")
+
+
+@dataclass(frozen=True)
 class HistoricalReplayDiagnostics:
     engine_start_boundary_time_ms: int
     output_start_boundary_time_ms: int
@@ -364,6 +408,11 @@ def _run_manifest(request):
     canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return HistoricalReplayRunManifest(**fields, run_fingerprint=digest)
+
+
+def historical_replay_run_manifest(request):
+    """The scientific run identity, shared by materialized and bounded inputs."""
+    return _run_manifest(request)
 
 
 def _point_id(run_fingerprint, boundary):
@@ -434,44 +483,98 @@ def _validate_checkpoint(checkpoint, manifest):
         raise ValueError("checkpoint does not belong to this replay run")
 
 
-def run_historical_market_replay(
-    request: HistoricalReplayRequest,
-    checkpoint: HistoricalReplayCheckpoint | None = None,
-    *,
+def _run_replay_core(
+    request, trades: Iterable[HistoricalReplayTrade], candles, source_intervals,
+    duplicate_count: int, manifest: HistoricalReplayRunManifest,
+    checkpoint: HistoricalReplayCheckpoint | None,
+    *, runtime_state: HistoricalReplayRuntimeState | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    boundary_callback: Callable[[HistoricalMarketReplayPoint,
+                                 HistoricalReplayRuntimeState | None], None] | None = None,
 ) -> HistoricalMarketReplayResult:
-    """Rebuild from warm-up; skip checkpointed outputs without private engine snapshots."""
-    if not isinstance(request, HistoricalReplayRequest):
-        raise ValueError("request must be HistoricalReplayRequest")
-    manifest = _run_manifest(request)
-    _validate_checkpoint(checkpoint, manifest)
-    trades, candles, source_intervals, duplicate_count = _canonical_inputs(request)
     symbols = request.universe.symbols
     config = request.config
-    engines = {instrument.symbol: MovementBucketEngine(instrument.instrument_id)
-               for instrument in request.instruments}
-    instruments = {instrument.symbol: instrument for instrument in request.instruments}
+    instruments = {item.symbol: item for item in request.instruments}
+    if runtime_state is not None:
+        if (runtime_state.runtime_version != HISTORICAL_REPLAY_RUNTIME_VERSION
+                or runtime_state.run_fingerprint != manifest.run_fingerprint
+                or runtime_state.completed_boundary_time_ms < config.output_start_boundary_time_ms
+                or runtime_state.completed_boundary_time_ms > config.output_end_boundary_time_ms
+                or runtime_state.completed_boundary_time_ms % BUCKET_INTERVAL_MS
+                or runtime_state.replay_clock_time_ms != runtime_state.completed_boundary_time_ms + config.finalization_grace_ms
+                or tuple(symbol for symbol, _ in runtime_state.engines) != symbols
+                or tuple(symbol for symbol, _ in runtime_state.pending_trades) != symbols):
+            raise ValueError("runtime replay state does not belong to this run")
+        engines = {symbol: MovementBucketEngine.from_state(state)
+                   for symbol, state in runtime_state.engines}
+        if any(engine._last_finalized_boundary_ms != runtime_state.completed_boundary_time_ms
+               for engine in engines.values()):
+            raise ValueError("runtime replay engine boundary mismatch")
+        pending_trades = {symbol: list(rows)
+                          for symbol, rows in runtime_state.pending_trades}
+        symbol_index = {symbol: index for index, symbol in enumerate(symbols)}
+        for symbol, rows in pending_trades.items():
+            if any(row.symbol != symbol
+                   or row.first_seen_at_ms > runtime_state.replay_clock_time_ms
+                   or row.trade_time_ms <= runtime_state.completed_boundary_time_ms
+                   or runtime_state.last_source_trade_key is None
+                   or (row.first_seen_at_ms, symbol_index[symbol],
+                       row.trade_time_ms, row.aggregate_trade_id)
+                   > runtime_state.last_source_trade_key
+                   for row in rows):
+                raise ValueError("runtime replay pending trade mismatch")
+        processed_trades = runtime_state.processed_trade_count
+        source_counts = Counter(dict(runtime_state.source_state_counts))
+        eligible_counts = Counter(dict(runtime_state.eligible_counts))
+        ineligible_counts = Counter(dict(runtime_state.ineligible_counts))
+        emitted_count = runtime_state.emitted_point_count
+        start_boundary = runtime_state.completed_boundary_time_ms + BUCKET_INTERVAL_MS
+        last_trade_key = runtime_state.last_source_trade_key
+    else:
+        engines = {item.symbol: MovementBucketEngine(item.instrument_id)
+                   for item in request.instruments}
+        pending_trades = {symbol: [] for symbol in symbols}
+        processed_trades = emitted_count = 0
+        source_counts, eligible_counts, ineligible_counts = Counter(), Counter(), Counter()
+        start_boundary = config.engine_start_boundary_time_ms
+        last_trade_key = None
     source_indexes = {symbol: 0 for symbol in symbols}
+    for symbol in symbols:
+        sequence = source_intervals[symbol]
+        while (source_indexes[symbol] + 1 < len(sequence)
+               and sequence[source_indexes[symbol]].end_boundary_time_ms < start_boundary):
+            source_indexes[symbol] += 1
     visible_candles = {symbol: [] for symbol in symbols}
     visible_generations = {symbol: 0 for symbol in symbols}
     historical_cache = _ReplayHistoricalInputCache()
-    pending_trades = {symbol: [] for symbol in symbols}
-    trade_index = candle_index = processed_trades = 0
-    source_counts = Counter()
-    eligible_counts = Counter()
-    ineligible_counts = Counter()
+    candle_index = 0
+    if runtime_state is not None:
+        while (candle_index < len(candles)
+               and candles[candle_index].first_seen_at_ms <= runtime_state.replay_clock_time_ms):
+            candle = candles[candle_index]
+            visible_candles[candle.symbol].append(candle.canonical())
+            visible_generations[candle.symbol] += 1
+            candle_index += 1
+    symbol_index = {symbol: index for index, symbol in enumerate(symbols)}
+    trade_iterator = iter(trades)
+    lookahead = next(trade_iterator, None)
     points = []
     output_boundary_count = ((config.output_end_boundary_time_ms
                               - config.output_start_boundary_time_ms)
                              // BUCKET_INTERVAL_MS + 1)
     reported_progress_step = 0
-    for boundary in range(config.engine_start_boundary_time_ms,
-                          config.output_end_boundary_time_ms + 1, BUCKET_INTERVAL_MS):
+    for boundary in range(start_boundary, config.output_end_boundary_time_ms + 1,
+                          BUCKET_INTERVAL_MS):
         replay_clock = boundary + config.finalization_grace_ms
-        while trade_index < len(trades) and trades[trade_index].first_seen_at_ms <= replay_clock:
-            trade = trades[trade_index]
+        while lookahead is not None and lookahead.first_seen_at_ms <= replay_clock:
+            trade = lookahead
+            key = (trade.first_seen_at_ms, symbol_index[trade.symbol],
+                   trade.trade_time_ms, trade.aggregate_trade_id)
+            if last_trade_key is not None and key <= last_trade_key:
+                raise ValueError("replay trade source is not strictly canonically ordered")
             pending_trades[trade.symbol].append(trade)
-            trade_index += 1
+            last_trade_key = key
+            lookahead = next(trade_iterator, None)
         while candle_index < len(candles) and candles[candle_index].first_seen_at_ms <= replay_clock:
             candle = candles[candle_index]
             visible_candles[candle.symbol].append(candle.canonical())
@@ -519,17 +622,14 @@ def run_historical_market_replay(
             movement_symbols[symbol] = MarketMovementSymbolInput(
                 symbol=symbol, instrument_id=instrument.instrument_id,
                 instrument_compatible=instrument.instrument_compatible,
-                readiness=readiness, historical=historical,
-            )
+                readiness=readiness, historical=historical)
             bucket = endpoint_buckets[symbol]
             source_evidence.append(SymbolSourceTimeEvidence(
                 symbol, bucket.last_real_trade_time_ms,
-                bucket.last_real_event_time_ms, bucket.last_received_at_ms,
-            ))
+                bucket.last_real_event_time_ms, bucket.last_received_at_ms))
         evaluation = calculate_market_movement(MarketMovementInput(
             evaluation_boundary_time_ms=boundary, universe=request.universe,
-            symbols=movement_symbols, config=config.movement_config,
-        ))
+            symbols=movement_symbols, config=config.movement_config))
         if progress_callback is not None:
             completed = ((boundary - config.output_start_boundary_time_ms)
                          // BUCKET_INTERVAL_MS + 1)
@@ -544,15 +644,31 @@ def run_historical_market_replay(
                 eligible_counts[window] += 1
             else:
                 ineligible_counts[window] += 1
-        points.append(HistoricalMarketReplayPoint(
+        point = HistoricalMarketReplayPoint(
             point_id=_point_id(manifest.run_fingerprint, boundary),
             evaluation_boundary_time_ms=boundary,
             replay_clock_time_ms=replay_clock,
             movement_evaluation=evaluation,
             endpoint_buckets=tuple((symbol, endpoint_buckets[symbol]) for symbol in symbols),
             source_time_evidence=tuple(source_evidence),
-            source_states=tuple((symbol, current_states[symbol]) for symbol in symbols),
-        ))
+            source_states=tuple((symbol, current_states[symbol]) for symbol in symbols))
+        points.append(point)
+        emitted_count += 1
+        if boundary_callback is not None:
+            checkpoint_due = (boundary == config.output_end_boundary_time_ms
+                              or boundary > config.output_start_boundary_time_ms
+                              and (boundary - config.output_start_boundary_time_ms) % 3_600_000 == 0)
+            state = HistoricalReplayRuntimeState(
+                HISTORICAL_REPLAY_RUNTIME_VERSION, manifest.run_fingerprint,
+                boundary, replay_clock,
+                tuple((symbol, engines[symbol].snapshot_state()) for symbol in symbols),
+                tuple((symbol, tuple(pending_trades[symbol])) for symbol in symbols),
+                last_trade_key, processed_trades,
+                tuple((name, source_counts[name]) for name in sorted(COLLECTOR_STATES)),
+                tuple((window, eligible_counts[window]) for window in WINDOWS),
+                tuple((window, ineligible_counts[window]) for window in WINDOWS),
+                emitted_count) if checkpoint_due else None
+            boundary_callback(point, state)
     diagnostics = HistoricalReplayDiagnostics(
         engine_start_boundary_time_ms=config.engine_start_boundary_time_ms,
         output_start_boundary_time_ms=config.output_start_boundary_time_ms,
@@ -560,18 +676,61 @@ def run_historical_market_replay(
         processed_trade_count=processed_trades,
         deduplicated_trade_count=duplicate_count,
         late_trade_count=sum(engine.rejected_late_observations for engine in engines.values()),
-        emitted_point_count=len(points),
+        emitted_point_count=emitted_count,
         source_state_symbol_boundary_counts=tuple((state, source_counts[state])
                                                    for state in sorted(COLLECTOR_STATES)),
         market_wide_eligible_point_counts=tuple((window, eligible_counts[window])
                                                 for window in WINDOWS),
         market_wide_ineligible_point_counts=tuple((window, ineligible_counts[window])
-                                                  for window in WINDOWS),
-    )
+                                                  for window in WINDOWS))
     final_checkpoint = (HistoricalReplayCheckpoint(
         manifest.run_fingerprint, points[-1].evaluation_boundary_time_ms,
         points[-1].point_id) if points else checkpoint)
     return HistoricalMarketReplayResult(manifest, tuple(points), diagnostics, final_checkpoint)
+
+
+def run_historical_market_replay(
+    request: HistoricalReplayRequest,
+    checkpoint: HistoricalReplayCheckpoint | None = None,
+    *, progress_callback: Callable[[int, int], None] | None = None,
+) -> HistoricalMarketReplayResult:
+    """Legacy materialized API: rebuild warm-up and skip checkpointed outputs."""
+    if not isinstance(request, HistoricalReplayRequest):
+        raise ValueError("request must be HistoricalReplayRequest")
+    manifest = _run_manifest(request)
+    _validate_checkpoint(checkpoint, manifest)
+    trades, candles, source_intervals, duplicate_count = _canonical_inputs(request)
+    return _run_replay_core(request, trades, candles, source_intervals,
+                            duplicate_count, manifest, checkpoint,
+                            progress_callback=progress_callback)
+
+
+def run_bounded_historical_market_replay(
+    dataset, *, runtime_state: HistoricalReplayRuntimeState | None = None,
+    boundary_callback: Callable[[HistoricalMarketReplayPoint,
+                                 HistoricalReplayRuntimeState | None], None] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> HistoricalMarketReplayResult:
+    """Run the same boundary core over a disk-indexed ordered trade cursor."""
+    manifest = _run_manifest(dataset)
+    if runtime_state is not None and runtime_state.run_fingerprint != manifest.run_fingerprint:
+        raise ValueError("runtime state run fingerprint mismatch")
+    # Candle and interval canonicalization is shared with the materialized path;
+    # the bounded archive has already validated and deduplicated raw trades.
+    canonical_view = type("ReplayInputView", (), {})()
+    canonical_view.universe = dataset.universe
+    canonical_view.instruments = dataset.instruments
+    canonical_view.candles = dataset.candles
+    canonical_view.source_intervals = dataset.source_intervals
+    canonical_view.config = dataset.config
+    canonical_view.trades = ()
+    _, candles, intervals, _ = _canonical_inputs(canonical_view)
+    after = None if runtime_state is None else runtime_state.last_source_trade_key
+    return _run_replay_core(
+        dataset, dataset._index.iter_replay_trades(dataset.universe.symbols, after),
+        candles, intervals, 0,
+        manifest, None, runtime_state=runtime_state,
+        boundary_callback=boundary_callback, progress_callback=progress_callback)
 
 
 def to_market_state_experiment_points(

@@ -116,6 +116,30 @@ class _PendingBucket:
             self.latest = observation
 
 
+@dataclass(frozen=True)
+class MovementPendingBucketState:
+    boundary_time_ms: int
+    base_volume: Decimal
+    quote_volume: Decimal
+    trade_count: int
+    latest: MarketObservation | None
+
+
+@dataclass(frozen=True)
+class MovementBucketEngineState:
+    provider: str
+    instrument_id: str
+    price_type: str
+    capacity: int
+    buckets: tuple[MovementBucket, ...]
+    pending: tuple[MovementPendingBucketState, ...]
+    last_finalized_boundary_ms: int | None
+    last_real_observation: MarketObservation | None
+    carry_observation: MarketObservation | None
+    last_accepted_order_key: tuple[int, int] | None
+    rejected_late_observations: int
+
+
 class MovementBucketEngine:
     """Per-instrument bounded state advanced only by explicit aligned boundaries."""
 
@@ -156,6 +180,96 @@ class MovementBucketEngine:
     @property
     def rejected_late_observations(self):
         return self._rejected_late_observations
+
+    def snapshot_state(self) -> MovementBucketEngineState:
+        return MovementBucketEngineState(
+            self.provider, self.instrument_id, self.price_type, self.capacity,
+            tuple(self._buckets),
+            tuple(MovementPendingBucketState(boundary, value.base_volume,
+                                             value.quote_volume, value.trade_count,
+                                             value.latest)
+                  for boundary, value in sorted(self._pending.items())),
+            self._last_finalized_boundary_ms, self._last_real_observation,
+            self._carry_observation, self._last_accepted_order_key,
+            self._rejected_late_observations)
+
+    @classmethod
+    def from_state(cls, state: MovementBucketEngineState) -> MovementBucketEngine:
+        if not isinstance(state, MovementBucketEngineState):
+            raise ValueError("invalid movement engine state")
+        engine = cls(state.instrument_id, state.provider, state.price_type,
+                     state.capacity)
+        finalized = state.last_finalized_boundary_ms
+        if finalized is not None:
+            _timestamp(finalized, "last finalized boundary")
+            if finalized % BUCKET_INTERVAL_MS:
+                raise ValueError("unaligned finalized movement boundary")
+        if len(state.buckets) > state.capacity or len(state.pending) > state.capacity:
+            raise ValueError("movement state exceeds capacity")
+        bucket_times = tuple(item.boundary_time_ms for item in state.buckets)
+        if (any(not isinstance(item, MovementBucket)
+                or (item.provider, item.instrument_id, item.price_type)
+                != (state.provider, state.instrument_id, state.price_type)
+                or item.source_state not in COLLECTOR_STATES
+                for item in state.buckets)
+                or any(right != left + BUCKET_INTERVAL_MS
+                       for left, right in zip(bucket_times, bucket_times[1:]))
+                or (bucket_times and bucket_times[-1] != finalized)
+                or (finalized is None and bucket_times)):
+            raise ValueError("invalid finalized movement bucket sequence")
+        pending_times = tuple(item.boundary_time_ms for item in state.pending)
+        if (pending_times != tuple(sorted(set(pending_times)))
+                or any(value % BUCKET_INTERVAL_MS or value < 0
+                       or (finalized is not None and value <= finalized)
+                       for value in pending_times)):
+            raise ValueError("invalid pending movement boundaries")
+        def observation(value):
+            if value is None:
+                return
+            if (not isinstance(value, MarketObservation)
+                    or (value.provider, value.instrument_id, value.price_type)
+                    != (state.provider, state.instrument_id, state.price_type)):
+                raise ValueError("movement observation provenance mismatch")
+        for value in (state.last_real_observation, state.carry_observation):
+            observation(value)
+        if state.carry_observation is not None and state.carry_observation != state.last_real_observation:
+            raise ValueError("invalid movement carry state")
+        for item in state.pending:
+            if (not isinstance(item, MovementPendingBucketState)
+                    or type(item.trade_count) is not int or item.trade_count <= 0
+                    or item.base_volume <= 0 or item.quote_volume <= 0):
+                raise ValueError("invalid pending movement aggregate")
+            observation(item.latest)
+            if (item.latest is None
+                    or cls._bucket_boundary(item.latest.trade_time_ms) != item.boundary_time_ms):
+                raise ValueError("pending movement latest observation mismatch")
+        if (state.last_accepted_order_key is not None
+                and (type(state.last_accepted_order_key) is not tuple
+                     or len(state.last_accepted_order_key) != 2
+                     or tuple(map(type, state.last_accepted_order_key)) != (int, int)
+                     or min(state.last_accepted_order_key) < 0)):
+            raise ValueError("invalid movement accepted order key")
+        latest_keys = [(item.latest.trade_time_ms, item.latest.aggregate_trade_id)
+                       for item in state.pending]
+        if (state.last_accepted_order_key is None) != (state.last_real_observation is None and not latest_keys):
+            raise ValueError("inconsistent movement accepted order key")
+        if latest_keys and max(latest_keys) > state.last_accepted_order_key:
+            raise ValueError("movement accepted key precedes pending observation")
+        if (type(state.rejected_late_observations) is not int
+                or state.rejected_late_observations < 0):
+            raise ValueError("invalid movement late rejection count")
+        engine._buckets.extend(state.buckets)
+        engine._pending = {
+            item.boundary_time_ms: _PendingBucket(item.base_volume,
+                                                  item.quote_volume,
+                                                  item.trade_count, item.latest)
+            for item in state.pending}
+        engine._last_finalized_boundary_ms = finalized
+        engine._last_real_observation = state.last_real_observation
+        engine._carry_observation = state.carry_observation
+        engine._last_accepted_order_key = state.last_accepted_order_key
+        engine._rejected_late_observations = state.rejected_late_observations
+        return engine
 
     @staticmethod
     def _bucket_boundary(trade_time_ms):

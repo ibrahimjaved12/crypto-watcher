@@ -21,6 +21,7 @@ from market_analysis.binance_historical_archive import (
     daily_aggtrades_checksum_relative_path, daily_aggtrades_relative_path,
     daily_kline_checksum_relative_path, daily_kline_relative_path,
     historical_candle_start_ms, load_binance_usdm_historical_replay_dataset,
+    load_binance_usdm_bounded_historical_replay_dataset,
     required_aggtrade_dates, required_kline_dates,
     verify_binance_usdm_historical_core_archives,
 )
@@ -32,6 +33,7 @@ from market_analysis.historical_ohlc_evidence import (
 )
 from market_analysis.historical_replay import (
     HistoricalReplayConfig, ReplayPartitionPlan, run_historical_market_replay,
+    run_bounded_historical_market_replay,
     to_market_state_experiment_points,
 )
 from market_analysis.historical_taker_flow_evidence import (
@@ -136,6 +138,83 @@ def _single_day_bundle(root, *, trades=None, klines=None, symbols=(SYMBOL,),
 
 
 class BinanceHistoricalArchiveTests(unittest.TestCase):
+    def test_bounded_archive_matches_materialized_science_and_numeric_id_order(self):
+        symbols = ("BTCUSDT", "ETHUSDT")
+        config = _config()
+        day = date(2026, 8, 20)
+        boundary = config.output_start_boundary_time_ms
+        rows = {
+            ("BTCUSDT", day): (
+                _agg(boundary, 10), _agg(boundary, 10),
+                _agg(boundary, 2), _agg(boundary, 2**63 + 1)),
+            ("ETHUSDT", day): (_agg(boundary, 3),),
+        }
+        klines = {(symbol, day): (_kline(historical_candle_start_ms(config)),)
+                  for symbol in symbols}
+        with tempfile.TemporaryDirectory() as folder:
+            request = _bundle(Path(folder), config, symbols,
+                              trade_rows=rows, kline_rows=klines)
+            materialized = load_binance_usdm_historical_replay_dataset(
+                request, include_taker_flow_evidence=True)
+            bounded = load_binance_usdm_bounded_historical_replay_dataset(request)
+            try:
+                self.assertEqual(bounded.archive_manifest, materialized.archive_manifest)
+                self.assertEqual(bounded.diagnostics, materialized.diagnostics)
+                self.assertEqual(bounded.ohlc_evidence, materialized.ohlc_evidence)
+                self.assertEqual(bounded.taker_flow_evidence,
+                                 materialized.taker_flow_evidence)
+                self.assertEqual(tuple(bounded.iter_trades()), tuple(sorted(
+                    materialized.replay_request.trades,
+                    key=lambda item: (item.first_seen_at_ms,
+                                      symbols.index(item.symbol),
+                                      item.trade_time_ms, item.aggregate_trade_id))))
+                self.assertEqual([item.aggregate_trade_id
+                                  for item in bounded.iter_trades() if item.symbol == "BTCUSDT"],
+                                 [2, 10, 2**63 + 1])
+                self.assertEqual(
+                    run_historical_market_replay(materialized.replay_request),
+                    run_bounded_historical_market_replay(bounded))
+            finally:
+                bounded.close()
+
+    def test_bounded_archive_rejects_conflicting_duplicate(self):
+        config = _config()
+        day = date(2026, 8, 20)
+        boundary = config.output_start_boundary_time_ms
+        with tempfile.TemporaryDirectory() as folder:
+            request = _bundle(
+                Path(folder), config,
+                trade_rows={(SYMBOL, day): (
+                    _agg(boundary, 19, price="100"),
+                    _agg(boundary, 19, price="101"))},
+                kline_rows={(SYMBOL, day): (
+                    _kline(historical_candle_start_ms(config)),)})
+            with self.assertRaisesRegex(ValueError, "conflicting aggTrade ID"):
+                load_binance_usdm_bounded_historical_replay_dataset(request)
+
+    def test_bounded_dataset_retains_no_raw_trade_population(self):
+        config = _config()
+        day = date(2026, 8, 20)
+        start = config.engine_start_boundary_time_ms
+        rows = tuple(_agg(start + index * 1_000, index + 1)
+                     for index in range(1_000))
+        with tempfile.TemporaryDirectory() as folder:
+            request = _bundle(
+                Path(folder), config,
+                trade_rows={(SYMBOL, day): rows},
+                kline_rows={(SYMBOL, day): (
+                    _kline(historical_candle_start_ms(config)),)})
+            bounded = load_binance_usdm_bounded_historical_replay_dataset(request)
+            try:
+                self.assertFalse(hasattr(bounded, "trades"))
+                self.assertFalse(hasattr(bounded, "replay_request"))
+                self.assertEqual(bounded.trade_stream_manifest.unique_replayable_row_count,
+                                 len(tuple(bounded.iter_trades())))
+                self.assertGreater(bounded.trade_stream_manifest.unique_replayable_row_count,
+                                   500)
+            finally:
+                bounded.close()
+
     def test_exact_daily_paths_versions_and_midnight_dates(self):
         day = date(2026, 8, 20)
         agg = "data/futures/um/daily/aggTrades/BTCUSDT/BTCUSDT-aggTrades-2026-08-20.zip"

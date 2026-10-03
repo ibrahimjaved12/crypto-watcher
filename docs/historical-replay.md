@@ -48,11 +48,30 @@ partition cutoffs are separate from this identity. The pure
 source-time evidence as development, validation, or test without recalculation;
 Issue #75 experiment runners can consume the resulting chronological stream.
 
-Checkpoints use **rebuild-and-skip v1**: resume validates the fingerprint and
-point ID, rebuilds canonical engine state from warm-up, then emits only points
-after the checkpoint. No private engine state is serialized. Trade processing,
-late-rejection, source-state, and market-wide eligibility counts remain visible
-in replay diagnostics.
+The legacy `HistoricalReplayCheckpoint` API remains **rebuild-and-skip v1**:
+it validates the fingerprint and point ID, rebuilds from warm-up, and emits
+only later points. The #152 study executor instead uses durable runtime
+checkpoints containing exact `MovementBucketEngine` state, pending visible
+trades, source position, cumulative diagnostics, and immutable JSONL point
+chunks. Checkpoints are written at deterministic hourly output boundaries and
+at output end. A restart validates the entire contiguous checkpoint chain and
+restores the latest complete state; corrupt or conflicting files fail closed.
+These files are local operational working state, not scientific observations.
+
+The study's raw aggTrades are deduplicated and ordered in a bounded-cache,
+disk-backed SQLite index, then streamed into the same canonical replay loop
+used by materialized callers. Ordering is `(first_seen_at_ms, symbol_index,
+trade_time_ms, numeric aggregate_trade_id)`. Final scientific outputs and
+fingerprints retain their existing versions. Frozen `code_revision` continues
+to identify the scientific producer; checkpoints separately bind the actual
+`runtime_implementation_revision` from Git HEAD. Final period reports remain
+create-only.
+
+By default, checkpoints live under `<output-dir>/.runtime-checkpoints/` and
+progress observations append to `<output-dir>/study-progress.jsonl` with
+flush and fsync. `execute --checkpoint-dir PATH --progress-report PATH` can
+override those locations. Progress and checkpoint files do not enter final
+scientific report hashes.
 
 ## Archive research and live history
 

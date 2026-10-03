@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .binance_historical_archive import (
-    BinanceHistoricalReplayDataset, BinanceUSDMArchiveRequest,
+    BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset, BinanceUSDMArchiveRequest,
     load_binance_usdm_historical_replay_dataset,
 )
 from .experiments.market_state_common import validate_experiment_points
@@ -143,7 +143,7 @@ class HistoricalMarkTradeExtensionRequest:
 
 @dataclass(frozen=True)
 class HistoricalMarkTradeExtensionPrepared:
-    archive_dataset: BinanceHistoricalReplayDataset
+    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset
     replay_result: HistoricalMarketReplayResult
     experiment_points: tuple
     partition_plan: ReplayPartitionPlan | None
@@ -152,7 +152,7 @@ class HistoricalMarkTradeExtensionPrepared:
     study_phase: str | None = None
 
     def __post_init__(self):
-        if (not isinstance(self.archive_dataset, BinanceHistoricalReplayDataset)
+        if (not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
                 or not isinstance(self.replay_result, HistoricalMarketReplayResult)
                 or ((self.partition_plan is None) == (self.study_phase is None))
                 or (self.partition_plan is not None
