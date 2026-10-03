@@ -267,7 +267,7 @@ test("redirects are never followed and unused error bodies are canceled", async 
     for (const cleanupFails of [false, true]) {
       let calls = 0;
       let canceled = 0;
-      const { value: reply } = await captureDiagnostics(() =>
+      const { value: reply, logs } = await captureDiagnostics(() =>
         analyzeForUser(db({ watchlist_items: {} }), "user", "BTCUSDT", env, async (_, options) => {
           calls++;
           assert.equal(options.redirect, "manual");
@@ -284,6 +284,9 @@ test("redirects are never followed and unused error bodies are canceled", async 
       );
       assert.equal(calls, 1);
       assert.equal(canceled, 1);
+      assert.deepEqual(logs, [["[python-analysis]", { stage: "response-status", status }]]);
+      assert.equal(JSON.stringify(logs).includes("private cleanup failure"), false);
+      assert.equal(JSON.stringify(logs).includes("https://other.example.test"), false);
       const expected =
         status < 400
           ? "Could not reach the Python analysis service or read its response. Please retry later."
@@ -372,12 +375,20 @@ test("outbound failures return safe categories without logging private data", as
       reply.category,
       entry.stage === "schema-validation" ? "invalid_response" : "network_or_response",
     );
-    assert.equal(logs.length, 0);
-    const surfaced = JSON.stringify(reply);
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0][0], "[python-analysis]");
+    assert.deepEqual(logs[0][1], entry.status === undefined
+      ? { stage: entry.stage } : { stage: entry.stage, status: entry.status });
+    assert.equal(logs[0].length, 2);
+    const surfaced = JSON.stringify({ reply, logs });
     assert.equal(surfaced.includes(env.PYTHON_ANALYSIS_TOKEN), false);
     assert.equal(surfaced.includes(env.PYTHON_ANALYSIS_URL), false);
     assert.equal(surfaced.includes("private-user-id"), false);
     assert.equal(surfaced.includes(privateResponse), false);
+    assert.equal(surfaced.includes(`Bearer ${env.PYTHON_ANALYSIS_TOKEN}`), false);
+    assert.equal(surfaced.includes("baseline"), false);
+    assert.equal(surfaced.includes("threshold_pct"), false);
+    assert.equal(surfaced.includes("ECONNRESET"), false);
   }
 });
 
@@ -433,27 +444,21 @@ test("HTTP authentication errors, unavailable services, malformed and mismatched
     assert.equal(reply.ok, false);
     assert.equal(reply.error.includes("private-service-detail"), false);
   }
-  for (const response of [
-    new Response("<html>error</html>"),
-    Response.json({}),
-    Response.json({ ...result(), symbol: "ETHUSDT" }),
-    Response.json({
+  for (const [stage, response] of [
+    ["json-parse", new Response("<html>error</html>")],
+    ["schema-validation", Response.json({})],
+    ["schema-validation", Response.json({ ...result(), symbol: "ETHUSDT" })],
+    ["schema-validation", Response.json({
       ...result(),
       instrument: { ...result().instrument, id: "binance-usdm:ETHUSDT" },
-    }),
+    })],
   ]) {
-    assert.equal(
-      (
-        await analyzeForUser(
-          db({ watchlist_items: {} }),
-          "user",
-          "BTCUSDT",
-          env,
-          async () => response,
-        )
-      ).ok,
-      false,
-    );
+    const { value: reply, logs } = await captureDiagnostics(() => analyzeForUser(
+      db({ watchlist_items: {} }), "user", "BTCUSDT", env, async () => response));
+    assert.equal(reply.ok, false);
+    assert.deepEqual(logs, [["[python-analysis]", {
+      stage, status: 200,
+    }]]);
   }
   assert.equal(
     (
@@ -484,7 +489,7 @@ test("service deadline aborts the request and returns a safe timeout message", a
   const original = globalThis.setTimeout;
   globalThis.setTimeout = (fn, ms, ...args) => original(fn, ms === 25_000 ? 1 : ms, ...args);
   try {
-    const reply = await analyzeForUser(
+    const { value: reply, logs } = await captureDiagnostics(() => analyzeForUser(
       db({ watchlist_items: {} }),
       "user",
       "BTCUSDT",
@@ -495,7 +500,8 @@ test("service deadline aborts the request and returns a safe timeout message", a
             reject(new Error("private-timeout-details")),
           );
         }),
-    );
+    ));
+    assert.deepEqual(logs, [["[python-analysis]", { stage: "fetch" }]]);
     assert.equal(reply.ok, false);
     assert.match(reply.error, /timed out/);
     assert.equal(reply.error.includes("private-timeout-details"), false);
