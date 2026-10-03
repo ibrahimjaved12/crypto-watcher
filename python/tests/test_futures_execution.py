@@ -180,9 +180,8 @@ class RuleTests(unittest.TestCase):
                     result = f.validate_order(order, rules, context)
                     self.assertEqual(result.status, 'VALID' if valid else 'REJECTED_RULE')
                     if not valid:
-                        self.assertIn('LOT_SIZE:OFF_GRID', result.reasons)
-                        if market:
-                            self.assertIn('MARKET_LOT_SIZE:OFF_GRID', result.reasons)
+                        applicable = 'MARKET_LOT_SIZE' if market else 'LOT_SIZE'
+                        self.assertEqual(result.reasons, (applicable + ':OFF_GRID',))
         for grid in (lot, market_lot):
             for original, expected in (('.15', '.15'), ('.20', '.15'), ('.25', '.25'),
                                         ('.30', '.25'), ('.34', '.25')):
@@ -214,6 +213,81 @@ class RuleTests(unittest.TestCase):
             self.assertEqual(f.validate_order(price_bearing, RULES).status, 'VALID')
             # A low dynamic mark cannot override the submitted limit notional.
             self.assertEqual(f.validate_order(price_bearing, RULES, replace(context, mark_price=D(1))).status, 'VALID')
+
+    def test_market_ignores_non_applicable_filters_even_when_required_or_invalid(self):
+        order = intent(quantity=D('.4'), market=True, price=None)
+        context = RuleEvaluationContext(D(100), EVIDENCE)
+        missing = replace(EVIDENCE, classification=Provenance.UNAVAILABLE)
+        changes = (
+            {'lot': None},
+            {'lot': replace(LOT, evidence=missing)},
+            {'lot': replace(LOT, increment=D(0))},
+            {'lot': replace(LOT, minimum=D('.15'))},  # .4 is off this lattice
+            {'price': None},
+            {'price': replace(PRICE, evidence=missing)},
+            {'price': replace(PRICE, tick_size=D(-1))},
+            {'percent_price': None, 'percent_price_required': True},
+            {'percent_price': PercentPrice(D('.9'), D('1.1'), missing)},
+            {'percent_price': PercentPrice(D(-1), D('1.1'), EVIDENCE)},
+            {'lot': None, 'price': None, 'percent_price': None, 'percent_price_required': True},
+        )
+        for fields in changes:
+            with self.subTest(fields=fields):
+                rules = replace(RULES, **fields)
+                result = f.validate_order(order, rules, context)
+                self.assertEqual((result.status, result.reasons), ('VALID', ()))
+        rules = replace(RULES, lot=None, price=None, percent_price_required=True)
+        for market_lot, status, reason in (
+                (None, 'UNAVAILABLE_RULE', 'MARKET_LOT_SIZE:UNAVAILABLE_GRID'),
+                (replace(MARKET_LOT, evidence=missing), 'UNAVAILABLE_RULE', 'MARKET_LOT_SIZE:UNAVAILABLE_GRID'),
+                (replace(MARKET_LOT, increment=D(0)), 'REJECTED_RULE', 'MARKET_LOT_SIZE:INVALID_GRID'),
+                (replace(MARKET_LOT, minimum=D('.15')), 'REJECTED_RULE', 'MARKET_LOT_SIZE:OFF_GRID')):
+            result = f.validate_order(order, replace(rules, market_lot=market_lot), context)
+            self.assertEqual((result.status, result.reasons), (status, (reason,)))
+        for missing_mark in (None, replace(context, mark_price=None),
+                             replace(context, evidence=missing)):
+            with self.subTest(missing_mark=missing_mark):
+                result = f.validate_order(order, rules, missing_mark)
+                self.assertEqual((result.status, result.reasons),
+                                 ('UNAVAILABLE_RULE', ('UNAVAILABLE_MARK_PRICE',)))
+        result = f.validate_order(order, rules, replace(context, mark_price=D(10)))
+        self.assertEqual((result.status, result.reasons), ('REJECTED_RULE', ('BELOW_MIN_NOTIONAL',)))
+        # With the existing reduce-only exemption, no applicable filter needs a
+        # mark. A supplied or required PERCENT_PRICE must not introduce that need.
+        for percent in (None, PercentPrice(D('.9'), D('1.1'), EVIDENCE)):
+            result = f.validate_order(replace(order, reduce_only=True),
+                                      replace(rules, percent_price=percent))
+            self.assertEqual((result.status, result.reasons), ('VALID', ()))
+
+    def test_price_bearing_ignores_market_lot_but_enforces_its_own_filters(self):
+        order = intent()
+        missing = replace(EVIDENCE, classification=Provenance.UNAVAILABLE)
+        for market_lot in (None, replace(MARKET_LOT, evidence=missing),
+                           replace(MARKET_LOT, increment=D(0)),
+                           replace(MARKET_LOT, maximum=D('.2'))):
+            with self.subTest(market_lot=market_lot):
+                rules = replace(RULES, market_lot=market_lot)
+                result = f.validate_order(order, rules)
+                self.assertEqual((result.status, result.reasons), ('VALID', ()))
+        rules = replace(RULES, market_lot=None)
+        for lot, status in ((None, 'UNAVAILABLE_RULE'),
+                            (replace(LOT, evidence=missing), 'UNAVAILABLE_RULE'),
+                            (replace(LOT, increment=D(0)), 'REJECTED_RULE'),
+                            (replace(LOT, minimum=D('.15')), 'REJECTED_RULE')):
+            self.assertEqual(f.validate_order(order, replace(rules, lot=lot)).status, status)
+        self.assertEqual(f.validate_order(order, replace(rules, price=None)).status, 'UNAVAILABLE_RULE')
+        self.assertIn('PRICE_FILTER:OFF_GRID', f.validate_order(replace(order, price=D('100.1')), rules).reasons)
+        percent_rules = replace(rules, percent_price_required=True)
+        self.assertEqual(f.validate_order(order, percent_rules).reasons, ('UNAVAILABLE_PERCENT_PRICE',))
+        percent_rules = replace(percent_rules, percent_price=PercentPrice(D('.9'), D('1.1'), EVIDENCE))
+        self.assertEqual(f.validate_order(order, percent_rules).reasons, ('UNAVAILABLE_MARK_PRICE',))
+        context = RuleEvaluationContext(D(100), EVIDENCE)
+        self.assertEqual(f.validate_order(replace(order, price=D(120)), percent_rules, context).reasons,
+                         ('OUTSIDE_PERCENT_PRICE',))
+        self.assertEqual(f.validate_order(replace(order, side=SELL, price=D(80)), percent_rules, context).reasons,
+                         ('OUTSIDE_PERCENT_PRICE',))
+        self.assertEqual(f.validate_order(replace(order, quantity=D('.1'), price=D(10)), rules, context).reasons,
+                         ('BELOW_MIN_NOTIONAL',))
 
     def test_market_lot_and_explicit_mark_context(self):
         order = intent(quantity=D('.3'), market=True, price=None)

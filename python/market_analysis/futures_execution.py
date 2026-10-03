@@ -292,23 +292,22 @@ def validate_order(intent, rules, context=None):
         except ValueError:
             add("INVALID_TRIGGER_PROTECT", malformed=True)
 
-    grids = [("LOT_SIZE", rules.lot, intent.quantity)]
-    if intent.market:
-        grids.append(("MARKET_LOT_SIZE", rules.market_lot, intent.quantity))
-    for name, grid, value in grids:
-        errors = _grid_errors(grid)
-        if not errors and value is not None:
-            errors = grid_reasons(value, grid)
-        for error in errors:
-            add(name + ":" + error, missing=error.startswith("UNAVAILABLE"),
-                malformed=error.startswith("INVALID"))
-    # Disabled price components remain independent of the strict quantity grids.
-    price_errors = _price_filter_errors(rules.price)
-    if not price_errors and intent.price is not None:
-        price_errors = price_filter_reasons(intent.price, rules.price)
-    for error in price_errors:
-        add("PRICE_FILTER:" + error, missing=error.startswith("UNAVAILABLE"),
+    # Filter applicability follows the immutable order form.
+    name, grid = (("MARKET_LOT_SIZE", rules.market_lot) if intent.market
+                  else ("LOT_SIZE", rules.lot))
+    errors = _grid_errors(grid)
+    if not errors:
+        errors = grid_reasons(intent.quantity, grid)
+    for error in errors:
+        add(name + ":" + error, missing=error.startswith("UNAVAILABLE"),
             malformed=error.startswith("INVALID"))
+    if not intent.market:
+        price_errors = _price_filter_errors(rules.price)
+        if not price_errors:
+            price_errors = price_filter_reasons(intent.price, rules.price)
+        for error in price_errors:
+            add("PRICE_FILTER:" + error, missing=error.startswith("UNAVAILABLE"),
+                malformed=error.startswith("INVALID"))
     reference = mark if intent.market else intent.price
     minimum = rules.min_notional
     if minimum is None or not _evidence_available(minimum.evidence):
@@ -326,27 +325,28 @@ def validate_order(intent, rules, context=None):
                     add("UNAVAILABLE_MARK_PRICE", missing=True)
                 elif _mul(intent.quantity, reference) < minimum.minimum:
                     add("BELOW_MIN_NOTIONAL")
-    percent = rules.percent_price
-    if percent is None:
-        if rules.percent_price_required:
-            add("UNAVAILABLE_PERCENT_PRICE", missing=True)
-    else:
-        try:
-            number(percent.multiplier_down, "percent down", positive=True)
-            number(percent.multiplier_up, "percent up", positive=True)
-            if percent.multiplier_down > percent.multiplier_up:
-                raise ValueError("invalid percent bounds")
-        except ValueError:
-            add("INVALID_PERCENT_PRICE", malformed=True)
-        else:
-            if not _evidence_available(percent.evidence):
+    if not intent.market:
+        percent = rules.percent_price
+        if percent is None:
+            if rules.percent_price_required:
                 add("UNAVAILABLE_PERCENT_PRICE", missing=True)
-            elif intent.price is not None:
-                if mark is None:
-                    add("UNAVAILABLE_MARK_PRICE", missing=True)
-                elif ((intent.side is OrderSide.BUY and intent.price > _mul(mark, percent.multiplier_up))
-                      or (intent.side is OrderSide.SELL and intent.price < _mul(mark, percent.multiplier_down))):
-                    add("OUTSIDE_PERCENT_PRICE")
+        else:
+            try:
+                number(percent.multiplier_down, "percent down", positive=True)
+                number(percent.multiplier_up, "percent up", positive=True)
+                if percent.multiplier_down > percent.multiplier_up:
+                    raise ValueError("invalid percent bounds")
+            except ValueError:
+                add("INVALID_PERCENT_PRICE", malformed=True)
+            else:
+                if not _evidence_available(percent.evidence):
+                    add("UNAVAILABLE_PERCENT_PRICE", missing=True)
+                elif intent.price is not None:
+                    if mark is None:
+                        add("UNAVAILABLE_MARK_PRICE", missing=True)
+                    elif ((intent.side is OrderSide.BUY and intent.price > _mul(mark, percent.multiplier_up))
+                          or (intent.side is OrderSide.SELL and intent.price < _mul(mark, percent.multiplier_down))):
+                        add("OUTSIDE_PERCENT_PRICE")
     if invalid:
         status = "REJECTED_RULE"
     elif unavailable:

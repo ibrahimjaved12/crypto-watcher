@@ -8,13 +8,14 @@ from .canonical_identity import canonical_digest
 from .exact_scalar import ExactScalar, Scalar, exact_scalar
 
 
-ALGORITHM_VERSION = "binance-usdm-execution-math-v3:exact-rational"
+ALGORITHM_VERSION = "binance-usdm-execution-math-v4:exact-rational"
 POLICY = (
     "base-unit-quantity:isolated-one-way:cap-inclusive-brackets:"
     "quantity-origin-min:quantity-floor:passive-buy-floor-sell-ceil:explicit-adjustment:"
     "stop-buy-ge-sell-le:tp-buy-le-sell-ge:adverse-bps-10000:exact-rational:"
     "percent-buy-upper-sell-lower-mark:market-min-notional-mark:"
-    "price-filter-zero-disabled-origin-min:integer-leverage-1-125:market-no-price-limit-price-required"
+    "price-filter-zero-disabled-origin-min:integer-leverage-1-125:market-no-price-limit-price-required:"
+    "market-filter-market-lot-only:price-bearing-filter-lot-price-percent"
 )
 
 

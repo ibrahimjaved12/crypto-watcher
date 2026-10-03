@@ -156,20 +156,22 @@ from historical evidence. The frozen [Issue #37 design comment](https://github.c
 is the detailed contract.
 
 Submitted intents are validated without modification. Suggestions require explicit
-acceptance and full order revalidation; quantities never round upward. Market
-quantities satisfy both supplied LOT_SIZE and MARKET_LOT_SIZE filters, with minQty
-as each fixed lattice origin. MARKET intents contain no submitted price;
-price-bearing intents require one. Dynamic mark evidence is supplied separately
-from order intent: MARKET MIN_NOTIONAL uses
-mark price; price-bearing orders use their submitted price. PERCENT_PRICE checks
-only the BUY upper bound or SELL lower bound against mark. PRICE_FILTER components
-are independently disabled by zero; enabled ticks use minPrice as grid origin.
+acceptance and full order revalidation; quantities never round upward. Price-bearing
+orders use LOT_SIZE and price filters; MARKET orders use only MARKET_LOT_SIZE and
+mark-based MIN_NOTIONAL. Non-applicable filters do not constrain validation or
+require evidence. Both quantity filters use minQty as their fixed lattice origin.
+MARKET intents contain no submitted price; price-bearing intents require one.
+Dynamic mark evidence is supplied separately from order intent: MARKET MIN_NOTIONAL
+uses mark price; price-bearing orders use their submitted price. Price-bearing
+PERCENT_PRICE checks only the BUY upper bound or SELL lower bound against mark.
+PRICE_FILTER components are independently disabled by zero; enabled ticks use
+minPrice as grid origin.
 Leverage is an integer in 1–125, further limited by the supplied effective bracket.
 Brackets are contiguous and maintenance-continuous: positive tiers own their cap
 (`floor < notional <= cap`), so exact boundaries belong to the preceding tier.
 Zero belongs to the first tier for zero-notional helpers; values above the final
 supplied cap are unavailable, never extrapolated. Execution identity is versioned
-v3. Missing settlement marks are unavailable and requested price protection is
+v4. Missing settlement marks are unavailable and requested price protection is
 unsupported.
 
 Arithmetic is independent of the caller's Decimal context. Reduced integer
