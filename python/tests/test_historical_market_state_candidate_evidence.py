@@ -39,6 +39,33 @@ class FixturePELTResult:
     summaries: dict
 
 
+@dataclass(frozen=True)
+class FixtureBOCPDObservation:
+    evaluation_boundary_time_ms: int
+    detector_state: str
+    recent_change_probability: float
+
+
+@dataclass(frozen=True)
+class FixtureBOCPDPoint:
+    evaluation_boundary_time_ms: int
+    bocpd_observation: FixtureBOCPDObservation
+
+
+@dataclass(frozen=True)
+class FixtureBOCPDRegion:
+    start_boundary_time_ms: int
+    end_boundary_time_ms: int
+    observed_through_boundary_time_ms: int
+
+
+@dataclass(frozen=True)
+class FixtureBOCPDResult:
+    points: tuple[FixtureBOCPDPoint, ...]
+    detection_regions_by_partition: dict
+    summaries: dict
+
+
 class CandidateEvidenceAdapterTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -66,6 +93,35 @@ class CandidateEvidenceAdapterTests(unittest.TestCase):
         self.assertEqual(bundle.records[1].native_evidence["positive_accumulator"], 1.75)
         self.assertEqual(bundle.native_summaries, {"native_count": 3})
         self.assertEqual(len(bundle.result_sha256), 64)
+
+    def test_bocpd_event_persists_exact_causal_onset_separately(self):
+        start = self.period.start_boundary_time_ms
+        onset = start + 5_000
+        observation = FixtureBOCPDObservation(onset, "CHANGE", 0.75)
+        region = FixtureBOCPDRegion(onset, onset + 10_000, onset + 20_000)
+        result = FixtureBOCPDResult(
+            (FixtureBOCPDPoint(onset, observation),),
+            {"development": (region,)},
+            {"development": {"region_count": 1}})
+        descriptor = SimpleNamespace(
+            experiment_id="EXP-75-04B", algorithm_version="bocpd-v1",
+            config_version="bocpd-config-a")
+
+        bundle = adapt_candidate_result(self.period, descriptor, result)
+
+        self.assertEqual(len(bundle.records), 1)
+        event = bundle.records[0]
+        self.assertEqual(event.evidence_kind, "EVENT")
+        self.assertEqual(event.decision_time_ms, onset)
+        self.assertEqual(
+            event.native_evidence["causal_onset_observation"]
+            ["evaluation_boundary_time_ms"], onset)
+        self.assertEqual(
+            event.native_evidence["causal_onset_observation"]
+            ["recent_change_probability"], 0.75)
+        self.assertEqual(
+            event.native_evidence["descriptive_detection_region"]
+            ["end_boundary_time_ms"], onset + 10_000)
 
     def test_pelt_segments_remain_retrospective_without_decision_time(self):
         descriptor = SimpleNamespace(
