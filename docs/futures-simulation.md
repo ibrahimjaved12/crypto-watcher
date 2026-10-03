@@ -261,8 +261,72 @@ availability surrogate.
 
 These adapters perform no hidden acquisition or authenticated API calls. Missing
 historical applicability, exact settlement marks and account/tier-specific fees or
-brackets require supplied frozen evidence. Fill allocation, event ordering,
-conditional execution and liquidation settlement remain later #37 work.
+brackets require supplied frozen evidence. Part 3 below uses those inputs for fill,
+conditional, causal and financial proposals; wallet settlement remains #36 work.
+
+## Implemented execution resolution (#37 Part 3)
+
+`futures_execution_resolution{,_contracts}.py` supplies immutable admission,
+order/conditional lifecycle views, position input views, candidates and identified
+financial proposals. Part 3 has its own `binance-usdm-execution-resolution-v1`
+identity; Part 1 math v4 and Part 2 scientific identities remain unchanged. It
+performs no network calls, reads no clocks, and commits no state. Position
+quantity, entry and isolated collateral are caller-supplied #36 input facts;
+funding/risk require an explicitly confirmed position applicability interval.
+
+Admission freezes a **VALID** Part 1 result and its exact rules, context and
+evidence identities. Invalid or unavailable intents remain unadmitted, without
+adjustment. Exact mark context must be supplied explicitly; a one-minute mark
+candle is never turned into an admission mark. Historical snapshots must cover
+the actual execution boundary. Dynamic admission filters are not rerun for later
+partial fills. Conditional child intents are validated at activation with the
+rules/context then supplied, rather than at parent creation.
+
+- **MARKET:** the first causally eligible contract aggTrade anchors a full-fill
+  assumption. Separate explicit fixed-bps spread and slippage transforms apply
+  sequentially in the adverse direction; the final actual simulated quantity and
+  price determine the normal TAKER fee. Zero bps is an explicit valid policy.
+- **Passive LIMIT:** `PASSIVE_TRADE_THROUGH_FULL_PRINT_CAP_V1` requires an opposite
+  aggressor and strict trade-through: BUY below the limit, SELL above it. Equality
+  does not prove queue priority. Quantity is capped by both supplied remaining
+  quantity and observed aggregate volume; fill price is the submitted limit, with
+  a MAKER fee and no spread/slippage charge or favorable price improvement.
+  Later calls require #36's updated remainder and committed fill cursor.
+- **Conditional activation:** Part 1 owns all STOP/TAKE_PROFIT inequalities.
+  CONTRACT_PRICE triggers bind exact trade keys; the trigger print cannot also
+  fill the new child, even at the same millisecond. Mark high/low can establish
+  only `TRIGGERED_WITHIN_INTERVAL` over the complete minute. A child can execute
+  only after that interval ends. Cross-stream equal-time submission/trigger
+  evidence remains unresolved, rather than assumed to precede a trade.
+- **Causal resolution:** precedence requires disjoint time bounds or an explicit
+  same-stream aggTrade key. There is no liquidation/stop/target/funding priority.
+  `EXPLICIT_AMBIGUITY_V1` binds incomparable competing candidates and returns no
+  executable proposals. Equal-time funding and position-changing fills, or a mark
+  stop/target and liquidation crossing in the same envelope, remain ambiguous.
+  Identified resource links use stable caller-supplied position/order IDs;
+  related candidates must share the same position ID. Two exact funding charges
+  against the same confirmed quantity can commute without inventing chronology.
+- **Funding and liquidation:** exact event-based funding delegates to Part 1;
+  missing marks stay `UNAVAILABLE_FUNDING_MARK`, and leverage never multiplies
+  funding. Liquidation thresholds and bracket identities remain risk calculations.
+  OHLC crossing gives a causal interval, never an exact liquidation timestamp.
+  Only an unambiguously selected risk allows
+  `FIXED_BPS_FROM_LIQUIDATION_THRESHOLD_V1`: adverse SELL for LONG, BUY for SHORT,
+  with a separate exact closeout charge. This is a simulation approximation, not
+  a factual Binance liquidation fill, and it is distinct from normal trading fees.
+
+The production fill path consumes `ExecutionTradeTapeEvidence` through
+`iter_execution_trades()` and closes the iterator at the first candidate. It never
+materializes the tape. The causal resolver accepts a bounded current candidate
+window (maximum 128 unique candidates), not a historical population. Callers must
+supply all relevant competing streams for that window; missing streams cannot
+prove that no competing event exists. Candidate payloads are tentative: only a
+`SELECTED` frontier exposes executable proposals. After selection, #36 validates
+account constraints, commits proposal IDs exactly once, and supplies the next
+immutable state view/window; it must recompute later proposals after a state change.
+Wallet balance, margin reservation, position/order persistence and the ledger
+remain #36 responsibilities. These fill policies do not reconstruct Binance
+order books, bid/ask history, hidden queue depth or matching-engine queue state.
 
 ## Event resolution and ambiguity
 
