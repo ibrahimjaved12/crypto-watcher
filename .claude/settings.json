@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh run *)",
+      "Bash(python3 -m py_compile python/tests/test_historical_stage_batching.py python/tests/test_github_historical_orchestration.py)"
+    ]
+  }
+}
