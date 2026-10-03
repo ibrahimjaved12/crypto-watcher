@@ -1075,12 +1075,18 @@ class StageVerificationTests(unittest.TestCase):
         second = [self.evidence("V1", "CONTINUOUS", 120_000, {"s": "x"}),
                   self.evidence("EXP-75-04B", "EVENT", 15_000, {"causal_onset_observation": {"p": 0.25}})]
         in_memory = (self.evidence("EXP-75-04B", "EVENT", 20_000, {"causal_onset_observation": {"p": 1}}),)
-        decoded = []
+        decoded, depth = [], [0]
         decode = self.runtime.decode
 
         def counting_decode(value, *args, **kwargs):
-            decoded.append(1)
-            return decode(value, *args, **kwargs)
+            # decode() recurses through the patched module name: count records only.
+            if not depth[0]:
+                decoded.append(1)
+            depth[0] += 1
+            try:
+                return decode(value, *args, **kwargs)
+            finally:
+                depth[0] -= 1
 
         with TemporaryDirectory() as directory, \
              patch.object(execution, "_bocpd_onset_evidence", side_effect=lambda items: tuple(items)):
