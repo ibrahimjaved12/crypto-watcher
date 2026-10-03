@@ -1,0 +1,1302 @@
+"""Part-C evaluation over aligned domain objects, with hash-linked phase gates.
+
+There is deliberately no file loader or CLI. A later adapter supplies verified
+finalized Part-B identities and extracted inputs; this core binds those identities
+and never generates the upstream representations.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from datetime import date
+from statistics import median
+
+from .historical_market_state_study_features import (
+    AlignedStudyDay, BASELINE_FEATURES, FROZEN_EVALUATION_PLAN, PHASE_DAY_COUNTS,
+    PHASE_MINIMUM_DAYS, StudyEvaluationPlan, TercileSpec, finite_number,
+    predictive_family, require_name, require_sha256, scientific_sha256, seal_hash,
+    FROZEN_PERIOD_ROSTER, PRIMARY_CONFIRMATORY_FAMILY, UpstreamInputProvenance,
+    FinalizedPeriodProvenance, EvidenceValueDay, fit_day_balanced_terciles,
+    PartBScientificContract, shared_part_b_contract, LayerOneStratifierSpec,
+    layer_one_stratifier, require_layer_one_spec,
+)
+from .historical_market_state_study_models import (
+    FrozenLinearModel, FrozenLogisticModel, FrozenStandardizer, StudyModelFitError,
+    day_balanced_weights, fit_standardizer, fit_weighted_logistic, fit_weighted_ols,
+)
+from .historical_market_state_study_statistics import (
+    BootstrapNamespace, DayBootstrapResult, DaySignTestResult, EvidenceClassification,
+    EvidenceComponents, classify_evidence, day_loss, exact_day_sign_test,
+    incremental_effect, whole_day_bootstrap, HypothesisPValue, holm_adjust,
+)
+
+
+@dataclass(frozen=True)
+class CandidateConfigIdentity:
+    family_id: str
+    algorithm_version: str
+    config_version: str
+
+    def __post_init__(self):
+        predictive_family(self.family_id)
+        require_name(self.algorithm_version)
+        require_name(self.config_version)
+
+
+def _day_identity(day):
+    return CandidateConfigIdentity(day.family_id, day.algorithm_version, day.config_version)
+
+
+def _fixed_family_identities(identities):
+    identities = tuple(identities)
+    if (not identities or any(not isinstance(i, CandidateConfigIdentity) for i in identities)
+            or len({i.family_id for i in identities}) != 1
+            or len({i.config_version for i in identities}) != len(identities)
+            or len({i.algorithm_version for i in identities}) != 1):
+        raise ValueError("fixed family requires unique configs and one family/algorithm identity")
+    spec = predictive_family(identities[0].family_id)
+    if len(identities) != spec.expected_config_count:
+        raise ValueError("fixed config count differs from the frozen family cardinality")
+    return spec
+
+
+def _validate_source_population(periods):
+    identities = []
+    for name in ("hmm_cross_fit_sha256", "hmm_final_model_sha256"):
+        values = {getattr(p, name) for p in periods if getattr(p, name) is not None}
+        if len(values) > 1:
+            raise ValueError("mixed HMM scientific provenance: " + name)
+        identities.append(next(iter(values), None))
+    return shared_part_b_contract(periods, *identities)
+
+
+def _cohort(days, phase, identity=None):
+    days = tuple(days)
+    if phase not in dict(PHASE_DAY_COUNTS):
+        raise ValueError("unknown study phase")
+    if (any(not isinstance(day, AlignedStudyDay) or day.phase != phase for day in days)
+            or len({d.study_period_index for d in days}) != len(days)
+            or len({d.utc_date for d in days}) != len(days)
+            or len(days) > dict(PHASE_DAY_COUNTS)[phase]):
+        raise ValueError("cohort must contain unique days from exactly the requested phase")
+    for day in days:
+        FROZEN_PERIOD_ROSTER.require_period(day.study_period_index, day.utc_date, phase)
+        if not isinstance(day.source_provenance, FinalizedPeriodProvenance):
+            raise ValueError("scientific evaluation requires finalized Part-B source provenance")
+    if days:
+        _validate_source_population(tuple(day.source_provenance for day in
+                                          sorted(days, key=lambda d: d.study_period_index)))
+    if identity is None and days:
+        identity = _day_identity(days[0])
+    if any(_day_identity(day) != identity for day in days):
+        raise ValueError("cohort mixes family/algorithm/config identities")
+    return tuple(sorted(days, key=lambda day: day.study_period_index))
+
+
+@dataclass(frozen=True)
+class DayEligibility:
+    study_period_index: int
+    utc_date: date
+    usable_count: int
+    required_count: int
+    status: str
+    reason: str
+    source_provenance_sha256: str | None = None
+
+    def __post_init__(self):
+        if (type(self.study_period_index) is not int or self.study_period_index < 0
+                or type(self.utc_date) is not date
+                or type(self.usable_count) is not int or self.usable_count < 0
+                or type(self.required_count) is not int or self.required_count < 1
+                or self.status != ("ELIGIBLE" if self.usable_count >= self.required_count else "COVERAGE_LIMITED")
+                or self.reason not in ("MISSING_FROZEN_DAY", "PRIMARY_ROWS_AVAILABLE", "INSUFFICIENT_PRIMARY_ROWS")
+                or self.reason == "MISSING_FROZEN_DAY" and self.usable_count != 0
+                or (self.reason == "MISSING_FROZEN_DAY") != (self.source_provenance_sha256 is None)):
+            raise ValueError("invalid day eligibility contract")
+        if self.source_provenance_sha256 is not None:
+            require_sha256(self.source_provenance_sha256)
+
+
+def day_eligibility(day: AlignedStudyDay) -> DayEligibility:
+    if not isinstance(day.source_provenance, FinalizedPeriodProvenance):
+        raise ValueError("scientific coverage requires finalized Part-B source provenance")
+    # ceil(0.50*n), without floating-point rounding at odd scheduled counts.
+    required = (day.scheduled_primary_count + 1) // 2 if day.observation_mode == "CONTINUOUS" else 1
+    eligible = len(day.observations) >= required
+    return DayEligibility(day.study_period_index, day.utc_date, len(day.observations), required,
+                          "ELIGIBLE" if eligible else "COVERAGE_LIMITED",
+                          "PRIMARY_ROWS_AVAILABLE" if eligible else "INSUFFICIENT_PRIMARY_ROWS",
+                          day.source_provenance.provenance_sha256)
+
+
+@dataclass(frozen=True)
+class PhaseCoverage:
+    phase: str
+    scheduled_day_count: int
+    supplied_day_count: int
+    eligible_day_count: int
+    minimum_day_count: int
+    days: tuple[DayEligibility, ...]
+    status: str
+    reason: str
+
+    def __post_init__(self):
+        object.__setattr__(self, "days", tuple(self.days))
+        if (self.phase not in dict(PHASE_DAY_COUNTS)
+                or self.scheduled_day_count != dict(PHASE_DAY_COUNTS)[self.phase]
+                or self.minimum_day_count != dict(PHASE_MINIMUM_DAYS)[self.phase]
+                or self.supplied_day_count != sum(d.reason != "MISSING_FROZEN_DAY" for d in self.days)
+                or tuple((d.study_period_index, d.utc_date, self.phase) for d in self.days)
+                != tuple(p for p in FROZEN_PERIOD_ROSTER.periods if p[2] == self.phase)
+                or self.supplied_day_count > self.scheduled_day_count
+                or len({d.study_period_index for d in self.days}) != len(self.days)
+                or len({d.utc_date for d in self.days}) != len(self.days)
+                or self.eligible_day_count != sum(d.status == "ELIGIBLE" for d in self.days)
+                or self.status != ("ADEQUATE" if self.eligible_day_count >= self.minimum_day_count
+                                   else "COVERAGE_LIMITED")):
+            raise ValueError("invalid phase coverage contract")
+
+
+def phase_coverage(days, phase) -> PhaseCoverage:
+    days = _cohort(days, phase)
+    by_index = {day.study_period_index: day for day in days}
+    eligibility = tuple(day_eligibility(by_index[index]) if index in by_index else
+                        DayEligibility(index, utc_date, 0, 1, "COVERAGE_LIMITED", "MISSING_FROZEN_DAY")
+                        for index, utc_date, assigned in FROZEN_PERIOD_ROSTER.periods if assigned == phase)
+    eligible = sum(d.status == "ELIGIBLE" for d in eligibility)
+    minimum = dict(PHASE_MINIMUM_DAYS)[phase]
+    return PhaseCoverage(phase, dict(PHASE_DAY_COUNTS)[phase], len(days), eligible, minimum,
+                         eligibility, "ADEQUATE" if eligible >= minimum else "COVERAGE_LIMITED",
+                         "PHASE_DAY_GATE_PASSED" if eligible >= minimum else "INSUFFICIENT_ELIGIBLE_DAYS")
+
+
+@dataclass(frozen=True)
+class ConfigDevelopmentSample:
+    identity: CandidateConfigIdentity
+    days: tuple[AlignedStudyDay, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "days", _cohort(self.days, "development", self.identity))
+
+
+@dataclass(frozen=True)
+class ExcludedDevelopmentDay:
+    study_period_index: int
+    reason: str
+
+    def __post_init__(self):
+        if (type(self.study_period_index) is not int or self.study_period_index < 0
+                or self.reason not in ("MISSING_CONFIG_DAY", "COMMON_DAY_COVERAGE_FAILED")):
+            raise ValueError("invalid common development exclusion")
+
+
+@dataclass(frozen=True)
+class CommonDevelopmentConfigSelection:
+    identity: CandidateConfigIdentity
+    source_day_sha256: str
+    source_row_count: int
+    source_provenance_sha256: str
+    source_observation_keys: tuple[str, ...]
+    source_row_context_sha256s: tuple[tuple[str, str], ...]
+    scheduled_primary_count: int | None
+    common_usable_row_count: int
+    selected_day_sha256: str | None
+
+    def __post_init__(self):
+        object.__setattr__(self, "source_observation_keys", tuple(self.source_observation_keys))
+        object.__setattr__(self, "source_row_context_sha256s",
+                           tuple(tuple(pair) for pair in self.source_row_context_sha256s))
+        require_sha256(self.source_provenance_sha256)
+        require_sha256(self.source_day_sha256)
+        if (type(self.source_row_count) is not int or self.source_row_count != len(self.source_observation_keys)
+                or len(set(self.source_observation_keys)) != len(self.source_observation_keys)
+                or tuple(sorted(self.source_observation_keys)) != self.source_observation_keys
+                or tuple(key for key, _ in self.source_row_context_sha256s) != self.source_observation_keys
+                or type(self.common_usable_row_count) is not int or self.common_usable_row_count < 0
+                or self.common_usable_row_count > self.source_row_count):
+            raise ValueError("invalid source-day selection evidence")
+        for key, context_sha in self.source_row_context_sha256s:
+            require_name(key)
+            require_sha256(context_sha)
+        spec = predictive_family(self.identity.family_id)
+        if spec.observation_mode == "CONTINUOUS":
+            if (type(self.scheduled_primary_count) is not int or self.scheduled_primary_count <= 0
+                    or self.source_row_count > self.scheduled_primary_count
+                    or self.selected_day_sha256 is not None and self.common_usable_row_count == 0):
+                raise ValueError("invalid continuous source-day selection evidence")
+        elif self.scheduled_primary_count is not None:
+            raise ValueError("event source-day selection cannot have a scheduled grid")
+        if self.selected_day_sha256 is not None:
+            require_sha256(self.selected_day_sha256)
+
+
+@dataclass(frozen=True)
+class CommonDevelopmentDaySelection:
+    study_period_index: int
+    utc_date: date | None
+    expected_config_identities: tuple[CandidateConfigIdentity, ...]
+    supplied_configs: tuple[CommonDevelopmentConfigSelection, ...]
+    common_observation_keys: tuple[str, ...] | None
+    common_day_eligible: bool | None
+    disposition: str
+
+    def __post_init__(self):
+        object.__setattr__(self, "expected_config_identities", tuple(self.expected_config_identities))
+        supplied = tuple(sorted(self.supplied_configs, key=lambda item: item.identity.config_version))
+        object.__setattr__(self, "supplied_configs", supplied)
+        expected = tuple(sorted(self.expected_config_identities, key=lambda item: item.config_version))
+        object.__setattr__(self, "expected_config_identities", expected)
+        if (type(self.study_period_index) is not int or self.study_period_index < 0
+                or self.utc_date is not None and type(self.utc_date) is not date
+                or not expected or len({i.config_version for i in expected}) != len(expected)
+                or len({i.family_id for i in expected}) != 1
+                or len({i.algorithm_version for i in expected}) != 1):
+            raise ValueError("invalid common development period identity")
+        spec = _fixed_family_identities(expected)
+        supplied_ids = tuple(item.identity for item in supplied)
+        if (len(set(supplied_ids)) != len(supplied_ids)
+                or any(identity not in expected for identity in supplied_ids)
+                or (self.utc_date is None) != (not supplied)
+                or any(item.source_row_count != len(item.source_observation_keys) for item in supplied)):
+            raise ValueError("invalid supplied config identities in common development provenance")
+        if self.disposition not in ("RETAINED", "MISSING_CONFIG_DAY", "COMMON_DAY_COVERAGE_FAILED"):
+            raise ValueError("unknown common development selection disposition")
+        complete = len(supplied) == len(expected)
+        if self.disposition == "MISSING_CONFIG_DAY":
+            if complete or self.common_day_eligible is not None:
+                raise ValueError("missing-config disposition conflicts with supplied family days")
+            if spec.observation_mode == "CONTINUOUS":
+                object.__setattr__(self, "common_observation_keys", tuple(self.common_observation_keys or ()))
+                if self.common_observation_keys:
+                    raise ValueError("missing-config period cannot have a common observation intersection")
+            elif self.common_observation_keys is not None:
+                raise ValueError("event selection has no shared observation-key set")
+            if any(item.common_usable_row_count or item.selected_day_sha256 is not None for item in supplied):
+                raise ValueError("missing-config period cannot contain selected rows")
+            return
+        if not complete:
+            raise ValueError("non-missing disposition requires every fixed config day")
+        if spec.observation_mode == "CONTINUOUS":
+            keys = tuple(self.common_observation_keys or ())
+            object.__setattr__(self, "common_observation_keys", keys)
+            actual_intersection = tuple(sorted(set.intersection(
+                *(set(item.source_observation_keys) for item in supplied))))
+            if tuple(sorted(set(keys))) != keys or keys != actual_intersection:
+                raise ValueError("continuous common keys are not the exact source intersection")
+            context_maps = [dict(item.source_row_context_sha256s) for item in supplied]
+            if any(len({context.get(key) for context in context_maps}) != 1 for key in keys):
+                raise ValueError("continuous common rows disagree on baseline/time/outcome context")
+            counts = {item.common_usable_row_count for item in supplied}
+            if counts != {len(keys)}:
+                raise ValueError("continuous usable row counts differ from the common key set")
+            scheduled = {item.scheduled_primary_count for item in supplied}
+            if len(scheduled) != 1:
+                raise ValueError("continuous selection has inconsistent scheduled counts")
+            eligible = len(keys) >= (next(iter(scheduled)) + 1) // 2
+        else:
+            if self.common_observation_keys is not None:
+                raise ValueError("event selection cannot intersect native event keys")
+            if any(item.common_usable_row_count != item.source_row_count for item in supplied):
+                raise ValueError("event selection must retain each config's native rows unchanged")
+            eligible = all(item.source_row_count >= 1 for item in supplied)
+            if eligible and any(item.selected_day_sha256 != item.source_day_sha256 for item in supplied):
+                raise ValueError("event selection changed a native source day")
+        if self.common_day_eligible is not eligible:
+            raise ValueError("common-day eligibility differs from the fixed selection rule")
+        expected_disposition = "RETAINED" if eligible else "COMMON_DAY_COVERAGE_FAILED"
+        if self.disposition != expected_disposition:
+            raise ValueError("common-day disposition differs from its eligibility")
+        if eligible and any(item.selected_day_sha256 is None for item in supplied):
+            raise ValueError("retained common day must bind each selected config day")
+        if not eligible and any(item.selected_day_sha256 is not None for item in supplied):
+            raise ValueError("excluded common day cannot have retained config days")
+
+
+@dataclass(frozen=True)
+class CommonDevelopmentSourceDay:
+    """Commitment to one normalized aligned input day and its selection inputs."""
+
+    study_period_index: int
+    utc_date: date
+    identity: CandidateConfigIdentity
+    day_sha256: str
+    selection_inputs_sha256: str
+    source_provenance_sha256: str
+
+    def __post_init__(self):
+        if (type(self.study_period_index) is not int or self.study_period_index < 0
+                or type(self.utc_date) is not date or not isinstance(self.identity, CandidateConfigIdentity)):
+            raise ValueError("invalid common development source-day identity")
+        FROZEN_PERIOD_ROSTER.require_period(self.study_period_index, self.utc_date, "development")
+        require_sha256(self.source_provenance_sha256)
+        require_sha256(self.day_sha256)
+        require_sha256(self.selection_inputs_sha256)
+
+
+def _source_entry(index, utc_date, evidence):
+    inputs = (evidence.source_row_count, evidence.source_observation_keys,
+              evidence.source_row_context_sha256s, evidence.scheduled_primary_count)
+    return CommonDevelopmentSourceDay(index, utc_date, evidence.identity,
+                                      evidence.source_day_sha256, scientific_sha256(inputs),
+                                      evidence.source_provenance_sha256)
+
+
+def _source_order(item):
+    return (item.identity.family_id, item.identity.algorithm_version,
+            item.identity.config_version, item.study_period_index)
+
+
+def _normalized_day_sha256(day):
+    ordered = replace(day, observations=tuple(sorted(day.observations, key=lambda row: row.observation_key)))
+    return scientific_sha256(ordered)
+
+
+def _source_config_selection(identity, source_day, selected_day, common_count):
+    rows = tuple(sorted(source_day.observations, key=lambda row: row.observation_key))
+    return CommonDevelopmentConfigSelection(
+        identity,
+        _normalized_day_sha256(source_day),
+        len(rows),
+        source_day.source_provenance.provenance_sha256,
+        tuple(row.observation_key for row in rows),
+        tuple((row.observation_key, scientific_sha256(
+            (row.decision_time_ms, row.baseline_features, row.outcome))) for row in rows),
+        source_day.scheduled_primary_count,
+        common_count,
+        None if selected_day is None else _normalized_day_sha256(selected_day))
+
+
+@dataclass(frozen=True)
+class CommonDevelopmentSamples:
+    samples: tuple[ConfigDevelopmentSample, ...]
+    excluded_days: tuple[ExcludedDevelopmentDay, ...]
+    selection_provenance: tuple[CommonDevelopmentDaySelection, ...]
+    source_population: tuple[CommonDevelopmentSourceDay, ...]
+    source_days_sha256: str
+    version: str = "historical-market-state-common-development-samples-v1"
+    samples_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "samples", tuple(self.samples))
+        object.__setattr__(self, "excluded_days", tuple(self.excluded_days))
+        selections = tuple(sorted(self.selection_provenance, key=lambda item: item.study_period_index))
+        object.__setattr__(self, "selection_provenance", selections)
+        for selection in selections:
+            validated = replace(selection, supplied_configs=tuple(replace(item) for item in selection.supplied_configs))
+            if validated != selection:
+                raise ValueError("invalid common development selection provenance")
+        identities = tuple(s.identity for s in self.samples)
+        _fixed_family_identities(identities)
+        if (tuple(sorted(identities, key=lambda i: i.config_version)) != identities
+                or self.version != "historical-market-state-common-development-samples-v1"
+                or len({item.study_period_index for item in selections}) != len(selections)
+                or any(item.expected_config_identities != identities for item in selections)):
+            raise ValueError("invalid fixed common-sample family")
+        population = tuple(sorted(self.source_population, key=_source_order))
+        object.__setattr__(self, "source_population", population)
+        for item in population:
+            replace(item)
+        require_sha256(self.source_days_sha256)
+        described = tuple(sorted((_source_entry(selection.study_period_index, selection.utc_date, item)
+                                  for selection in selections for item in selection.supplied_configs),
+                                 key=_source_order))
+        periods = {item.study_period_index for item in population}
+        if (scientific_sha256(population) != self.source_days_sha256 or described != population
+                or len({_source_order(item) for item in population}) != len(population)
+                or periods != {item.study_period_index for item in selections}
+                or len(periods) > dict(PHASE_DAY_COUNTS)["development"]
+                or any(item.identity not in identities for item in population)
+                or any(len({item.utc_date for item in population if item.study_period_index == index}) != 1
+                       for index in periods)
+                or len({item.utc_date for item in selections}) != len(selections)):
+            raise ValueError("common selection provenance differs from the bound source population")
+        excluded_by_period = {item.study_period_index: item.reason for item in self.excluded_days}
+        expected_excluded = {selection.study_period_index: selection.disposition
+                             for selection in selections if selection.disposition != "RETAINED"}
+        if (len(excluded_by_period) != len(self.excluded_days) or excluded_by_period != expected_excluded
+                or tuple(sorted(self.excluded_days, key=lambda item: item.study_period_index)) != self.excluded_days):
+            raise ValueError("common development exclusions differ from selection provenance")
+        for sample in self.samples:
+            retained = tuple(item for item in selections if item.disposition == "RETAINED")
+            if len(sample.days) != len(retained):
+                raise ValueError("retained config days differ from selection provenance")
+            evidence_by_period = {item.study_period_index: item for item in retained}
+            for day in sample.days:
+                selection = evidence_by_period.get(day.study_period_index)
+                if selection is None or day.utc_date != selection.utc_date:
+                    raise ValueError("retained config day is absent from its selection provenance")
+                config_evidence = next(item for item in selection.supplied_configs
+                                       if item.identity == sample.identity)
+                keys = tuple(sorted(row.observation_key for row in day.observations))
+                context = tuple((row.observation_key, scientific_sha256(
+                    (row.decision_time_ms, row.baseline_features, row.outcome)))
+                    for row in sorted(day.observations, key=lambda row: row.observation_key))
+                if (config_evidence.source_provenance_sha256 != day.source_provenance.provenance_sha256
+                        or config_evidence.selected_day_sha256 != _normalized_day_sha256(day)
+                        or config_evidence.common_usable_row_count != len(day.observations)
+                        or config_evidence.scheduled_primary_count != day.scheduled_primary_count
+                        or selection.common_observation_keys is not None
+                        and (keys != selection.common_observation_keys
+                             or context != tuple((key, dict(config_evidence.source_row_context_sha256s)[key])
+                                                 for key in keys))):
+                    raise ValueError("retained config day differs from its selection provenance")
+        seal_hash(self, "samples_sha256")
+
+
+def common_development_samples(fixed_configs, days) -> CommonDevelopmentSamples:
+    """Continuous configs share exact rows; event configs share eligible days."""
+    identities = tuple(sorted(fixed_configs, key=lambda identity: identity.config_version))
+    spec = _fixed_family_identities(identities)
+    days = tuple(days)
+    if any(_day_identity(day) not in identities or day.phase != "development" for day in days):
+        raise ValueError("development common samples contain unregistered configs/other phases")
+    if (any(len({d.utc_date for d in days if d.study_period_index == index}) != 1
+            for index in {d.study_period_index for d in days})
+            or any(len({d.study_period_index for d in days if d.utc_date == value}) != 1
+                   for value in {d.utc_date for d in days})):
+        raise ValueError("development configs disagree on study period/date identities")
+    source_by_period = {}
+    for day in days:
+        if not isinstance(day.source_provenance, FinalizedPeriodProvenance):
+            raise ValueError("scientific evaluation requires finalized Part-B source provenance")
+        previous = source_by_period.setdefault(day.study_period_index, day.source_provenance)
+        if previous != day.source_provenance:
+            raise ValueError("configs disagree on finalized Part-B period-report/evidence identity")
+    if source_by_period:
+        _validate_source_population(tuple(source_by_period[i] for i in sorted(source_by_period)))
+    grouped = {identity: _cohort(tuple(d for d in days if _day_identity(d) == identity),
+                                "development", identity) for identity in identities}
+    indices = sorted({d.study_period_index for d in days})
+    if len(indices) > dict(PHASE_DAY_COUNTS)["development"]:
+        raise ValueError("too many distinct development study days")
+    per_config = {identity: {d.study_period_index: d for d in grouped[identity]} for identity in identities}
+    # Commit every normalized input day before intersections or exclusions.
+    source_population = tuple(sorted((_source_entry(
+        day.study_period_index, day.utc_date, _source_config_selection(identity, day, None, 0))
+        for identity in identities for day in grouped[identity]), key=_source_order))
+    source_sha = scientific_sha256(source_population)
+    retained, excluded, provenance = {identity: [] for identity in identities}, [], []
+    for index in indices:
+        available = [per_config[identity].get(index) for identity in identities]
+        if len({day.utc_date for day in available if day is not None}) > 1:
+            raise ValueError("same study period has conflicting dates across configs")
+        if any(day is None for day in available):
+            excluded.append(ExcludedDevelopmentDay(index, "MISSING_CONFIG_DAY"))
+            supplied = tuple(_source_config_selection(identity, day, None, 0)
+                             for identity, day in zip(identities, available) if day is not None)
+            provenance.append(CommonDevelopmentDaySelection(
+                index, next(day.utc_date for day in available if day is not None), identities, supplied,
+                () if spec.observation_mode == "CONTINUOUS" else None, None, "MISSING_CONFIG_DAY"))
+            continue
+        source_days = tuple(available)
+        if spec.observation_mode == "CONTINUOUS":
+            if len({d.scheduled_primary_count for d in available}) != 1:
+                raise ValueError("continuous configs disagree on scheduled primary grid")
+            lookups = [{row.observation_key: row for row in day.observations} for day in available]
+            keys = sorted(set.intersection(*(set(lookup) for lookup in lookups)))
+            for key in keys:
+                rows = [lookup[key] for lookup in lookups]
+                if len({(row.decision_time_ms, row.baseline_features, row.outcome) for row in rows}) != 1:
+                    raise ValueError("common row key has different baseline/time/outcome across configs")
+            available = [replace(day, observations=tuple(lookup[key] for key in keys))
+                         for day, lookup in zip(available, lookups)]
+            common_keys = tuple(keys)
+            common_eligible = not any(day_eligibility(day).status != "ELIGIBLE" for day in available)
+            common_count = len(common_keys)
+        else:
+            common_keys = None
+            common_eligible = not any(day_eligibility(day).status != "ELIGIBLE" for day in available)
+            common_count = None
+        disposition = "RETAINED" if common_eligible else "COMMON_DAY_COVERAGE_FAILED"
+        if not common_eligible:
+            excluded.append(ExcludedDevelopmentDay(index, "COMMON_DAY_COVERAGE_FAILED"))
+        else:
+            for identity, day in zip(identities, available):
+                retained[identity].append(day)
+        supplied = tuple(_source_config_selection(
+            identity, source_day, selected_day if common_eligible else None,
+            len(selected_day.observations) if spec.observation_mode == "EVENT" else common_count)
+            for identity, source_day, selected_day in zip(identities, source_days, available))
+        provenance.append(CommonDevelopmentDaySelection(
+            index, source_days[0].utc_date, identities, supplied, common_keys, common_eligible, disposition))
+    return CommonDevelopmentSamples(tuple(ConfigDevelopmentSample(i, tuple(retained[i]))
+                                          for i in identities), tuple(excluded), tuple(provenance),
+                                    source_population, source_sha)
+
+
+@dataclass(frozen=True)
+class DayPredictiveResult:
+    study_period_index: int
+    utc_date: date
+    observation_keys: tuple[str, ...]
+    observation_count: int
+    baseline_loss: float
+    extended_loss: float
+    delta: float
+
+    def __post_init__(self):
+        object.__setattr__(self, "observation_keys", tuple(self.observation_keys))
+        if (type(self.study_period_index) is not int or self.study_period_index < 0
+                or type(self.utc_date) is not date
+                or not self.observation_keys or len(set(self.observation_keys)) != len(self.observation_keys)
+                or self.observation_count != len(self.observation_keys)
+                or finite_number(self.delta) != incremental_effect(self.baseline_loss, self.extended_loss)):
+            raise ValueError("invalid paired day loss/effect")
+        for key in self.observation_keys:
+            require_name(key)
+
+
+def _validate_day_results(coverage, results):
+    expected = tuple((d.study_period_index, d.utc_date, d.usable_count)
+                     for d in coverage.days if d.status == "ELIGIBLE")
+    actual = tuple((d.study_period_index, d.utc_date, d.observation_count) for d in results)
+    if actual != expected:
+        raise ValueError("paired day results do not match eligible coverage days/row counts")
+
+
+@dataclass(frozen=True)
+class DevelopmentFold:
+    held_out_period: int
+    training_periods: tuple[int, ...]
+    status: str
+    reason: str
+    day_result: DayPredictiveResult | None = None
+    baseline_preprocessing: FrozenStandardizer | None = None
+    candidate_preprocessing: FrozenStandardizer | None = None
+    baseline_model_sha256: str | None = None
+    extended_model_sha256: str | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "training_periods", tuple(self.training_periods))
+        if (self.held_out_period in self.training_periods
+                or len(set(self.training_periods)) != len(self.training_periods)
+                or not self.training_periods or self.status not in ("EVALUABLE", "FIT_FAILED")):
+            raise ValueError("invalid whole-day LODO fold")
+        if self.status == "EVALUABLE":
+            if (self.day_result is None or self.day_result.study_period_index != self.held_out_period
+                    or self.baseline_preprocessing is None or self.candidate_preprocessing is None):
+                raise ValueError("successful fold requires paired scores and preprocessing")
+            require_sha256(self.baseline_model_sha256)
+            require_sha256(self.extended_model_sha256)
+        elif self.day_result is not None:
+            raise ValueError("failed fit cannot manufacture a day effect")
+
+
+@dataclass(frozen=True)
+class DevelopmentConfigResult:
+    identity: CandidateConfigIdentity
+    coverage: PhaseCoverage
+    folds: tuple[DevelopmentFold, ...]
+    development_sample_sha256: str
+    common_samples_sha256: str
+    status: str
+    reason: str
+    plan_sha256: str = FROZEN_EVALUATION_PLAN.plan_sha256
+    version: str = "historical-market-state-development-config-result-v1"
+    median_delta: float | None = field(init=False)
+    result_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "folds", tuple(self.folds))
+        require_sha256(self.development_sample_sha256)
+        require_sha256(self.common_samples_sha256)
+        if (self.coverage.phase != "development" or self.plan_sha256 != FROZEN_EVALUATION_PLAN.plan_sha256
+                or self.status not in ("EVALUABLE", "COVERAGE_LIMITED", "FIT_FAILED")
+                or self.version != "historical-market-state-development-config-result-v1"):
+            raise ValueError("invalid development evaluation identity/status")
+        if self.status == "EVALUABLE":
+            if (self.coverage.status != "ADEQUATE" or len(self.folds) != self.coverage.eligible_day_count
+                    or any(f.status != "EVALUABLE" for f in self.folds)
+                    or len({f.held_out_period for f in self.folds}) != len(self.folds)):
+                raise ValueError("development score needs every eligible LODO fold")
+            _validate_day_results(self.coverage, tuple(f.day_result for f in self.folds))
+            indices = tuple(f.held_out_period for f in self.folds)
+            if any(f.training_periods != tuple(i for i in indices if i != f.held_out_period) for f in self.folds):
+                raise ValueError("LODO training masks differ from the other eligible development days")
+            value = finite_number(median(f.day_result.delta for f in self.folds))
+        else:
+            if (self.status == "COVERAGE_LIMITED") != (self.coverage.status == "COVERAGE_LIMITED"):
+                raise ValueError("development failure status conflicts with coverage")
+            if self.status == "COVERAGE_LIMITED" and self.folds:
+                raise ValueError("coverage-limited development must not fit LODO models")
+            if self.status == "FIT_FAILED" and not any(f.status == "FIT_FAILED" for f in self.folds):
+                raise ValueError("development fit failure requires explicit failed folds")
+            value = None
+        object.__setattr__(self, "median_delta", value)
+        seal_hash(self, "result_sha256")
+
+
+@dataclass(frozen=True)
+class DevelopmentNomination:
+    family_id: str
+    development_result_refs: tuple[tuple[str, str], ...]
+    common_samples_sha256: str
+    status: str
+    reason: str
+    identity: CandidateConfigIdentity | None = None
+    median_delta: float | None = None
+    selected_result_sha256: str | None = None
+    development_sample_sha256: str | None = None
+    version: str = "historical-market-state-development-nomination-v1"
+    nomination_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        predictive_family(self.family_id)
+        require_sha256(self.common_samples_sha256)
+        refs = tuple(sorted(tuple(pair) for pair in self.development_result_refs))
+        object.__setattr__(self, "development_result_refs", refs)
+        if (not refs or len({c for c, _ in refs}) != len(refs)
+                or self.status not in ("NOMINATED", "NOT_EVALUABLE")
+                or self.version != "historical-market-state-development-nomination-v1"):
+            raise ValueError("invalid nomination contract")
+        for config, digest in refs:
+            require_name(config)
+            require_sha256(digest)
+        if self.status == "NOMINATED":
+            if (self.identity is None or self.identity.family_id != self.family_id
+                    or (self.identity.config_version, self.selected_result_sha256) not in refs):
+                raise ValueError("nomination must bind an existing evaluated configuration")
+            finite_number(self.median_delta)
+            require_sha256(self.development_sample_sha256)
+        elif any(v is not None for v in (self.identity, self.median_delta,
+                                         self.selected_result_sha256, self.development_sample_sha256)):
+            raise ValueError("unavailable nomination cannot manufacture a selected config/effect")
+        seal_hash(self, "nomination_sha256")
+
+
+@dataclass(frozen=True)
+class FrozenPredictivePair:
+    identity: CandidateConfigIdentity
+    horizon_minutes: int
+    outcome_id: str
+    outcome_kind: str
+    training_periods: tuple[tuple[int, date], ...]
+    baseline_preprocessing: FrozenStandardizer
+    candidate_preprocessing: FrozenStandardizer
+    baseline_model: FrozenLinearModel | FrozenLogisticModel
+    extended_model: FrozenLinearModel | FrozenLogisticModel
+    development_median: float
+    nomination_sha256: str
+    development_sample_sha256: str
+    common_samples_sha256: str
+    plan_sha256: str = FROZEN_EVALUATION_PLAN.plan_sha256
+    version: str = "historical-market-state-frozen-predictive-pair-v1"
+    pair_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        spec = predictive_family(self.identity.family_id)
+        object.__setattr__(self, "training_periods", tuple(tuple(p) for p in self.training_periods))
+        if (self.baseline_preprocessing.features != BASELINE_FEATURES
+                or self.candidate_preprocessing.features != spec.candidate_features
+                or (self.horizon_minutes, self.outcome_id, self.outcome_kind)
+                != (spec.horizon_minutes, spec.outcome_id, spec.outcome_kind)
+                or self.plan_sha256 != FROZEN_EVALUATION_PLAN.plan_sha256
+                or self.version != "historical-market-state-frozen-predictive-pair-v1"
+                or not 8 <= len(self.training_periods) <= 10
+                or any(type(i) is not int or i < 0 or type(d) is not date for i, d in self.training_periods)
+                or tuple(sorted(self.training_periods)) != self.training_periods
+                or len({p for p, _ in self.training_periods}) != len(self.training_periods)
+                or len({d for _, d in self.training_periods}) != len(self.training_periods)):
+            raise ValueError("invalid frozen development predictive identity/schema")
+        baseline_names = self.baseline_preprocessing.active_feature_names
+        candidate_names = self.candidate_preprocessing.active_feature_names
+        model_type = FrozenLogisticModel if self.outcome_kind == "BINARY" else FrozenLinearModel
+        if (not isinstance(self.baseline_model, model_type) or not isinstance(self.extended_model, model_type)
+                or self.baseline_model.feature_names != ("intercept",) + baseline_names
+                or self.extended_model.feature_names != ("intercept",) + baseline_names + candidate_names
+                or any(item.numpy_version != FROZEN_EVALUATION_PLAN.numpy_version for item in (
+                    self.baseline_preprocessing, self.candidate_preprocessing,
+                    self.baseline_model, self.extended_model))):
+            raise ValueError("frozen models differ from preprocessing/design/numerical environment")
+        finite_number(self.development_median)
+        require_sha256(self.nomination_sha256)
+        require_sha256(self.development_sample_sha256)
+        require_sha256(self.common_samples_sha256)
+        seal_hash(self, "pair_sha256")
+
+
+def _fit_models(identity, training_days):
+    spec = predictive_family(identity.family_id)
+    baseline_days = tuple(tuple(row.baseline_features for row in d.observations) for d in training_days)
+    candidate_days = tuple(tuple(row.candidate_features for row in d.observations) for d in training_days)
+    baseline = fit_standardizer(BASELINE_FEATURES, baseline_days)
+    candidate = fit_standardizer(spec.candidate_features, candidate_days)
+    rows = tuple(row for day in training_days for row in day.observations)
+    baseline_x = tuple(baseline.active_row(row.baseline_features) for row in rows)
+    extended_x = tuple(b + candidate.active_row(row.candidate_features) for b, row in zip(baseline_x, rows))
+    targets = tuple(row.outcome for row in rows)
+    weights = day_balanced_weights(tuple(len(day.observations) for day in training_days))
+    fit = fit_weighted_logistic if spec.outcome_kind == "BINARY" else fit_weighted_ols
+    baseline_model = fit(baseline.active_feature_names, baseline_x, targets, weights)
+    extended_model = fit(baseline.active_feature_names + candidate.active_feature_names,
+                         extended_x, targets, weights)
+    return baseline, candidate, baseline_model, extended_model
+
+
+def _score_day(day, baseline, candidate, baseline_model, extended_model):
+    rows = tuple(sorted(day.observations, key=lambda row: row.observation_key))
+    baseline_x = tuple(baseline.active_row(row.baseline_features) for row in rows)
+    extended_x = tuple(b + candidate.active_row(row.candidate_features) for b, row in zip(baseline_x, rows))
+    targets = tuple(row.outcome for row in rows)
+    baseline_loss = day_loss(day.outcome_kind, targets, baseline_model.predict(baseline_x))
+    extended_loss = day_loss(day.outcome_kind, targets, extended_model.predict(extended_x))
+    return DayPredictiveResult(day.study_period_index, day.utc_date,
+                               tuple(row.observation_key for row in rows), len(rows),
+                               baseline_loss, extended_loss, incremental_effect(baseline_loss, extended_loss))
+
+
+def evaluate_development_config(identity: CandidateConfigIdentity, days,
+                                common_samples_sha256: str) -> DevelopmentConfigResult:
+    require_sha256(common_samples_sha256)
+    days = _cohort(days, "development", identity)
+    coverage = phase_coverage(days, "development")
+    eligible = tuple(d for d in days if day_eligibility(d).status == "ELIGIBLE")
+    sample_sha = scientific_sha256(eligible)
+    if coverage.status != "ADEQUATE":
+        return DevelopmentConfigResult(identity, coverage, (), sample_sha, common_samples_sha256,
+                                       "COVERAGE_LIMITED", coverage.reason)
+    folds = []
+    for held_out in eligible:
+        training = tuple(day for day in eligible if day.study_period_index != held_out.study_period_index)
+        training_indices = tuple(day.study_period_index for day in training)
+        try:
+            baseline, candidate, baseline_model, extended_model = _fit_models(identity, training)
+            result = _score_day(held_out, baseline, candidate, baseline_model, extended_model)
+            folds.append(DevelopmentFold(held_out.study_period_index, training_indices, "EVALUABLE",
+                                          "LODO_SCORED", result, baseline, candidate,
+                                          baseline_model.model_sha256, extended_model.model_sha256))
+        except (StudyModelFitError, ValueError) as exc:
+            folds.append(DevelopmentFold(held_out.study_period_index, training_indices, "FIT_FAILED", str(exc)))
+    success = all(fold.status == "EVALUABLE" for fold in folds)
+    return DevelopmentConfigResult(identity, coverage, tuple(folds), sample_sha, common_samples_sha256,
+                                   "EVALUABLE" if success else "FIT_FAILED",
+                                   "ALL_LODO_FOLDS_SCORED" if success else "LODO_MODEL_NOT_FEASIBLE")
+
+
+def nominate_configuration(results) -> DevelopmentNomination:
+    results = tuple(results)
+    _fixed_family_identities(r.identity for r in results)
+    if len({r.common_samples_sha256 for r in results}) != 1:
+        raise ValueError("config results bind different family common-sample SHAs")
+    family = results[0].identity.family_id
+    common_sha = results[0].common_samples_sha256
+    refs = tuple((r.identity.config_version, r.result_sha256) for r in results)
+    eligible = tuple(r for r in results if r.status == "EVALUABLE")
+    if not eligible:
+        return DevelopmentNomination(family, refs, common_sha, "NOT_EVALUABLE", "NO_FINITE_COMPLETE_LODO_CONFIG")
+    winner = min(eligible, key=lambda r: (-r.median_delta, r.identity.config_version))
+    return DevelopmentNomination(family, refs, common_sha, "NOMINATED", "LARGEST_MEDIAN_RAW_DAY_DELTA",
+                                 winner.identity, winner.median_delta, winner.result_sha256,
+                                 winner.development_sample_sha256)
+
+
+def evaluate_development_family(fixed_configs, days):
+    samples = common_development_samples(fixed_configs, days)
+    results = tuple(evaluate_development_config(sample.identity, sample.days, samples.samples_sha256)
+                    for sample in samples.samples)
+    return samples, results, nominate_configuration(results)
+
+
+def fit_final_development_pair(nomination: DevelopmentNomination, days) -> FrozenPredictivePair:
+    if nomination.status != "NOMINATED":
+        raise ValueError("final fit requires a development nomination")
+    days = _cohort(days, "development", nomination.identity)
+    if phase_coverage(days, "development").status != "ADEQUATE":
+        raise StudyModelFitError("final development fit lacks eligible days")
+    eligible = tuple(d for d in days if day_eligibility(d).status == "ELIGIBLE")
+    if scientific_sha256(eligible) != nomination.development_sample_sha256:
+        raise ValueError("final fit rows do not match the nominated development sample")
+    baseline, candidate, baseline_model, extended_model = _fit_models(nomination.identity, eligible)
+    spec = predictive_family(nomination.family_id)
+    return FrozenPredictivePair(nomination.identity, spec.horizon_minutes, spec.outcome_id, spec.outcome_kind,
+                                tuple((d.study_period_index, d.utc_date) for d in eligible),
+                                baseline, candidate, baseline_model, extended_model,
+                                nomination.median_delta, nomination.nomination_sha256,
+                                nomination.development_sample_sha256, nomination.common_samples_sha256)
+
+
+@dataclass(frozen=True)
+class LayerOneContinuousEvidence:
+    identity: CandidateConfigIdentity
+    stratifier: LayerOneStratifierSpec
+    days: tuple[EvidenceValueDay, ...]
+    source_period_provenance: tuple[tuple[int, str], ...]
+    evidence_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "days", tuple(self.days))
+        object.__setattr__(self, "source_period_provenance", tuple(tuple(p) for p in self.source_period_provenance))
+        require_layer_one_spec(self.identity, self.stratifier)
+        if predictive_family(self.identity.family_id).observation_mode != "CONTINUOUS":
+            raise ValueError("Layer-1 continuous bins require a continuous family")
+        if tuple(d.study_period_index for d in self.days) != tuple(i for i, _ in self.source_period_provenance):
+            raise ValueError("Layer-1 evidence/source period mismatch")
+        for day, (_, digest) in zip(self.days, self.source_period_provenance):
+            FROZEN_PERIOD_ROSTER.require_period(day.study_period_index, day.utc_date, "development")
+            if day.phase != "development":
+                raise ValueError("Layer-1 fitting requires development evidence")
+            require_sha256(digest)
+        fit_day_balanced_terciles(self.days)
+        seal_hash(self, "evidence_sha256")
+
+
+@dataclass(frozen=True)
+class FrozenLayerOneBins:
+    identity: CandidateConfigIdentity
+    stratifier: LayerOneStratifierSpec
+    development_evidence_sha256: str
+    bins: TercileSpec
+    binding_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        predictive_family(self.identity.family_id)
+        require_layer_one_spec(self.identity, self.stratifier)
+        require_sha256(self.development_evidence_sha256)
+        if not isinstance(self.bins, TercileSpec) or replace(self.bins) != self.bins:
+            raise ValueError("Layer-1 bins require a valid TercileSpec")
+        seal_hash(self, "binding_sha256")
+
+
+def freeze_layer_one_bins(evidence: LayerOneContinuousEvidence) -> FrozenLayerOneBins:
+    return FrozenLayerOneBins(evidence.identity, evidence.stratifier,
+                              evidence.evidence_sha256, fit_day_balanced_terciles(evidence.days))
+
+
+@dataclass(frozen=True)
+class DevelopmentFreeze:
+    study_manifest_sha256: str
+    config_results: tuple[DevelopmentConfigResult, ...]
+    nominations: tuple[DevelopmentNomination, ...]
+    predictive_pairs: tuple[FrozenPredictivePair, ...]
+    common_samples: tuple[CommonDevelopmentSamples, ...]
+    upstream_provenance: UpstreamInputProvenance
+    plan: StudyEvaluationPlan = FROZEN_EVALUATION_PLAN
+    layer_one_terciles: tuple[FrozenLayerOneBins, ...] = ()
+    layer_one_evidence: tuple[LayerOneContinuousEvidence, ...] = ()
+    hmm_cross_fit_sha256: str | None = None
+    hmm_final_model_sha256: str | None = None
+    version: str = "historical-market-state-development-freeze-v1"
+    freeze_sha256: str = field(init=False)
+    upstream_provenance_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        require_sha256(self.study_manifest_sha256)
+        if (not isinstance(self.upstream_provenance, UpstreamInputProvenance)
+                or replace(self.upstream_provenance) != self.upstream_provenance
+                or self.upstream_provenance.phase != "development"
+                or self.study_manifest_sha256 != self.upstream_provenance.roster.study_manifest_sha256):
+            raise ValueError("development freeze requires matching finalized upstream provenance")
+        object.__setattr__(self, "upstream_provenance_sha256", self.upstream_provenance.provenance_sha256)
+        for name, key in (("config_results", lambda r: (r.identity.family_id, r.identity.config_version)),
+                          ("nominations", lambda n: n.family_id),
+                          ("predictive_pairs", lambda p: p.identity.family_id),
+                          ("common_samples", lambda s: s.samples[0].identity.family_id)):
+            values = tuple(sorted(getattr(self, name), key=key))
+            if len({key(value) for value in values}) != len(values):
+                raise ValueError("duplicate development freeze member")
+            object.__setattr__(self, name, values)
+        if any(not isinstance(b, FrozenLayerOneBins) for b in self.layer_one_terciles):
+            raise ValueError("Layer-1 bins require family/config/stratifier/source bindings")
+        terciles = tuple(sorted(self.layer_one_terciles, key=lambda b: (b.identity.family_id, b.stratifier.source_identity)))
+        if any(not isinstance(e, LayerOneContinuousEvidence) for e in self.layer_one_evidence):
+            raise ValueError("Layer-1 bins require declared development evidence contracts")
+        evidence = tuple(sorted(self.layer_one_evidence, key=lambda e: (e.identity.family_id, e.stratifier.source_identity)))
+        object.__setattr__(self, "layer_one_evidence", evidence)
+        object.__setattr__(self, "layer_one_terciles", terciles)
+        if (self.plan != FROZEN_EVALUATION_PLAN or not self.config_results
+                or len({(b.identity.family_id, b.stratifier.source_identity) for b in terciles}) != len(terciles)
+                or self.version != "historical-market-state-development-freeze-v1"
+                or any(r.plan_sha256 != self.plan.plan_sha256 for r in self.config_results)
+                or {r.identity.family_id for r in self.config_results} != set(PRIMARY_CONFIRMATORY_FAMILY)
+                or {n.family_id for n in self.nominations} != set(PRIMARY_CONFIRMATORY_FAMILY)
+                or {s.samples[0].identity.family_id for s in self.common_samples} != set(PRIMARY_CONFIRMATORY_FAMILY)):
+            raise ValueError("invalid development freeze plan/family membership")
+        for family in PRIMARY_CONFIRMATORY_FAMILY:
+            _fixed_family_identities(r.identity for r in self.config_results if r.identity.family_id == family)
+        # HMM belongs to every whole-study freeze, even when its results are unavailable.
+        require_sha256(self.hmm_cross_fit_sha256)
+        require_sha256(self.hmm_final_model_sha256)
+        if (self.hmm_cross_fit_sha256, self.hmm_final_model_sha256) != (
+                self.upstream_provenance.hmm_cross_fit_sha256, self.upstream_provenance.hmm_final_model_sha256):
+            raise ValueError("HMM identities differ from finalized upstream provenance")
+        required_layer_one = {n.identity for n in self.nominations if n.status == "NOMINATED"
+                              and layer_one_stratifier(n.family_id).mode == "CONTINUOUS_TERCILE"}
+        if (len(terciles) != len(required_layer_one)
+                or {b.identity for b in terciles} != required_layer_one):
+            raise ValueError("Layer-1 freeze requires exactly one binding per nominated continuous stratifier")
+        if len(evidence) != len(terciles):
+            raise ValueError("Layer-1 frozen bins require their declared development evidence")
+        for binding, source in zip(terciles, evidence):
+            nomination = next((n for n in self.nominations if n.identity == binding.identity), None)
+            if (replace(source) != source or nomination is None or nomination.status != "NOMINATED"
+                    or binding != freeze_layer_one_bins(source)):
+                raise ValueError("Layer-1 frozen family/config/stratifier/source identity mismatch")
+            for index, digest in source.source_period_provenance:
+                self.upstream_provenance.require_source(index, digest)
+        for common in self.common_samples:
+            for source in common.source_population:
+                self.upstream_provenance.require_source(source.study_period_index, source.source_provenance_sha256)
+        expected_pairs = set()
+        for nomination in self.nominations:
+            results = tuple(r for r in self.config_results if r.identity.family_id == nomination.family_id)
+            if nomination != nominate_configuration(results):
+                raise ValueError("freeze nomination differs from exact development nomination")
+            common = next(s for s in self.common_samples if s.samples[0].identity.family_id == nomination.family_id)
+            if replace(common) != common:
+                raise ValueError("freeze common-sample contract has an invalid scientific identity")
+            if nomination.common_samples_sha256 != common.samples_sha256:
+                raise ValueError("freeze common-sample identity differs from the family selection object")
+            if {r.identity for r in results} != {s.identity for s in common.samples}:
+                raise ValueError("freeze config identities differ from the common-sample family")
+            for result in results:
+                sample = next(s for s in common.samples if s.identity == result.identity)
+                if (result.common_samples_sha256 != common.samples_sha256
+                        or result.development_sample_sha256 != scientific_sha256(sample.days)
+                        or result.coverage != phase_coverage(sample.days, "development")):
+                    raise ValueError("freeze config result does not bind its common-sample rows/coverage")
+                if result.status == "EVALUABLE" and any(
+                    fold.day_result.observation_keys != tuple(sorted(row.observation_key for row in day.observations))
+                    for fold, day in zip(result.folds, sample.days)):
+                    raise ValueError("freeze LODO masks differ from the common-sample observations")
+            if nomination.status != "NOMINATED":
+                continue
+            expected_pairs.add(nomination.identity)
+            pair = next((p for p in self.predictive_pairs if p.identity == nomination.identity), None)
+            selected = next(r for r in results if r.result_sha256 == nomination.selected_result_sha256)
+            if (pair is None or pair.nomination_sha256 != nomination.nomination_sha256
+                    or pair.development_sample_sha256 != nomination.development_sample_sha256
+                    or pair.common_samples_sha256 != common.samples_sha256
+                    or pair.development_median != nomination.median_delta
+                    or tuple(p for p, _ in pair.training_periods)
+                    != tuple(f.held_out_period for f in selected.folds)):
+                raise ValueError("final pair does not bind the selected development result/rows")
+        if {p.identity for p in self.predictive_pairs} != expected_pairs:
+            raise ValueError("development freeze contains missing or un-nominated final pairs")
+        seal_hash(self, "freeze_sha256")
+
+
+@dataclass(frozen=True)
+class ValidationDecision:
+    identity: CandidateConfigIdentity
+    upstream_provenance_sha256: str
+    predictive_pair_sha256: str
+    development_median: float
+    coverage: PhaseCoverage
+    day_results: tuple[DayPredictiveResult, ...]
+    status: str
+    reason: str
+    version: str = "historical-market-state-validation-decision-v1"
+    median_delta: float | None = field(init=False)
+    decision_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "day_results", tuple(self.day_results))
+        require_sha256(self.upstream_provenance_sha256)
+        require_sha256(self.predictive_pair_sha256)
+        finite_number(self.development_median)
+        if (self.coverage.phase != "validation"
+                or self.status not in ("CONFIRMED", "NOT_CONFIRMED", "COVERAGE_LIMITED", "FIT_FAILED")
+                or self.version != "historical-market-state-validation-decision-v1"):
+            raise ValueError("invalid validation phase/status")
+        if self.status in ("CONFIRMED", "NOT_CONFIRMED"):
+            if self.coverage.status != "ADEQUATE" or len(self.day_results) != self.coverage.eligible_day_count:
+                raise ValueError("validation decision requires the covered paired days")
+            _validate_day_results(self.coverage, self.day_results)
+            value = finite_number(median(d.delta for d in self.day_results))
+            confirmed = self.development_median > 0 and value > 0
+            if (self.status == "CONFIRMED") != confirmed:
+                raise ValueError("validation status conflicts with development/validation signs")
+        else:
+            if self.day_results:
+                raise ValueError("failed validation cannot manufacture effects")
+            if (self.status == "COVERAGE_LIMITED") != (self.coverage.status == "COVERAGE_LIMITED"):
+                raise ValueError("validation failure status conflicts with coverage")
+            value = None
+        object.__setattr__(self, "median_delta", value)
+        seal_hash(self, "decision_sha256")
+
+
+def _evaluate_frozen_phase(pair, days, phase):
+    days = _cohort(days, phase, pair.identity)
+    training_indices = {index for index, _ in pair.training_periods}
+    training_dates = {day_date for _, day_date in pair.training_periods}
+    if any(day.study_period_index in training_indices or day.utc_date in training_dates for day in days):
+        raise ValueError("evaluation days overlap the frozen development training cohort")
+    coverage = phase_coverage(days, phase)
+    if coverage.status != "ADEQUATE":
+        return coverage, (), "COVERAGE_LIMITED", coverage.reason
+    try:
+        results = tuple(_score_day(day, pair.baseline_preprocessing, pair.candidate_preprocessing,
+                                   pair.baseline_model, pair.extended_model)
+                        for day in days if day_eligibility(day).status == "ELIGIBLE")
+    except (StudyModelFitError, ValueError) as exc:
+        return coverage, (), "FIT_FAILED", str(exc)
+    return coverage, results, "EVALUABLE", "FROZEN_DEVELOPMENT_PAIR_SCORED"
+
+
+def evaluate_validation(pair: FrozenPredictivePair, days,
+                        upstream_provenance: UpstreamInputProvenance,
+                        development: DevelopmentFreeze) -> ValidationDecision:
+    if (not isinstance(upstream_provenance, UpstreamInputProvenance)
+            or replace(upstream_provenance) != upstream_provenance
+            or upstream_provenance.phase != "validation"):
+        raise ValueError("validation requires validation-phase finalized upstream provenance")
+    if (not isinstance(development, DevelopmentFreeze) or replace(development) != development
+            or upstream_provenance.shared_contract != development.upstream_provenance.shared_contract):
+        raise ValueError("validation shared Part-B scientific contract differs from development")
+    days = _cohort(days, "validation", pair.identity)
+    for day in days:
+        upstream_provenance.require_source(day.study_period_index, day.source_provenance.provenance_sha256)
+    coverage, results, status, reason = _evaluate_frozen_phase(pair, days, "validation")
+    if status == "EVALUABLE":
+        confirmed = pair.development_median > 0 and median(d.delta for d in results) > 0
+        status = "CONFIRMED" if confirmed else "NOT_CONFIRMED"
+        reason = "POSITIVE_DEVELOPMENT_AND_VALIDATION" if confirmed else "NONPOSITIVE_OR_REVERSED_EFFECT"
+    return ValidationDecision(pair.identity, upstream_provenance.provenance_sha256,
+                              pair.pair_sha256, pair.development_median,
+                              coverage, results, status, reason)
+
+
+@dataclass(frozen=True)
+class ValidationFreeze:
+    development_freeze_sha256: str
+    upstream_provenance: UpstreamInputProvenance
+    decisions: tuple[ValidationDecision, ...]
+    version: str = "historical-market-state-validation-freeze-v1"
+    freeze_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        require_sha256(self.development_freeze_sha256)
+        if (not isinstance(self.upstream_provenance, UpstreamInputProvenance)
+                or replace(self.upstream_provenance) != self.upstream_provenance
+                or self.upstream_provenance.phase != "validation"):
+            raise ValueError("validation freeze requires validation-phase upstream provenance")
+        object.__setattr__(self, "decisions", tuple(sorted(self.decisions, key=lambda d: d.identity.family_id)))
+        if (len({d.identity.family_id for d in self.decisions}) != len(self.decisions)
+                or self.version != "historical-market-state-validation-freeze-v1"):
+            raise ValueError("duplicate or incompatible validation freeze member")
+        seal_hash(self, "freeze_sha256")
+
+
+def _validate_freeze_link(development: DevelopmentFreeze, validation: ValidationFreeze):
+    if validation.development_freeze_sha256 != development.freeze_sha256:
+        raise ValueError("validation scientific parent SHA mismatch")
+    if validation.upstream_provenance.shared_contract != development.upstream_provenance.shared_contract:
+        raise ValueError("validation shared Part-B scientific contract differs from development")
+    for decision in validation.decisions:
+        if decision.upstream_provenance_sha256 != validation.upstream_provenance.provenance_sha256:
+            raise ValueError("validation differs from frozen upstream provenance")
+        for day in decision.coverage.days:
+            if day.source_provenance_sha256 is not None:
+                validation.upstream_provenance.require_source(day.study_period_index, day.source_provenance_sha256)
+    if ({(d.identity, d.predictive_pair_sha256, d.development_median) for d in validation.decisions}
+            != {(p.identity, p.pair_sha256, p.development_median) for p in development.predictive_pairs}):
+        raise ValueError("validation must bind exactly the nominated frozen predictive pairs")
+
+
+def freeze_validation(development: DevelopmentFreeze, decisions,
+                      upstream_provenance: UpstreamInputProvenance) -> ValidationFreeze:
+    result = ValidationFreeze(development.freeze_sha256, upstream_provenance, tuple(decisions))
+    _validate_freeze_link(development, result)
+    return result
+
+
+@dataclass(frozen=True)
+class TestAuthorizationMember:
+    family_id: str
+    status: str
+    identity: CandidateConfigIdentity | None = None
+    nomination_sha256: str | None = None
+    predictive_pair_sha256: str | None = None
+    validation_decision_sha256: str | None = None
+
+    def __post_init__(self):
+        predictive_family(self.family_id)
+        if self.status not in ("AUTHORIZED", "VETOED", "NOT_EVALUABLE", "COVERAGE_LIMITED"):
+            raise ValueError("unknown frozen test disposition")
+        if self.identity is not None and (not isinstance(self.identity, CandidateConfigIdentity)
+                                         or self.identity.family_id != self.family_id):
+            raise ValueError("authorization family/config mismatch")
+        if self.identity is not None and replace(self.identity) != self.identity:
+            raise ValueError("invalid frozen authorization config identity")
+        for digest in (self.nomination_sha256, self.predictive_pair_sha256, self.validation_decision_sha256):
+            if digest is not None:
+                require_sha256(digest)
+        if self.status == "AUTHORIZED" and (self.identity is None or any(d is None for d in (
+                self.nomination_sha256, self.predictive_pair_sha256, self.validation_decision_sha256))):
+            raise ValueError("authorized member requires all frozen scientific identities")
+
+
+@dataclass(frozen=True)
+class TestAuthorizationFreeze:
+    development_freeze_sha256: str
+    validation_freeze_sha256: str
+    plan_sha256: str
+    study_manifest_sha256: str
+    members: tuple[TestAuthorizationMember, ...]
+    shared_contract: PartBScientificContract
+    version: str = "historical-market-state-test-authorization-freeze-v1"
+    authorization_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "members", tuple(self.members))
+        if (not isinstance(self.shared_contract, PartBScientificContract)
+                or replace(self.shared_contract) != self.shared_contract
+                or self.shared_contract.study_manifest_sha256 != self.study_manifest_sha256):
+            raise ValueError("authorization requires the shared Part-B prerequisite identity")
+        for digest in (self.development_freeze_sha256, self.validation_freeze_sha256,
+                       self.plan_sha256, self.study_manifest_sha256):
+            require_sha256(digest)
+        if (any(not isinstance(m, TestAuthorizationMember) or replace(m) != m for m in self.members)
+                or tuple(m.family_id for m in self.members) != PRIMARY_CONFIRMATORY_FAMILY
+                or self.plan_sha256 != FROZEN_EVALUATION_PLAN.plan_sha256
+                or self.study_manifest_sha256 != FROZEN_PERIOD_ROSTER.study_manifest_sha256
+                or self.version != "historical-market-state-test-authorization-freeze-v1"):
+            raise ValueError("test authorization must freeze exactly all 15 non-PELT primary families")
+        seal_hash(self, "authorization_sha256")
+
+
+def authorize_test(development: DevelopmentFreeze, validation: ValidationFreeze) -> TestAuthorizationFreeze:
+    """Freeze the complete confirmatory set, including every unavailable/vetoed member."""
+    if replace(development) != development or replace(validation) != validation:
+        raise ValueError("invalid development/validation freeze identity")
+    _validate_freeze_link(development, validation)
+    members = []
+    for family in PRIMARY_CONFIRMATORY_FAMILY:
+        nomination = next((n for n in development.nominations if n.family_id == family), None)
+        pair = next((p for p in development.predictive_pairs if p.identity.family_id == family), None)
+        decision = next((d for d in validation.decisions if d.identity.family_id == family), None)
+        if nomination is None:
+            raise ValueError("authorization requires an explicit development nomination for every primary family")
+        if nomination.status == "NOT_EVALUABLE":
+            if pair is not None or decision is not None:
+                raise ValueError("non-evaluable development member cannot have a predictive pair/validation decision")
+        elif pair is None or decision is None:
+            raise ValueError("nominated development member requires its frozen pair and validation decision")
+        status = ("AUTHORIZED" if decision is not None and decision.status == "CONFIRMED" else
+                  "VETOED" if decision is not None and decision.status == "NOT_CONFIRMED" else
+                  "COVERAGE_LIMITED" if decision is not None and decision.status == "COVERAGE_LIMITED" else
+                  "NOT_EVALUABLE")
+        members.append(TestAuthorizationMember(
+            family, status, nomination.identity, nomination.nomination_sha256,
+            pair.pair_sha256 if pair is not None else None,
+            decision.decision_sha256 if decision is not None else None))
+    return TestAuthorizationFreeze(development.freeze_sha256, validation.freeze_sha256,
+                                   development.plan.plan_sha256, development.study_manifest_sha256, tuple(members),
+                                   development.upstream_provenance.shared_contract)
+
+
+@dataclass(frozen=True)
+class PrimaryTestResult:
+    authorization: TestAuthorizationFreeze
+    family_id: str
+    upstream_provenance_sha256: str
+    coverage: PhaseCoverage
+    day_results: tuple[DayPredictiveResult, ...]
+    bootstrap: DayBootstrapResult | None
+    sign_test: DaySignTestResult | None
+    status: str
+    reason: str
+    classification: EvidenceClassification
+    version: str = "historical-market-state-primary-test-result-v1"
+    result_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "day_results", tuple(self.day_results))
+        if (not isinstance(self.authorization, TestAuthorizationFreeze)
+                or replace(self.authorization) != self.authorization):
+            raise ValueError("test result requires a complete authorization freeze")
+        member = next((m for m in self.authorization.members if m.family_id == self.family_id), None)
+        if member is None or member.status != "AUTHORIZED":
+            raise ValueError("test requires an authorized member of the aggregate freeze")
+        spec = predictive_family(self.family_id)
+        require_sha256(self.upstream_provenance_sha256)
+        if (self.coverage.phase != "test" or self.status not in ("EVALUABLE", "COVERAGE_LIMITED", "FIT_FAILED")
+                or self.version != "historical-market-state-primary-test-result-v1"):
+            raise ValueError("invalid authorized primary test status")
+        if self.status == "EVALUABLE":
+            if (self.coverage.status != "ADEQUATE" or len(self.day_results) != self.coverage.eligible_day_count
+                    or self.bootstrap is None or self.sign_test is None
+                    or self.bootstrap.day_effects != tuple(d.delta for d in self.day_results)
+                    or self.sign_test != exact_day_sign_test(self.bootstrap.day_effects)
+                    or (self.bootstrap.namespace.phase, self.bootstrap.namespace.family_id,
+                        self.bootstrap.namespace.config_version, self.bootstrap.namespace.horizon_minutes,
+                        self.bootstrap.namespace.outcome_id)
+                    != ("test", member.identity.family_id, member.identity.config_version,
+                        spec.horizon_minutes, spec.outcome_id)):
+                raise ValueError("test statistics do not bind the authorized paired day effects")
+            _validate_day_results(self.coverage, self.day_results)
+        else:
+            if self.day_results or self.bootstrap is not None or self.sign_test is not None:
+                raise ValueError("failed test evaluation cannot manufacture effects/statistics")
+            if (self.status == "COVERAGE_LIMITED") != (self.coverage.status == "COVERAGE_LIMITED"):
+                raise ValueError("test failure status conflicts with coverage")
+            if self.classification != EvidenceClassification.COVERAGE_LIMITED:
+                raise ValueError("failed test evaluation must retain feasibility classification")
+        seal_hash(self, "result_sha256")
+
+
+def evaluate_test(development: DevelopmentFreeze, validation: ValidationFreeze,
+                  authorization: TestAuthorizationFreeze, family_id: str, days,
+                  upstream_provenance: UpstreamInputProvenance) -> PrimaryTestResult:
+    if not isinstance(authorization, TestAuthorizationFreeze):
+        raise ValueError("test requires an immutable authorization contract")
+    expected = authorize_test(development, validation)
+    if authorization != expected:
+        raise ValueError("test authorization identity/scientific parent mismatch")
+    if (not isinstance(upstream_provenance, UpstreamInputProvenance)
+            or replace(upstream_provenance) != upstream_provenance
+            or upstream_provenance.phase != "test"):
+        raise ValueError("test evaluation requires test-phase finalized upstream provenance")
+    if upstream_provenance.shared_contract != authorization.shared_contract:
+        raise ValueError("test shared Part-B scientific contract differs from authorization")
+    member = next((m for m in authorization.members if m.family_id == family_id), None)
+    if member is None or member.status != "AUTHORIZED":
+        raise ValueError("only validation-confirmed authorized members unlock test")
+    pair = next(p for p in development.predictive_pairs if p.identity == member.identity)
+    decision = next(d for d in validation.decisions if d.identity == member.identity)
+    days = _cohort(days, "test", pair.identity)
+    for day in days:
+        if not isinstance(day.source_provenance, FinalizedPeriodProvenance):
+            raise ValueError("test requires finalized upstream period provenance")
+        upstream_provenance.require_source(day.study_period_index, day.source_provenance.provenance_sha256)
+    coverage, results, status, reason = _evaluate_frozen_phase(pair, days, "test")
+    bootstrap = sign_test = None
+    if status == "EVALUABLE":
+        effects = tuple(d.delta for d in results)
+        namespace = BootstrapNamespace(development.study_manifest_sha256, "test", pair.identity.family_id,
+                                       pair.identity.config_version, pair.horizon_minutes, pair.outcome_id)
+        bootstrap = whole_day_bootstrap(effects, namespace)
+        sign_test = exact_day_sign_test(effects)
+    classification = classify_evidence(EvidenceComponents(
+        coverage.status, "FIT_FAILED" if status == "FIT_FAILED" else "FEASIBLE",
+        pair.development_median, decision.median_delta,
+        bootstrap.median if bootstrap is not None else None,
+        bootstrap.median_ci95 if bootstrap is not None else None))
+    return PrimaryTestResult(authorization, family_id, upstream_provenance.provenance_sha256,
+                             coverage, results, bootstrap, sign_test, status, reason, classification)
+
+
+def study_primary_holm(authorization: TestAuthorizationFreeze, results) -> tuple:
+    """Study-level Holm always retains the complete frozen 15-member registry."""
+    if not isinstance(authorization, TestAuthorizationFreeze) or replace(authorization) != authorization:
+        raise ValueError("study Holm requires the aggregate authorization freeze")
+    results = tuple(results)
+    if (any(not isinstance(r, PrimaryTestResult) or replace(r) != r
+            or r.authorization != authorization for r in results)
+            or len({r.family_id for r in results}) != len(results)):
+        raise ValueError("Holm results must bind one complete authorization freeze")
+    if len({r.upstream_provenance_sha256 for r in results}) > 1:
+        raise ValueError("Holm results must bind the same exact test provenance SHA")
+    lookup = {r.family_id: r for r in results}
+    supplied = []
+    for member in authorization.members:
+        result = lookup.get(member.family_id)
+        status = ("VETOED" if member.status == "VETOED" else
+                  "NOT_TESTABLE" if member.status != "AUTHORIZED" else
+                  "MISSING" if result is None else
+                  "TESTABLE" if result.status == "EVALUABLE" else "NOT_TESTABLE")
+        supplied.append(HypothesisPValue(member.family_id,
+                                        result.sign_test.raw_p if status == "TESTABLE" else None, status))
+    adjusted = {m.hypothesis_id: m for m in holm_adjust(PRIMARY_CONFIRMATORY_FAMILY, tuple(supplied))}
+    return tuple(adjusted[family] for family in PRIMARY_CONFIRMATORY_FAMILY)
