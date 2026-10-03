@@ -149,20 +149,254 @@ class ExcludedDevelopmentDay:
     study_period_index: int
     reason: str
 
+    def __post_init__(self):
+        if (type(self.study_period_index) is not int or self.study_period_index < 0
+                or self.reason not in ("MISSING_CONFIG_DAY", "COMMON_DAY_COVERAGE_FAILED")):
+            raise ValueError("invalid common development exclusion")
+
+
+@dataclass(frozen=True)
+class CommonDevelopmentConfigSelection:
+    identity: CandidateConfigIdentity
+    source_day_sha256: str
+    source_row_count: int
+    source_observation_keys: tuple[str, ...]
+    source_row_context_sha256s: tuple[tuple[str, str], ...]
+    scheduled_primary_count: int | None
+    common_usable_row_count: int
+    selected_day_sha256: str | None
+
+    def __post_init__(self):
+        object.__setattr__(self, "source_observation_keys", tuple(self.source_observation_keys))
+        object.__setattr__(self, "source_row_context_sha256s",
+                           tuple(tuple(pair) for pair in self.source_row_context_sha256s))
+        require_sha256(self.source_day_sha256)
+        if (type(self.source_row_count) is not int or self.source_row_count != len(self.source_observation_keys)
+                or len(set(self.source_observation_keys)) != len(self.source_observation_keys)
+                or tuple(sorted(self.source_observation_keys)) != self.source_observation_keys
+                or tuple(key for key, _ in self.source_row_context_sha256s) != self.source_observation_keys
+                or type(self.common_usable_row_count) is not int or self.common_usable_row_count < 0
+                or self.common_usable_row_count > self.source_row_count):
+            raise ValueError("invalid source-day selection evidence")
+        for key, context_sha in self.source_row_context_sha256s:
+            require_name(key)
+            require_sha256(context_sha)
+        spec = predictive_family(self.identity.family_id)
+        if spec.observation_mode == "CONTINUOUS":
+            if (type(self.scheduled_primary_count) is not int or self.scheduled_primary_count <= 0
+                    or self.source_row_count > self.scheduled_primary_count
+                    or self.selected_day_sha256 is not None and self.common_usable_row_count == 0):
+                raise ValueError("invalid continuous source-day selection evidence")
+        elif self.scheduled_primary_count is not None:
+            raise ValueError("event source-day selection cannot have a scheduled grid")
+        if self.selected_day_sha256 is not None:
+            require_sha256(self.selected_day_sha256)
+
+
+@dataclass(frozen=True)
+class CommonDevelopmentDaySelection:
+    study_period_index: int
+    utc_date: date | None
+    expected_config_identities: tuple[CandidateConfigIdentity, ...]
+    supplied_configs: tuple[CommonDevelopmentConfigSelection, ...]
+    common_observation_keys: tuple[str, ...] | None
+    common_day_eligible: bool | None
+    disposition: str
+
+    def __post_init__(self):
+        object.__setattr__(self, "expected_config_identities", tuple(self.expected_config_identities))
+        supplied = tuple(sorted(self.supplied_configs, key=lambda item: item.identity.config_version))
+        object.__setattr__(self, "supplied_configs", supplied)
+        expected = tuple(sorted(self.expected_config_identities, key=lambda item: item.config_version))
+        object.__setattr__(self, "expected_config_identities", expected)
+        if (type(self.study_period_index) is not int or self.study_period_index < 0
+                or self.utc_date is not None and type(self.utc_date) is not date
+                or not expected or len({i.config_version for i in expected}) != len(expected)
+                or len({i.family_id for i in expected}) != 1
+                or len({i.algorithm_version for i in expected}) != 1):
+            raise ValueError("invalid common development period identity")
+        spec = _fixed_family_identities(expected)
+        supplied_ids = tuple(item.identity for item in supplied)
+        if (len(set(supplied_ids)) != len(supplied_ids)
+                or any(identity not in expected for identity in supplied_ids)
+                or (self.utc_date is None) != (not supplied)
+                or any(item.source_row_count != len(item.source_observation_keys) for item in supplied)):
+            raise ValueError("invalid supplied config identities in common development provenance")
+        if self.disposition not in ("RETAINED", "MISSING_CONFIG_DAY", "COMMON_DAY_COVERAGE_FAILED"):
+            raise ValueError("unknown common development selection disposition")
+        complete = len(supplied) == len(expected)
+        if self.disposition == "MISSING_CONFIG_DAY":
+            if complete or self.common_day_eligible is not None:
+                raise ValueError("missing-config disposition conflicts with supplied family days")
+            if spec.observation_mode == "CONTINUOUS":
+                object.__setattr__(self, "common_observation_keys", tuple(self.common_observation_keys or ()))
+                if self.common_observation_keys:
+                    raise ValueError("missing-config period cannot have a common observation intersection")
+            elif self.common_observation_keys is not None:
+                raise ValueError("event selection has no shared observation-key set")
+            if any(item.common_usable_row_count or item.selected_day_sha256 is not None for item in supplied):
+                raise ValueError("missing-config period cannot contain selected rows")
+            return
+        if not complete:
+            raise ValueError("non-missing disposition requires every fixed config day")
+        if spec.observation_mode == "CONTINUOUS":
+            keys = tuple(self.common_observation_keys or ())
+            object.__setattr__(self, "common_observation_keys", keys)
+            actual_intersection = tuple(sorted(set.intersection(
+                *(set(item.source_observation_keys) for item in supplied))))
+            if tuple(sorted(set(keys))) != keys or keys != actual_intersection:
+                raise ValueError("continuous common keys are not the exact source intersection")
+            context_maps = [dict(item.source_row_context_sha256s) for item in supplied]
+            if any(len({context.get(key) for context in context_maps}) != 1 for key in keys):
+                raise ValueError("continuous common rows disagree on baseline/time/outcome context")
+            counts = {item.common_usable_row_count for item in supplied}
+            if counts != {len(keys)}:
+                raise ValueError("continuous usable row counts differ from the common key set")
+            scheduled = {item.scheduled_primary_count for item in supplied}
+            if len(scheduled) != 1:
+                raise ValueError("continuous selection has inconsistent scheduled counts")
+            eligible = len(keys) >= (next(iter(scheduled)) + 1) // 2
+        else:
+            if self.common_observation_keys is not None:
+                raise ValueError("event selection cannot intersect native event keys")
+            if any(item.common_usable_row_count != item.source_row_count for item in supplied):
+                raise ValueError("event selection must retain each config's native rows unchanged")
+            eligible = all(item.source_row_count >= 1 for item in supplied)
+            if eligible and any(item.selected_day_sha256 != item.source_day_sha256 for item in supplied):
+                raise ValueError("event selection changed a native source day")
+        if self.common_day_eligible is not eligible:
+            raise ValueError("common-day eligibility differs from the fixed selection rule")
+        expected_disposition = "RETAINED" if eligible else "COMMON_DAY_COVERAGE_FAILED"
+        if self.disposition != expected_disposition:
+            raise ValueError("common-day disposition differs from its eligibility")
+        if eligible and any(item.selected_day_sha256 is None for item in supplied):
+            raise ValueError("retained common day must bind each selected config day")
+        if not eligible and any(item.selected_day_sha256 is not None for item in supplied):
+            raise ValueError("excluded common day cannot have retained config days")
+
+
+@dataclass(frozen=True)
+class CommonDevelopmentSourceDay:
+    """Commitment to one normalized aligned input day and its selection inputs."""
+
+    study_period_index: int
+    utc_date: date
+    identity: CandidateConfigIdentity
+    day_sha256: str
+    selection_inputs_sha256: str
+
+    def __post_init__(self):
+        if (type(self.study_period_index) is not int or self.study_period_index < 0
+                or type(self.utc_date) is not date or not isinstance(self.identity, CandidateConfigIdentity)):
+            raise ValueError("invalid common development source-day identity")
+        require_sha256(self.day_sha256)
+        require_sha256(self.selection_inputs_sha256)
+
+
+def _source_entry(index, utc_date, evidence):
+    inputs = (evidence.source_row_count, evidence.source_observation_keys,
+              evidence.source_row_context_sha256s, evidence.scheduled_primary_count)
+    return CommonDevelopmentSourceDay(index, utc_date, evidence.identity,
+                                      evidence.source_day_sha256, scientific_sha256(inputs))
+
+
+def _source_order(item):
+    return (item.identity.family_id, item.identity.algorithm_version,
+            item.identity.config_version, item.study_period_index)
+
+
+def _normalized_day_sha256(day):
+    ordered = replace(day, observations=tuple(sorted(day.observations, key=lambda row: row.observation_key)))
+    return scientific_sha256(ordered)
+
+
+def _source_config_selection(identity, source_day, selected_day, common_count):
+    rows = tuple(sorted(source_day.observations, key=lambda row: row.observation_key))
+    return CommonDevelopmentConfigSelection(
+        identity,
+        _normalized_day_sha256(source_day),
+        len(rows),
+        tuple(row.observation_key for row in rows),
+        tuple((row.observation_key, scientific_sha256(
+            (row.decision_time_ms, row.baseline_features, row.outcome))) for row in rows),
+        source_day.scheduled_primary_count,
+        common_count,
+        None if selected_day is None else _normalized_day_sha256(selected_day))
+
 
 @dataclass(frozen=True)
 class CommonDevelopmentSamples:
     samples: tuple[ConfigDevelopmentSample, ...]
     excluded_days: tuple[ExcludedDevelopmentDay, ...]
+    selection_provenance: tuple[CommonDevelopmentDaySelection, ...]
+    source_population: tuple[CommonDevelopmentSourceDay, ...]
+    source_days_sha256: str
     version: str = "historical-market-state-common-development-samples-v1"
     samples_sha256: str = field(init=False)
 
     def __post_init__(self):
         object.__setattr__(self, "samples", tuple(self.samples))
         object.__setattr__(self, "excluded_days", tuple(self.excluded_days))
-        _fixed_family_identities(s.identity for s in self.samples)
-        if self.version != "historical-market-state-common-development-samples-v1":
+        selections = tuple(sorted(self.selection_provenance, key=lambda item: item.study_period_index))
+        object.__setattr__(self, "selection_provenance", selections)
+        for selection in selections:
+            validated = replace(selection, supplied_configs=tuple(replace(item) for item in selection.supplied_configs))
+            if validated != selection:
+                raise ValueError("invalid common development selection provenance")
+        identities = tuple(s.identity for s in self.samples)
+        _fixed_family_identities(identities)
+        if (tuple(sorted(identities, key=lambda i: i.config_version)) != identities
+                or self.version != "historical-market-state-common-development-samples-v1"
+                or len({item.study_period_index for item in selections}) != len(selections)
+                or any(item.expected_config_identities != identities for item in selections)):
             raise ValueError("invalid fixed common-sample family")
+        population = tuple(sorted(self.source_population, key=_source_order))
+        object.__setattr__(self, "source_population", population)
+        for item in population:
+            replace(item)
+        require_sha256(self.source_days_sha256)
+        described = tuple(sorted((_source_entry(selection.study_period_index, selection.utc_date, item)
+                                  for selection in selections for item in selection.supplied_configs),
+                                 key=_source_order))
+        periods = {item.study_period_index for item in population}
+        if (scientific_sha256(population) != self.source_days_sha256 or described != population
+                or len({_source_order(item) for item in population}) != len(population)
+                or periods != {item.study_period_index for item in selections}
+                or len(periods) > dict(PHASE_DAY_COUNTS)["development"]
+                or any(item.identity not in identities for item in population)
+                or any(len({item.utc_date for item in population if item.study_period_index == index}) != 1
+                       for index in periods)
+                or len({item.utc_date for item in selections}) != len(selections)):
+            raise ValueError("common selection provenance differs from the bound source population")
+        excluded_by_period = {item.study_period_index: item.reason for item in self.excluded_days}
+        expected_excluded = {selection.study_period_index: selection.disposition
+                             for selection in selections if selection.disposition != "RETAINED"}
+        if (len(excluded_by_period) != len(self.excluded_days) or excluded_by_period != expected_excluded
+                or tuple(sorted(self.excluded_days, key=lambda item: item.study_period_index)) != self.excluded_days):
+            raise ValueError("common development exclusions differ from selection provenance")
+        for sample in self.samples:
+            retained = tuple(item for item in selections if item.disposition == "RETAINED")
+            if len(sample.days) != len(retained):
+                raise ValueError("retained config days differ from selection provenance")
+            evidence_by_period = {item.study_period_index: item for item in retained}
+            for day in sample.days:
+                selection = evidence_by_period.get(day.study_period_index)
+                if selection is None or day.utc_date != selection.utc_date:
+                    raise ValueError("retained config day is absent from its selection provenance")
+                config_evidence = next(item for item in selection.supplied_configs
+                                       if item.identity == sample.identity)
+                keys = tuple(sorted(row.observation_key for row in day.observations))
+                context = tuple((row.observation_key, scientific_sha256(
+                    (row.decision_time_ms, row.baseline_features, row.outcome)))
+                    for row in sorted(day.observations, key=lambda row: row.observation_key))
+                if (config_evidence.selected_day_sha256 != _normalized_day_sha256(day)
+                        or config_evidence.common_usable_row_count != len(day.observations)
+                        or config_evidence.scheduled_primary_count != day.scheduled_primary_count
+                        or selection.common_observation_keys is not None
+                        and (keys != selection.common_observation_keys
+                             or context != tuple((key, dict(config_evidence.source_row_context_sha256s)[key])
+                                                 for key in keys))):
+                    raise ValueError("retained config day differs from its selection provenance")
         seal_hash(self, "samples_sha256")
 
 
@@ -184,14 +418,25 @@ def common_development_samples(fixed_configs, days) -> CommonDevelopmentSamples:
     if len(indices) > dict(PHASE_DAY_COUNTS)["development"]:
         raise ValueError("too many distinct development study days")
     per_config = {identity: {d.study_period_index: d for d in grouped[identity]} for identity in identities}
-    retained, excluded = {identity: [] for identity in identities}, []
+    # Commit every normalized input day before intersections or exclusions.
+    source_population = tuple(sorted((_source_entry(
+        day.study_period_index, day.utc_date, _source_config_selection(identity, day, None, 0))
+        for identity in identities for day in grouped[identity]), key=_source_order))
+    source_sha = scientific_sha256(source_population)
+    retained, excluded, provenance = {identity: [] for identity in identities}, [], []
     for index in indices:
         available = [per_config[identity].get(index) for identity in identities]
         if len({day.utc_date for day in available if day is not None}) > 1:
             raise ValueError("same study period has conflicting dates across configs")
         if any(day is None for day in available):
             excluded.append(ExcludedDevelopmentDay(index, "MISSING_CONFIG_DAY"))
+            supplied = tuple(_source_config_selection(identity, day, None, 0)
+                             for identity, day in zip(identities, available) if day is not None)
+            provenance.append(CommonDevelopmentDaySelection(
+                index, next(day.utc_date for day in available if day is not None), identities, supplied,
+                () if spec.observation_mode == "CONTINUOUS" else None, None, "MISSING_CONFIG_DAY"))
             continue
+        source_days = tuple(available)
         if spec.observation_mode == "CONTINUOUS":
             if len({d.scheduled_primary_count for d in available}) != 1:
                 raise ValueError("continuous configs disagree on scheduled primary grid")
@@ -203,13 +448,28 @@ def common_development_samples(fixed_configs, days) -> CommonDevelopmentSamples:
                     raise ValueError("common row key has different baseline/time/outcome across configs")
             available = [replace(day, observations=tuple(lookup[key] for key in keys))
                          for day, lookup in zip(available, lookups)]
-        if any(day_eligibility(day).status != "ELIGIBLE" for day in available):
+            common_keys = tuple(keys)
+            common_eligible = not any(day_eligibility(day).status != "ELIGIBLE" for day in available)
+            common_count = len(common_keys)
+        else:
+            common_keys = None
+            common_eligible = not any(day_eligibility(day).status != "ELIGIBLE" for day in available)
+            common_count = None
+        disposition = "RETAINED" if common_eligible else "COMMON_DAY_COVERAGE_FAILED"
+        if not common_eligible:
             excluded.append(ExcludedDevelopmentDay(index, "COMMON_DAY_COVERAGE_FAILED"))
-            continue
-        for identity, day in zip(identities, available):
-            retained[identity].append(day)
+        else:
+            for identity, day in zip(identities, available):
+                retained[identity].append(day)
+        supplied = tuple(_source_config_selection(
+            identity, source_day, selected_day if common_eligible else None,
+            len(selected_day.observations) if spec.observation_mode == "EVENT" else common_count)
+            for identity, source_day, selected_day in zip(identities, source_days, available))
+        provenance.append(CommonDevelopmentDaySelection(
+            index, source_days[0].utc_date, identities, supplied, common_keys, common_eligible, disposition))
     return CommonDevelopmentSamples(tuple(ConfigDevelopmentSample(i, tuple(retained[i]))
-                                          for i in identities), tuple(excluded))
+                                          for i in identities), tuple(excluded), tuple(provenance),
+                                    source_population, source_sha)
 
 
 @dataclass(frozen=True)
@@ -553,10 +813,8 @@ class DevelopmentFreeze:
             if nomination != nominate_configuration(results):
                 raise ValueError("freeze nomination differs from exact development nomination")
             common = next(s for s in self.common_samples if s.samples[0].identity.family_id == nomination.family_id)
-            retained = common_development_samples(tuple(s.identity for s in common.samples),
-                                                  tuple(day for s in common.samples for day in s.days))
-            if retained.samples != common.samples:
-                raise ValueError("freeze common samples violate the family paired-row/day selection rules")
+            if replace(common) != common:
+                raise ValueError("freeze common-sample contract has an invalid scientific identity")
             if nomination.common_samples_sha256 != common.samples_sha256:
                 raise ValueError("freeze common-sample identity differs from the family selection object")
             if {r.identity for r in results} != {s.identity for s in common.samples}:

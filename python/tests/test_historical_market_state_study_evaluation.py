@@ -143,10 +143,85 @@ class StudyEvaluationTests(unittest.TestCase):
         common = evaluation.common_development_samples(identities, a + b + c)
         self.assertEqual(tuple(len(s.days) for s in common.samples), (9, 9, 9))
         self.assertEqual(common.excluded_days[0].study_period_index, 2)
+        for selection in common.selection_provenance:
+            self.assertIsNone(selection.common_observation_keys)
+            self.assertEqual(selection.common_day_eligible, selection.study_period_index != 2)
+            self.assertEqual(tuple(item.common_usable_row_count for item in selection.supplied_configs),
+                             (1, 0, 1) if selection.study_period_index == 2 else (1, 1, 1))
+        event_common, results, nomination = evaluation.evaluate_development_family(identities, a[:1] + b[:1] + c[:1])
+        self.assertEqual(nomination.status, "NOT_EVALUABLE")
+        evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (), (event_common,))
         for a_day, b_day in zip(common.samples[0].days, common.samples[1].days):
             self.assertEqual(a_day.study_period_index, b_day.study_period_index)
             self.assertNotEqual(a_day.observations[0].observation_key, b_day.observations[0].observation_key)
             self.assertNotEqual(a_day.observations[0].decision_time_ms, b_day.observations[0].decision_time_ms)
+
+    def test_common_selection_freezes_complete_source_population_and_dispositions(self):
+        identities = tuple(replace(IDENTITY, config_version=config) for config in ("a", "b", "c"))
+        missing_a = synthetic_day(0, config="a")
+        missing_b = synthetic_day(0, config="b")
+        sparse_a = replace(synthetic_day(1, config="a"),
+                           observations=synthetic_day(1, config="a").observations[:16])
+        sparse_b = replace(synthetic_day(1, config="b"),
+                           observations=synthetic_day(1, config="b").observations[1:17])
+        sparse_c = replace(synthetic_day(1, config="c"),
+                           observations=synthetic_day(1, config="c").observations[2:18])
+        retained_days = tuple(synthetic_day(2, config=config) for config in ("a", "b", "c"))
+        source_days = (missing_a, missing_b, sparse_a, sparse_b, sparse_c) + retained_days
+        common = evaluation.common_development_samples(identities, source_days)
+        missing, failed, retained = common.selection_provenance
+        self.assertEqual(retained.disposition, "RETAINED")
+        self.assertEqual(tuple(item.common_usable_row_count for item in retained.supplied_configs), (32, 32, 32))
+        self.assertEqual(missing.disposition, "MISSING_CONFIG_DAY")
+        self.assertEqual(tuple(item.identity.config_version for item in missing.supplied_configs), ("a", "b"))
+        self.assertEqual(failed.disposition, "COMMON_DAY_COVERAGE_FAILED")
+        self.assertEqual(failed.common_observation_keys, tuple(f"{i:02}" for i in range(2, 16)))
+        self.assertEqual(tuple(item.common_usable_row_count for item in failed.supplied_configs), (14, 14, 14))
+        self.assertEqual(tuple(item.source_row_count for item in failed.supplied_configs), (16, 16, 16))
+        self.assertEqual(tuple(item.study_period_index for item in common.selection_provenance), (0, 1, 2))
+        self.assertEqual(tuple(item.reason for item in common.excluded_days),
+                         ("MISSING_CONFIG_DAY", "COMMON_DAY_COVERAGE_FAILED"))
+        reordered = evaluation.common_development_samples(identities, tuple(reversed(source_days)))
+        self.assertEqual(common.source_days_sha256, reordered.source_days_sha256)
+        self.assertEqual(common.samples_sha256, reordered.samples_sha256)
+        changed_row = replace(missing_a.observations[0], candidate_features=(2.0, 0.0))
+        changed_a = replace(missing_a, observations=(changed_row,) + missing_a.observations[1:])
+        changed = evaluation.common_development_samples(identities,
+                                                       (changed_a, missing_b, sparse_a, sparse_b, sparse_c) + retained_days)
+        self.assertNotEqual(common.source_days_sha256, changed.source_days_sha256)
+        self.assertEqual(common.samples, changed.samples)
+        _, results, nomination = evaluation.evaluate_development_family(identities, source_days)
+        freeze = evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (), (common,))
+        with self.assertRaises(ValueError):
+            replace(freeze, common_samples=(changed,))
+        with self.assertRaises(ValueError):
+            replace(common, source_days_sha256="b" * 64)
+        with self.assertRaises(ValueError):
+            replace(common, selection_provenance=(failed, retained))
+        with self.assertRaises(ValueError):
+            replace(common, selection_provenance=(missing, failed, retained, retained))
+        with self.assertRaises(ValueError):
+            replace(common, excluded_days=common.excluded_days[1:])
+        with self.assertRaises(ValueError):
+            replace(common, excluded_days=common.excluded_days +
+                    (evaluation.ExcludedDevelopmentDay(3, "MISSING_CONFIG_DAY"),))
+        with self.assertRaises(ValueError):
+            replace(retained, common_observation_keys=retained.common_observation_keys[:-1])
+        with self.assertRaises(ValueError):
+            altered = replace(retained, supplied_configs=(
+                replace(retained.supplied_configs[0], source_day_sha256="b" * 64),
+                *retained.supplied_configs[1:]))
+            replace(common, selection_provenance=(missing, failed, altered))
+        with self.assertRaises(ValueError):
+            replace(common, selection_provenance=(replace(missing, supplied_configs=missing.supplied_configs[:1]),
+                                                 failed, retained))
+        with self.assertRaises(ValueError):
+            replace(common, source_population=common.source_population[:-1])
+        with self.assertRaises(ValueError):
+            replace(failed, common_observation_keys=failed.common_observation_keys[:-1])
+        with self.assertRaises(ValueError):
+            replace(common, excluded_days=(replace(common.excluded_days[0], reason="COMMON_DAY_COVERAGE_FAILED"),
+                                            common.excluded_days[1]))
 
     def test_continuous_half_coverage_boundary_and_phase_headline_gates(self):
         day = synthetic_day(0)
