@@ -1327,23 +1327,24 @@ def _batchable_candidate_stage(selector, supplementary):
 def _candidate_batch_layout(selectors, supplementary, workers):
     """``(batch_size, batched)`` for the leading batchable candidate stages.
 
-    An explicit STUDY_STAGE_BATCH_SIZE always wins. Otherwise a worker pool
-    gets ``max(2, ceil(batchable / workers))`` so every worker takes one batch
-    in a single round and a small count is still batched; one worker keeps
-    STAGE_BATCH_SIZE. Grouping only: stage identities and outputs do not depend
-    on it. ``batch_size <= 1`` or ``batchable <= 1`` disables batching
-    (``batched == 0``).
+    Derived default (STUDY_STAGE_BATCH_SIZE unset/empty, ``workers > 1``):
+    ``max(2, ceil(batchable / workers))`` so every worker takes one batch in a
+    single round; ``batchable <= 1`` disables batching. Otherwise (explicit
+    size, or one worker) exactly as before the pool: ``_stage_batch_size()``,
+    and ``batch_size <= 1`` disables batching. Grouping only: stage identities
+    and outputs do not depend on it.
     """
     batchable = 0
     while (batchable < len(selectors)
            and _batchable_candidate_stage(selectors[batchable], supplementary)):
         batchable += 1
     raw = os.environ.get("STUDY_STAGE_BATCH_SIZE")
-    if (raw is None or raw == "") and workers > 1 and batchable > 1:
-        batch_size = max(2, math.ceil(batchable / workers))
-    else:
-        batch_size = _stage_batch_size()
-    return batch_size, (batchable if batch_size > 1 and batchable > 1 else 0)
+    if (raw is None or raw == "") and workers > 1:
+        if batchable <= 1:
+            return STAGE_BATCH_SIZE, 0
+        return max(2, math.ceil(batchable / workers)), batchable
+    batch_size = _stage_batch_size()
+    return batch_size, (batchable if batch_size > 1 else 0)
 
 
 def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=None,

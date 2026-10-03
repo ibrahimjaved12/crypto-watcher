@@ -1246,13 +1246,22 @@ class CandidateBatchLayoutTests(unittest.TestCase):
                                                      {}, workers)
 
     def test_small_batchable_counts(self):
+        from market_analysis import historical_market_state_study_execution as execution
         tail = ("taker-flow", "funding")
-        self.assertEqual(self.layout(3, selectors=("hmm", "fixed-00", *tail)), (2, 2))
+        one, two = ("hmm", *tail), ("hmm", "fixed-00", *tail)
+        # Derived default: balanced, floor 2, and no batching for <= 1 batchable stage.
+        self.assertEqual(self.layout(3, selectors=two), (2, 2))
         self.assertEqual(self.layout(3), (11, 31))
+        self.assertEqual(self.layout(3, selectors=one)[1], 0)
+        self.assertEqual(self.layout(3, "", selectors=one)[1], 0)
+        self.assertEqual(self.layout(3, selectors=tail)[1], 0)
+        # One worker without the env, or an explicit size: exactly as before the pool.
+        self.assertEqual(self.layout(1, selectors=one), (execution.STAGE_BATCH_SIZE, 1))
         for workers in (1, 3):
             with self.subTest(workers=workers):
-                self.assertEqual(self.layout(workers, selectors=("hmm", *tail))[1], 0)
-                self.assertEqual(self.layout(workers, selectors=tail)[1], 0)
+                self.assertEqual(self.layout(workers, "5", selectors=one), (5, 1))
+                self.assertEqual(self.layout(workers, "1", selectors=one), (1, 0))
+                self.assertEqual(self.layout(workers, "5", selectors=tail), (5, 0))
 
     def groups(self, batch_size, batched):
         return [self.SELECTORS[start:min(start + batch_size, batched)] for start in range(0, batched, batch_size)]
