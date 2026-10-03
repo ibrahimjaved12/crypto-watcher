@@ -637,8 +637,31 @@ python3 -m market_analysis.historical_market_state_study_execution execute \
 ```
 
 That limit selects the first three frozen development dates and does not create
-a new sample. Run the development phase without `--period-limit` to complete
-all ten periods before `freeze-hmm`; validation requires that frozen
+a new sample. The period-report v2 contract also persists two Part-C
+prerequisites without recomputation: a deduplicated exact-boundary V1 context
+for every causal event and a separately hash-bound BOCPD causal-onset
+observation section. BOCPD detection-region end/observed-through metadata stays
+descriptive and is not the causal onset predictor.
+
+Run the development phase without `--period-limit` to complete all ten periods.
+Before validation, build the deterministic leave-one-development-day-out HMM
+cross-fit artifacts from those ten finalized period reports:
+
+```bash
+python3 -m market_analysis.historical_market_state_hmm_crossfit \
+  --study-manifest research/historical-market-state-study-v1/selection/historical-market-state-study-v1-manifest.json \
+  --output-dir "$OUTPUT_ROOT/full-study" \
+  --code-revision "$CODE_REV"
+```
+
+The cross-fit tool is artifact-only: it accepts no archive roots or download
+flags. Each of the ten folds trains the existing HMM on the other nine stored
+development training blocks and causally filters the held-out stored feature
+blocks, resetting at stored gaps. It writes ten immutable fold artifacts plus a
+hash-linked index. The held-out day never enters its fold model.
+
+Then run `freeze-hmm` on the complete ten-day development cohort for the final
+all-development HMM used by validation/test. Validation requires that frozen
 development-only HMM artifact, and test additionally requires an explicit
 `--allow-test` acknowledgement. Part B stores descriptive native candidate
 evidence and candidate-independent trade-price outcomes only. It does not
