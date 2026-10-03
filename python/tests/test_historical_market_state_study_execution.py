@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from market_analysis.historical_market_state_study import (
     parse_historical_market_state_study_manifest_json,
 )
+from market_analysis.experiments.market_state_hmm_regimes import HMMDevelopmentTrainingBlock
 from market_analysis.historical_market_state_study_execution import (
     EXECUTION_VERSION, EXTENSION_COVERAGE_VERSION, SOURCE_IDENTITIES,
     TOOL_CONFIG_VERSION, _canonical,
@@ -283,14 +284,30 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             "EXP-75-04B", "bocpd-v1", "b", boundary, "EVENT", "ONSET",
             {"causal_onset_observation": {
                 "evaluation_boundary_time_ms": boundary}})
+        other_family = execution.HistoricalStudyCandidateEvidence(
+            period.study_period_index, period.utc_date.isoformat(), period.phase,
+            "EXP-75-09", "hmm-v1", "hmm", boundary, "EVENT", "ONSET", {})
+        extension_event = execution.HistoricalStudyCandidateEvidence(
+            period.study_period_index, period.utc_date.isoformat(), period.phase,
+            "EXP-75-11-FUNDING", "funding-v1", "funding", boundary, "EVENT", "ONSET", {})
+        continuous_v1 = execution.HistoricalStudyCandidateEvidence(
+            period.study_period_index, period.utc_date.isoformat(), period.phase,
+            "V1", "market-state-classifier-v1", "v1-config",
+            boundary + 5_000, "CONTINUOUS", "READY", {})
 
-        records = execution._event_time_v1_context(prepared, (first, second))
+        records = execution._event_time_v1_context(
+            prepared, (first, second, other_family, extension_event, continuous_v1))
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["decision_time_ms"], boundary)
         self.assertEqual(records[0]["provenance"]["movement_config_version"],
                          "movement-config-v1")
         self.assertEqual(records[0]["transitions"][0]["transition"], "STARTED")
+        with self.assertRaisesRegex(ValueError, "exact canonical V1 branch"):
+            wrong = execution.HistoricalStudyCandidateEvidence(
+                period.study_period_index, period.utc_date.isoformat(), period.phase,
+                "EXP-75-02", "cusum-v1", "a", boundary + 5_000, "EVENT", "ONSET", {})
+            execution._event_time_v1_context(prepared, (wrong,))
 
     def test_execute_period_times_source_and_outcome_paths_once(self):
         period = self.manifest.selected_periods[0]
@@ -375,14 +392,43 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                         if name not in ("period_total_seconds",
                                         "period_artifact_write_seconds"):
                             runtime_metrics.record_elapsed_ns(name, 1_000_000)
+                empty = []
+                scope = ("movement-v1", "config-v1", "universe-v1", "1", ("BTCUSDT",),
+                         "provider", "exchange", "trade")
+                block = HMMDevelopmentTrainingBlock(
+                    period.study_period_index, period.utc_date.isoformat(),
+                    period.start_boundary_time_ms, period.end_boundary_time_ms,
+                    scope, (), 1440)
                 payload = {
+                    "period_report_schema_version": execution.PERIOD_REPORT_SCHEMA_VERSION,
                     "execution_version": EXECUTION_VERSION,
+                    "candidate_evidence_version": execution.CANDIDATE_EVIDENCE_VERSION,
+                    "forward_outcomes_version": execution.FORWARD_OUTCOMES_VERSION,
+                    "tool_config_version": TOOL_CONFIG_VERSION,
                     "study_version": self.manifest.study_version,
                     "study_manifest_sha256": manifest.manifest_sha256,
                     "extension_coverage_manifest_sha256": (
                         frozen_coverage["coverage_manifest_sha256"]),
                     "code_revision": code_revision,
                     "period": execution.report_json_safe(period),
+                    "canonical_replay_manifest": {
+                        "movement_algorithm_version": "movement-v1",
+                        "movement_config_version": "config-v1", "universe_id": "universe-v1",
+                        "universe_version": "1", "configured_universe": ["BTCUSDT"],
+                        "provider": "provider", "exchange": "exchange", "price_type": "trade"},
+                    "candidate_evidence": empty,
+                    "candidate_evidence_sha256": execution._digest(empty),
+                    "v1_evidence_sha256": execution._digest(empty),
+                    "event_time_v1_context_version": execution.EVENT_TIME_V1_CONTEXT_VERSION,
+                    "event_time_v1_context": empty,
+                    "event_time_v1_context_sha256": execution._digest({
+                        "version": execution.EVENT_TIME_V1_CONTEXT_VERSION, "records": empty}),
+                    "bocpd_onset_evidence_version": execution.BOCPD_ONSET_EVIDENCE_VERSION,
+                    "bocpd_onset_evidence": empty,
+                    "bocpd_onset_evidence_sha256": execution._digest({
+                        "version": execution.BOCPD_ONSET_EVIDENCE_VERSION, "records": empty}),
+                    "hmm_development_training_block": execution.report_json_safe(block),
+                    "hmm_development_training_block_sha256": block.block_sha256,
                 }
                 return json.loads(execution._artifact_json(payload, "report_sha256"))
 
@@ -623,12 +669,51 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
         }
         coverage["coverage_manifest_sha256"] = execution._digest(coverage)
         period = periods[0]
+        empty = []
+        scope = ("movement-v1", "config-v1", "universe-v1", "1", ("BTCUSDT",),
+                 "provider", "exchange", "trade")
+        block = HMMDevelopmentTrainingBlock(
+            period.study_period_index, period.utc_date.isoformat(),
+            period.start_boundary_time_ms, period.end_boundary_time_ms,
+            scope, (), 1440)
+        replay_identity = {
+            "movement_algorithm_version": "movement-v1",
+            "movement_config_version": "config-v1", "universe_id": "universe-v1",
+            "universe_version": "1", "configured_universe": ["BTCUSDT"],
+            "provider": "provider", "exchange": "exchange", "price_type": "trade",
+        }
+        context_hashes = {
+            name: {"version": version, "records": empty}
+            for name, version in (
+                ("event_time_v1_context", execution.EVENT_TIME_V1_CONTEXT_VERSION),
+                ("bocpd_onset_evidence", execution.BOCPD_ONSET_EVIDENCE_VERSION),
+            )
+        }
         report = execution._artifact_json({
+            "period_report_schema_version": execution.PERIOD_REPORT_SCHEMA_VERSION,
             "execution_version": EXECUTION_VERSION,
+            "study_version": self.manifest.study_version,
+            "candidate_evidence_version": execution.CANDIDATE_EVIDENCE_VERSION,
+            "forward_outcomes_version": execution.FORWARD_OUTCOMES_VERSION,
+            "tool_config_version": TOOL_CONFIG_VERSION,
             "study_manifest_sha256": self.manifest.manifest_sha256,
             "extension_coverage_manifest_sha256": coverage["coverage_manifest_sha256"],
             "code_revision": revision,
             "period": execution.report_json_safe(period),
+            "canonical_replay_manifest": replay_identity,
+            "candidate_evidence": empty,
+            "candidate_evidence_sha256": execution._digest(empty),
+            "v1_evidence_sha256": execution._digest(empty),
+            "event_time_v1_context_version": execution.EVENT_TIME_V1_CONTEXT_VERSION,
+            "event_time_v1_context": empty,
+            "event_time_v1_context_sha256": execution._digest(
+                context_hashes["event_time_v1_context"]),
+            "bocpd_onset_evidence_version": execution.BOCPD_ONSET_EVIDENCE_VERSION,
+            "bocpd_onset_evidence": empty,
+            "bocpd_onset_evidence_sha256": execution._digest(
+                context_hashes["bocpd_onset_evidence"]),
+            "hmm_development_training_block": execution.report_json_safe(block),
+            "hmm_development_training_block_sha256": block.block_sha256,
         }, "report_sha256")
         report_payload = json.loads(report)
 

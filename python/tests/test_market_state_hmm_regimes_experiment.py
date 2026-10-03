@@ -16,7 +16,7 @@ from market_analysis.experiments.market_state_hmm_regimes import (
     _canonicalize, _development_blocks, _extract_feature_row, _filter_observation,
     _gaussian_log_density, _logsumexp, _occupancy_tv, _standardize_blocks,
     _summary, _train_from_blocks, _training_fingerprint,
-    advance_hmm_regime_filter, run_market_state_hmm_experiment,
+    advance_hmm_regime_filter, filter_hmm_regime_feature_blocks, run_market_state_hmm_experiment,
     train_hmm_regime_model, train_hmm_regime_model_from_blocks,
     train_hmm_regime_model_from_feature_blocks,
 )
@@ -347,6 +347,20 @@ class GaussianHMMReplayTests(unittest.TestCase):
         restarted, _ = advance_hmm_regime_filter(_evaluation(243 * 60_000), "test", model, cleared)
         self.assertTrue(restarted.filter_reset_before_observation)
         self.assertEqual(restarted.predicted_state_probabilities, model.pi)
+
+    def test_stored_feature_filter_preserves_state_across_blocks_and_resets_at_gaps(self):
+        start = 240 * 60_000
+        rows = tuple(HMMFeatureRow(start + minute * 60_000,
+                                   (0.1 * minute, 0.3, 0.6 + 0.01 * minute, 1.2))
+                     for minute in (0, 1, 3, 4))
+        split = filter_hmm_regime_feature_blocks(((rows[0],), (rows[1],), rows[2:]), self.model)
+        joined = filter_hmm_regime_feature_blocks(((rows[0], rows[1]), rows[2:]), self.model)
+        flatten = lambda result: tuple(item for block in result for item in block)
+        self.assertEqual(flatten(split), flatten(joined))
+        evidence = flatten(split)
+        self.assertEqual(tuple(item.filter_reset_before_observation for item in evidence),
+                         (True, False, True, False))
+        self.assertEqual(evidence[2].predicted_state_probabilities, self.model.pi)
 
     def test_fixed_scope_and_v1_training_label_separation(self):
         changed = list(self.points)

@@ -8,6 +8,7 @@ import unittest
 from market_analysis.historical_market_state_candidate_evidence import (
     adapt_candidate_result,
 )
+from market_analysis.historical_market_state_study_execution import _bocpd_onset_evidence
 from market_analysis.historical_market_state_study import (
     parse_historical_market_state_study_manifest_json,
 )
@@ -44,6 +45,15 @@ class FixtureBOCPDObservation:
     evaluation_boundary_time_ms: int
     detector_state: str
     recent_change_probability: float
+    candidate_algorithm_version: str = "bocpd-v1"
+    candidate_config_version: str = "bocpd-config-a"
+    available: bool = True
+    raw_primary_median_normalized_movement: dict | None = None
+    run_length_zero_probability: float = 0.75
+    map_run_length_steps: int = 0
+    expected_run_length_steps: float = 1.0
+    hypothesis_count: int = 2
+    observations_since_reset: int = 1
 
 
 @dataclass(frozen=True)
@@ -122,6 +132,37 @@ class CandidateEvidenceAdapterTests(unittest.TestCase):
         self.assertEqual(
             event.native_evidence["descriptive_detection_region"]
             ["end_boundary_time_ms"], onset + 10_000)
+        causal = _bocpd_onset_evidence(bundle.records)
+        self.assertEqual(len(causal), 1)
+        self.assertEqual(causal[0]["decision_time_ms"], onset)
+        self.assertEqual(causal[0]["onset_observation"]["recent_change_probability"], 0.75)
+        self.assertNotIn("descriptive_detection_region", causal[0])
+        self.assertNotIn("end_boundary_time_ms", causal[0]["onset_observation"])
+        self.assertNotIn("observed_through_boundary_time_ms", causal[0]["onset_observation"])
+
+    def test_bocpd_onset_must_match_its_native_point_and_descriptor_identity(self):
+        start = self.period.start_boundary_time_ms
+        onset = start + 5_000
+        descriptor = SimpleNamespace(
+            experiment_id="EXP-75-04B", algorithm_version="bocpd-v1",
+            config_version="bocpd-config-a")
+        region = FixtureBOCPDRegion(onset, onset + 10_000, onset + 20_000)
+        wrong_boundary = FixtureBOCPDObservation(onset + 5_000, "CHANGE", 0.75)
+        with self.assertRaisesRegex(ValueError, "exact causal observation"):
+            adapt_candidate_result(self.period, descriptor, FixtureBOCPDResult(
+                (FixtureBOCPDPoint(onset, wrong_boundary),),
+                {"development": (region,)}, {}))
+        wrong_config = FixtureBOCPDObservation(
+            onset, "CHANGE", 0.75, "bocpd-v1", "another-config")
+        with self.assertRaisesRegex(ValueError, "exact causal observation"):
+            adapt_candidate_result(self.period, descriptor, FixtureBOCPDResult(
+                (FixtureBOCPDPoint(onset, wrong_config),),
+                {"development": (region,)}, {}))
+        with self.assertRaisesRegex(ValueError, "unique exact point boundaries"):
+            adapt_candidate_result(self.period, descriptor, FixtureBOCPDResult(
+                (FixtureBOCPDPoint(onset, FixtureBOCPDObservation(onset, "CHANGE", 0.75)),
+                 FixtureBOCPDPoint(onset, FixtureBOCPDObservation(onset, "CHANGE", 0.75))),
+                {"development": (region,)}, {}))
 
     def test_pelt_segments_remain_retrospective_without_decision_time(self):
         descriptor = SimpleNamespace(
