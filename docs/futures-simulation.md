@@ -142,6 +142,39 @@ Holding time matters because a position may cross funding timestamps. There is n
 invented per-minute leverage charge: trading fees apply to fills and funding applies
 at the exchange's relevant settlement events.
 
+## Implemented execution-math foundation (#37 Part 1)
+
+`python/market_analysis/futures_execution{,_contracts}.py` provides stateless,
+versioned Decimal calculations for P&L and position increases/reductions, fill fees,
+settlement funding amounts, filter-grid validation and explicit adjustment
+suggestions, leverage/maintenance brackets, margin, piecewise isolated liquidation
+risk thresholds, explicit STOP/TAKE_PROFIT references, and fixed-bps adverse prices.
+Inputs use the existing `binance-usdm:<symbol>` identity for one-way isolated linear
+USDT perpetuals. Snapshot identities bind actual parameters, per-filter provenance,
+effective time and observed time; current-rule assumptions remain distinguishable
+from historical evidence. The frozen [Issue #37 design comment](https://github.com/ibrahimjaved12/crypto-watcher/issues/37#issuecomment-5969740973)
+is the detailed contract.
+
+Submitted intents are validated without modification. Suggestions require explicit
+acceptance and full order revalidation; quantities never round upward. Market
+quantities satisfy both supplied LOT_SIZE and MARKET_LOT_SIZE filters. Brackets
+are contiguous, maintenance-continuous `[floor, cap)` intervals; notional outside
+the supplied table is unavailable, never extrapolated. Missing settlement marks
+are unavailable and requested price protection is unsupported.
+
+Finite arithmetic is exact and independent of the caller's Decimal context.
+Nonterminating quotients retain an exact Decimal numerator/denominator and return
+`UNAVAILABLE_CALCULATION` / `NON_TERMINATING_DECIMAL` with no rounded value.
+Liquidation candidates are checked against their own brackets and the equity/MM
+equality using exact cross multiplication, including nonterminating roots.
+
+This foundation does not provide wallet/ledger state (#36), account admission,
+funding entitlement or postings, network/historical acquisition, fill/event ordering,
+spread/order-book modeling, or liquidation execution/settlement. Initial margin is
+only notional/leverage, not complete exchange order acceptance. Other margin and
+position modes, non-USDT settlement, BNB fee state, trailing stops, authenticated
+operations and real trading remain unsupported. Later #37 parts remain open.
+
 ## Event resolution and ambiguity
 
 Analysis cadence and simulation event resolution are separate. A five-minute
