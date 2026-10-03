@@ -907,16 +907,15 @@ class DevelopmentFreeze:
                 or len({(b.identity.family_id, b.stratifier.source_identity) for b in terciles}) != len(terciles)
                 or self.version != "historical-market-state-development-freeze-v1"
                 or any(r.plan_sha256 != self.plan.plan_sha256 for r in self.config_results)
-                or {r.identity.family_id for r in self.config_results} != {n.family_id for n in self.nominations}
-                or {r.identity.family_id for r in self.config_results}
-                != {s.samples[0].identity.family_id for s in self.common_samples}):
+                or {r.identity.family_id for r in self.config_results} != set(PRIMARY_CONFIRMATORY_FAMILY)
+                or {n.family_id for n in self.nominations} != set(PRIMARY_CONFIRMATORY_FAMILY)
+                or {s.samples[0].identity.family_id for s in self.common_samples} != set(PRIMARY_CONFIRMATORY_FAMILY)):
             raise ValueError("invalid development freeze plan/family membership")
-        if any(r.identity.family_id == "EXP-75-09" for r in self.config_results):
-            require_sha256(self.hmm_cross_fit_sha256)
-            require_sha256(self.hmm_final_model_sha256)
-        for value in (self.hmm_cross_fit_sha256, self.hmm_final_model_sha256):
-            if value is not None:
-                require_sha256(value)
+        for family in PRIMARY_CONFIRMATORY_FAMILY:
+            _fixed_family_identities(r.identity for r in self.config_results if r.identity.family_id == family)
+        # HMM belongs to every whole-study freeze, even when its results are unavailable.
+        require_sha256(self.hmm_cross_fit_sha256)
+        require_sha256(self.hmm_final_model_sha256)
         if (self.hmm_cross_fit_sha256, self.hmm_final_model_sha256) != (
                 self.upstream_provenance.hmm_cross_fit_sha256, self.upstream_provenance.hmm_final_model_sha256):
             raise ValueError("HMM identities differ from finalized upstream provenance")
@@ -1167,13 +1166,19 @@ def authorize_test(development: DevelopmentFreeze, validation: ValidationFreeze)
         nomination = next((n for n in development.nominations if n.family_id == family), None)
         pair = next((p for p in development.predictive_pairs if p.identity.family_id == family), None)
         decision = next((d for d in validation.decisions if d.identity.family_id == family), None)
+        if nomination is None:
+            raise ValueError("authorization requires an explicit development nomination for every primary family")
+        if nomination.status == "NOT_EVALUABLE":
+            if pair is not None or decision is not None:
+                raise ValueError("non-evaluable development member cannot have a predictive pair/validation decision")
+        elif pair is None or decision is None:
+            raise ValueError("nominated development member requires its frozen pair and validation decision")
         status = ("AUTHORIZED" if decision is not None and decision.status == "CONFIRMED" else
                   "VETOED" if decision is not None and decision.status == "NOT_CONFIRMED" else
                   "COVERAGE_LIMITED" if decision is not None and decision.status == "COVERAGE_LIMITED" else
                   "NOT_EVALUABLE")
         members.append(TestAuthorizationMember(
-            family, status, nomination.identity if nomination is not None else None,
-            nomination.nomination_sha256 if nomination is not None else None,
+            family, status, nomination.identity, nomination.nomination_sha256,
             pair.pair_sha256 if pair is not None else None,
             decision.decision_sha256 if decision is not None else None))
     return TestAuthorizationFreeze(development.freeze_sha256, validation.freeze_sha256,
@@ -1281,6 +1286,8 @@ def study_primary_holm(authorization: TestAuthorizationFreeze, results) -> tuple
             or r.authorization != authorization for r in results)
             or len({r.family_id for r in results}) != len(results)):
         raise ValueError("Holm results must bind one complete authorization freeze")
+    if len({r.upstream_provenance_sha256 for r in results}) > 1:
+        raise ValueError("Holm results must bind the same exact test provenance SHA")
     lookup = {r.family_id: r for r in results}
     supplied = []
     for member in authorization.members:

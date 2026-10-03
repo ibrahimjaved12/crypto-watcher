@@ -1,5 +1,6 @@
 """Synthetic aligned days only; never reads real study periods or artifacts."""
 
+from copy import copy
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -18,6 +19,8 @@ from market_analysis.historical_market_state_study_features import (
 
 
 IDENTITY = evaluation.CandidateConfigIdentity("EXP-75-03", "synthetic-kalman-v1", "config-a")
+HMM_CROSS_FIT_SHA256 = "b" * 64
+HMM_FINAL_MODEL_SHA256 = "c" * 64
 
 
 def source_period(index):
@@ -30,21 +33,21 @@ def source_period(index):
         "historical-market-state-bocpd-onset-evidence-v1", scientific_sha256(("bocpd", index)))
 
 
-def phase_provenance(phase, cross_fit=None, final_model=None):
+def phase_provenance(phase, cross_fit=HMM_CROSS_FIT_SHA256, final_model=HMM_FINAL_MODEL_SHA256):
     return UpstreamInputProvenance(phase, tuple(source_period(i) for i, _, assigned in
                                                FROZEN_PERIOD_ROSTER.periods if assigned == phase),
                                    cross_fit, final_model)
 
 
-def development_provenance(cross_fit=None, final_model=None):
+def development_provenance(cross_fit=HMM_CROSS_FIT_SHA256, final_model=HMM_FINAL_MODEL_SHA256):
     return phase_provenance("development", cross_fit, final_model)
 
 
-def validation_provenance(cross_fit=None, final_model=None):
+def validation_provenance(cross_fit=HMM_CROSS_FIT_SHA256, final_model=HMM_FINAL_MODEL_SHA256):
     return phase_provenance("validation", cross_fit, final_model)
 
 
-def test_provenance(cross_fit=None, final_model=None):
+def test_provenance(cross_fit=HMM_CROSS_FIT_SHA256, final_model=HMM_FINAL_MODEL_SHA256):
     return phase_provenance("test", cross_fit, final_model)
 
 
@@ -62,12 +65,52 @@ def layer_one_fixture(nomination, common):
         tuple((day.study_period_index, day.source_provenance.provenance_sha256) for day in sample.days))
 
 
+@lru_cache(maxsize=15)
+def unavailable_development_family(family):
+    identity = evaluation.CandidateConfigIdentity(family, "synthetic-" + family + "-v1", "config-a")
+    return evaluation.evaluate_development_family(fixed_identities(identity), ())
+
+
 def development_freeze_fixture(manifest, results, nominations, pairs, common_samples, provenance, **kwargs):
-    evidence = tuple(item for nomination, common in zip(nominations, common_samples)
-                     if (item := layer_one_fixture(nomination, common)) is not None)
-    return evaluation.DevelopmentFreeze(manifest, results, nominations, pairs, common_samples, provenance,
-                                        layer_one_evidence=evidence, layer_one_terciles=tuple(
-                                            evaluation.freeze_layer_one_bins(e) for e in evidence), **kwargs)
+    # Whole-study fixtures explicitly evaluate coverage for every remaining
+    # registry config. Lower-level fixtures still exercise individual families.
+    results, nominations, common_samples = list(results), list(nominations), list(common_samples)
+    represented = {n.family_id for n in nominations}
+    for family in PRIMARY_CONFIRMATORY_FAMILY:
+        if family not in represented:
+            common, family_results, nomination = unavailable_development_family(family)
+            results.extend(family_results)
+            nominations.append(nomination)
+            common_samples.append(common)
+    by_family = {common.samples[0].identity.family_id: common for common in common_samples}
+    evidence = tuple(item for nomination in nominations
+                     if (item := layer_one_fixture(nomination, by_family[nomination.family_id])) is not None)
+    kwargs.setdefault("hmm_cross_fit_sha256", provenance.hmm_cross_fit_sha256)
+    kwargs.setdefault("hmm_final_model_sha256", provenance.hmm_final_model_sha256)
+    return evaluation.DevelopmentFreeze(manifest, tuple(results), tuple(nominations), pairs,
+                                        tuple(common_samples), provenance, layer_one_evidence=evidence,
+                                        layer_one_terciles=tuple(evaluation.freeze_layer_one_bins(e) for e in evidence),
+                                        **kwargs)
+
+
+def family_results(development, family=IDENTITY.family_id):
+    return tuple(r for r in development.config_results if r.identity.family_id == family)
+
+
+def family_common(development, family=IDENTITY.family_id):
+    return next(c for c in development.common_samples if c.samples[0].identity.family_id == family)
+
+
+def family_freeze_changes(development, results, nomination=None, pair=None):
+    changes = {"config_results": tuple(r for r in development.config_results
+                                       if r.identity.family_id != IDENTITY.family_id) + tuple(results)}
+    if nomination is not None:
+        changes["nominations"] = tuple(n for n in development.nominations
+                                       if n.family_id != IDENTITY.family_id) + (nomination,)
+    if pair is not None:
+        changes["predictive_pairs"] = tuple(p for p in development.predictive_pairs
+                                            if p.identity.family_id != IDENTITY.family_id) + (pair,)
+    return changes
 
 
 def synthetic_day(index, phase="development", config="config-a", count=32):
@@ -358,8 +401,8 @@ class StudyEvaluationTests(unittest.TestCase):
     def test_complete_family_cardinality_and_algorithm_identity_fail_closed(self):
         _, _, nomination, pair, development = development_fixture()
         identities = fixed_identities()
-        results = development.config_results
-        common = development.common_samples[0]
+        results = family_results(development)
+        common = family_common(development)
         self.assertEqual(len(common.samples), 3)
         self.assertEqual(len(results), 3)
         self.assertTrue(all(r.common_samples_sha256 == common.samples_sha256 for r in results))
@@ -384,7 +427,7 @@ class StudyEvaluationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     evaluation.nominate_configuration(config_results)
                 with self.assertRaises(ValueError):
-                    replace(development, config_results=config_results)
+                    replace(development, **family_freeze_changes(development, config_results))
 
     def test_actual_singleton_uses_the_same_common_sample_chain(self):
         identity = evaluation.CandidateConfigIdentity("EXP-75-10", "synthetic-mark-trade-v1", "only-config")
@@ -404,20 +447,20 @@ class StudyEvaluationTests(unittest.TestCase):
         self.assertEqual(results[0].common_samples_sha256, common.samples_sha256)
         pair = evaluation.fit_final_development_pair(nomination, common.samples[0].days)
         freeze = development_freeze_fixture(FROZEN_STUDY_MANIFEST_SHA256, results, (nomination,), (pair,), (common,), development_provenance())
-        self.assertIsNone(freeze.hmm_cross_fit_sha256)
-        self.assertIsNone(freeze.hmm_final_model_sha256)
+        self.assertEqual(freeze.hmm_cross_fit_sha256, HMM_CROSS_FIT_SHA256)
+        self.assertEqual(freeze.hmm_final_model_sha256, HMM_FINAL_MODEL_SHA256)
         with self.assertRaises(ValueError):
             evaluation.common_development_samples((identity, replace(identity, config_version="extra")), ())
 
     def test_different_common_sample_shas_cannot_nominate_or_freeze_together(self):
         _, _, _, _, development = development_fixture()
-        results = development.config_results
+        results = family_results(development)
         different = replace(results[1], common_samples_sha256="b" * 64)
         mixed = (results[0], different, results[2])
         with self.assertRaisesRegex(ValueError, "different family common-sample SHAs"):
             evaluation.nominate_configuration(mixed)
         with self.assertRaisesRegex(ValueError, "different family common-sample SHAs"):
-            replace(development, config_results=mixed)
+            replace(development, **family_freeze_changes(development, mixed))
         # A uniform arbitrary SHA is also insufficient: freeze must bind the
         # actual common-sample family object, not just matching result strings.
         arbitrary = tuple(replace(result, common_samples_sha256="b" * 64) for result in results)
@@ -425,19 +468,19 @@ class StudyEvaluationTests(unittest.TestCase):
         pair = replace(development.predictive_pairs[0], nomination_sha256=nomination.nomination_sha256,
                        common_samples_sha256=nomination.common_samples_sha256)
         with self.assertRaisesRegex(ValueError, "common-sample identity"):
-            replace(development, config_results=arbitrary, nominations=(nomination,), predictive_pairs=(pair,))
+            replace(development, **family_freeze_changes(development, arbitrary, nomination, pair))
         with self.assertRaises(ValueError):
             replace(development, common_samples=())
 
     def test_freeze_checks_per_config_rows_against_the_common_family_object(self):
         _, _, _, _, development = development_fixture()
         results = tuple(replace(result, development_sample_sha256="b" * 64)
-                        for result in development.config_results)
+                        for result in family_results(development))
         nomination = evaluation.nominate_configuration(results)
         pair = replace(development.predictive_pairs[0], nomination_sha256=nomination.nomination_sha256,
                        development_sample_sha256=nomination.development_sample_sha256)
         with self.assertRaisesRegex(ValueError, "common-sample rows/coverage"):
-            replace(development, config_results=results, nominations=(nomination,), predictive_pairs=(pair,))
+            replace(development, **family_freeze_changes(development, results, nomination, pair))
 
     def test_hmm_identities_are_required_at_development_freeze(self):
         identity = evaluation.CandidateConfigIdentity("EXP-75-09", "synthetic-hmm-v1", "only-config")
@@ -451,9 +494,9 @@ class StudyEvaluationTests(unittest.TestCase):
                                                hmm_cross_fit_sha256="b" * 64, hmm_final_model_sha256="c" * 64)
         self.assertEqual(freeze.hmm_cross_fit_sha256, "b" * 64)
         self.assertEqual(freeze.hmm_final_model_sha256, "c" * 64)
-        non_hmm = development_fixture()[-1]
-        self.assertIsNone(non_hmm.hmm_cross_fit_sha256)
-        self.assertIsNone(non_hmm.hmm_final_model_sha256)
+        complete = development_fixture()[-1]
+        self.assertEqual(complete.hmm_cross_fit_sha256, HMM_CROSS_FIT_SHA256)
+        self.assertEqual(complete.hmm_final_model_sha256, HMM_FINAL_MODEL_SHA256)
 
     def test_validation_predicts_without_fitting_and_cannot_reselect(self):
         _, _, _, pair, _ = development_fixture()
@@ -539,12 +582,12 @@ class StudyEvaluationTests(unittest.TestCase):
         self.assertNotEqual(development.freeze_sha256, parameter_development.freeze_sha256)
         self.assertNotEqual(validation.freeze_sha256, parameter_validation.freeze_sha256)
         self.assertNotEqual(authorization.authorization_sha256, parameter_authorization.authorization_sha256)
-        changed_development = replace(development, hmm_cross_fit_sha256="b" * 64,
-                                      hmm_final_model_sha256="c" * 64,
-                                      upstream_provenance=development_provenance("b" * 64, "c" * 64))
+        changed_development = replace(development, hmm_cross_fit_sha256="d" * 64,
+                                      hmm_final_model_sha256="e" * 64,
+                                      upstream_provenance=development_provenance("d" * 64, "e" * 64))
         self.assertNotEqual(development.freeze_sha256, changed_development.freeze_sha256)
-        changed_decision = replace(decision, upstream_provenance_sha256=validation_provenance("b" * 64, "c" * 64).provenance_sha256)
-        changed_validation = evaluation.freeze_validation(changed_development, (changed_decision,), validation_provenance("b" * 64, "c" * 64))
+        changed_decision = replace(decision, upstream_provenance_sha256=validation_provenance("d" * 64, "e" * 64).provenance_sha256)
+        changed_validation = evaluation.freeze_validation(changed_development, (changed_decision,), validation_provenance("d" * 64, "e" * 64))
         self.assertNotEqual(validation.freeze_sha256, changed_validation.freeze_sha256)
         changed_authorization = evaluation.authorize_test(changed_development, changed_validation)
         self.assertNotEqual(authorization.authorization_sha256, changed_authorization.authorization_sha256)
@@ -752,6 +795,115 @@ class StudyEvaluationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 replace(evidence, identity=replace(IDENTITY, family_id=family), stratifier=native)
 
+    def test_whole_study_freeze_requires_every_family_nomination_and_config(self):
+        development = development_fixture()[-1]
+        expected = set(PRIMARY_CONFIRMATORY_FAMILY)
+        self.assertEqual({n.family_id for n in development.nominations}, expected)
+        self.assertEqual({c.samples[0].identity.family_id for c in development.common_samples}, expected)
+        for family in PRIMARY_CONFIRMATORY_FAMILY:
+            results = family_results(development, family)
+            self.assertEqual(len(results), predictive_family(family).expected_config_count)
+            with self.subTest(family=family):
+                with self.assertRaisesRegex(ValueError, "family membership"):
+                    replace(development,
+                            config_results=tuple(r for r in development.config_results if r.identity.family_id != family),
+                            nominations=tuple(n for n in development.nominations if n.family_id != family),
+                            common_samples=tuple(c for c in development.common_samples
+                                                 if c.samples[0].identity.family_id != family),
+                            predictive_pairs=tuple(p for p in development.predictive_pairs if p.identity.family_id != family),
+                            layer_one_terciles=tuple(b for b in development.layer_one_terciles if b.identity.family_id != family),
+                            layer_one_evidence=tuple(e for e in development.layer_one_evidence if e.identity.family_id != family))
+                with self.assertRaisesRegex(ValueError, "family membership"):
+                    replace(development, nominations=tuple(n for n in development.nominations if n.family_id != family))
+                with self.assertRaises(ValueError):
+                    replace(development, config_results=tuple(r for r in development.config_results if r != results[0]))
+                with self.assertRaises(ValueError):
+                    replace(development, common_samples=tuple(c for c in development.common_samples
+                                                              if c.samples[0].identity.family_id != family))
+        with self.assertRaises(ValueError):
+            replace(development, hmm_cross_fit_sha256=None, hmm_final_model_sha256=None,
+                    upstream_provenance=development_provenance(None, None),
+                    config_results=tuple(r for r in development.config_results if r.identity.family_id != "EXP-75-09"),
+                    nominations=tuple(n for n in development.nominations if n.family_id != "EXP-75-09"),
+                    common_samples=tuple(c for c in development.common_samples
+                                         if c.samples[0].identity.family_id != "EXP-75-09"))
+
+    def test_unavailable_membership_is_explicit_and_cannot_be_manufactured(self):
+        development = development_fixture()[-1]
+        family = "EXP-75-01"
+        results = family_results(development, family)
+        nomination = next(n for n in development.nominations if n.family_id == family)
+        self.assertTrue(all(r.status == "COVERAGE_LIMITED" for r in results))
+        self.assertEqual(nomination, evaluation.nominate_configuration(results))
+        self.assertEqual(nomination.status, "NOT_EVALUABLE")
+        self.assertNotIn(family, {p.identity.family_id for p in development.predictive_pairs})
+        limited = evaluation.evaluate_validation(development.predictive_pairs[0], (), validation_provenance(), development)
+        validation = evaluation.freeze_validation(development, (limited,), validation_provenance())
+        authorization = evaluation.authorize_test(development, validation)
+        member = next(m for m in authorization.members if m.family_id == family)
+        self.assertEqual(member.status, "NOT_EVALUABLE")
+        self.assertEqual(member.nomination_sha256, nomination.nomination_sha256)
+        self.assertIsNone(member.identity)
+        self.assertIsNone(member.predictive_pair_sha256)
+        self.assertIsNone(member.validation_decision_sha256)
+        # Revalidation at authorization rejects even an in-memory object whose
+        # constructor was bypassed; missing membership cannot acquire a status.
+        missing = copy(development)
+        object.__setattr__(missing, "nominations", tuple(n for n in development.nominations if n.family_id != family))
+        with self.assertRaises(ValueError):
+            evaluation.authorize_test(missing, validation)
+        with self.assertRaises(ValueError):
+            evaluation.freeze_validation(development, (), validation_provenance())
+
+    def test_study_holm_rejects_two_valid_results_with_different_test_provenance(self):
+        original = development_fixture()[-1]
+        mark_identity = evaluation.CandidateConfigIdentity("EXP-75-10", "synthetic-mark-trade-v1", "only-config")
+        def mark_day(index, phase="development"):
+            source = synthetic_day(index, phase)
+            rows = tuple(replace(row, family_id=mark_identity.family_id,
+                                 algorithm_version=mark_identity.algorithm_version,
+                                 config_version=mark_identity.config_version, horizon_minutes=5,
+                                 candidate_features=(row.candidate_features[0],)) for row in source.observations)
+            return replace(source, family_id=mark_identity.family_id,
+                           algorithm_version=mark_identity.algorithm_version,
+                           config_version=mark_identity.config_version, horizon_minutes=5, observations=rows)
+        common, results, nomination = evaluation.evaluate_development_family(
+            (mark_identity,), tuple(mark_day(i) for i in range(8)))
+        mark_pair = evaluation.fit_final_development_pair(nomination, common.samples[0].days)
+        kalman_nomination = next(n for n in original.nominations if n.family_id == IDENTITY.family_id)
+        development = development_freeze_fixture(
+            FROZEN_STUDY_MANIFEST_SHA256, family_results(original) + results,
+            (kalman_nomination, nomination), original.predictive_pairs + (mark_pair,),
+            (family_common(original), common), development_provenance())
+        kalman_pair = next(p for p in development.predictive_pairs if p.identity == IDENTITY)
+        decisions = (
+            evaluation.evaluate_validation(kalman_pair, tuple(synthetic_day(i, "validation") for i in range(10, 16)),
+                                           validation_provenance(), development),
+            evaluation.evaluate_validation(mark_pair, tuple(mark_day(i, "validation") for i in range(10, 16)),
+                                           validation_provenance(), development))
+        self.assertTrue(all(d.status == "CONFIRMED" for d in decisions))
+        validation = evaluation.freeze_validation(development, decisions, validation_provenance())
+        authorization = evaluation.authorize_test(development, validation)
+        test_inputs = test_provenance()
+        first = evaluation.evaluate_test(development, validation, authorization, IDENTITY.family_id,
+                                         tuple(synthetic_day(i, "test") for i in range(18, 27)), test_inputs)
+        second = evaluation.evaluate_test(development, validation, authorization, mark_identity.family_id,
+                                          tuple(mark_day(i, "test") for i in range(18, 27)), test_inputs)
+        self.assertEqual(len(evaluation.study_primary_holm(authorization, (first, second))), 15)
+        altered_inputs = replace(test_inputs, periods=(replace(test_inputs.periods[0], period_report_sha256="e" * 64),)
+                                 + test_inputs.periods[1:])
+        lookup = {p.study_period_index: p for p in altered_inputs.periods}
+        altered = evaluation.evaluate_test(development, validation, authorization, mark_identity.family_id,
+                                           tuple(replace(mark_day(i, "test"), source_provenance=lookup[i])
+                                                 for i in range(18, 27)), altered_inputs)
+        self.assertEqual(first.authorization, altered.authorization)
+        self.assertNotEqual(first.upstream_provenance_sha256, altered.upstream_provenance_sha256)
+        self.assertEqual(len(evaluation.study_primary_holm(authorization, (altered,))), 15)
+        with self.assertRaisesRegex(ValueError, "same exact test provenance"):
+            evaluation.study_primary_holm(authorization, (first, altered))
+        with self.assertRaises(ValueError):
+            evaluation.study_primary_holm(authorization, (first, first))
+
     def test_exact_phase_provenance_and_opening_order(self):
         for phase, count in (("development", 10), ("validation", 8), ("test", 12)):
             provenance = phase_provenance(phase)
@@ -793,7 +945,7 @@ class StudyEvaluationTests(unittest.TestCase):
                                                             for p in test_inputs.periods)),
                           replace(test_inputs, periods=tuple(replace(p, extension_coverage_manifest_sha256="e" * 64)
                                                             for p in test_inputs.periods)),
-                          test_provenance("b" * 64, "c" * 64)):
+                          test_provenance("d" * 64, "e" * 64)):
                 with self.assertRaises(ValueError):
                     evaluation.evaluate_test(development, validation, authorization, IDENTITY.family_id, (), wrong)
             with self.assertRaises(ValueError):

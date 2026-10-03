@@ -62,6 +62,16 @@ class StudyStatisticsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             stats.whole_day_bootstrap((), namespace)
 
+    def test_bootstrap_rejects_unfrozen_numpy_identity(self):
+        result = stats.whole_day_bootstrap((-1, 2, 4), self.namespace())
+        self.assertEqual(result.numpy_version, stats.FROZEN_EVALUATION_PLAN.numpy_version)
+        with self.assertRaises(ValueError):
+            replace(result, numpy_version="different-version")
+        with patch.object(stats.np, "__version__", "different-version"), \
+                patch.object(stats.np.random, "Generator", side_effect=AssertionError("bootstrap executed")):
+            with self.assertRaisesRegex(ValueError, "NumPy version"):
+                stats.whole_day_bootstrap((-1, 2, 4), self.namespace())
+
     def test_exact_one_sided_sign_test_small_cases_and_zero_ties(self):
         self.assertEqual(stats.exact_day_sign_test((1, 1, 1)).raw_p, 1 / 8)
         result = stats.exact_day_sign_test((1, 1, -1, 0))

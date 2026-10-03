@@ -10,7 +10,7 @@ from statistics import fmean
 import numpy as np
 
 from .historical_market_state_study_features import (
-    PHASES, finite_number, finite_vector, predictive_family,
+    FROZEN_EVALUATION_PLAN, PHASES, finite_number, finite_vector, predictive_family,
     require_name, require_sha256, seal_hash,
 )
 
@@ -117,12 +117,15 @@ class DayBootstrapResult:
                 or self.positive_day_fraction != self.positive_day_count / self.day_count
                 or self.seed != self.namespace.seed or self.draws != BOOTSTRAP_DRAWS
                 or self.generator != BOOTSTRAP_GENERATOR or self.quantile_method != "linear"
+                or self.numpy_version != FROZEN_EVALUATION_PLAN.numpy_version
                 or self.version != "historical-market-state-whole-day-bootstrap-v1"):
             raise ValueError("incompatible bootstrap identity/counts")
         seal_hash(self, "result_sha256")
 
 
 def whole_day_bootstrap(day_effects, namespace: BootstrapNamespace) -> DayBootstrapResult:
+    if np.__version__ != FROZEN_EVALUATION_PLAN.numpy_version:
+        raise ValueError("bootstrap NumPy version differs from the frozen evaluation plan")
     effects = finite_vector(day_effects)
     if not effects:
         raise ValueError("whole-day bootstrap needs day effects")
@@ -136,7 +139,7 @@ def whole_day_bootstrap(day_effects, namespace: BootstrapNamespace) -> DayBootst
     positive = sum(v > 0 for v in effects)
     return DayBootstrapResult(namespace, effects, float(np.median(values)), float(np.mean(values)),
                               median_ci, mean_ci, positive, positive / len(effects),
-                              len(effects), namespace.seed)
+                              len(effects), namespace.seed, numpy_version=np.__version__)
 
 
 @dataclass(frozen=True)
