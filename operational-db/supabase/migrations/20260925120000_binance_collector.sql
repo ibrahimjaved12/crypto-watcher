@@ -48,6 +48,16 @@ CREATE TABLE public.collector_health (
   CHECK (instrument_id = 'binance-usdm:' || symbol)
 );
 
+-- Derived collector input. The application/orchestration side owns user
+-- watchlists; it assigns the shared, supported symbol set here and the collector
+-- worker reads it. This is collector input/state, never a second watchlist
+-- authority, and the worker holds no Lovable credentials.
+CREATE TABLE public.collector_subscriptions (
+  universe_name TEXT PRIMARY KEY CHECK (universe_name = 'binance-usdm-shared'),
+  symbols TEXT[] NOT NULL,
+  assigned_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE public.collector_leases (
   lease_name TEXT PRIMARY KEY CHECK (lease_name = 'binance-usdm-public-market'),
   instance_id UUID NOT NULL,
@@ -57,10 +67,13 @@ CREATE TABLE public.collector_leases (
 
 ALTER TABLE public.collector_recent_candles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.collector_health ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.collector_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.collector_leases ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.collector_recent_candles, public.collector_health, public.collector_leases
+REVOKE ALL ON public.collector_recent_candles, public.collector_health,
+  public.collector_subscriptions, public.collector_leases
   FROM PUBLIC, anon, authenticated;
-GRANT ALL ON public.collector_recent_candles, public.collector_health, public.collector_leases
+GRANT ALL ON public.collector_recent_candles, public.collector_health,
+  public.collector_subscriptions, public.collector_leases
   TO service_role;
 
 CREATE FUNCTION public.record_collector_candles(
@@ -126,6 +139,53 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION public.assign_collector_subscriptions(p_symbols TEXT[])
+RETURNS VOID
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = public
+AS $$
+DECLARE
+  normalized TEXT[];
+BEGIN
+  IF p_symbols IS NULL THEN
+    RAISE EXCEPTION 'Invalid collector subscription set';
+  END IF;
+  SELECT coalesce(
+      array_agg(DISTINCT upper(btrim(value)) ORDER BY upper(btrim(value))),
+      ARRAY[]::TEXT[]
+    )
+    INTO normalized
+  FROM unnest(p_symbols) AS value
+  WHERE btrim(value) <> '';
+  IF array_length(normalized, 1) > 100 THEN
+    RAISE EXCEPTION 'Collector subscription set exceeds the supported maximum';
+  END IF;
+  INSERT INTO public.collector_subscriptions(universe_name, symbols, assigned_at)
+    VALUES ('binance-usdm-shared', normalized, clock_timestamp())
+  ON CONFLICT (universe_name) DO UPDATE SET
+    symbols = EXCLUDED.symbols,
+    assigned_at = clock_timestamp();
+
+  UPDATE public.collector_health SET
+    status = 'UNAVAILABLE',
+    error_message = 'collection disabled/unsubscribed',
+    lag_ms = NULL,
+    queue_depth = 0,
+    updated_at = clock_timestamp()
+  WHERE NOT (symbol = ANY(normalized));
+END;
+$$;
+
+CREATE FUNCTION public.get_collector_subscriptions()
+RETURNS TEXT[]
+LANGUAGE sql STABLE SECURITY INVOKER SET search_path = public
+AS $$
+  SELECT coalesce(
+    (SELECT symbols FROM public.collector_subscriptions
+      WHERE universe_name = 'binance-usdm-shared'),
+    ARRAY[]::TEXT[]
+  );
+$$;
+
 CREATE FUNCTION public.record_collector_health(
   p_instrument_id TEXT, p_symbol TEXT, p_timeframe_minutes INTEGER, p_status TEXT,
   p_last_event_at TIMESTAMPTZ, p_last_completed_open_time TIMESTAMPTZ,
@@ -134,14 +194,30 @@ CREATE FUNCTION public.record_collector_health(
 ) RETURNS VOID
 LANGUAGE plpgsql SECURITY INVOKER SET search_path = public
 AS $$
+DECLARE
+  subscribed BOOLEAN;
 BEGIN
+  -- SHARE conflicts with the ROW EXCLUSIVE lock held by assignment's upsert.
+  -- Hold it through the health write, including when no assignment row exists,
+  -- so assignment/invalidation cannot race with a previously queued intent.
+  LOCK TABLE public.collector_subscriptions IN SHARE MODE;
+  SELECT EXISTS (
+    SELECT 1 FROM public.collector_subscriptions
+    WHERE universe_name = 'binance-usdm-shared' AND p_symbol = ANY(symbols)
+  ) INTO subscribed;
+
   INSERT INTO public.collector_health (
     instrument_id, symbol, timeframe_minutes, status, last_event_at,
     last_completed_open_time, lag_ms, queue_depth, reconnect_count, error_message
   ) VALUES (
-    p_instrument_id, p_symbol, p_timeframe_minutes, p_status, p_last_event_at,
-    p_last_completed_open_time, p_lag_ms, p_queue_depth, p_reconnect_count,
-    nullif(left(coalesce(p_error_message, ''), 1000), '')
+    p_instrument_id, p_symbol, p_timeframe_minutes,
+    CASE WHEN subscribed THEN p_status ELSE 'UNAVAILABLE' END,
+    p_last_event_at, p_last_completed_open_time,
+    CASE WHEN subscribed THEN p_lag_ms ELSE NULL END,
+    CASE WHEN subscribed THEN p_queue_depth ELSE 0 END,
+    p_reconnect_count,
+    CASE WHEN subscribed THEN nullif(left(coalesce(p_error_message, ''), 1000), '')
+      ELSE 'collection disabled/unsubscribed' END
   )
   ON CONFLICT (instrument_id, timeframe_minutes) DO UPDATE SET
     status = EXCLUDED.status,

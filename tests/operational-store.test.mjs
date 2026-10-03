@@ -68,15 +68,6 @@ before(async () => {
   await db.exec(
     await readFile(
       new URL(
-        "../operational-db/supabase/migrations/20260926120000_collector_subscriptions.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
         "../operational-db/supabase/migrations/20260925180000_market_movement_episodes.sql",
         import.meta.url,
       ),
