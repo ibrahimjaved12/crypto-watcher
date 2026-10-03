@@ -1,7 +1,7 @@
 """Synthetic aligned days only; never reads real study periods or artifacts."""
 
-from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import FrozenInstanceError, replace
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 import json
 import unittest
@@ -10,16 +10,32 @@ from unittest.mock import patch
 from market_analysis import historical_market_state_study_evaluation as evaluation
 from market_analysis.historical_market_state_study_features import (
     AlignedStudyDay, AlignedStudyObservation, BASELINE_FEATURES,
-    FROZEN_EVALUATION_PLAN, canonical_json, predictive_family,
+    FROZEN_EVALUATION_PLAN, canonical_json, predictive_family, FROZEN_PERIOD_ROSTER,
+    FROZEN_STUDY_MANIFEST_SHA256, FinalizedPeriodProvenance, UpstreamInputProvenance,
+    PRIMARY_CONFIRMATORY_FAMILY, EvidenceValueDay, scientific_sha256,
 )
 
 
 IDENTITY = evaluation.CandidateConfigIdentity("EXP-75-03", "synthetic-kalman-v1", "config-a")
 
 
+def source_period(index):
+    _, day_date, phase = FROZEN_PERIOD_ROSTER.periods[index]
+    return FinalizedPeriodProvenance(
+        index, day_date, phase, FROZEN_STUDY_MANIFEST_SHA256, "d" * 64,
+        "historical-market-state-study-period-report-v2", "synthetic-part-b-revision",
+        scientific_sha256(("synthetic-period-report", index)),
+        "historical-market-state-event-time-v1-context-v1", scientific_sha256(("event-v1", index)),
+        "historical-market-state-bocpd-onset-evidence-v1", scientific_sha256(("bocpd", index)))
+
+
+def upstream_fixture(cross_fit=None, final_model=None):
+    return UpstreamInputProvenance(tuple(source_period(i) for i in range(30)), cross_fit, final_model)
+
+
 def synthetic_day(index, phase="development", config="config-a", count=32):
     """Independent basis columns give both designs full rank without randomness."""
-    day_date = date(2024, 1, 1) + timedelta(days=index)
+    day_date = FROZEN_PERIOD_ROSTER.periods[index][1]
     start = int(datetime.combine(day_date, datetime.min.time(), timezone.utc).timestamp()) * 1000
     rows = []
     for row_index in range(count):
@@ -32,7 +48,7 @@ def synthetic_day(index, phase="development", config="config-a", count=32):
                                              "signed_market_return", "CONTINUOUS", f"{row_index:02}",
                                              baseline, candidate, outcome))
     return AlignedStudyDay(index, day_date, phase, IDENTITY.family_id, IDENTITY.algorithm_version,
-                           config, "CONTINUOUS", 15, "signed_market_return", "CONTINUOUS", count, tuple(rows))
+                           config, "CONTINUOUS", 15, "signed_market_return", "CONTINUOUS", count, tuple(rows), source_period(index))
 
 
 def synthetic_event_day(index, config, empty=False):
@@ -42,10 +58,10 @@ def synthetic_event_day(index, config, empty=False):
     event = replace(row, family_id=spec.family_id, algorithm_version="synthetic-bocpd-v1",
                     observation_mode="EVENT", horizon_minutes=60, outcome_id="realized_volatility",
                     candidate_features=(0.1,), observation_key="event-" + config,
-                    decision_time_ms=row.decision_time_ms + {"a": 1_000, "b": 5_000, "c": 9_000}[config])
+                    decision_time_ms=row.decision_time_ms + {"a": 5_000, "b": 10_000, "c": 15_000}[config])
     return AlignedStudyDay(index, source.utc_date, "development", spec.family_id, event.algorithm_version,
                            config, "EVENT", 60, "realized_volatility", "CONTINUOUS", None,
-                           () if empty else (event,))
+                           () if empty else (event,), source_period(index))
 
 
 def fixed_identities(identity=IDENTITY):
@@ -73,7 +89,7 @@ def development_fixture():
         fixed_identities(), family_days(IDENTITY, days))
     result = next(r for r in results if r.identity == IDENTITY)
     pair = evaluation.fit_final_development_pair(nomination, days)
-    freeze = evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (pair,), (common,))
+    freeze = evaluation.DevelopmentFreeze(FROZEN_STUDY_MANIFEST_SHA256, results, (nomination,), (pair,), (common,), upstream_fixture())
     return days, result, nomination, pair, freeze
 
 
@@ -150,7 +166,7 @@ class StudyEvaluationTests(unittest.TestCase):
                              (1, 0, 1) if selection.study_period_index == 2 else (1, 1, 1))
         event_common, results, nomination = evaluation.evaluate_development_family(identities, a[:1] + b[:1] + c[:1])
         self.assertEqual(nomination.status, "NOT_EVALUABLE")
-        evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (), (event_common,))
+        evaluation.DevelopmentFreeze(FROZEN_STUDY_MANIFEST_SHA256, results, (nomination,), (), (event_common,), upstream_fixture())
         for a_day, b_day in zip(common.samples[0].days, common.samples[1].days):
             self.assertEqual(a_day.study_period_index, b_day.study_period_index)
             self.assertNotEqual(a_day.observations[0].observation_key, b_day.observations[0].observation_key)
@@ -191,7 +207,7 @@ class StudyEvaluationTests(unittest.TestCase):
         self.assertNotEqual(common.source_days_sha256, changed.source_days_sha256)
         self.assertEqual(common.samples, changed.samples)
         _, results, nomination = evaluation.evaluate_development_family(identities, source_days)
-        freeze = evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (), (common,))
+        freeze = evaluation.DevelopmentFreeze(FROZEN_STUDY_MANIFEST_SHA256, results, (nomination,), (), (common,), upstream_fixture())
         with self.assertRaises(ValueError):
             replace(freeze, common_samples=(changed,))
         with self.assertRaises(ValueError):
@@ -266,7 +282,7 @@ class StudyEvaluationTests(unittest.TestCase):
                          for row_index, row in enumerate(source.observations) for target in (0, 1))
             days.append(AlignedStudyDay(index, source.utc_date, "development", identity.family_id,
                                          identity.algorithm_version, identity.config_version, "CONTINUOUS",
-                                         15, "v1_direction_persistence", "BINARY", 64, rows))
+                                         15, "v1_direction_persistence", "BINARY", 64, rows, source_period(index)))
         common, results, nomination = evaluation.evaluate_development_family((identity,), tuple(days))
         result = results[0]
         self.assertEqual(result.status, "EVALUABLE")
@@ -343,14 +359,14 @@ class StudyEvaluationTests(unittest.TestCase):
                                  candidate_features=(row.candidate_features[0],)) for row in source.observations)
             days.append(AlignedStudyDay(index, source.utc_date, "development", identity.family_id,
                                         identity.algorithm_version, identity.config_version, "CONTINUOUS",
-                                        5, "signed_market_return", "CONTINUOUS", 32, rows))
+                                        5, "signed_market_return", "CONTINUOUS", 32, rows, source_period(index)))
         common, results, nomination = evaluation.evaluate_development_family((identity,), tuple(days))
         self.assertEqual(results[0].status, "EVALUABLE")
         self.assertEqual(nomination.identity, identity)
         self.assertEqual(nomination.common_samples_sha256, common.samples_sha256)
         self.assertEqual(results[0].common_samples_sha256, common.samples_sha256)
         pair = evaluation.fit_final_development_pair(nomination, common.samples[0].days)
-        freeze = evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (pair,), (common,))
+        freeze = evaluation.DevelopmentFreeze(FROZEN_STUDY_MANIFEST_SHA256, results, (nomination,), (pair,), (common,), upstream_fixture())
         self.assertIsNone(freeze.hmm_cross_fit_sha256)
         self.assertIsNone(freeze.hmm_final_model_sha256)
         with self.assertRaises(ValueError):
@@ -392,9 +408,9 @@ class StudyEvaluationTests(unittest.TestCase):
         for cross_fit, final_model in ((None, None), ("b" * 64, None), (None, "c" * 64),
                                        ("invalid", "c" * 64)):
             with self.subTest(cross_fit=cross_fit, final_model=final_model), self.assertRaises(ValueError):
-                evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (), (common,),
+                evaluation.DevelopmentFreeze(FROZEN_STUDY_MANIFEST_SHA256, results, (nomination,), (), (common,), upstream_fixture(cross_fit, final_model),
                                              hmm_cross_fit_sha256=cross_fit, hmm_final_model_sha256=final_model)
-        freeze = evaluation.DevelopmentFreeze("a" * 64, results, (nomination,), (), (common,),
+        freeze = evaluation.DevelopmentFreeze(FROZEN_STUDY_MANIFEST_SHA256, results, (nomination,), (), (common,), upstream_fixture("b" * 64, "c" * 64),
                                                hmm_cross_fit_sha256="b" * 64, hmm_final_model_sha256="c" * 64)
         self.assertEqual(freeze.hmm_cross_fit_sha256, "b" * 64)
         self.assertEqual(freeze.hmm_final_model_sha256, "c" * 64)
@@ -409,13 +425,13 @@ class StudyEvaluationTests(unittest.TestCase):
         with patch.object(evaluation, "fit_standardizer", side_effect=AssertionError("validation refit")), \
                 patch.object(evaluation, "fit_weighted_ols", side_effect=AssertionError("validation refit")), \
                 patch.object(evaluation, "fit_weighted_logistic", side_effect=AssertionError("validation refit")):
-            decision = evaluation.evaluate_validation(pair, days)
+            decision = evaluation.evaluate_validation(pair, days, upstream_fixture())
         self.assertEqual(decision.status, "CONFIRMED")
         self.assertGreater(decision.median_delta, 0)
         self.assertEqual(canonical_json(pair), before)
-        self.assertEqual(evaluation.evaluate_validation(pair, days[:-1]).status, "COVERAGE_LIMITED")
+        self.assertEqual(evaluation.evaluate_validation(pair, days[:-1], upstream_fixture()).status, "COVERAGE_LIMITED")
         with self.assertRaisesRegex(ValueError, "mixes family/algorithm/config"):
-            evaluation.evaluate_validation(pair, tuple(synthetic_day(i, "validation", "other") for i in range(10, 16)))
+            evaluation.evaluate_validation(pair, tuple(synthetic_day(i, "validation", "other") for i in range(10, 16)), upstream_fixture())
 
     def test_validation_veto_does_not_unlock_test(self):
         _, _, _, pair, development = development_fixture()
@@ -426,76 +442,259 @@ class StudyEvaluationTests(unittest.TestCase):
                                                             for r in day.observations))
             rows = tuple(replace(row, outcome=prediction) for row, prediction in zip(day.observations, predictions))
             validation_days.append(replace(day, observations=rows))
-        decision = evaluation.evaluate_validation(pair, tuple(validation_days))
+        decision = evaluation.evaluate_validation(pair, tuple(validation_days), upstream_fixture())
         self.assertEqual(decision.status, "NOT_CONFIRMED")
         self.assertLess(decision.median_delta, 0)
         freeze = evaluation.freeze_validation(development, (decision,))
+        authorization = evaluation.authorize_test(development, freeze)
+        self.assertEqual(next(m for m in authorization.members if m.family_id == IDENTITY.family_id).status, "VETOED")
         with self.assertRaisesRegex(ValueError, "validation-confirmed"):
-            evaluation.authorize_test(development, freeze, IDENTITY.family_id)
+            evaluation.evaluate_test(development, freeze, authorization, IDENTITY.family_id, ())
         negative_development = replace(pair, development_median=-pair.development_median)
         positive_validation = tuple(synthetic_day(i, "validation") for i in range(10, 16))
-        self.assertEqual(evaluation.evaluate_validation(negative_development, positive_validation).status, "NOT_CONFIRMED")
+        self.assertEqual(evaluation.evaluate_validation(negative_development, positive_validation, upstream_fixture()).status, "NOT_CONFIRMED")
 
     def test_test_requires_exact_hash_linked_authorization_and_never_refits(self):
         _, _, _, pair, development = development_fixture()
-        decision = evaluation.evaluate_validation(pair, tuple(synthetic_day(i, "validation") for i in range(10, 16)))
+        decision = evaluation.evaluate_validation(pair, tuple(synthetic_day(i, "validation") for i in range(10, 16)), upstream_fixture())
         validation = evaluation.freeze_validation(development, (decision,))
-        authorization = evaluation.authorize_test(development, validation, IDENTITY.family_id)
+        authorization = evaluation.authorize_test(development, validation)
         test_days = tuple(synthetic_day(i, "test") for i in range(18, 27))
         with patch.object(evaluation, "fit_standardizer", side_effect=AssertionError("test refit")), \
                 patch.object(evaluation, "fit_weighted_ols", side_effect=AssertionError("test refit")):
-            result = evaluation.evaluate_test(development, validation, authorization, test_days)
+            result = evaluation.evaluate_test(development, validation, authorization, IDENTITY.family_id, test_days)
         self.assertEqual(result.status, "EVALUABLE")
         self.assertEqual(result.bootstrap.day_count, 9)
         self.assertEqual(result.bootstrap.day_effects, tuple(d.delta for d in result.day_results))
         self.assertEqual(result.classification, evaluation.EvidenceClassification.ROBUST_INCREMENTAL_EVIDENCE)
-        unavailable = evaluation.evaluate_test(development, validation, authorization, test_days[:-1])
+        unavailable = evaluation.evaluate_test(development, validation, authorization, IDENTITY.family_id, test_days[:-1])
         self.assertEqual(unavailable.status, "COVERAGE_LIMITED")
         self.assertIsNone(unavailable.bootstrap)
         self.assertEqual(unavailable.day_results, ())
+        member = next(m for m in authorization.members if m.family_id == IDENTITY.family_id)
+        def changed_member(**changes):
+            return replace(authorization, members=tuple(replace(m, **changes) if m == member else m
+                                                        for m in authorization.members))
         for bad in (True, replace(authorization, development_freeze_sha256="b" * 64),
-                    replace(authorization, identity=replace(IDENTITY, config_version="other")),
-                    replace(authorization, validation_decision_sha256="b" * 64)):
+                    changed_member(identity=replace(IDENTITY, config_version="other")),
+                    changed_member(validation_decision_sha256="b" * 64)):
             with self.assertRaises(ValueError):
-                evaluation.evaluate_test(development, validation, bad, test_days)
+                evaluation.evaluate_test(development, validation, bad, IDENTITY.family_id, test_days)
         with self.assertRaises(ValueError):
-            replace(authorization, horizon_minutes=60)
+            replace(development, study_manifest_sha256="b" * 64)
         with self.assertRaises(ValueError):
-            replace(authorization, authorized=False)
-        with self.assertRaises(ValueError):
-            evaluation.freeze_validation(replace(development, study_manifest_sha256="b" * 64),
-                                         (replace(decision, predictive_pair_sha256="c" * 64),))
+            evaluation.freeze_validation(development, (replace(decision, predictive_pair_sha256="c" * 64),))
 
     def test_scientific_hashes_bind_parameters_parent_freezes_and_hmm_placeholders(self):
         _, _, _, pair, development = development_fixture()
-        decision = evaluation.evaluate_validation(pair, tuple(synthetic_day(i, "validation") for i in range(10, 16)))
+        decision = evaluation.evaluate_validation(pair, tuple(synthetic_day(i, "validation") for i in range(10, 16)), upstream_fixture())
         validation = evaluation.freeze_validation(development, (decision,))
-        authorization = evaluation.authorize_test(development, validation, IDENTITY.family_id)
+        authorization = evaluation.authorize_test(development, validation)
         changed_model = replace(pair.extended_model, coefficients=(pair.extended_model.coefficients[0] + 0.1,)
                                 + pair.extended_model.coefficients[1:])
         changed_pair = replace(pair, extended_model=changed_model)
         self.assertNotEqual(pair.pair_sha256, changed_pair.pair_sha256)
         parameter_development = replace(development, predictive_pairs=(changed_pair,))
         parameter_decision = evaluation.evaluate_validation(
-            changed_pair, tuple(synthetic_day(i, "validation") for i in range(10, 16)))
+            changed_pair, tuple(synthetic_day(i, "validation") for i in range(10, 16)), upstream_fixture())
         parameter_validation = evaluation.freeze_validation(parameter_development, (parameter_decision,))
-        parameter_authorization = evaluation.authorize_test(parameter_development, parameter_validation, IDENTITY.family_id)
+        parameter_authorization = evaluation.authorize_test(parameter_development, parameter_validation)
         self.assertNotEqual(development.freeze_sha256, parameter_development.freeze_sha256)
         self.assertNotEqual(validation.freeze_sha256, parameter_validation.freeze_sha256)
         self.assertNotEqual(authorization.authorization_sha256, parameter_authorization.authorization_sha256)
         changed_development = replace(development, hmm_cross_fit_sha256="b" * 64,
-                                      hmm_final_model_sha256="c" * 64)
+                                      hmm_final_model_sha256="c" * 64,
+                                      upstream_provenance=upstream_fixture("b" * 64, "c" * 64))
         self.assertNotEqual(development.freeze_sha256, changed_development.freeze_sha256)
-        changed_validation = evaluation.freeze_validation(changed_development, (decision,))
+        changed_decision = replace(decision, upstream_provenance_sha256=changed_development.upstream_provenance_sha256)
+        changed_validation = evaluation.freeze_validation(changed_development, (changed_decision,))
         self.assertNotEqual(validation.freeze_sha256, changed_validation.freeze_sha256)
-        changed_authorization = evaluation.authorize_test(changed_development, changed_validation, IDENTITY.family_id)
+        changed_authorization = evaluation.authorize_test(changed_development, changed_validation)
         self.assertNotEqual(authorization.authorization_sha256, changed_authorization.authorization_sha256)
         with self.assertRaisesRegex(ValueError, "parent SHA mismatch"):
-            evaluation.authorize_test(changed_development, validation, IDENTITY.family_id)
-        self.assertEqual(json.loads(canonical_json(development))["study_manifest_sha256"], "a" * 64)
+            evaluation.authorize_test(changed_development, validation)
+        self.assertEqual(json.loads(canonical_json(development))["study_manifest_sha256"], FROZEN_STUDY_MANIFEST_SHA256)
         self.assertIsInstance(hash(development), int)
         self.assertIsInstance(hash(validation), int)
         self.assertIsInstance(hash(authorization), int)
+
+    def test_roster_identity_and_missing_days_are_explicit(self):
+        day = synthetic_day(0)
+        for changes in ({"study_period_index": 1}, {"utc_date": day.utc_date + timedelta(days=1)},
+                        {"phase": "test"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                replace(day, **changes)
+        for phase, count in (("development", 10), ("validation", 8), ("test", 12)):
+            coverage = evaluation.phase_coverage((), phase)
+            self.assertEqual(len(coverage.days), count)
+            self.assertEqual(coverage.supplied_day_count, 0)
+            self.assertTrue(all(d.status == "COVERAGE_LIMITED" and d.reason == "MISSING_FROZEN_DAY"
+                                for d in coverage.days))
+        coverage = evaluation.phase_coverage((day,), "development")
+        self.assertEqual(tuple(d.study_period_index for d in coverage.days), tuple(range(10)))
+        self.assertEqual(coverage.days[1].utc_date, FROZEN_PERIOD_ROSTER.periods[1][1])
+        with self.assertRaises(ValueError):
+            replace(coverage, days=coverage.days[:1])
+
+    def test_upstream_mixed_scientific_provenance_fails_closed(self):
+        first, second = source_period(0), source_period(1)
+        for field, value in (("extension_coverage_manifest_sha256", "e" * 64),
+                             ("part_b_code_revision", "different-revision")):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "mixed Part-B"):
+                UpstreamInputProvenance((first, replace(second, **{field: value})))
+        for changes in ({"part_b_report_schema_version": "different-schema"},
+                        {"study_manifest_sha256": "e" * 64},
+                        {"event_time_v1_context_version": "different-context"},
+                        {"bocpd_onset_evidence_version": "different-onset"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                replace(second, **changes)
+        for field in ("hmm_cross_fit_sha256", "hmm_final_model_sha256"):
+            mismatched = replace(first, **{field: "e" * 64})
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "mixed HMM"):
+                UpstreamInputProvenance((mismatched, second), "b" * 64, "c" * 64)
+        with self.assertRaises(ValueError):
+            UpstreamInputProvenance((second, first))
+        with self.assertRaises(ValueError):
+            UpstreamInputProvenance((first, first))
+        days = (synthetic_day(0), replace(synthetic_day(1), source_provenance=replace(
+            second, extension_coverage_manifest_sha256="e" * 64)))
+        with self.assertRaises(ValueError):
+            evaluation.evaluate_development_family(fixed_identities(), family_days(IDENTITY, days))
+
+    def test_source_report_and_event_identities_are_bound_to_freeze(self):
+        development = development_fixture()[-1]
+        upstream = development.upstream_provenance
+        for field in ("period_report_sha256", "event_time_v1_context_sha256", "bocpd_onset_evidence_sha256"):
+            altered = replace(upstream.periods[0], **{field: "e" * 64})
+            changed = replace(upstream, periods=(altered,) + upstream.periods[1:])
+            self.assertNotEqual(changed.provenance_sha256, upstream.provenance_sha256)
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "upstream period-report"):
+                replace(development, upstream_provenance=changed)
+        self.assertEqual(development.upstream_provenance_sha256, upstream.provenance_sha256)
+        pair = development.predictive_pairs[0]
+        day = synthetic_day(10, "validation")
+        altered = replace(day.source_provenance, period_report_sha256="e" * 64)
+        validation_days = (replace(day, source_provenance=altered),) + tuple(
+            synthetic_day(i, "validation") for i in range(11, 16))
+        with patch.object(evaluation, "_score_day", side_effect=AssertionError("scored")):
+            with self.assertRaisesRegex(ValueError, "upstream period-report"):
+                evaluation.evaluate_validation(pair, validation_days, upstream_fixture())
+
+    def test_test_rejects_mismatched_upstream_before_scoring(self):
+        _, _, _, pair, development = development_fixture()
+        decision = evaluation.evaluate_validation(pair, tuple(synthetic_day(i, "validation") for i in range(10, 16)), upstream_fixture())
+        validation = evaluation.freeze_validation(development, (decision,))
+        authorization = evaluation.authorize_test(development, validation)
+        day = synthetic_day(18, "test")
+        for field in ("period_report_sha256", "event_time_v1_context_sha256", "bocpd_onset_evidence_sha256"):
+            altered = replace(day, source_provenance=replace(day.source_provenance, **{field: "e" * 64}))
+            with self.subTest(field=field), patch.object(evaluation, "_score_day", side_effect=AssertionError("scored")):
+                with self.assertRaisesRegex(ValueError, "upstream period-report"):
+                    evaluation.evaluate_test(development, validation, authorization, IDENTITY.family_id, (altered,))
+        with self.assertRaises(ValueError):
+            replace(development, hmm_cross_fit_sha256="e" * 64)
+
+    def test_authorization_retains_coverage_limited_and_fit_failed_members(self):
+        _, _, _, pair, development = development_fixture()
+        limited = evaluation.evaluate_validation(pair, (), upstream_fixture())
+        freeze = evaluation.freeze_validation(development, (limited,))
+        authorization = evaluation.authorize_test(development, freeze)
+        member = next(m for m in authorization.members if m.family_id == IDENTITY.family_id)
+        self.assertEqual(member.status, "COVERAGE_LIMITED")
+        self.assertEqual(member.identity, IDENTITY)
+        self.assertEqual(member.predictive_pair_sha256, pair.pair_sha256)
+        self.assertEqual(member.validation_decision_sha256, limited.decision_sha256)
+        with self.assertRaises(ValueError):
+            evaluation.evaluate_test(development, freeze, authorization, IDENTITY.family_id, ())
+        adequate = evaluation.phase_coverage(tuple(synthetic_day(i, "validation") for i in range(10, 16)), "validation")
+        failed = evaluation.ValidationDecision(IDENTITY, upstream_fixture().provenance_sha256,
+                                               pair.pair_sha256, pair.development_median,
+                                               adequate, (), "FIT_FAILED", "SYNTHETIC_FAILURE")
+        freeze = evaluation.freeze_validation(development, (failed,))
+        authorization = evaluation.authorize_test(development, freeze)
+        member = next(m for m in authorization.members if m.family_id == IDENTITY.family_id)
+        self.assertEqual(member.status, "NOT_EVALUABLE")
+        self.assertEqual(member.validation_decision_sha256, failed.decision_sha256)
+        self.assertEqual(len(authorization.members), 15)
+
+    def test_aggregate_authorization_is_complete_immutable_and_cannot_be_extended(self):
+        _, _, _, pair, development = development_fixture()
+        decision = evaluation.evaluate_validation(pair, tuple(synthetic_day(i, "validation") for i in range(10, 16)), upstream_fixture())
+        validation = evaluation.freeze_validation(development, (decision,))
+        authorization = evaluation.authorize_test(development, validation)
+        self.assertEqual(tuple(m.family_id for m in authorization.members), PRIMARY_CONFIRMATORY_FAMILY)
+        self.assertEqual(len(authorization.members), 15)
+        with self.assertRaises(FrozenInstanceError):
+            authorization.members = authorization.members[:-1]
+        self.assertNotIn("EXP-75-04A", PRIMARY_CONFIRMATORY_FAMILY)
+        unavailable = next(m for m in authorization.members if m.family_id == "EXP-75-01")
+        self.assertEqual(unavailable.status, "NOT_EVALUABLE")
+        with self.assertRaises(ValueError):
+            evaluation.evaluate_test(development, validation, authorization, unavailable.family_id, ())
+        with self.assertRaises(ValueError):
+            replace(authorization, members=authorization.members[:-1])
+        with self.assertRaises(ValueError):
+            replace(authorization, members=authorization.members + (unavailable,))
+        # Changing an unavailable member requires a different complete freeze;
+        # it still cannot authorize test against the existing parent freezes.
+        changed = replace(authorization, members=tuple(
+            replace(m, status="COVERAGE_LIMITED") if m == unavailable else m for m in authorization.members))
+        self.assertNotEqual(changed.authorization_sha256, authorization.authorization_sha256)
+        with self.assertRaises(ValueError):
+            evaluation.evaluate_test(development, validation, changed, IDENTITY.family_id, ())
+        with self.assertRaises(TypeError):
+            evaluation.authorize_test(development, validation, IDENTITY.family_id)
+
+    def test_study_holm_retains_all_15_with_effective_one_for_unavailable(self):
+        _, _, _, pair, development = development_fixture()
+        decision = evaluation.evaluate_validation(pair, tuple(synthetic_day(i, "validation") for i in range(10, 16)), upstream_fixture())
+        validation = evaluation.freeze_validation(development, (decision,))
+        authorization = evaluation.authorize_test(development, validation)
+        result = evaluation.evaluate_test(development, validation, authorization, IDENTITY.family_id,
+                                          tuple(synthetic_day(i, "test") for i in range(18, 27)))
+        members = evaluation.study_primary_holm(authorization, (result,))
+        self.assertEqual(tuple(m.hypothesis_id for m in members), PRIMARY_CONFIRMATORY_FAMILY)
+        selected = next(m for m in members if m.hypothesis_id == IDENTITY.family_id)
+        self.assertEqual(selected.adjusted_p, min(1, 15 * result.sign_test.raw_p))
+        self.assertTrue(all(m.raw_p == 1 and m.status == "NOT_TESTABLE" for m in members
+                            if m.hypothesis_id != IDENTITY.family_id))
+        missing = evaluation.study_primary_holm(authorization, ())
+        self.assertEqual(next(m for m in missing if m.hypothesis_id == IDENTITY.family_id).status, "MISSING")
+        self.assertTrue(all(m.raw_p == 1 for m in missing))
+        veto = replace(decision, day_results=tuple(replace(
+            r, baseline_loss=1, extended_loss=2, delta=-1) for r in decision.day_results), status="NOT_CONFIRMED")
+        veto_validation = evaluation.freeze_validation(development, (veto,))
+        veto_authorization = evaluation.authorize_test(development, veto_validation)
+        veto_member = next(m for m in evaluation.study_primary_holm(veto_authorization, ())
+                           if m.hypothesis_id == IDENTITY.family_id)
+        self.assertEqual((veto_member.status, veto_member.raw_p), ("VETOED", 1))
+        failed = evaluation.evaluate_test(development, validation, authorization, IDENTITY.family_id, ())
+        failed_member = next(m for m in evaluation.study_primary_holm(authorization, (failed,))
+                             if m.hypothesis_id == IDENTITY.family_id)
+        self.assertEqual((failed_member.status, failed_member.raw_p), ("NOT_TESTABLE", 1))
+
+    def test_layer_one_bins_bind_selected_identity_declared_stratifier_and_source(self):
+        days, _, _, _, development = development_fixture()
+        evidence = evaluation.LayerOneContinuousEvidence(
+            IDENTITY, "native-kalman-trend", tuple(EvidenceValueDay(
+                d.study_period_index, d.utc_date, "development", (float(d.study_period_index),)) for d in days),
+            tuple((d.study_period_index, d.source_provenance.provenance_sha256) for d in days))
+        binding = evaluation.freeze_layer_one_bins(evidence)
+        freeze = replace(development, layer_one_terciles=(binding,), layer_one_evidence=(evidence,))
+        self.assertNotEqual(development.freeze_sha256, freeze.freeze_sha256)
+        for changes in ({"identity": replace(IDENTITY, family_id="EXP-75-07")},
+                        {"identity": replace(IDENTITY, config_version="config-b")},
+                        {"declared_stratifier_id": "other-stratifier"},
+                        {"development_evidence_sha256": "e" * 64}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "Layer-1"):
+                replace(freeze, layer_one_terciles=(replace(binding, **changes),))
+        with self.assertRaises(ValueError):
+            replace(freeze, layer_one_terciles=(("arbitrary-label", binding.bins),))
+        altered_evidence = replace(evidence, source_period_provenance=((0, "e" * 64),)
+                                   + evidence.source_period_provenance[1:])
+        with self.assertRaises(ValueError):
+            replace(freeze, layer_one_terciles=(evaluation.freeze_layer_one_bins(altered_evidence),),
+                    layer_one_evidence=(altered_evidence,))
 
 
 if __name__ == "__main__":

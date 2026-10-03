@@ -6,8 +6,8 @@ no artifact parsing, market calculations, event joining or HMM inference.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
-from datetime import date
+from dataclasses import dataclass, field, fields, replace
+from datetime import date, datetime, timezone
 from fractions import Fraction
 import hashlib
 import json
@@ -48,6 +48,156 @@ def require_sha256(value: str) -> None:
     if (not isinstance(value, str) or len(value) != 64
             or any(c not in "0123456789abcdef" for c in value)):
         raise ValueError("scientific identity must be a lowercase SHA-256")
+
+
+# Compact identity copied from the finalized selection manifest; no artifact I/O.
+FROZEN_STUDY_MANIFEST_SHA256 = '7f863cb6e6d3a39c46f109ba65c1617eb0aef894bb7dff74a6b393b24dc714f9'
+_FROZEN_PERIODS = (
+    (0, "2024-01-01", "development"),
+    (1, "2024-02-06", "development"),
+    (2, "2024-04-03", "development"),
+    (3, "2024-05-02", "development"),
+    (4, "2024-05-17", "development"),
+    (5, "2024-06-29", "development"),
+    (6, "2024-07-28", "development"),
+    (7, "2024-09-09", "development"),
+    (8, "2024-09-24", "development"),
+    (9, "2024-11-13", "development"),
+    (10, "2024-11-21", "validation"),
+    (11, "2024-12-27", "validation"),
+    (12, "2025-02-01", "validation"),
+    (13, "2025-03-02", "validation"),
+    (14, "2025-04-21", "validation"),
+    (15, "2025-05-06", "validation"),
+    (16, "2025-06-04", "validation"),
+    (17, "2025-07-24", "validation"),
+    (18, "2025-08-15", "test"),
+    (19, "2025-09-13", "test"),
+    (20, "2025-11-02", "test"),
+    (21, "2025-12-08", "test"),
+    (22, "2025-12-30", "test"),
+    (23, "2026-01-28", "test"),
+    (24, "2026-02-19", "test"),
+    (25, "2026-04-03", "test"),
+    (26, "2026-05-02", "test"),
+    (27, "2026-06-21", "test"),
+    (28, "2026-07-06", "test"),
+    (29, "2026-08-25", "test"),
+)
+
+
+@dataclass(frozen=True)
+class FrozenPeriodRoster:
+    study_manifest_sha256: str = FROZEN_STUDY_MANIFEST_SHA256
+    periods: tuple[tuple[int, date, str], ...] = tuple(
+        (index, date.fromisoformat(day), phase) for index, day, phase in _FROZEN_PERIODS)
+    roster_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "periods", tuple(tuple(p) for p in self.periods))
+        if (self.study_manifest_sha256 != FROZEN_STUDY_MANIFEST_SHA256
+                or self.periods != type(self).__dataclass_fields__["periods"].default):
+            raise ValueError("period roster differs from the frozen study manifest")
+        seal_hash(self, "roster_sha256")
+
+    def require_period(self, index, utc_date, phase):
+        if type(index) is not int or (index, utc_date, phase) not in self.periods:
+            raise ValueError("period/date/phase differs from the frozen study roster")
+
+
+FROZEN_PERIOD_ROSTER = FrozenPeriodRoster()
+
+
+def validate_observation_timing(utc_date, decision_time_ms, mode, horizon_minutes):
+    start = int(datetime.combine(utc_date, datetime.min.time(), timezone.utc).timestamp()) * 1000
+    if not start <= decision_time_ms < start + 86_400_000:
+        raise ValueError("decision timestamp lies outside the declared UTC study date")
+    interval = horizon_minutes * 60_000 if mode == "CONTINUOUS" else 5_000
+    if (decision_time_ms - start) % interval:
+        raise ValueError("decision timestamp is off the exact primary/replay boundary grid")
+
+
+@dataclass(frozen=True)
+class FinalizedPeriodProvenance:
+    study_period_index: int
+    utc_date: date
+    phase: str
+    study_manifest_sha256: str
+    extension_coverage_manifest_sha256: str
+    part_b_report_schema_version: str
+    part_b_code_revision: str
+    period_report_sha256: str
+    event_time_v1_context_version: str | None = None
+    event_time_v1_context_sha256: str | None = None
+    bocpd_onset_evidence_version: str | None = None
+    bocpd_onset_evidence_sha256: str | None = None
+    hmm_cross_fit_sha256: str | None = None
+    hmm_final_model_sha256: str | None = None
+    study_version: str = STUDY_VERSION
+    provenance_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        FROZEN_PERIOD_ROSTER.require_period(self.study_period_index, self.utc_date, self.phase)
+        if (self.study_version != STUDY_VERSION
+                or self.study_manifest_sha256 != FROZEN_STUDY_MANIFEST_SHA256
+                or self.part_b_report_schema_version != "historical-market-state-study-period-report-v2"):
+            raise ValueError("incompatible finalized Part-B study/report identity")
+        for value in (self.study_manifest_sha256, self.extension_coverage_manifest_sha256,
+                      self.period_report_sha256):
+            require_sha256(value)
+        require_name(self.part_b_code_revision)
+        for version, digest, expected in (
+            (self.event_time_v1_context_version, self.event_time_v1_context_sha256,
+             "historical-market-state-event-time-v1-context-v1"),
+            (self.bocpd_onset_evidence_version, self.bocpd_onset_evidence_sha256,
+             "historical-market-state-bocpd-onset-evidence-v1")):
+            if version is None and digest is None:
+                continue
+            if version != expected:
+                raise ValueError("incompatible event-time V1 / BOCPD evidence version")
+            require_sha256(digest)
+        for digest in (self.hmm_cross_fit_sha256, self.hmm_final_model_sha256):
+            if digest is not None:
+                require_sha256(digest)
+        seal_hash(self, "provenance_sha256")
+
+
+@dataclass(frozen=True)
+class UpstreamInputProvenance:
+    periods: tuple[FinalizedPeriodProvenance, ...]
+    hmm_cross_fit_sha256: str | None = None
+    hmm_final_model_sha256: str | None = None
+    roster: FrozenPeriodRoster = FROZEN_PERIOD_ROSTER
+    version: str = "historical-market-state-part-c-upstream-inputs-v1"
+    provenance_sha256: str = field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "periods", tuple(self.periods))
+        if (self.roster != FROZEN_PERIOD_ROSTER or not self.periods
+                or self.version != "historical-market-state-part-c-upstream-inputs-v1"
+                or any(not isinstance(p, FinalizedPeriodProvenance) or replace(p) != p
+                       for p in self.periods)
+                or tuple(p.study_period_index for p in self.periods)
+                != tuple(sorted({p.study_period_index for p in self.periods}))):
+            raise ValueError("upstream provenance requires ordered unique finalized periods")
+        for name in ("study_version", "study_manifest_sha256", "extension_coverage_manifest_sha256",
+                     "part_b_report_schema_version", "part_b_code_revision"):
+            if len({getattr(p, name) for p in self.periods}) != 1:
+                raise ValueError("mixed Part-B scientific provenance: " + name)
+        for digest in (self.hmm_cross_fit_sha256, self.hmm_final_model_sha256):
+            if digest is not None:
+                require_sha256(digest)
+        for period in self.periods:
+            for name in ("hmm_cross_fit_sha256", "hmm_final_model_sha256"):
+                digest = getattr(period, name)
+                if digest is not None and digest != getattr(self, name):
+                    raise ValueError("mixed HMM scientific provenance: " + name)
+        seal_hash(self, "provenance_sha256")
+
+    def require_source(self, index, digest):
+        source = next((p for p in self.periods if p.study_period_index == index), None)
+        if source is None or digest != source.provenance_sha256:
+            raise ValueError("aligned input differs from finalized upstream period-report/evidence identity")
 
 
 def finite_number(value) -> float:
@@ -257,6 +407,8 @@ class StudyEvaluationPlan:
 
 
 FROZEN_EVALUATION_PLAN = StudyEvaluationPlan()
+PRIMARY_CONFIRMATORY_FAMILY = tuple(s.family_id for s in FAMILY_EVALUATION_SPECS
+                                   if s.causal_forward_test)
 
 
 def family_spec(family_id: str) -> FamilyEvaluationSpec:
@@ -312,6 +464,8 @@ class AlignedStudyObservation:
                 != (spec.observation_mode, spec.horizon_minutes, spec.outcome_id, spec.outcome_kind)
                 or self.version != ALIGNED_OBSERVATION_VERSION):
             raise ValueError("invalid aligned primary observation identity")
+        validate_observation_timing(self.utc_date, self.decision_time_ms,
+                                    self.observation_mode, self.horizon_minutes)
         for name in (self.algorithm_version, self.config_version, self.observation_key):
             require_name(name)
         object.__setattr__(self, "baseline_features",
@@ -337,6 +491,7 @@ class AlignedStudyDay:
     outcome_kind: str
     scheduled_primary_count: int | None
     observations: tuple[AlignedStudyObservation, ...]
+    source_provenance: FinalizedPeriodProvenance | None = None
 
     def __post_init__(self):
         spec = predictive_family(self.family_id)
@@ -347,6 +502,23 @@ class AlignedStudyDay:
                 or (self.observation_mode, self.horizon_minutes, self.outcome_id, self.outcome_kind)
                 != (spec.observation_mode, spec.horizon_minutes, spec.outcome_id, spec.outcome_kind)):
             raise ValueError("invalid aligned day identity")
+        FROZEN_PERIOD_ROSTER.require_period(self.study_period_index, self.utc_date, self.phase)
+        if self.source_provenance is not None:
+            source = self.source_provenance
+            if (not isinstance(source, FinalizedPeriodProvenance)
+                    or replace(source) != source
+                    or (source.study_period_index, source.utc_date, source.phase)
+                    != (self.study_period_index, self.utc_date, self.phase)):
+                raise ValueError("aligned day has mismatched source period provenance")
+            if self.observation_mode == "EVENT" and source.event_time_v1_context_sha256 is None:
+                raise ValueError("event aligned input requires exact event-time V1 provenance")
+            if self.family_id == "EXP-75-04B" and source.bocpd_onset_evidence_sha256 is None:
+                raise ValueError("BOCPD aligned input requires causal onset-evidence provenance")
+            if self.family_id == "EXP-75-09":
+                digest = (source.hmm_cross_fit_sha256 if self.phase == "development" else
+                          source.hmm_final_model_sha256)
+                if digest is None:
+                    raise ValueError("HMM input requires phase-specific cross-fit/final-model provenance")
         require_name(self.algorithm_version)
         require_name(self.config_version)
         if self.observation_mode == "CONTINUOUS":

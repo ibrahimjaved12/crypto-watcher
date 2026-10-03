@@ -107,6 +107,19 @@ class StudyFeatureTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             self.observation().outcome = 5
 
+    def test_exact_primary_and_event_boundary_timing(self):
+        start = 1_704_067_200_000
+        for timestamp in (start + 1, start + 60_000, start - 1, start + 86_400_000):
+            with self.subTest(mode="CONTINUOUS", timestamp=timestamp), self.assertRaises(ValueError):
+                self.observation(decision_time_ms=timestamp)
+        for timestamp in (start + 1, start + 6_000, start - 5_000, start + 86_400_000):
+            with self.subTest(mode="EVENT", timestamp=timestamp), self.assertRaises(ValueError):
+                self.observation("EXP-75-04B", decision_time_ms=timestamp)
+        self.assertEqual(self.observation(decision_time_ms=start + 15 * 60_000).decision_time_ms,
+                         start + 15 * 60_000)
+        self.assertEqual(self.observation("EXP-75-04B", decision_time_ms=start + 5_000).decision_time_ms,
+                         start + 5_000)
+
     def test_pelt_cannot_create_predictive_observations(self):
         spec = features.family_spec("EXP-75-04A")
         self.assertFalse(spec.causal_forward_test)
