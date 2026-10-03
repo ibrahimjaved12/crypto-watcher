@@ -16,7 +16,7 @@ from typing import Union, get_args, get_origin, get_type_hints
 from .historical_market_state_study_json import canonical_study_json
 from .historical_replay import (
     HISTORICAL_REPLAY_RUNTIME_VERSION, HistoricalMarketReplayPoint,
-    HistoricalReplayRuntimeState,
+    HistoricalReplayRuntimeState, HistoricalReplayTrade,
 )
 from .movement import (
     MarketObservation, MovementBucket, MovementBucketEngineState,
@@ -33,6 +33,7 @@ REPLAY_CHECKPOINT_SCHEMA_VERSION = "historical-replay-checkpoint-v1"
 REPLAY_POINT_CHUNK_SCHEMA_VERSION = "historical-replay-points-v1"
 _ALLOWED = frozenset((
     HistoricalMarketReplayPoint, HistoricalReplayRuntimeState,
+    HistoricalReplayTrade,
     MarketObservation, MovementBucket, MovementBucketEngineState,
     MovementPendingBucketState, SymbolSourceTimeEvidence,
     BreadthSide, ExcludedSymbol, MarketMovementEvaluation,

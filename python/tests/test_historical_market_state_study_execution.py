@@ -1,13 +1,25 @@
 """Generated governance and identity fixtures for Part-B execution."""
 
 from contextlib import ExitStack
-from datetime import date
+import csv
+from datetime import date, datetime, timezone
+import hashlib
+import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import json
 import unittest
 from unittest.mock import Mock, patch
+import zipfile
+
+from market_analysis.binance_historical_archive import (
+    BinanceUSDMArchiveRequest, daily_aggtrades_relative_path,
+    daily_kline_relative_path, historical_candle_start_ms,
+    load_binance_usdm_bounded_historical_replay_dataset,
+    load_binance_usdm_historical_replay_dataset, required_aggtrade_dates,
+    required_kline_dates,
+)
 
 from market_analysis.historical_market_state_study import (
     parse_historical_market_state_study_manifest_json,
@@ -20,8 +32,12 @@ from market_analysis.historical_market_state_study_execution import (
     load_and_validate_coverage, select_execution_periods,
     freeze_study_hmm_model, validate_hmm_development_cohort,
 )
-from market_analysis.historical_replay import HistoricalReplayDiagnostics
+from market_analysis.historical_replay import (
+    HistoricalReplayConfig, run_bounded_historical_market_replay,
+    run_historical_market_replay,
+)
 from market_analysis.historical_liquidation_evidence import daily_liquidation_relative_path
+from market_analysis.movement_metrics import MarketMovementConfig, MarketUniverseInput
 import market_analysis.historical_market_state_study_execution as execution
 
 
@@ -497,55 +513,19 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                 + sum(runtime[name] for name in execution.RUNTIME_EXTENSION_FIELDS))
 
     def test_materialized_and_bounded_period_payloads_are_identical(self):
-        period = self.manifest.selected_periods[0]
         revision = "frozen-scientific-producer"
         coverage = {"coverage_manifest_sha256": "c" * 64, "sources": {}}
-        archive_manifest = SimpleNamespace(
-            dataset_id="fixture-dataset", dataset_version="fixture-v1",
-            content_sha256="a" * 64, archive_files=())
-        diagnostics = SimpleNamespace(
-            archive_file_count=0, verified_archive_file_count=0,
-            aggtrade_archive_count=0, kline_archive_count=0,
-            aggtrade_row_count=1, kline_row_count=0, duplicate_aggtrade_count=0,
-            missing_kline_minute_count=0, symbols_with_kline_gaps=(),
-            earliest_trade_time_ms=period.start_boundary_time_ms,
-            latest_trade_time_ms=period.start_boundary_time_ms,
-            earliest_kline_open_time_ms=None, latest_kline_open_time_ms=None)
-        flow = SimpleNamespace(
-            schema_version="flow-schema-v1", algorithm_version="flow-algorithm-v1",
-            dataset_content_sha256="a" * 64, configured_symbols=("BTCUSDT",),
-            engine_start_boundary_time_ms=period.start_boundary_time_ms,
-            output_end_boundary_time_ms=period.end_boundary_time_ms,
-            bucket_interval_ms=5_000, bucket_rule="right-closed-v1",
-            side_mapping="maker-side-v1", availability_basis="archive-time-v1",
-            finalization_grace_ms=2_000, evidence_sha256="d" * 64)
-        replay_manifest = SimpleNamespace(
-            run_fingerprint="e" * 64,
-            output_start_boundary_time_ms=period.start_boundary_time_ms,
-            output_end_boundary_time_ms=period.end_boundary_time_ms,
-            algorithm_version="replay-v1", policy_version="policy-v1",
-            dataset_id="fixture-dataset", dataset_version="fixture-v1",
-            dataset_content_sha256="a" * 64)
-        replay_diagnostics = HistoricalReplayDiagnostics(
-            period.start_boundary_time_ms, period.start_boundary_time_ms,
-            period.end_boundary_time_ms, 1, 0, 0, 0, (), (), ())
-        replay = SimpleNamespace(manifest=replay_manifest, diagnostics=replay_diagnostics,
-                                 points=())
-        materialized_dataset = SimpleNamespace(
-            archive_manifest=archive_manifest, diagnostics=diagnostics,
-            taker_flow_evidence=flow, ohlc_evidence=SimpleNamespace())
-        bounded_dataset = SimpleNamespace(
-            archive_manifest=archive_manifest, diagnostics=diagnostics,
-            taker_flow_evidence=flow, ohlc_evidence=SimpleNamespace(),
-            trade_stream_manifest=SimpleNamespace(normalized_row_stream_sha256="f" * 64))
-        prepared = [
-            SimpleNamespace(archive_dataset=materialized_dataset,
-                            canonical_replay_result=replay, experiment_points=(),
-                            core_eligibility_sha256="b" * 64),
-            SimpleNamespace(archive_dataset=bounded_dataset,
-                            canonical_replay_result=replay, experiment_points=(),
-                            core_eligibility_sha256="b" * 64),
-        ]
+        utc_day = date(2024, 1, 1)
+        start = int(datetime(2024, 1, 1, 12, tzinfo=timezone.utc).timestamp() * 1000)
+        end = start + 10_000
+        config = HistoricalReplayConfig(
+            start, end, finalization_grace_ms=2_000,
+            movement_config=MarketMovementConfig(
+                historical_lookback_ms=60_000,
+                minimum_historical_coverage_ms=60_000))
+        period = SimpleNamespace(
+            study_period_index=0, utc_date=utc_day, phase="development",
+            start_boundary_time_ms=start, end_boundary_time_ms=end)
         forward = SimpleNamespace(
             evidence_version="forward-v1", evidence_sha256="1" * 64,
             source_dataset_content_sha256="2" * 64)
@@ -560,29 +540,106 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                 return [report_json_safe(item) for item in value]
             return safe(value)
 
-        with patch.object(execution, "report_json_safe", side_effect=report_json_safe), \
-             patch.object(execution, "_prepare_study_period", side_effect=[
-                 (prepared[0], {"sources": {}}, (), {}),
-                 (prepared[1], {"sources": {}}, (), {})]), \
-             patch.object(execution, "_load_source_evidence", return_value={}), \
-             patch.object(execution, "_candidate_execution", return_value=(
-                 (), (), (), {}, None, None)), \
-             patch.object(execution, "_event_time_v1_context", return_value=()), \
-             patch.object(execution, "_bocpd_onset_evidence", return_value=()), \
-             patch.object(execution, "_label_price_evidence", return_value=forward), \
-             patch.object(execution, "_continuous_and_event_outcomes",
-                          return_value=((), (), ())):
-            materialized_payload = execution._execute_period(
-                self.manifest, coverage, period, Path("/synthetic/core"), {},
-                revision, None)
-            metrics = execution.StudyPeriodRuntimeMetrics()
-            bounded_payload = execution._execute_period(
-                self.manifest, coverage, period, Path("/synthetic/core"), {},
-                revision, None, runtime_metrics=metrics,
-                checkpoint_root=Path("/synthetic/checkpoints"),
-                progress=lambda *_args: None,
-                runtime_implementation_revision="runtime-implementation")
+        with TemporaryDirectory() as temporary:
+            archive_root = Path(temporary)
 
+            def write_package(relative, header, rows):
+                archive = archive_root.joinpath(*relative.parts)
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                text = io.StringIO(newline="")
+                writer = csv.writer(text)
+                writer.writerow(header)
+                writer.writerows(rows)
+                with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+                    member = zipfile.ZipInfo(
+                        f"{relative.stem}.csv", date_time=(1980, 1, 1, 0, 0, 0))
+                    member.compress_type = zipfile.ZIP_DEFLATED
+                    bundle.writestr(member, text.getvalue())
+                digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+                Path(f"{archive}.CHECKSUM").write_text(
+                    f"{digest}  {relative.name}\n", encoding="utf-8")
+
+            trade_header = (
+                "agg_trade_id", "price", "quantity", "first_trade_id",
+                "last_trade_id", "transact_time", "is_buyer_maker")
+            trades = (
+                ("1", "100", "1", "1", "1", str(start - 5_000), "false"),
+                ("2", "101", "1", "2", "2", str(start), "false"),
+                ("3", "102", "1", "3", "3", str(start + 5_000), "false"),
+            )
+            kline_header = (
+                "open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_asset_volume", "number_of_trades",
+                "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore")
+            candle_open = historical_candle_start_ms(config)
+            candles = ((str(candle_open), "100", "101", "99", "100", "1",
+                        str(candle_open + 59_999), "100", "1", "0.5", "50", "0"),)
+            for day in required_aggtrade_dates(config):
+                write_package(
+                    daily_aggtrades_relative_path("BTCUSDT", day), trade_header,
+                    trades if day == utc_day else ())
+            for day in required_kline_dates(config):
+                write_package(
+                    daily_kline_relative_path("BTCUSDT", day), kline_header,
+                    candles if day == utc_day else ())
+
+            request = BinanceUSDMArchiveRequest(
+                archive_root, MarketUniverseInput("period-parity", "v1", ("BTCUSDT",)),
+                config)
+            materialized_dataset = load_binance_usdm_historical_replay_dataset(
+                request, include_taker_flow_evidence=True)
+            bounded_dataset = load_binance_usdm_bounded_historical_replay_dataset(request)
+            try:
+                materialized_replay = run_historical_market_replay(
+                    materialized_dataset.replay_request)
+                bounded_replay = run_bounded_historical_market_replay(bounded_dataset)
+                prepared_routes = []
+                v1_routes = []
+                for dataset, replay in ((materialized_dataset, materialized_replay),
+                                         (bounded_dataset, bounded_replay)):
+                    experiment_points = execution._study_experiment_points(replay, period)
+                    v1_records, v1_states, v1_branches = execution._build_v1_evidence(
+                        period, replay.points)
+                    prepared_routes.append((
+                        SimpleNamespace(
+                            archive_dataset=dataset,
+                            canonical_replay_result=replay,
+                            experiment_points=experiment_points,
+                            canonical_v1_branch_by_boundary=v1_branches,
+                            core_eligibility_sha256="b" * 64),
+                        {"sources": {}}, v1_records, v1_states))
+                    v1_routes.append((experiment_points, v1_records, v1_states, v1_branches))
+
+                with patch.object(execution, "report_json_safe",
+                                  side_effect=report_json_safe), patch.object(
+                        execution, "_prepare_study_period",
+                        side_effect=prepared_routes), patch.object(
+                        execution, "_load_source_evidence", return_value={}), patch.object(
+                        execution, "_candidate_execution",
+                        return_value=((), (), (), {}, None, None)), patch.object(
+                        execution, "_label_price_evidence", return_value=forward), patch.object(
+                        execution, "_continuous_and_event_outcomes",
+                        return_value=((), (), ())):
+                    materialized_payload = execution._execute_period(
+                        self.manifest, coverage, period, archive_root, {}, revision, None)
+                    bounded_payload = execution._execute_period(
+                        self.manifest, coverage, period, archive_root, {}, revision, None,
+                        runtime_metrics=execution.StudyPeriodRuntimeMetrics(),
+                        checkpoint_root=archive_root / "checkpoints",
+                        progress=lambda *_args: None,
+                        runtime_implementation_revision="runtime-implementation")
+            finally:
+                bounded_dataset.close()
+
+        self.assertTrue(materialized_replay.points)
+        self.assertEqual(materialized_replay.points, bounded_replay.points)
+        self.assertEqual(
+            tuple(item.movement_evaluation for item in materialized_replay.points),
+            tuple(item.movement_evaluation for item in bounded_replay.points))
+        self.assertEqual(materialized_replay.diagnostics, bounded_replay.diagnostics)
+        self.assertEqual(materialized_replay.manifest, bounded_replay.manifest)
+        self.assertTrue(v1_routes[0][1])
+        self.assertEqual(v1_routes[0], v1_routes[1])
         self.assertEqual(execution._canonical(materialized_payload),
                          execution._canonical(bounded_payload))
         self.assertEqual(materialized_payload["report_sha256"],
