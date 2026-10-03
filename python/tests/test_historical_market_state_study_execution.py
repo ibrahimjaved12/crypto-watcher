@@ -289,6 +289,7 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             transitions=({"transition": "STARTED",
                           "evaluation_boundary_time_ms": boundary},))
         prepared = SimpleNamespace(
+            period=period,
             canonical_v1_branch_by_boundary={
                 boundary: ({"windows": {"5": {"direction_state": "BROAD_RISE"}}},
                            lifecycle)},
@@ -351,6 +352,7 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             diagnostics={})
         prepared = SimpleNamespace(
             period=period, archive_dataset=dataset, canonical_replay_result=replay,
+            canonical_v1_branch_by_boundary=None,
             experiment_points=(), core_eligibility_sha256="d" * 64)
         forward = SimpleNamespace(
             evidence_version="forward-v1", evidence_sha256="e" * 64,

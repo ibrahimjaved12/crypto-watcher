@@ -84,6 +84,8 @@ class HistoricalMarketStateHMMCrossFitTests(unittest.TestCase):
                 "code_revision": revision,
                 "period": report_json_safe(period),
                 "canonical_replay_manifest": replay_identity,
+                "taker_flow_evidence_identity": {
+                    "algorithm_version": "taker-buy-sell-imbalance-v2-exact-sign"},
                 "candidate_evidence": candidate_records,
                 "candidate_evidence_sha256": execution._digest(candidate_records),
                 "v1_evidence_sha256": execution._digest(candidate_records),

@@ -120,6 +120,8 @@ def generated_report(index=0, config=None, timestamp=None, evidence=None):
         'code_revision': REVISION, 'period': study_json_safe(period),
         'core_eligibility_sha256': 'e' * 64, 'core_archive_content_sha256': 'd' * 64,
         'canonical_replay_manifest': replay, 'canonical_replay_run_fingerprint': replay['run_fingerprint'],
+        'taker_flow_evidence_identity': {
+            'algorithm_version': 'taker-buy-sell-imbalance-v2-exact-sign'},
         'canonical_replay_diagnostics': {}, 'canonical_replay_diagnostics_sha256': part_b._digest({}),
         'candidate_evidence': records, 'candidate_evidence_sha256': part_b._digest(records),
         'v1_evidence_sha256': part_b._digest(records[:1]),
@@ -518,6 +520,18 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
             path.write_text(canonical_study_json(report))
             self.assertEqual(part_b.load_finalized_period_report(path, manifest, period,
                 coverage_sha256=COVERAGE, code_revision=REVISION), report)
+            for version in ('taker-buy-sell-imbalance-v1', 'invented', None):
+                changed = deepcopy(report)
+                if version is None:
+                    del changed['taker_flow_evidence_identity']
+                else:
+                    changed['taker_flow_evidence_identity']['algorithm_version'] = version
+                path.write_text(canonical_study_json(seal(changed)))
+                with self.subTest(taker_flow_version=version), self.assertRaisesRegex(
+                        ValueError, 'incompatible taker-flow calculation'):
+                    part_b.load_finalized_period_report(path, manifest, period,
+                        coverage_sha256=COVERAGE, code_revision=REVISION)
+            path.write_text(canonical_study_json(report))
             for revision, coverage in (('consumer-head', COVERAGE), (REVISION, '0' * 64)):
                 with self.assertRaises(ValueError):
                     part_b.load_finalized_period_report(path, manifest, period, coverage_sha256=coverage, code_revision=revision)
