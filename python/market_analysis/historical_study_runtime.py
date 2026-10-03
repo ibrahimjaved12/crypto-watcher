@@ -842,10 +842,10 @@ def _compact_points(points):
         points.adopt_validated_completion()
         return cached
     compact = tuple(points)
-    experiment_points = tuple(point.experiment_point() for point in compact)
+    entry = (compact, tuple(point.experiment_point() for point in compact))
     if key is not None and points.validated_completion:
-        _COMPACT_POINTS[key] = (compact, experiment_points)
-    return compact, experiment_points
+        _COMPACT_POINTS[key] = entry
+    return entry
 
 
 def _execute_scientific_stage(request):
