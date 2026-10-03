@@ -142,6 +142,52 @@ Holding time matters because a position may cross funding timestamps. There is n
 invented per-minute leverage charge: trading fees apply to fills and funding applies
 at the exchange's relevant settlement events.
 
+## Implemented execution-math foundation (#37 Part 1)
+
+`python/market_analysis/futures_execution{,_contracts}.py` provides stateless,
+versioned exact calculations for P&L and position increases/reductions, fill fees,
+settlement funding amounts, filter-grid validation and explicit adjustment
+suggestions, leverage/maintenance brackets, margin, piecewise isolated liquidation
+risk thresholds, explicit STOP/TAKE_PROFIT references, and fixed-bps adverse prices.
+Inputs use the existing `binance-usdm:<symbol>` identity for one-way isolated linear
+USDT perpetuals. Snapshot identities bind actual parameters, per-filter provenance,
+effective time and observed time; current-rule assumptions remain distinguishable
+from historical evidence. The frozen [Issue #37 design comment](https://github.com/ibrahimjaved12/crypto-watcher/issues/37#issuecomment-5969740973)
+is the detailed contract.
+
+Submitted intents are validated without modification. Suggestions require explicit
+acceptance and full order revalidation; quantities never round upward. Price-bearing
+orders use LOT_SIZE and price filters; MARKET orders use only MARKET_LOT_SIZE and
+mark-based MIN_NOTIONAL. Non-applicable filters do not constrain validation or
+require evidence. Both quantity filters use minQty as their fixed lattice origin.
+MARKET intents contain no submitted price; price-bearing intents require one.
+Dynamic mark evidence is supplied separately from order intent: MARKET MIN_NOTIONAL
+uses mark price; price-bearing orders use their submitted price. Price-bearing
+PERCENT_PRICE checks only the BUY upper bound or SELL lower bound against mark.
+PRICE_FILTER components are independently disabled by zero; enabled ticks use
+minPrice as grid origin.
+Leverage is an integer in 1–125, further limited by the supplied effective bracket.
+Brackets are contiguous and maintenance-continuous: positive tiers own their cap
+(`floor < notional <= cap`), so exact boundaries belong to the preceding tier.
+Zero belongs to the first tier for zero-notional helpers; values above the final
+supplied cap are unavailable, never extrapolated. Execution identity is versioned
+v4. Missing settlement marks are unavailable and requested price protection is
+unsupported.
+
+Arithmetic is independent of the caller's Decimal context. Reduced integer
+`ExactScalar` values make repeating quotients VALID and usable by subsequent P&L,
+entry, margin and liquidation calculations. Finite results retain an exact Decimal
+view; no rounding assumption is introduced. Liquidation candidates are checked
+against their own brackets and exact equity/MM equality, including repeating roots.
+Shared neutral canonical hashing preserves existing lifecycle identities unchanged.
+
+This foundation does not provide wallet/ledger state (#36), account admission,
+funding entitlement or postings, network/historical acquisition, fill/event ordering,
+spread/order-book modeling, or liquidation execution/settlement. Initial margin is
+only notional/leverage, not complete exchange order acceptance. Other margin and
+position modes, non-USDT settlement, BNB fee state, trailing stops, authenticated
+operations and real trading remain unsupported. Later #37 parts remain open.
+
 ## Event resolution and ambiguity
 
 Analysis cadence and simulation event resolution are separate. A five-minute
