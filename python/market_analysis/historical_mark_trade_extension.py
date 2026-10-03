@@ -12,6 +12,11 @@ import argparse
 from collections import Counter
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
+from functools import lru_cache
+from .historical_study_inputs import HistoricalStudyArchiveInputs
+from .historical_extension_stream import paired_study_points
+
+from .historical_decimal_policy import decimal_policy, policy_context
 from pathlib import Path
 import subprocess
 import sys
@@ -65,12 +70,17 @@ def _decimal_text(value: Decimal | None) -> str | None:
     return text or "0"
 
 
+@lru_cache(maxsize=4096)
+def _policy_log_ratio(numerator, denominator, policy):
+    with localcontext(policy_context(policy)):
+        return (Decimal(numerator) / Decimal(denominator)).ln()
+
+
 def _log_ratio(numerator: Decimal, denominator: Decimal) -> Decimal:
     if numerator <= 0 or denominator <= 0:
         raise ValueError("log-return endpoints must be positive")
-    with localcontext() as context:
-        context.prec = MARK_TRADE_DECIMAL_PRECISION
-        return (numerator / denominator).ln()
+    return _policy_log_ratio(str(numerator), str(denominator),
+                             decimal_policy(MARK_TRADE_DECIMAL_PRECISION))
 
 
 def _mean(values: list[Decimal]) -> Decimal | None:
@@ -84,6 +94,13 @@ def _mean(values: list[Decimal]) -> Decimal | None:
 def _median(values: list[Decimal]) -> Decimal | None:
     if not values:
         return None
+    if hasattr(values, "middle"):
+        endpoints = values.middle()
+        if len(endpoints) == 1:
+            return endpoints[0]
+        with localcontext() as context:
+            context.prec = MARK_TRADE_DECIMAL_PRECISION
+            return (endpoints[0] + endpoints[1]) / Decimal(2)
     ordered = sorted(values)
     middle = len(ordered) // 2
     if len(ordered) % 2:
@@ -145,7 +162,7 @@ class HistoricalMarkTradeExtensionRequest:
 
 @dataclass(frozen=True)
 class HistoricalMarkTradeExtensionPrepared:
-    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset
+    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset | HistoricalStudyArchiveInputs
     replay_result: HistoricalMarketReplayResult
     experiment_points: tuple
     partition_plan: ReplayPartitionPlan | None
@@ -154,7 +171,8 @@ class HistoricalMarkTradeExtensionPrepared:
     study_phase: str | None = None
 
     def __post_init__(self):
-        if (not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
+        if (not (isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
+                         or (self.study_phase is not None and isinstance(self.archive_dataset, HistoricalStudyArchiveInputs)))
                 or not (isinstance(self.replay_result, HistoricalMarketReplayResult)
                         or (self.study_phase is not None
                             and isinstance(self.replay_result, CompactStudyReplay)))
@@ -165,7 +183,11 @@ class HistoricalMarkTradeExtensionPrepared:
                     and self.study_phase not in ("development", "validation", "test"))
                 or not isinstance(self.mark_evidence, BinanceMarkPriceEvidence)):
             raise ValueError("mark/trade extension preparation has invalid contract types")
-        object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
+        if self.experiment_points is None:
+            if self.study_phase is None or not isinstance(self.replay_result, CompactStudyReplay):
+                raise ValueError("streamed extension requires uniform-phase compact replay")
+        else:
+            object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
         object.__setattr__(self, "mark_archive_root",
                            Path(self.mark_archive_root).expanduser().resolve())
 
@@ -402,6 +424,18 @@ def _source_candle_checks(source: str, symbol: str, open_times: tuple[int, ...],
     return tuple(candles), tuple(valid_times), tuple(reasons)
 
 
+@lru_cache(maxsize=4096)
+def _completed_calculations(symbol, window_minutes, expected, endpoints, policy):
+    mark_start, mark_end, trade_start, trade_end = map(Decimal, endpoints)
+    with localcontext(policy_context(policy)):
+        mark_return = _log_ratio(mark_end, mark_start)
+        trade_return = _log_ratio(trade_end, trade_start)
+        start_basis = _log_ratio(mark_start, trade_start)
+        end_basis = _log_ratio(mark_end, trade_end)
+        divergence = end_basis - start_basis
+    return mark_return, trade_return, start_basis, end_basis, divergence
+
+
 def _symbol_window_output(symbol: str, window_minutes: int, boundary: int,
                           mark_evidence: BinanceMarkPriceEvidence,
                           mark_index: Mapping[tuple[str, int], object],
@@ -422,13 +456,11 @@ def _symbol_window_output(symbol: str, window_minutes: int, boundary: int,
     if ready:
         mark_start, mark_end = mark_candles[0].close, mark_candles[-1].close
         trade_start, trade_end = trade_candles[0].close, trade_candles[-1].close
-        mark_return = _log_ratio(mark_end, mark_start)
-        trade_return = _log_ratio(trade_end, trade_start)
-        start_basis = _log_ratio(mark_start, trade_start)
-        end_basis = _log_ratio(mark_end, trade_end)
-        with localcontext() as context:
-            context.prec = MARK_TRADE_DECIMAL_PRECISION
-            divergence = end_basis - start_basis
+        mark_return, trade_return, start_basis, end_basis, divergence = _completed_calculations(
+            symbol, window_minutes, expected,
+            tuple(map(str, (mark_start, mark_end, trade_start, trade_end))),
+            decimal_policy(MARK_TRADE_DECIMAL_PRECISION))
+
     direction_metric = v1_symbol.direction
     return MarkTradeSymbolWindowOutput(
         symbol, window_minutes, "READY" if ready else "UNAVAILABLE",
@@ -446,15 +478,13 @@ def _symbol_window_output(symbol: str, window_minutes: int, boundary: int,
     )
 
 
-def _build_candidate_points(prepared: HistoricalMarkTradeExtensionPrepared):
+def _iter_candidate_points(prepared: HistoricalMarkTradeExtensionPrepared):
     mark = prepared.mark_evidence
     trade = prepared.archive_dataset.ohlc_evidence
     symbols = prepared.replay_result.manifest.configured_universe
     mark_index = {(item.symbol, item.open_time_ms): item for item in mark.candles}
     trade_index = {(item.symbol, item.open_time_ms): item for item in trade.candles}
-    candidate_points = []
-    for replay_point, experiment_point in zip(
-            prepared.replay_result.points, prepared.experiment_points):
+    for replay_point, experiment_point in paired_study_points(prepared):
         boundary = replay_point.evaluation_boundary_time_ms
         if boundary % MINUTE_MS:
             continue
@@ -469,10 +499,14 @@ def _build_candidate_points(prepared: HistoricalMarkTradeExtensionPrepared):
             windows.append(MarkTradeWindowOutput(
                 window_minutes, _v1_context(v1_window),
                 all(item.status == "READY" for item in outputs), outputs))
-        candidate_points.append(MarkTradePointOutput(
+        yield MarkTradePointOutput(
             replay_point.point_id, boundary, experiment_point.partition,
-            tuple(windows)))
-    return tuple(candidate_points)
+            tuple(windows))
+
+
+def _build_candidate_points(prepared, *, retain=True):
+    points = _iter_candidate_points(prepared)
+    return tuple(points) if retain else points
 
 
 def _trade_source_coverage(prepared) -> tuple[Mapping, ...]:
@@ -508,75 +542,9 @@ def _divergence_sign(value: str | None) -> str:
 
 
 def _partition_summaries(candidate_points, symbols):
-    summaries = {}
-    for partition in REPORT_PARTITIONS:
-        points = tuple(point for point in candidate_points
-                       if partition == "all" or point.partition == partition)
-        windows = []
-        for window_minutes in MARK_TRADE_WINDOWS_MINUTES:
-            point_windows = [next(item for item in point.windows
-                                  if item.window_minutes == window_minutes)
-                             for point in points]
-            per_symbol = []
-            for symbol in symbols:
-                rows = [next(item for item in item_window.symbols
-                             if item.symbol == symbol) for item_window in point_windows]
-                ready_rows = [row for row in rows if row.status == "READY"]
-                reason_counts = Counter(reason.reason for row in rows
-                                         for reason in row.reasons)
-                per_symbol.append({
-                    "symbol": symbol,
-                    "minute_point_count": len(rows),
-                    "ready_count": len(ready_rows),
-                    "unavailable_count": len(rows) - len(ready_rows),
-                    "coverage_ratio": len(ready_rows) / len(rows) if rows else None,
-                    "reason_counts": dict(sorted(reason_counts.items())),
-                })
-            common_windows = [item for item in point_windows
-                              if item.all_configured_symbols_ready]
-            common_rows = [row for item_window in common_windows
-                           for row in item_window.symbols]
-            mark_returns = [Decimal(row.mark_return) for row in common_rows]
-            trade_returns = [Decimal(row.trade_return) for row in common_rows]
-            start_bases = [Decimal(row.basis_at_start) for row in common_rows]
-            end_bases = [Decimal(row.basis_at_end) for row in common_rows]
-            divergences = [Decimal(row.divergence) for row in common_rows]
-            crosstab = Counter((row.v1_direction or "UNAVAILABLE",
-                                _divergence_sign(row.divergence))
-                               for row in common_rows)
-            windows.append({
-                "window_minutes": window_minutes,
-                "minute_point_count": len(points),
-                "configured_symbol_window_count": len(points) * len(symbols),
-                "ready_symbol_window_count": sum(
-                    item["ready_count"] for item in per_symbol),
-                "unavailable_symbol_window_count": sum(
-                    item["unavailable_count"] for item in per_symbol),
-                "all_configured_symbols_ready_boundary_count": len(common_windows),
-                "all_configured_symbols_ready_coverage_ratio": (
-                    len(common_windows) / len(points) if points else None),
-                "per_symbol_coverage": tuple(per_symbol),
-                "common_ready_diagnostic_summary": {
-                    "symbol_window_observation_count": len(common_rows),
-                    "median_mark_return": _decimal_text(_median(mark_returns)),
-                    "mean_mark_return": _decimal_text(_mean(mark_returns)),
-                    "median_trade_return": _decimal_text(_median(trade_returns)),
-                    "mean_trade_return": _decimal_text(_mean(trade_returns)),
-                    "median_basis_at_start": _decimal_text(_median(start_bases)),
-                    "median_basis_at_end": _decimal_text(_median(end_bases)),
-                    "median_divergence": _decimal_text(_median(divergences)),
-                    "mean_divergence": _decimal_text(_mean(divergences)),
-                    "positive_divergence_count": sum(value > 0 for value in divergences),
-                    "negative_divergence_count": sum(value < 0 for value in divergences),
-                    "zero_divergence_count": sum(value == 0 for value in divergences),
-                    "same_time_v1_direction_by_divergence_sign": tuple(
-                        {"v1_direction": direction, "divergence_sign": sign,
-                         "count": count}
-                        for (direction, sign), count in sorted(crosstab.items())),
-                },
-            })
-        summaries[partition] = tuple(windows)
-    return MappingProxyType(summaries)
+    from .historical_extension_summaries import mark_summaries
+    return MappingProxyType(mark_summaries(candidate_points, symbols, REPORT_PARTITIONS,
+        MARK_TRADE_WINDOWS_MINUTES, _mean, _median, _decimal_text, _divergence_sign))
 
 
 def _extension_manifest(prepared, candidate_sha: str, code_revision: str):
@@ -633,11 +601,11 @@ def _extension_manifest(prepared, candidate_sha: str, code_revision: str):
     return replace(manifest, extension_run_fingerprint=_sha256(identity))
 
 
-def build_historical_study_mark_trade_points(prepared: HistoricalMarkTradeExtensionPrepared):
+def build_historical_study_mark_trade_points(prepared: HistoricalMarkTradeExtensionPrepared, *, retain=True):
     """Run mark/trade over an already prepared uniform-phase study day."""
     from .historical_market_state_candidate_evidence import validate_study_phase_prepared
     validate_study_phase_prepared(prepared)
-    return _build_candidate_points(prepared)
+    return _build_candidate_points(prepared, retain=retain)
 
 
 def run_historical_mark_trade_extension(

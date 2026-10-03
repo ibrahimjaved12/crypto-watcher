@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields, is_dataclass
 import hashlib
 import json
 from typing import Any, Iterable
@@ -42,16 +43,18 @@ def _native_status(item):
 
 
 def _native_point(item):
-    value = report_json_safe(item)
-    if not isinstance(value, dict):
-        return value
-    # The canonical movement and V1 branch are persisted once in their own
-    # shared sections; retain the candidate's existing native result fields.
-    return {key: item for key, item in value.items()
-            if key not in ("movement_evaluation", "baseline_movement_evaluation",
-                           "candidate_movement_evaluation", "source_time_evidence",
-                           "baseline_classification", "baseline_lifecycle_state",
-                           "baseline_transitions")}
+    excluded = frozenset(("movement_evaluation", "baseline_movement_evaluation",
+                          "candidate_movement_evaluation", "source_time_evidence",
+                          "baseline_classification", "baseline_lifecycle_state",
+                          "baseline_transitions"))
+    if is_dataclass(item):
+        retained = {f.name: getattr(item, f.name) for f in fields(item)
+                    if f.name not in excluded}
+    elif isinstance(item, Mapping):
+        retained = {key: value for key, value in item.items() if key not in excluded}
+    else:
+        return report_json_safe(item)
+    return report_json_safe(retained)
 
 
 @dataclass(frozen=True)
@@ -158,12 +161,15 @@ def adapt_candidate_result(period, descriptor, result) -> CandidateEvidenceBundl
         if (timestamp < period.start_boundary_time_ms
                 or timestamp >= period.end_boundary_time_ms):
             continue
+        native = (_native_point(point) if timestamp % CONTINUOUS_MINUTE_MS == 0
+                  or (family == "EXP-75-02" and getattr(point, "cusum_directional_onset", False))
+                  else None)
         if timestamp % CONTINUOUS_MINUTE_MS == 0:
             records.append(_record(period, descriptor, timestamp, "CONTINUOUS",
-                                   _native_status(point), _native_point(point)))
+                                   _native_status(point), native)))
         if family == "EXP-75-02" and getattr(point, "cusum_directional_onset", False):
             records.append(_record(period, descriptor, timestamp, "EVENT",
-                                   _native_status(point), _native_point(point)))
+                                   _native_status(point), native)))
 
     if family == "EXP-75-04B":
         regions = getattr(result, "detection_regions_by_partition", {})
@@ -222,18 +228,35 @@ def validate_study_phase_prepared(prepared) -> None:
     """Validate extension inputs against the shared one-replay study stream."""
     archive = getattr(prepared, "archive_dataset", None)
     replay = getattr(prepared, "replay_result", None)
-    points = tuple(getattr(prepared, "experiment_points", ()))
+    provided = getattr(prepared, "experiment_points", ())
+    points = tuple(provided) if provided is not None else None
     phase = getattr(prepared, "study_phase", None)
     if (archive is None or replay is None
             or phase not in ("development", "validation", "test")
-            or not points or len(points) != len(replay.points)):
+            or (points is not None and (not points or len(points) != len(replay.points)))):
         raise ValueError("invalid prepared uniform-phase study extension")
-    validate_experiment_points(points)
+    if points is not None:
+        validate_experiment_points(points)
     if (archive.archive_manifest.content_sha256 != replay.manifest.dataset_content_sha256
             or archive.archive_manifest.dataset_id != replay.manifest.dataset_id
             or archive.archive_manifest.dataset_version != replay.manifest.dataset_version):
         raise ValueError("study extension does not match the verified core dataset")
     symbols = replay.manifest.configured_universe
+    from .historical_study_inputs import HistoricalStudyArchiveInputs
+    if isinstance(archive, HistoricalStudyArchiveInputs):
+        manifest = replay.manifest
+        from .movement_metrics import MarketMovementConfig
+        if (archive.config.movement_config != MarketMovementConfig()
+                or archive.universe.symbols != symbols
+                or (archive.universe.id, archive.universe.version)
+                != (manifest.universe_id, manifest.universe_version)
+                or (archive.config.output_start_boundary_time_ms,
+                    archive.config.output_end_boundary_time_ms)
+                != (manifest.output_start_boundary_time_ms, manifest.output_end_boundary_time_ms)
+                or archive.config.movement_config.version != manifest.movement_config_version):
+            raise ValueError("study archive configuration differs from canonical replay")
+        if getattr(prepared, "mark_evidence", None) is not None and archive.ohlc_evidence is None:
+            raise ValueError("mark/trade study requires verified OHLC evidence")
     for name in ("mark_evidence", "oi_evidence", "funding_evidence",
                  "liquidation_evidence"):
         evidence = getattr(prepared, name, None)
@@ -245,6 +268,13 @@ def validate_study_phase_prepared(prepared) -> None:
                 != (replay.manifest.output_start_boundary_time_ms,
                     replay.manifest.output_end_boundary_time_ms)):
             raise ValueError("supplementary source evidence differs from the frozen period")
+    if points is None:
+        from .historical_study_runtime import StudyPointStream
+        if (not isinstance(replay.points, StudyPointStream)
+                or replay.points.identity["run_fingerprint"] != replay.manifest.run_fingerprint
+                or replay.points.identity["phase"] != phase):
+            raise ValueError("streamed extension requires identity-bound study points")
+        return
     from .historical_replay import canonical_replay_point_id
     for replay_point, point in zip(replay.points, points):
         if (replay_point.point_id != canonical_replay_point_id(

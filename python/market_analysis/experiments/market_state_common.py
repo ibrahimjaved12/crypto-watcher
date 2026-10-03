@@ -135,7 +135,9 @@ def canonical_branch_for_point(
             evaluation, source_time_evidence, previous_state,
             classifier_config, lifecycle_config)
     boundary = evaluation.evaluation_boundary_time_ms
-    result = precomputed_by_boundary.get(boundary)
+    result = (precomputed_by_boundary.branch_for_point(evaluation, source_time_evidence)
+              if hasattr(precomputed_by_boundary, "branch_for_point")
+              else precomputed_by_boundary.get(boundary))
     if (not isinstance(result, tuple) or len(result) != 2
             or not isinstance(result[0], MarketClassificationEvaluation)
             or not isinstance(result[1], MarketEpisodeLifecycleResult)
@@ -213,7 +215,9 @@ def canonical_branch_for_point(
     if identity_matches:
         try:
             if previous_state is None:
-                identity_matches = boundary == min(precomputed_by_boundary)
+                identity_matches = boundary == (precomputed_by_boundary.first_boundary
+                    if hasattr(precomputed_by_boundary, "first_boundary")
+                    else min(precomputed_by_boundary))
             else:
                 previous_boundary = previous_state.last_evaluation_boundary_time_ms
                 previous = precomputed_by_boundary.get(previous_boundary)
