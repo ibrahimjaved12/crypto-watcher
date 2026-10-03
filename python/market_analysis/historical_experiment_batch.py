@@ -270,17 +270,28 @@ def _sha256(value: Any) -> str:
 def experiment_stream_sha256(replay_result: HistoricalMarketReplayResult,
                              experiment_points: tuple,
                              partition_plan: ReplayPartitionPlan) -> str:
-    replay_points = replay_result.points
-    if len(replay_points) != len(experiment_points):
+    if len(replay_result.points) != len(experiment_points):
         raise ValueError("replay/export point counts differ")
-    paired = []
-    for replay_point, experiment_point in zip(replay_points, experiment_points):
+    for replay_point, experiment_point in zip(replay_result.points, experiment_points):
         if (replay_point.evaluation_boundary_time_ms
                 != experiment_point.movement_evaluation.evaluation_boundary_time_ms):
             raise ValueError("replay/export evaluation boundaries differ")
-        paired.append([replay_point.point_id, experiment_point.partition])
+    return experiment_point_stream_sha256(replay_result.manifest, experiment_points,
+        partition_plan, point_ids=(point.point_id for point in replay_result.points))
+
+
+def experiment_point_stream_sha256(manifest, experiment_points, partition_plan, *, point_ids=None):
+    """Same canonical hash from manifest + projected point stream, without replay buckets."""
+    from .historical_replay import canonical_replay_point_id
+    points = tuple(experiment_points)
+    ids = (tuple(point_ids) if point_ids is not None else tuple(
+        canonical_replay_point_id(manifest.run_fingerprint,
+            point.movement_evaluation.evaluation_boundary_time_ms) for point in points))
+    if len(ids) != len(points):
+        raise ValueError("canonical point identity/count mismatch")
+    paired = [[point_id, point.partition] for point_id, point in zip(ids, points)]
     return _sha256({
-        "replay_run_fingerprint": replay_result.manifest.run_fingerprint,
+        "replay_run_fingerprint": manifest.run_fingerprint,
         "development_end_boundary_time_ms": partition_plan.development_end_boundary_time_ms,
         "validation_end_boundary_time_ms": partition_plan.validation_end_boundary_time_ms,
         "points": paired,

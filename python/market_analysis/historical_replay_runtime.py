@@ -16,7 +16,7 @@ from typing import Union, get_args, get_origin, get_type_hints
 from .historical_market_state_study_json import canonical_study_json
 from .historical_replay import (
     HISTORICAL_REPLAY_RUNTIME_VERSION, HistoricalMarketReplayPoint,
-    HistoricalReplayRuntimeState, HistoricalReplayTrade,
+    HistoricalReplayRuntimeState, HistoricalReplayTrade, canonical_replay_point_id,
 )
 from .movement import (
     MarketObservation, MovementBucket, MovementBucketEngineState,
@@ -159,7 +159,12 @@ def _atomic_write(path: Path, data: bytes) -> None:
             if path.read_bytes() != data:
                 raise ValueError(f"conflicting replay checkpoint file: {path.name}")
             return
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != data:
+                raise ValueError(f"conflicting replay checkpoint file: {path.name}")
+        temporary.unlink()
         temporary = None
         descriptor = os.open(path.parent, os.O_RDONLY)
         try:
@@ -183,7 +188,7 @@ class ReplayCheckpointStore:
         self.progress = progress
         self.previous_sha = None
         self.previous_boundary = None
-        self.points = []
+        self.point_count = 0
         self.chunk_points = []
         self._complete = False
 
@@ -195,6 +200,10 @@ class ReplayCheckpointStore:
         yield self.end_boundary
 
     def load_latest(self):
+        self.point_count = 0
+        self.previous_sha = None
+        self.previous_boundary = None
+        self._complete = False
         paths = sorted(self.root.glob("checkpoint-*.json"))
         if not paths:
             return None
@@ -290,10 +299,11 @@ class ReplayCheckpointStore:
                 raise ValueError("noncanonical replay state")
             if (state.run_fingerprint != self.identity["run_fingerprint"]
                     or state.completed_boundary_time_ms != boundary
-                    or state.emitted_point_count != len(self.points) + len(chunk)
+                    or state.emitted_point_count != self.point_count + len(chunk)
                     or metadata["cumulative_point_count"] != state.emitted_point_count):
                 raise ValueError("replay state boundary/count mismatch")
-            self.points.extend(chunk)
+            self.point_count += len(chunk)
+            del chunk, lines, chunk_raw
             self.previous_sha = current_sha
             self.previous_boundary = boundary
             self._complete = metadata.get("status") == "REPLAY_COMPLETE"
@@ -351,7 +361,7 @@ class ReplayCheckpointStore:
         metadata = {**body, "checkpoint_sha256": checkpoint_sha}
         _atomic_write(self.root / f"checkpoint-{boundary}.json",
                       _canonical_bytes(metadata))
-        self.points.extend(self.chunk_points)
+        self.point_count += len(self.chunk_points)
         self.chunk_points.clear()
         self.previous_sha = checkpoint_sha
         self.previous_boundary = boundary
@@ -362,11 +372,29 @@ class ReplayCheckpointStore:
                 "completed_output_boundaries": state.emitted_point_count,
                 "total_output_boundaries": (self.end_boundary - self.start_boundary) // 5_000 + 1,
                 "checkpoint_sha256": checkpoint_sha,
-                "point_count": len(self.points),
+                "point_count": self.point_count,
             })
             if self._complete:
                 self.progress("REPLAY_COMPLETE", {"completed_boundary": boundary})
 
 
+    def iter_points(self):
+        """Revalidate the chain and read immutable chunks without retaining the day."""
+        self.load_latest()
+        for path in sorted(self.root.glob("checkpoint-*.json")):
+            metadata = _read_json_bytes(path.read_bytes())
+            chunk_path = self.root / "chunks" / f"{metadata['point_chunk_sha256']}.jsonl"
+            digest = hashlib.sha256()
+            with chunk_path.open("rb") as stream:
+                for line in stream:
+                    digest.update(line)
+            if digest.hexdigest() != metadata["point_chunk_sha256"]:
+                raise ValueError("replay chunk changed after validation")
+            with chunk_path.open("rb") as stream:
+                next(stream)
+                for line in stream:
+                    yield _decode(HistoricalMarketReplayPoint, _read_json_bytes(line))
+
+
 def _point_id(fingerprint, boundary):
-    return _sha(f"{fingerprint}|movement|{boundary}".encode("ascii"))
+    return canonical_replay_point_id(fingerprint, boundary)

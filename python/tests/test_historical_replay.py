@@ -162,7 +162,7 @@ class HistoricalReplayTests(unittest.TestCase):
             state = resumed_store.load_latest()
             self.assertEqual(state.completed_boundary_time_ms,
                              request.config.output_end_boundary_time_ms)
-            self.assertEqual(tuple(resumed_store.points), full.points)
+            self.assertEqual(tuple(resumed_store.iter_points()), full.points)
             self.assertEqual(
                 run_bounded_historical_market_replay(bounded, runtime_state=state).diagnostics,
                 full.diagnostics)

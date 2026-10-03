@@ -8,6 +8,8 @@ modify V1, the replay dataset, or the fixed experiment suite.
 from __future__ import annotations
 
 import argparse
+from .historical_study_runtime import CompactStudyReplay
+
 from collections import Counter
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
@@ -153,7 +155,9 @@ class HistoricalMarkTradeExtensionPrepared:
 
     def __post_init__(self):
         if (not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
-                or not isinstance(self.replay_result, HistoricalMarketReplayResult)
+                or not (isinstance(self.replay_result, HistoricalMarketReplayResult)
+                        or (self.study_phase is not None
+                            and isinstance(self.replay_result, CompactStudyReplay)))
                 or ((self.partition_plan is None) == (self.study_phase is None))
                 or (self.partition_plan is not None
                     and not isinstance(self.partition_plan, ReplayPartitionPlan))

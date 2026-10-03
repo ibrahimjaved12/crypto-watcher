@@ -127,6 +127,9 @@ from .historical_replay import (
     run_historical_market_replay,
 )
 from .historical_replay_runtime import ReplayCheckpointStore
+from .historical_study_runtime import (
+    CompactStudyReplay, create_study_point_stream, run_stage,
+)
 from .historical_taker_flow_extension import (
     TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
     _partition_summaries as _taker_summaries,
@@ -920,7 +923,7 @@ def _label_price_evidence(dataset, archive_root, period):
         dataset.archive_manifest.content_sha256, start - MINUTE_MS, label_end)
 
 
-def _build_v1_evidence(period, replay_points):
+def _build_v1_evidence(period, replay_points, *, retain_branch=True):
     classifier_config = MarketClassifierConfig()
     lifecycle_config = MarketEpisodeLifecycleConfig()
     lifecycle_state = None
@@ -934,7 +937,8 @@ def _build_v1_evidence(period, replay_points):
             replay_point.movement_evaluation, replay_point.source_time_evidence,
             lifecycle_state, classifier_config, lifecycle_config)
         lifecycle_state = lifecycle.next_state
-        branch_by_boundary[boundary] = (classification, lifecycle)
+        if retain_branch:
+            branch_by_boundary[boundary] = (classification, lifecycle)
         if not period.start_boundary_time_ms <= boundary < period.end_boundary_time_ms:
             continue
         primary = classification.windows[5]
@@ -1023,7 +1027,8 @@ def _record_candidate_bundle(period, descriptor, result):
 
 
 def _candidate_execution(prepared_period, supplementary, hmm_model,
-                         runtime_metrics: StudyPeriodRuntimeMetrics | None = None):
+                         runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
+                         *, stage_selector=None):
     period = prepared_period.period
     dataset = prepared_period.archive_dataset
     replay = prepared_period.canonical_replay_result
@@ -1039,17 +1044,20 @@ def _candidate_execution(prepared_period, supplementary, hmm_model,
     classifier_config = MarketClassifierConfig()
     lifecycle_config = MarketEpisodeLifecycleConfig()
     core_started_ns = time.perf_counter_ns() if runtime_metrics is not None else None
+    hmm_block = hmm_model_sha = None
     try:
-        hmm_records, hmm_summary, hmm_block, hmm_model_sha = _hmm_study_evidence(
-            period, points, hmm_model)
-        records.extend(hmm_records)
-        native_summaries.append({
-            "experiment_id": "EXP-75-09", "algorithm_version": HMM_ALGORITHM_VERSION,
-            "config_version": HMM_CONFIG_V1.version, "summary": hmm_summary,
-            "result_sha256": _digest(hmm_records if hmm_records else hmm_block),
-        })
-        for descriptor in EXPERIMENT_SUITE_V1:
-            if descriptor.experiment_id == "EXP-75-09":
+        if stage_selector in (None, "hmm"):
+            hmm_records, hmm_summary, hmm_block, hmm_model_sha = _hmm_study_evidence(
+                period, points, hmm_model)
+            records.extend(hmm_records)
+            native_summaries.append({
+                "experiment_id": "EXP-75-09", "algorithm_version": HMM_ALGORITHM_VERSION,
+                "config_version": HMM_CONFIG_V1.version, "summary": hmm_summary,
+                "result_sha256": _digest(hmm_records if hmm_records else hmm_block),
+            })
+        for descriptor_index, descriptor in enumerate(EXPERIMENT_SUITE_V1):
+            if (descriptor.experiment_id == "EXP-75-09"
+                    or stage_selector not in (None, f"fixed-{descriptor_index:02d}")):
                 continue
             bocpd_field = ("bocpd_seconds"
                            if descriptor.experiment_id == "EXP-75-04B" else None)
@@ -1073,38 +1081,42 @@ def _candidate_execution(prepared_period, supplementary, hmm_model,
             runtime_metrics.record_elapsed_ns(
                 "core_experiment_seconds", time.perf_counter_ns() - core_started_ns)
 
-    # ATR 06B shares one suite pass; the same result supplies native summaries
-    # and compact candidate evidence for each preregistered ATR configuration.
-    with _runtime_measure(runtime_metrics, "atr_06b_seconds"):
-        atr_results = run_market_state_atr_normalization_suite(
-            points, dataset.ohlc_evidence, replay.manifest,
-            classifier_config=classifier_config, lifecycle_config=lifecycle_config,
-            canonical_branch_by_boundary=canonical_branch_by_boundary)
-        for result in atr_results:
-            descriptor = SimpleNamespace(
-                experiment_id="EXP-75-06B", algorithm_version=ATR_ALGORITHM_VERSION,
-                config_version=result.atr_config.version)
-            bundle = adapt_candidate_result(period, descriptor, result)
-            records.extend(bundle.records)
-            native_summaries.append({
-                "experiment_id": "EXP-75-06B", "algorithm_version": ATR_ALGORITHM_VERSION,
-                "config_version": result.atr_config.version,
-                "summary": bundle.native_summaries,
-                "result_sha256": bundle.result_sha256,
-                "evidence_record_count": len(bundle.records),
-            })
-        del atr_results
+    # One configuration per disposable worker in the bounded path.
+    if stage_selector is None or stage_selector.startswith("atr-"):
+        with _runtime_measure(runtime_metrics, "atr_06b_seconds"):
+            kwargs = {} if stage_selector is None else {
+                "configurations": (ATR_CONFIGURATIONS[int(stage_selector.split("-")[1])],)}
+            atr_results = run_market_state_atr_normalization_suite(
+                points, dataset.ohlc_evidence, replay.manifest,
+                classifier_config=classifier_config, lifecycle_config=lifecycle_config,
+                canonical_branch_by_boundary=canonical_branch_by_boundary, **kwargs)
+            for result in atr_results:
+                descriptor = SimpleNamespace(
+                    experiment_id="EXP-75-06B", algorithm_version=ATR_ALGORITHM_VERSION,
+                    config_version=result.atr_config.version)
+                bundle = adapt_candidate_result(period, descriptor, result)
+                records.extend(bundle.records)
+                native_summaries.append({
+                    "experiment_id": "EXP-75-06B", "algorithm_version": ATR_ALGORITHM_VERSION,
+                    "config_version": result.atr_config.version,
+                    "summary": bundle.native_summaries,
+                    "result_sha256": bundle.result_sha256,
+                    "evidence_record_count": len(bundle.records),
+                })
+                del result, bundle
+            del atr_results
 
     # Build existing extension Prepared contracts around the same dataset,
     # replay and uniform-phase point stream; no from-archive helper is called.
     symbols = replay.manifest.configured_universe
-    with _runtime_measure(runtime_metrics, "taker_flow_seconds"):
-        taker_points = build_historical_study_taker_flow_points(
-            dataset, replay, points, period.phase)
-        taker_summary = _taker_summaries(taker_points, symbols)
-        _append_extension_records(records, native_summaries, period, "EXP-75-12",
-                                  TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
-                                  taker_points, taker_summary[period.phase])
+    if stage_selector in (None, "taker-flow"):
+        with _runtime_measure(runtime_metrics, "taker_flow_seconds"):
+            taker_points = build_historical_study_taker_flow_points(
+                dataset, replay, points, period.phase)
+            taker_summary = _taker_summaries(taker_points, symbols)
+            _append_extension_records(records, native_summaries, period, "EXP-75-12",
+                                      TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
+                                      taker_points, taker_summary[period.phase])
 
     extension_specs = (
         ("mark_trade", "EXP-75-10", MARK_TRADE_ALGORITHM_VERSION,
@@ -1127,6 +1139,8 @@ def _candidate_execution(prepared_period, supplementary, hmm_model,
     extension_reports = {}
     for (name, experiment_id, algorithm, config, prepared_type, evidence_field,
          root_field, builder, summarize) in extension_specs:
+        if stage_selector not in (None, name):
+            continue
         with _runtime_measure(runtime_metrics, f"{name}_seconds"):
             source = supplementary.get(name)
             source_coverage = source["coverage"]
@@ -1164,6 +1178,69 @@ def _candidate_execution(prepared_period, supplementary, hmm_model,
 
     return (tuple(records), tuple(native_summaries), fixed_identities,
             extension_reports, hmm_block, hmm_model_sha)
+
+
+def _stage_prepared(prepared, selector):
+    # Pure fixed candidates, V1 and event context have no archive/provider handle.
+    dataset = prepared.archive_dataset
+    if selector in ("v1", "event-context", "hmm") or selector.startswith("fixed-"):
+        dataset = None
+    elif selector.startswith("atr-"):
+        dataset = SimpleNamespace(ohlc_evidence=dataset.ohlc_evidence)
+    return SimpleNamespace(**{**vars(prepared), "archive_dataset": dataset})
+
+
+def _stage_science_identity(selector):
+    if selector == "hmm" or selector.startswith("fixed-"):
+        descriptor = (next(item for item in EXPERIMENT_SUITE_V1 if item.experiment_id == "EXP-75-09")
+                      if selector == "hmm" else EXPERIMENT_SUITE_V1[int(selector.split("-")[1])])
+        return {"experiment_id": descriptor.experiment_id,
+                "algorithm_version": descriptor.algorithm_version,
+                "config_version": descriptor.config_version}
+    if selector.startswith("atr-"):
+        return {"experiment_id": "EXP-75-06B", "algorithm_version": ATR_ALGORITHM_VERSION,
+                "config_version": ATR_CONFIGURATIONS[int(selector.split("-")[1])].version}
+    identity = {
+        "taker-flow": ("EXP-75-12", TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION),
+        "mark_trade": ("EXP-75-10", MARK_TRADE_ALGORITHM_VERSION, MARK_TRADE_CONFIG_VERSION),
+        "open_interest": ("EXP-75-11-OI", OI_ALGORITHM_VERSION, OI_CONFIG_VERSION),
+        "funding": ("EXP-75-11-FUNDING", FUNDING_ALGORITHM_VERSION, FUNDING_CONFIG_VERSION),
+        "liquidation": ("EXP-75-11-LIQUIDATION", LIQ_ALGORITHM_VERSION, LIQ_CONFIG_VERSION),
+    }[selector]
+    return dict(zip(("experiment_id", "algorithm_version", "config_version"), identity))
+
+
+def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=None,
+                                runtime_metrics=None):
+    stream = prepared.canonical_replay_result.points
+    selectors = ("hmm", *(f"fixed-{index:02d}" for index, item in enumerate(EXPERIMENT_SUITE_V1)
+                          if item.experiment_id != "EXP-75-09"),
+                 *(f"atr-{index}" for index in range(len(ATR_CONFIGURATIONS))),
+                 "taker-flow", "mark_trade", "open_interest", "funding", "liquidation")
+    records, summaries, reports = [], [], {}
+    hmm_block = hmm_sha = identities = None
+    for selector in selectors:
+        source = {selector: supplementary[selector]} if selector in supplementary else {}
+        request = {"action": "candidate", "prepared": _stage_prepared(prepared, selector),
+                   "supplementary": source, "hmm_model": hmm_model,
+                   "selector": selector, "scientific_stage": _stage_science_identity(selector),
+                   "supplementary_source_sha256": _digest(source)}
+        timing_field = ("core_experiment_seconds" if selector == "hmm" or selector.startswith("fixed-")
+                        else "atr_06b_seconds" if selector.startswith("atr-")
+                        else "taker_flow_seconds" if selector == "taker-flow"
+                        else f"{selector}_seconds")
+        bocpd_field = ("bocpd_seconds" if request["scientific_stage"]["experiment_id"] == "EXP-75-04B"
+                       else None)
+        with _runtime_measure(runtime_metrics, timing_field), _runtime_measure(runtime_metrics, bocpd_field):
+            result = run_stage(stream, selector, request, progress=progress)
+        stage_records, stage_summaries, fixed, extension, block, model_sha = result
+        records.extend(stage_records)
+        summaries.extend(stage_summaries)
+        reports.update(extension)
+        identities = fixed
+        if selector == "hmm":
+            hmm_block, hmm_sha = block, model_sha
+    return tuple(records), tuple(summaries), identities, reports, hmm_block, hmm_sha
 
 
 def _append_extension_records(records, summaries, period, experiment_id,
@@ -1447,18 +1524,27 @@ def _event_time_v1_context(prepared_period, candidate_records):
     }))
     if not event_times:
         return ()
-    branch_by_boundary = prepared_period.canonical_v1_branch_by_boundary
-    replay_by_boundary = {
-        item.evaluation_boundary_time_ms: item
-        for item in prepared_period.canonical_replay_result.points
-    }
+    requested = set(event_times)
     records = []
-    for boundary in event_times:
-        branch = branch_by_boundary.get(boundary)
-        replay_point = replay_by_boundary.get(boundary)
-        if branch is None or replay_point is None:
-            raise ValueError("causal event lacks exact canonical V1 branch context")
-        classification, lifecycle = branch
+    lifecycle_state = None
+    classifier_config = MarketClassifierConfig()
+    lifecycle_config = MarketEpisodeLifecycleConfig()
+    branch_map = prepared_period.canonical_v1_branch_by_boundary
+    for replay_point in prepared_period.canonical_replay_result.points:
+        boundary = replay_point.evaluation_boundary_time_ms
+        if branch_map is None:
+            classification, lifecycle = advance_canonical_branch(
+                replay_point.movement_evaluation, replay_point.source_time_evidence,
+                lifecycle_state, classifier_config, lifecycle_config)
+            lifecycle_state = lifecycle.next_state
+        elif boundary in requested:
+            branch = branch_map.get(boundary)
+            if branch is None:
+                raise ValueError("causal event lacks exact canonical V1 branch context")
+            classification, lifecycle = branch
+        if boundary not in requested:
+            continue
+        requested.remove(boundary)
         if (getattr(replay_point.movement_evaluation,
                     "evaluation_boundary_time_ms", None) != boundary):
             raise ValueError("event-time V1 context boundary mismatch")
@@ -1482,6 +1568,8 @@ def _event_time_v1_context(prepared_period, candidate_records):
                 "price_type": movement.price_type,
             },
         })
+    if requested:
+        raise ValueError("causal event lacks exact canonical V1 branch context")
     return tuple(records)
 
 
@@ -1642,17 +1730,25 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
                     config.output_end_boundary_time_ms, progress=progress)
                 state = store.load_latest()
                 partial = run_bounded_historical_market_replay(
-                    dataset, runtime_state=state, boundary_callback=store.add_point)
+                    dataset, runtime_state=state, boundary_callback=store.add_point,
+                    retain_points=False)
                 if not store._complete:
                     raise ValueError("replay ended without a complete durable checkpoint")
-                all_points = tuple(store.points)
-                replay = HistoricalMarketReplayResult(
-                    partial.manifest, all_points, partial.diagnostics,
-                    HistoricalReplayCheckpoint(run_manifest.run_fingerprint,
-                                               all_points[-1].evaluation_boundary_time_ms,
-                                               all_points[-1].point_id))
+                stream = create_study_point_stream(store)
+                replay = CompactStudyReplay(partial.manifest, stream, partial.diagnostics,
+                                            partial.final_checkpoint)
     finally:
         dataset.close()
+    if checkpoint_root is not None:
+        prepared_period = SimpleNamespace(
+            period=period, archive_dataset=dataset, canonical_replay_result=replay,
+            experiment_points=None, canonical_v1_branch_by_boundary=None,
+            study_manifest_sha256=manifest.manifest_sha256,
+            core_eligibility_sha256=eligibility.eligibility_sha256, code_revision=code_revision)
+        with _runtime_measure(runtime_metrics, "v1_preparation_seconds"):
+            v1_records, v1_state_by_boundary = run_stage(
+                stream, "v1", {"action": "v1", "prepared": _stage_prepared(prepared_period, "v1")}, progress=progress)
+        return prepared_period, frozen_coverage, v1_records, v1_state_by_boundary
     with _runtime_measure(runtime_metrics, "v1_preparation_seconds"):
         points = _study_experiment_points(replay, period)
         v1_records, v1_state_by_boundary, canonical_branch_by_boundary = (
@@ -1693,7 +1789,10 @@ def _execute_period(
         raise StudyArtifactConflictError(
             "supplementary source packages changed since coverage was frozen")
 
-    if runtime_metrics is None:
+    if isinstance(replay, CompactStudyReplay):
+        extension_results = _staged_candidate_execution(
+            prepared_period, supplementary, hmm_model, progress=progress, runtime_metrics=runtime_metrics)
+    elif runtime_metrics is None:
         extension_results = _candidate_execution(
             prepared_period, supplementary, hmm_model)
     else:
@@ -1702,13 +1801,23 @@ def _execute_period(
     (candidate_records, native_summaries, fixed_identities,
      extension_reports, hmm_block, hmm_model_sha) = extension_results
     candidate_records = tuple((*candidate_records, *v1_records))
-    event_time_v1_context = _event_time_v1_context(prepared_period, candidate_records)
+    event_time_v1_context = (run_stage(
+        replay.points, "event-context", {"action": "event-context",
+            "prepared": _stage_prepared(prepared_period, "event-context"), "records": candidate_records}, progress=progress)
+        if isinstance(replay, CompactStudyReplay) else
+        _event_time_v1_context(prepared_period, candidate_records))
     bocpd_onset_evidence = _bocpd_onset_evidence(candidate_records)
     with _runtime_measure(runtime_metrics, "forward_label_evidence_seconds"):
         forward_evidence = _label_price_evidence(dataset, archive_root, period)
     with _runtime_measure(runtime_metrics, "forward_outcomes_seconds"):
-        continuous, events, state_outcomes = _continuous_and_event_outcomes(
-            forward_evidence, candidate_records, v1_state_by_boundary, period)
+        if isinstance(replay, CompactStudyReplay):
+            continuous, events, state_outcomes = run_stage(
+                replay.points, "outcomes", {"action": "outcomes", "period": period,
+                    "forward_evidence": forward_evidence, "records": candidate_records,
+                    "states": v1_state_by_boundary}, progress=progress)
+        else:
+            continuous, events, state_outcomes = _continuous_and_event_outcomes(
+                forward_evidence, candidate_records, v1_state_by_boundary, period)
     continuous_state_labels = tuple(item for item in state_outcomes
                                     if item["experiment_id"] == "CONTINUOUS_GRID")
     event_state_labels = tuple(item for item in state_outcomes

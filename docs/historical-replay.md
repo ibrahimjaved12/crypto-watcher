@@ -734,3 +734,107 @@ never receives forward labels. Secondary V1 state paths are censored whenever
 their terminal point is outside the selected day's replay interval; an
 evaluable path with no reversal records `CENSORED_NO_REVERSAL`, while gaps in
 the V1 path make the reversal label unavailable.
+
+### Issue #152 post-replay repair and acceptance gate
+
+PR #156 bounded raw archive replay and added durable replay resume. The real
+24-hour acceptance run completed all 17,281 boundaries and wrote
+`REPLAY_COMPLETE`, then OOM-killed during post-replay processing before the
+period report was finalized. `/usr/bin/time` recorded 10,489,340 kB peak RSS;
+the kernel recorded 10,298,832 kB anonymous RSS at the kill. Those failed-run
+checkpoints are diagnostic evidence, not reusable input for the repaired
+runtime.
+
+The default study execution now uses this local runtime pipeline:
+
+```text
+verified bounded archive -> canonical replay (retain_points=False)
+  -> validated hourly checkpoint chain -> compact study-points/points.jsonl
+  -> one fresh Python interpreter per scientific stage -> post-replay/*.json
+  -> parent assembly of the existing scientific period report
+```
+
+The replay core keeps its legacy materialized default. The study path emits the
+same point to its checkpoint callback without appending it to a full-day list.
+The checkpoint store retains cumulative counts and the current hourly chunk;
+validation/resume decodes and releases one hourly chunk at a time. Its
+`iter_points()` API validates the chain before streaming exact replay values.
+
+The compact stream is a projection of completed validated replay, containing
+point ID, boundary, exact movement evaluation, source-time evidence and uniform
+phase. It contains no endpoint buckets, collector source states or replay-clock
+objects. It is atomically published and checked for canonical bytes, stream
+SHA, count, contiguous boundaries, canonical point IDs and phase before reuse.
+Its metadata binds the complete replay identity (including both scientific
+producer and actual runtime Git revisions, study/coverage manifest SHAs,
+period/date/phase, run fingerprint, archive identities and replay versions),
+final checkpoint SHA, point count and first/last boundary. Its operational
+schema is `historical-study-point-spool-v1`.
+
+Canonical V1 runs sequentially in its own worker and returns only evidence and
+the compact boundary-to-direction path. Fixed candidates use the existing
+`canonical_branch_by_boundary=None` path; the parent retains no full-day
+classification/lifecycle map. Sparse event context is produced in a separate
+worker by one chronological scan of the compact stream, advancing the same V1
+branch at every boundary.
+
+The stage order is V1 preparation, HMM study handling, each non-HMM fixed-suite
+**configuration** in registered order, one ATR configuration per worker, taker
+flow, mark/trade, open interest, funding, liquidation, then sparse event context
+and forward outcomes. V1 evidence is appended after candidate evidence exactly
+as before. Each fixed stage calls its registered runner and immediately reduces
+its native result through the existing candidate evidence adapter. ATR calls
+the existing suite with exactly one configuration. Extension study contracts
+accept a distinct compact replay projection and reuse their existing builders
+and formulas; standalone materialized extension APIs remain available. Workers
+use `sys.executable` and an argv list with a fresh interpreter, never a fork of
+the populated parent. Fixed workers receive no archive/provider handle.
+
+Completed stage artifacts are create-only and atomic. Their operational schema
+is `historical-study-stage-v1`; identity includes the spool's complete identity,
+compact stream SHA, stage ID, experiment/algorithm/config identity where
+applicable, supplementary source SHA, and SHA of the complete lossless request.
+The request SHA also binds model, OHLC/taker evidence and required prior compact
+outputs for dependent stages. The stage-result SHA covers this identity and the
+compact result. Restart validates and reuses completed stages, computing missing
+stages only. Conflicting, corrupt or stale inputs fail explicitly; a failed
+worker leaves earlier completed stages available for reuse. Stage cache SHAs,
+worker IDs, progress, RSS and timing never enter scientific report hashes.
+Progress includes `POST_REPLAY_STAGE_STARTED`, `POST_REPLAY_STAGE_COMPLETED`,
+`POST_REPLAY_STAGE_REUSED`, experiment/config identity, stage SHA when available,
+and optional parent/worker current/peak RSS without `psutil`.
+
+Scientific algorithms, versions, dates, phases, universe and five-second
+boundaries are unchanged. Keep the scientific producer revision
+`c277011a3c1d3e0db2c5224e49386a375a6afc59`. Runtime checkpoint binding is still
+exact: checkpoints from `d5023c6cb6dbec7b7a0451562631fd1d8e34834d` are rejected
+by the new runtime. CI parity/retention fixtures are necessary but cannot
+establish real-day memory acceptance.
+
+After GitHub Actions is green, repeat the **three full development-day**
+acceptance run with a NEW output/checkpoint directory. Using the same frozen
+coverage and source roots as the failed run:
+
+```bash
+CODE_REV="c277011a3c1d3e0db2c5224e49386a375a6afc59"
+ACCEPTANCE_OUTPUT="$OUTPUT_ROOT/issue-152-post-replay-acceptance"
+test ! -e "$ACCEPTANCE_OUTPUT"  # Choose another new path if this exists.
+mkdir "$ACCEPTANCE_OUTPUT"
+/usr/bin/time -v -o "$ACCEPTANCE_OUTPUT/resource.txt" \
+python3 -m market_analysis.historical_market_state_study_execution execute \
+  --study-manifest research/historical-market-state-study-v1/selection/historical-market-state-study-v1-manifest.json \
+  --coverage-manifest "$OUTPUT_ROOT/historical-market-state-study-v1-extension-coverage.json" \
+  --archive-root "$CORE_ROOT" \
+  --mark-archive-root "$BINANCE_SUPP_ROOT" \
+  --open-interest-archive-root "$BINANCE_SUPP_ROOT" \
+  --funding-archive-root "$BINANCE_SUPP_ROOT" \
+  --liquidation-archive-root "$LIQUIDATION_ROOT" \
+  --output-dir "$ACCEPTANCE_OUTPUT" \
+  --checkpoint-dir "$ACCEPTANCE_OUTPUT/checkpoints" \
+  --progress-report "$ACCEPTANCE_OUTPUT/progress.jsonl" \
+  --runtime-report "$ACCEPTANCE_OUTPUT/runtime.jsonl" \
+  --phase development --period-limit 3 --code-revision "$CODE_REV"
+```
+
+This manual run is the merge/Issue #152 closure acceptance gate. Do not close
+#152 based on synthetic tests alone or rerun against the old runtime directory.
