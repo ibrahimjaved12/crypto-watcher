@@ -147,12 +147,17 @@ class Conflict(Exception):
         self.status = status
 
 
+class ClaimRefused(RuntimeError):
+    """A valid unclaimed entry refused by Stop, without any reservation."""
+    pass
+
+
 def invocation(key, operation):
     return control.digest({'key': key, 'operation': operation, 'run_id': os.environ['GITHUB_RUN_ID'],
                            'attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'nonce': uuid.uuid4().hex})
 
 
-DIAGNOSTIC_OPERATIONS = {'claim', 'dispatch', 'start', 'stop', 'resume', 'run', 'metadata', 'inputs', 'restore',
+DIAGNOSTIC_OPERATIONS = {'claim', 'claim-refusal', 'dispatch', 'start', 'stop', 'resume', 'run', 'metadata', 'inputs', 'restore',
     'snapshot', 'publish', 'record-receipt', 'install-dependencies', 'validate-parents', 'finalize-study',
     'diagnostic', 'bootstrap', 'validate', 'validate-settings', 'retention-plan', 'retention-apply',
     'cache-restore', 'cache-publish', 'dependency-key', 'setup'}
@@ -489,6 +494,9 @@ def claim(store):
     if not entered:
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             output.write('managed=true\nclaimed=false\n')
+        h = record['handoff']
+        if record['stop_requested'] and h and h['key'] == key and h['state'] in ('INTENT', 'DISPATCHED', 'AMBIGUOUS'):
+            raise ClaimRefused('OWNER_STOP')
         raise ValueError('duplicate/stale/stopped child refused before downloads')
     # Bounded rereads use this same claim identity, never a fresh reservation.
     # get() anchors the returned record and blob to the same immutable commit.
@@ -783,17 +791,20 @@ def reconcile_study(store, actions, record, job):
     steps = {key: remote_steps.get(name) for key, name in STUDY_STEPS.items()}
     entry_details = None
     validation_details = None
-    diagnostic_operation = ('claim' if steps['entry'] == 'failure' and steps['science'] == 'skipped'
-                            else 'validate-parents' if steps['parents'] in ('failure', 'cancelled') else None)
-    if h['state'] == 'CLAIMED' and diagnostic_operation and (not h.get('outcome') or h['outcome'].get('reason') == 'job-outcome-pending'):
+    diagnostic_operation = (('claim' if h['state'] == 'CLAIMED' else 'claim-refusal') if steps['entry'] == 'failure' and steps['science'] == 'skipped'
+                            else 'validate-parents' if h['state'] == 'CLAIMED' and steps['parents'] in ('failure', 'cancelled') else None)
+    if diagnostic_operation and (not h.get('outcome') or h['outcome'].get('reason') == 'job-outcome-pending'):
         # An independent stdlib diagnostic can survive failed local capture or
         # finalization. Missing diagnostic evidence must remain unresolved.
-        path = '/contents/campaigns/' + control.identifier(store.spec['campaign_id']) + '/diagnostics/' + h['run_id'] + '-' + h['attempt'] + '-' + diagnostic_operation + '-' + h['mutation_id'] + '.json'
+        suffix = '' if diagnostic_operation == 'claim-refusal' else '-' + h['mutation_id']
+        path = '/contents/campaigns/' + control.identifier(store.spec['campaign_id']) + '/diagnostics/' + h['run_id'] + '-' + h['attempt'] + '-' + diagnostic_operation + suffix + '.json'
         row = store.api.request(path, missing=True)
         if row:
             details = read(base64.b64decode(row['content'], validate=True))
-            if details.get('run_id') == h['run_id'] and details.get('attempt') == h['attempt'] and details.get('operation') == diagnostic_operation and details.get('handoff_key') == key and details.get('claim_mutation_id') == h.get('mutation_id'):
-                if diagnostic_operation == 'claim':
+            binding_matches = (details.get('category') == 'OWNER_STOP' if diagnostic_operation == 'claim-refusal'
+                               else details.get('claim_mutation_id') == h.get('mutation_id'))
+            if details.get('run_id') == h['run_id'] and details.get('attempt') == h['attempt'] and details.get('operation') == diagnostic_operation and details.get('handoff_key') == key and binding_matches:
+                if diagnostic_operation in ('claim', 'claim-refusal'):
                     entry_details = safe_diagnostic(details)
                 else:
                     validation_details = safe_diagnostic(details)
@@ -937,6 +948,8 @@ if __name__ == '__main__':
     except (Exception, KeyboardInterrupt) as exc:
         details = safe_error(exc, sys.argv[1] if len(sys.argv) > 1 else 'setup')
         if len(sys.argv) > 1 and sys.argv[1] == 'claim':
+            if isinstance(exc, ClaimRefused):
+                details.update(operation='claim-refusal', category='OWNER_STOP')
             if isinstance(exc, OSError) and not isinstance(exc, InterruptedError):
                 details['category'] = 'CAPTURE_UNAVAILABLE'
             # No scientific imports or control-claim.json are needed to record
