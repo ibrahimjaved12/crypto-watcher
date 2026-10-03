@@ -1,0 +1,40 @@
+{
+  "version": "historical-study-campaign-v1",
+  "campaign_id": "development-0-pilot-v1",
+  "runtime_sha": "6f20eb2276f5a67b9615222417d187e477d0a572",
+  "orchestration_sha": "6f20eb2276f5a67b9615222417d187e477d0a572",
+  "producer_revision": "aa981f1cbb4beca699623b2d16c99bb20b73539d",
+  "study_manifest_sha256": "7f863cb6e6d3a39c46f109ba65c1617eb0aef894bb7dff74a6b393b24dc714f9",
+  "coverage_manifest_sha256": "0b2bb170388ffe0cfaae145bcb94d1b1d4bf2a7da8f36dd9a174ab70d063d8b5",
+  "study_file_sha256": "ddbb34ccb93132a72d804303a2e011403e7461f79d31a63efd1e970f10ec3724",
+  "coverage_file_sha256": "f805a6caf64852a5b269ca68462786053df7690cc864dfdbb1a64758f191879f",
+  "dependency_locks": {
+    "requirements.txt": "c199df883aab5d81a7e1e1a8199ac499d78b5ab500e1d8a02c60a4a3637c64d2",
+    "requirements-research.txt": "a23aaf94250a9f53031a592980142245a848e2372b6c6c3093e8260b129265b8"
+  },
+  "expected_membership": {
+    "development": [
+      0
+    ],
+    "validation": [],
+    "test": []
+  },
+  "inputs": {
+    "0": {
+      "release_tag": "inputs-development-0-v1",
+      "manifest_sha256": "be56c609ba57acd44bbf3676f05121f266db7f0185b45f5e87aca1170a7a6e96"
+    }
+  },
+  "max_new_stages": 1,
+  "limits": {
+    "max_transfer_bytes": 5368709120,
+    "max_uncompressed_bytes": 5368709120,
+    "headroom_bytes": 6442450944
+  },
+  "budget": {
+    "ceiling_minutes": 120,
+    "max_runs": 4,
+    "no_progress_cap": 2
+  },
+  "expanded_budget_authorized": false
+}
