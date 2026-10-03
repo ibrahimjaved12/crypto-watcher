@@ -51,7 +51,10 @@ from .experiments.market_state_hmm_regimes import (
     train_hmm_regime_model_from_blocks,
 )
 from .historical_experiment_batch import (
-    EXPERIMENT_SUITE_V1, _canonical_json, report_json_safe,
+    EXPERIMENT_SUITE_V1,
+)
+from .historical_market_state_study_json import (
+    canonical_study_json, study_json_safe as report_json_safe,
 )
 from .historical_market_state_candidate_evidence import (
     CANDIDATE_EVIDENCE_VERSION,
@@ -127,7 +130,7 @@ from .historical_taker_flow_evidence import (
     TAKER_FLOW_AVAILABILITY_BASIS, TAKER_FLOW_BUCKET_RULE,
     TAKER_FLOW_EVIDENCE_SCHEMA_VERSION, TAKER_FLOW_SIDE_MAPPING,
 )
-from .movement_classifier import MarketClassifierConfig
+from .movement_classifier import MarketClassifierConfig, ALGORITHM_VERSION as V1_CLASSIFIER_ALGORITHM_VERSION
 from .market_episode_lifecycle import MarketEpisodeLifecycleConfig
 from .movement_history import MINUTE_MS
 
@@ -312,7 +315,7 @@ class PreparedHistoricalMarketStatePeriod:
 
 
 def _canonical(value) -> str:
-    return _canonical_json(value)
+    return canonical_study_json(value)
 
 
 def _digest(value) -> str:
@@ -1282,6 +1285,60 @@ def _validate_period_report(payload, manifest, period, code_revision, coverage_s
     if payload["bocpd_onset_evidence"] != report_json_safe(_bocpd_onset_evidence(bocpd_records)):
         raise ValueError("BOCPD onset section differs from exact causal candidate evidence")
     return supplied
+
+
+def load_finalized_period_report(path, manifest, period, *, coverage_sha256, code_revision):
+    """Artifact-only gate. Never opens archives or selects other periods."""
+    if not isinstance(code_revision, str) or not code_revision:
+        raise ValueError("explicit Part-B producer revision is required")
+    if period not in manifest.selected_periods:
+        raise ValueError("period is outside the frozen manifest")
+    report = _read_json(Path(path))
+    _validate_period_report(report, manifest, period, code_revision, coverage_sha256)
+    if (report.get('pelt_forward_label_count') != 0 or report.get('pelt_no_causal_outcomes') is not True
+            or any(group.get('experiment_id') == 'EXP-75-04A' for group in report.get('candidate_event_outcomes', ()))):
+        raise ValueError('PELT has acquired causal forward labels')
+    for record in report['candidate_evidence']:
+        reconstructed = HistoricalStudyCandidateEvidence(**{
+            k: v for k, v in record.items() if k != 'candidate_evidence_sha256'})
+        if reconstructed.candidate_evidence_sha256 != record['candidate_evidence_sha256']:
+            raise ValueError('candidate evidence reconstruction mismatch')
+        if reconstructed.experiment_id == 'V1' and (
+                reconstructed.algorithm_version != V1_CLASSIFIER_ALGORITHM_VERSION
+                or reconstructed.config_version != MarketClassifierConfig().version):
+            raise ValueError('V1 evidence classifier identity mismatch')
+        boundary = reconstructed.decision_time_ms
+        if (boundary is not None and not period.start_boundary_time_ms <= boundary < period.end_boundary_time_ms
+                or reconstructed.evidence_kind == 'CONTINUOUS' and (boundary is None or boundary % MINUTE_MS)):
+            raise ValueError('candidate evidence has an invalid exact period/minute boundary')
+    # Bind persisted scientific provenance without re-reading archive bytes.
+    for name in ("core_eligibility_sha256", "core_archive_content_sha256",
+                 "canonical_replay_run_fingerprint", "canonical_replay_diagnostics_sha256"):
+        value = report.get(name)
+        if (not isinstance(value, str) or len(value) != 64
+                or any(c not in "0123456789abcdef" for c in value)):
+            raise ValueError("invalid period scientific provenance: " + name)
+    if report["canonical_replay_diagnostics_sha256"] != _digest(report.get("canonical_replay_diagnostics")):
+        raise ValueError("canonical replay diagnostics hash mismatch")
+    if report["canonical_replay_manifest"].get("run_fingerprint") != report["canonical_replay_run_fingerprint"]:
+        raise ValueError("canonical replay fingerprint mismatch")
+    _verify_hashed_payload(report['canonical_replay_manifest'], 'run_fingerprint', 'canonical replay manifest')
+    if report['canonical_replay_manifest'].get('dataset_content_sha256') != report['core_archive_content_sha256']:
+        raise ValueError('canonical replay archive identity mismatch')
+    label = report.get("forward_label_evidence", {})
+    if (label.get("evidence_version") != FORWARD_OUTCOMES_VERSION
+            or label.get("numeric_policy") != FORWARD_NUMERIC_POLICY
+            or label.get("price_type") != "trade" or label.get("interval") != "1m"
+            or label.get("label_tail_is_not_in_replay_input") is not True
+            or label.get('availability_convention') != 'close_time_ms < decision_time and first_seen_at_ms <= decision_time'
+            or label.get('label_range_start_boundary_time_ms') != period.start_boundary_time_ms - MINUTE_MS
+            or label.get('label_range_end_boundary_time_ms') != period.end_boundary_time_ms + 60 * MINUTE_MS):
+        raise ValueError("forward label provenance mismatch")
+    for name in ('evidence_sha256', 'source_dataset_content_sha256'):
+        value = label.get(name)
+        if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+            raise ValueError('invalid forward label content identity')
+    return report
 
 
 def _validated_period_hmm_block(report, period):
