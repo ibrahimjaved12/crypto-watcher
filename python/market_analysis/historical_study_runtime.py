@@ -24,7 +24,7 @@ import tempfile
 from types import SimpleNamespace
 
 from .experiments.market_state_common import MarketStateExperimentPoint
-from .historical_replay import canonical_replay_point_id
+from .historical_replay import CompactStudyReplay, canonical_replay_point_id
 from .historical_replay_runtime import (
     _atomic_write, _canonical_bytes, _decode, _read_json_bytes, _sha,
 )
@@ -33,6 +33,19 @@ from .movement_metrics import MarketMovementEvaluation
 
 SPOOL_VERSION = "historical-study-point-spool-v1"
 STAGE_VERSION = "historical-study-stage-v1"
+
+
+def current_runtime_implementation_revision() -> str:
+    """Resolve the Git revision containing this local runtime implementation."""
+    root = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True)
+    revision = completed.stdout.strip()
+    if (len(revision) not in (40, 64)
+            or any(character not in "0123456789abcdef" for character in revision)):
+        raise ValueError("could not determine a valid runtime implementation revision")
+    return revision
 
 
 @dataclass(frozen=True)
@@ -46,15 +59,6 @@ class CompactStudyPoint:
     def experiment_point(self):
         return MarketStateExperimentPoint(
             self.movement_evaluation, self.source_time_evidence, self.phase)
-
-
-@dataclass(frozen=True)
-class CompactStudyReplay:
-    """Study-only replay projection; never carries buckets or collector states."""
-    manifest: object
-    points: object
-    diagnostics: object
-    final_checkpoint: object
 
 
 def _compact_decode(row):
@@ -316,35 +320,61 @@ def run_stage(stream, stage_id, request, *, progress=None):
     return result
 
 
-def _worker(job_path):
+def _valid_git_revision(value):
+    return (type(value) is str and len(value) in (40, 64)
+            and all(character in "0123456789abcdef" for character in value))
+
+
+def _verify_worker_runtime_revision(identity):
+    expected = identity.get("runtime_implementation_revision")
+    if not _valid_git_revision(expected):
+        raise ValueError("post-replay job lacks a valid runtime implementation revision")
+    try:
+        actual = current_runtime_implementation_revision()
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise ValueError("could not determine worker runtime implementation revision") from exc
+    if not _valid_git_revision(actual):
+        raise ValueError("could not determine a valid worker runtime implementation revision")
+    if actual != expected:
+        raise ValueError("post-replay worker runtime implementation revision mismatch")
+
+
+def _execute_scientific_stage(request):
     from . import historical_market_state_study_execution as execution
-    job = _read_json_bytes(Path(job_path).read_bytes())
-    raw = Path(job["request_path"]).read_bytes()
-    if _sha(raw) != job["identity"]["request_sha256"]:
-        raise ValueError("post-replay request SHA mismatch")
-    request = decode(_read_json_bytes(raw))
     prepared = request.get("prepared")
     action = request["action"]
     if action == "v1":
-        result = execution._build_v1_evidence(prepared.period,
+        return execution._build_v1_evidence(prepared.period,
                     prepared.canonical_replay_result.points, retain_branch=False)[:2]
-    elif action == "candidate":
+    if action == "candidate":
         compact = tuple(prepared.canonical_replay_result.points)
         prepared.canonical_replay_result = CompactStudyReplay(
             prepared.canonical_replay_result.manifest, compact,
             prepared.canonical_replay_result.diagnostics,
             prepared.canonical_replay_result.final_checkpoint)
         prepared.experiment_points = tuple(point.experiment_point() for point in compact)
-        result = execution._candidate_execution(prepared, request["supplementary"],
+        return execution._candidate_execution(prepared, request["supplementary"],
                     request["hmm_model"], stage_selector=request["selector"])
-    elif action == "event-context":
-        result = execution._event_time_v1_context(prepared, request["records"])
-    elif action == "outcomes":
-        result = execution._continuous_and_event_outcomes(
+    if action == "event-context":
+        return execution._event_time_v1_context(prepared, request["records"])
+    if action == "outcomes":
+        return execution._continuous_and_event_outcomes(
             request["forward_evidence"], request["records"], request["states"], request["period"])
-    else:
-        raise ValueError("unknown post-replay action")
-    body = {"schema_version": STAGE_VERSION, "identity": job["identity"],
+    raise ValueError("unknown post-replay action")
+
+
+def _worker(job_path):
+    job = _read_json_bytes(Path(job_path).read_bytes())
+    if type(job) is not dict or type(job.get("identity")) is not dict:
+        raise ValueError("invalid post-replay worker job")
+    identity = job["identity"]
+    _verify_worker_runtime_revision(identity)
+    raw = Path(job["request_path"]).read_bytes()
+    if _sha(raw) != identity.get("request_sha256"):
+        raise ValueError("post-replay request SHA mismatch")
+    request = decode(_read_json_bytes(raw))
+    result = _execute_scientific_stage(request)
+    body = {"schema_version": STAGE_VERSION, "identity": identity,
             "result": encode(result), "memory": {"process_id": os.getpid(), **memory_usage()}}
     _atomic_write(Path(job["result_path"]), _canonical_bytes(
         {**body, "stage_result_sha256": _sha(_canonical_bytes(body))}))

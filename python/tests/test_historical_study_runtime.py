@@ -77,6 +77,78 @@ def store_for(root, request, manifest, phase="development"):
     }, request.config.output_start_boundary_time_ms, request.config.output_end_boundary_time_ms)
 
 
+class WorkerRuntimeRevisionTests(unittest.TestCase):
+    def _job(self, root, runtime_revision, *, include_runtime_revision=True):
+        request_raw = runtime._canonical_bytes(runtime.encode({"action": "fixture"}))
+        request_path = root / "request.json"
+        result_path = root / "result.json"
+        job_path = root / "job.json"
+        request_path.write_bytes(request_raw)
+        identity = {
+            "scientific_producer_revision": PRODUCER,
+            "request_sha256": runtime._sha(request_raw),
+        }
+        if include_runtime_revision:
+            identity["runtime_implementation_revision"] = runtime_revision
+        job_path.write_bytes(runtime._canonical_bytes({
+            "identity": identity,
+            "request_path": str(request_path),
+            "result_path": str(result_path),
+        }))
+        return job_path, result_path, identity
+
+    def test_worker_runs_on_matching_runtime_revision_independent_of_producer(self):
+        runtime_revision = "a" * 40
+        self.assertNotEqual(runtime_revision, PRODUCER)
+        with TemporaryDirectory() as folder:
+            job_path, result_path, identity = self._job(Path(folder), runtime_revision)
+            with patch.object(runtime, "current_runtime_implementation_revision",
+                              return_value=runtime_revision), \
+                 patch.object(runtime, "_execute_scientific_stage",
+                              return_value={"fixture": "executed"}) as execute:
+                runtime._worker(job_path)
+            execute.assert_called_once_with({"action": "fixture"})
+            result = checkpoints._read_json_bytes(result_path.read_bytes())
+            self.assertEqual(result["identity"], identity)
+            self.assertEqual(runtime.decode(result["result"]), {"fixture": "executed"})
+
+    def test_worker_revision_mismatch_fails_before_execution_or_result_publication(self):
+        with TemporaryDirectory() as folder:
+            job_path, result_path, _ = self._job(Path(folder), "a" * 40)
+            with patch.object(runtime, "current_runtime_implementation_revision",
+                              return_value="b" * 40), \
+                 patch.object(runtime, "_execute_scientific_stage",
+                              side_effect=AssertionError("scientific stage must not run")) as execute:
+                with self.assertRaisesRegex(ValueError, "runtime implementation revision mismatch"):
+                    runtime._worker(job_path)
+            execute.assert_not_called()
+            self.assertFalse(result_path.exists())
+
+    def test_worker_rejects_missing_malformed_or_unavailable_runtime_revision(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            cases = ((None, False), ("not-a-git-revision", True))
+            for value, include_revision in cases:
+                with self.subTest(runtime_revision=value):
+                    job_path, result_path, _ = self._job(
+                        root, value, include_runtime_revision=include_revision)
+                    with patch.object(runtime, "current_runtime_implementation_revision",
+                                      side_effect=AssertionError("invalid identity must fail first")), \
+                         patch.object(runtime, "_execute_scientific_stage") as execute:
+                        with self.assertRaisesRegex(ValueError, "valid runtime implementation revision"):
+                            runtime._worker(job_path)
+                    execute.assert_not_called()
+                    self.assertFalse(result_path.exists())
+            job_path, result_path, _ = self._job(root, "c" * 40)
+            with patch.object(runtime, "current_runtime_implementation_revision",
+                              side_effect=OSError("Git is unavailable")), \
+                 patch.object(runtime, "_execute_scientific_stage") as execute:
+                with self.assertRaisesRegex(ValueError, "could not determine worker runtime"):
+                    runtime._worker(job_path)
+            execute.assert_not_called()
+            self.assertFalse(result_path.exists())
+
+
 class ReplayProjectionTests(unittest.TestCase):
     def test_default_materialized_and_callback_only_points_are_exact(self):
         request = _request(end=OUTPUT + 60_000)
@@ -230,7 +302,7 @@ class ScientificStageParityTests(unittest.TestCase):
         run_bounded_historical_market_replay(dataset, retain_points=False, boundary_callback=store.add_point)
         stream = runtime.create_study_point_stream(store)
         compact = SimpleNamespace(**{**vars(prepared),
-            "canonical_replay_result": runtime.CompactStudyReplay(
+            "canonical_replay_result": replay_module.CompactStudyReplay(
                 replay.manifest, stream, replay.diagnostics, replay.final_checkpoint),
             "experiment_points": None, "canonical_v1_branch_by_boundary": None})
         return prepared, compact, supplementary, model, v1, states
@@ -274,7 +346,7 @@ class ScientificStageParityTests(unittest.TestCase):
                 replay = compact.canonical_replay_result
                 projected = tuple(replay.points)
                 local = SimpleNamespace(**{**vars(compact),
-                    "canonical_replay_result": runtime.CompactStudyReplay(
+                    "canonical_replay_result": replay_module.CompactStudyReplay(
                         replay.manifest, projected, replay.diagnostics, replay.final_checkpoint),
                     "experiment_points": tuple(point.experiment_point() for point in projected)})
                 populated = {}

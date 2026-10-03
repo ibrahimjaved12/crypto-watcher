@@ -7,7 +7,6 @@ not alter V1 state decisions and does not estimate forward returns.
 from __future__ import annotations
 
 import argparse
-from .historical_study_runtime import CompactStudyReplay
 
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
@@ -27,7 +26,8 @@ from .historical_experiment_batch import (
 )
 from .experiments.market_state_common import validate_experiment_points
 from .historical_replay import (
-    HistoricalMarketReplayResult, HistoricalReplayConfig, ReplayPartitionPlan,
+    CompactStudyReplay, HistoricalMarketReplayResult, HistoricalReplayConfig,
+    ReplayPartitionPlan,
     run_historical_market_replay, to_market_state_experiment_points,
 )
 from .historical_taker_flow_evidence import (

@@ -1,8 +1,6 @@
 """Independent historical observed-liquidation context for EXP-75-11; descriptive only."""
 from __future__ import annotations
 
-from .historical_study_runtime import CompactStudyReplay
-
 from collections import Counter
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
@@ -25,7 +23,8 @@ from .historical_liquidation_evidence import (
     TardisLiquidationEvidence, load_tardis_liquidation_evidence,
 )
 from .historical_replay import (
-    HistoricalMarketReplayResult, HistoricalReplayConfig, ReplayPartitionPlan,
+    CompactStudyReplay, HistoricalMarketReplayResult, HistoricalReplayConfig,
+    ReplayPartitionPlan,
     run_historical_market_replay, to_market_state_experiment_points,
 )
 from .movement_metrics import MarketMovementConfig, MarketUniverseInput

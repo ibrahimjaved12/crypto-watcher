@@ -122,13 +122,14 @@ from .historical_liquidation_extension import (
     build_historical_study_liquidation_points,
 )
 from .historical_replay import (
-    HistoricalMarketReplayResult, HistoricalReplayCheckpoint,
+    CompactStudyReplay, HistoricalMarketReplayResult, HistoricalReplayCheckpoint,
     historical_replay_run_manifest, run_bounded_historical_market_replay,
     run_historical_market_replay,
 )
 from .historical_replay_runtime import ReplayCheckpointStore
 from .historical_study_runtime import (
-    CompactStudyReplay, create_study_point_stream, run_stage, stage_dependencies,
+    create_study_point_stream, current_runtime_implementation_revision,
+    run_stage, stage_dependencies,
 )
 from .historical_taker_flow_extension import (
     TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
@@ -2207,14 +2208,7 @@ def freeze_study_hmm_model(
 
 
 def _current_code_revision() -> str:
-    root = Path(__file__).resolve().parents[2]
-    completed = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True)
-    revision = completed.stdout.strip()
-    if not revision:
-        raise ValueError("could not determine code revision")
-    return revision
+    return current_runtime_implementation_revision()
 
 
 def build_cli_parser() -> argparse.ArgumentParser:

@@ -368,6 +368,15 @@ class HistoricalMarketReplayResult:
 
 
 @dataclass(frozen=True)
+class CompactStudyReplay:
+    """Minimal replay projection shared by study adapters and extensions."""
+    manifest: HistoricalReplayRunManifest
+    points: object
+    diagnostics: HistoricalReplayDiagnostics
+    final_checkpoint: HistoricalReplayCheckpoint | None
+
+
+@dataclass(frozen=True)
 class ReplayPartitionPlan:
     development_end_boundary_time_ms: int
     validation_end_boundary_time_ms: int

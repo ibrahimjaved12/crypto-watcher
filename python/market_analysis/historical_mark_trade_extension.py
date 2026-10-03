@@ -8,7 +8,6 @@ modify V1, the replay dataset, or the fixed experiment suite.
 from __future__ import annotations
 
 import argparse
-from .historical_study_runtime import CompactStudyReplay
 
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -39,7 +38,8 @@ from .historical_ohlc_evidence import (
     BinanceTradeOHLCEvidence, CompletedTradeOHLCCandle,
 )
 from .historical_replay import (
-    HistoricalMarketReplayResult, HistoricalReplayConfig, ReplayPartitionPlan,
+    CompactStudyReplay, HistoricalMarketReplayResult, HistoricalReplayConfig,
+    ReplayPartitionPlan,
     run_historical_market_replay, to_market_state_experiment_points,
 )
 from .movement_history import MINUTE_MS
