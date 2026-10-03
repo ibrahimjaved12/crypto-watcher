@@ -268,7 +268,8 @@ class ScientificStageParityTests(unittest.TestCase):
             try:
                 stream = compact.canonical_replay_result.points
                 actual_v1, actual_states = runtime.run_stage(stream, "v1", {
-                    "action": "v1", "prepared": execution._stage_prepared(compact, "v1")})
+                    "action": "v1", "prepared": execution._stage_prepared(compact, "v1"),
+                    "scientific_stage": execution._stage_science_identity("v1")})
                 self.assertEqual(actual_v1, v1)
                 self.assertEqual(actual_states, states)
                 self.assertEqual(execution._build_v1_evidence(prepared.period,
@@ -345,6 +346,14 @@ class ScientificStageParityTests(unittest.TestCase):
                     execution._staged_candidate_execution(compact, supplementary, model)
                 path = stream.root.parent / "post-replay" / "fixed-00.json"
                 raw = path.read_bytes()
+                metadata = checkpoints._read_json_bytes(raw)
+                identity = metadata["identity"]
+                for key in ("runtime_implementation_revision", "scientific_producer_revision",
+                            "study_manifest_sha256", "extension_coverage_manifest_sha256",
+                            "compact_stream_sha256", "run_fingerprint", "stage_id",
+                            "supplementary_source_sha256", "request_sha256"):
+                    with self.subTest(stale_stage_identity=key), self.assertRaises(ValueError):
+                        runtime._load_stage(path, {**identity, key: "conflicting-identity"})
                 path.write_bytes(raw[:-1])
                 with self.assertRaises(ValueError):
                     execution._staged_candidate_execution(compact, supplementary, model)

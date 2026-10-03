@@ -253,6 +253,26 @@ def _load_stage(path, identity):
     return decode(body["result"]), sha, body.get("memory", {})
 
 
+def stage_dependencies(stream, stage_ids):
+    """Bind dependent requests to the exact validated upstream cache identities."""
+    dependencies = []
+    for stage_id in stage_ids:
+        path = stream.root.parent / "post-replay" / f"{stage_id}.json"
+        raw = path.read_bytes()
+        payload = _read_json_bytes(raw)
+        body = dict(payload)
+        sha = body.pop("stage_result_sha256", None)
+        identity = body.get("identity", {})
+        if (raw != _canonical_bytes(payload) or sha != _sha(_canonical_bytes(body))
+                or any(identity.get(key) != value for key, value in stream.identity.items())
+                or identity.get("compact_stream_sha256") != stream.metadata["stream_sha256"]
+                or identity.get("stage_id") != stage_id):
+            raise ValueError("post-replay dependency identity/SHA mismatch")
+        dependencies.append({"stage_id": stage_id,
+            "stage_identity_sha256": _sha(_canonical_bytes(identity)), "stage_result_sha256": sha})
+    return tuple(dependencies)
+
+
 def run_stage(stream, stage_id, request, *, progress=None):
     """Validate/reuse or spawn one fresh interpreter; never fork the parent heap."""
     root = stream.root.parent / "post-replay"
@@ -262,7 +282,10 @@ def run_stage(stream, stage_id, request, *, progress=None):
     identity = {**stream.identity, "compact_stream_sha256": stream.metadata["stream_sha256"],
                 "stage_id": stage_id, "request_sha256": _sha(request_raw),
                 "scientific_stage": request.get("scientific_stage"),
-                "supplementary_source_sha256": request.get("supplementary_source_sha256")}
+                "supplementary_source_sha256": request.get("supplementary_source_sha256"),
+                "hmm_model_sha256": getattr(request.get("hmm_model"), "model_sha256", None),
+                "required_stage_results": request.get("required_stage_results", ())}
+    identity = _read_json_bytes(_canonical_bytes(identity))
     path = root / f"{stage_id}.json"
     if path.exists():
         result, sha, memory = _load_stage(path, identity)

@@ -794,6 +794,8 @@ Completed stage artifacts are create-only and atomic. Their operational schema
 is `historical-study-stage-v1`; identity includes the spool's complete identity,
 compact stream SHA, stage ID, experiment/algorithm/config identity where
 applicable, supplementary source SHA, and SHA of the complete lossless request.
+HMM stages also bind the model SHA explicitly. Dependent event-context/outcome
+stages bind every required upstream stage identity SHA and stage result SHA.
 The request SHA also binds model, OHLC/taker evidence and required prior compact
 outputs for dependent stages. The stage-result SHA covers this identity and the
 compact result. Restart validates and reuses completed stages, computing missing

@@ -128,7 +128,7 @@ from .historical_replay import (
 )
 from .historical_replay_runtime import ReplayCheckpointStore
 from .historical_study_runtime import (
-    CompactStudyReplay, create_study_point_stream, run_stage,
+    CompactStudyReplay, create_study_point_stream, run_stage, stage_dependencies,
 )
 from .historical_taker_flow_extension import (
     TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
@@ -1191,6 +1191,16 @@ def _stage_prepared(prepared, selector):
 
 
 def _stage_science_identity(selector):
+    if selector in ("v1", "event-context"):
+        from .market_episode_lifecycle import ALGORITHM_VERSION as lifecycle_algorithm
+        return {"experiment_id": "V1", "algorithm_version": V1_CLASSIFIER_ALGORITHM_VERSION,
+                "config_version": MarketClassifierConfig().version,
+                "lifecycle_algorithm_version": lifecycle_algorithm,
+                "lifecycle_config_version": MarketEpisodeLifecycleConfig().version,
+                "event_context_version": EVENT_TIME_V1_CONTEXT_VERSION if selector == "event-context" else None}
+    if selector == "outcomes":
+        return {"algorithm_version": FORWARD_OUTCOMES_VERSION,
+                "numeric_policy": FORWARD_NUMERIC_POLICY, "horizons_minutes": HORIZONS_MINUTES}
     if selector == "hmm" or selector.startswith("fixed-"):
         descriptor = (next(item for item in EXPERIMENT_SUITE_V1 if item.experiment_id == "EXP-75-09")
                       if selector == "hmm" else EXPERIMENT_SUITE_V1[int(selector.split("-")[1])])
@@ -1210,13 +1220,16 @@ def _stage_science_identity(selector):
     return dict(zip(("experiment_id", "algorithm_version", "config_version"), identity))
 
 
-def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=None,
-                                runtime_metrics=None):
-    stream = prepared.canonical_replay_result.points
-    selectors = ("hmm", *(f"fixed-{index:02d}" for index, item in enumerate(EXPERIMENT_SUITE_V1)
+def _candidate_stage_selectors():
+    return ("hmm", *(f"fixed-{index:02d}" for index, item in enumerate(EXPERIMENT_SUITE_V1)
                           if item.experiment_id != "EXP-75-09"),
                  *(f"atr-{index}" for index in range(len(ATR_CONFIGURATIONS))),
                  "taker-flow", "mark_trade", "open_interest", "funding", "liquidation")
+
+def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=None,
+                                runtime_metrics=None):
+    stream = prepared.canonical_replay_result.points
+    selectors = _candidate_stage_selectors()
     records, summaries, reports = [], [], {}
     hmm_block = hmm_sha = identities = None
     for selector in selectors:
@@ -1224,7 +1237,10 @@ def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=
         request = {"action": "candidate", "prepared": _stage_prepared(prepared, selector),
                    "supplementary": source, "hmm_model": hmm_model,
                    "selector": selector, "scientific_stage": _stage_science_identity(selector),
-                   "supplementary_source_sha256": _digest(source)}
+                   "supplementary_source_sha256": _digest({
+                       name: {"coverage": item["coverage"], "evidence_sha256":
+                              getattr(item["evidence"], "evidence_sha256", None)}
+                       for name, item in source.items()})}
         timing_field = ("core_experiment_seconds" if selector == "hmm" or selector.startswith("fixed-")
                         else "atr_06b_seconds" if selector.startswith("atr-")
                         else "taker_flow_seconds" if selector == "taker-flow"
@@ -1747,7 +1763,8 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
             core_eligibility_sha256=eligibility.eligibility_sha256, code_revision=code_revision)
         with _runtime_measure(runtime_metrics, "v1_preparation_seconds"):
             v1_records, v1_state_by_boundary = run_stage(
-                stream, "v1", {"action": "v1", "prepared": _stage_prepared(prepared_period, "v1")}, progress=progress)
+                stream, "v1", {"action": "v1", "prepared": _stage_prepared(prepared_period, "v1"),
+                            "scientific_stage": _stage_science_identity("v1")}, progress=progress)
         return prepared_period, frozen_coverage, v1_records, v1_state_by_boundary
     with _runtime_measure(runtime_metrics, "v1_preparation_seconds"):
         points = _study_experiment_points(replay, period)
@@ -1801,9 +1818,13 @@ def _execute_period(
     (candidate_records, native_summaries, fixed_identities,
      extension_reports, hmm_block, hmm_model_sha) = extension_results
     candidate_records = tuple((*candidate_records, *v1_records))
+    dependencies = (stage_dependencies(replay.points, ("v1", *_candidate_stage_selectors()))
+                    if isinstance(replay, CompactStudyReplay) else ())
     event_time_v1_context = (run_stage(
         replay.points, "event-context", {"action": "event-context",
-            "prepared": _stage_prepared(prepared_period, "event-context"), "records": candidate_records}, progress=progress)
+            "prepared": _stage_prepared(prepared_period, "event-context"), "records": candidate_records,
+            "scientific_stage": _stage_science_identity("event-context"),
+            "required_stage_results": dependencies}, progress=progress)
         if isinstance(replay, CompactStudyReplay) else
         _event_time_v1_context(prepared_period, candidate_records))
     bocpd_onset_evidence = _bocpd_onset_evidence(candidate_records)
@@ -1814,7 +1835,8 @@ def _execute_period(
             continuous, events, state_outcomes = run_stage(
                 replay.points, "outcomes", {"action": "outcomes", "period": period,
                     "forward_evidence": forward_evidence, "records": candidate_records,
-                    "states": v1_state_by_boundary}, progress=progress)
+                    "states": v1_state_by_boundary, "scientific_stage": _stage_science_identity("outcomes"),
+                    "required_stage_results": dependencies}, progress=progress)
         else:
             continuous, events, state_outcomes = _continuous_and_event_outcomes(
                 forward_evidence, candidate_records, v1_state_by_boundary, period)
