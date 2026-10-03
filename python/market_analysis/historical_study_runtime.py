@@ -245,6 +245,9 @@ def memory_usage():
 def _load_stage(path, identity):
     raw = path.read_bytes()
     payload = _read_json_bytes(raw)
+    if type(payload) is not dict or set(payload) != {
+            "schema_version", "identity", "result", "memory", "stage_result_sha256"}:
+        raise ValueError("invalid post-replay stage fields")
     body = dict(payload)
     sha = body.pop("stage_result_sha256", None)
     if (raw != _canonical_bytes(payload) or sha != _sha(_canonical_bytes(body))

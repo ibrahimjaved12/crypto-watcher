@@ -210,7 +210,7 @@ class HistoricalReplayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             store = ReplayCheckpointStore(Path(folder), identity, OUTPUT,
                                           request.config.output_end_boundary_time_ms)
-            with patch.object(runtime_module.os, "replace", side_effect=OSError("crash")):
+            with patch.object(runtime_module.os, "link", side_effect=OSError("crash")):
                 with self.assertRaisesRegex(OSError, "crash"):
                     store.add_point(full.points[0], None)
                     for point in full.points[1:-1]:
@@ -287,7 +287,7 @@ class HistoricalReplayTests(unittest.TestCase):
                     self.assertGreater(causal_row.trade_time_ms, checkpoint_boundary)
                 remainder = run_bounded_historical_market_replay(
                     bounded, runtime_state=state, boundary_callback=restored.add_point)
-                self.assertEqual(tuple(restored.points), full.points)
+                self.assertEqual(tuple(restored.iter_points()), full.points)
                 self.assertEqual(remainder.manifest, full.manifest)
                 self.assertEqual(remainder.diagnostics, full.diagnostics)
                 self.assertEqual(restored.identity, identity)

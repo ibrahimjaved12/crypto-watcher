@@ -3,7 +3,9 @@
 The scaled regression measures live rich replay objects, not a fixed RSS number.
 Real 24-hour acceptance remains a separate manual gate.
 """
+from dataclasses import replace
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -258,6 +260,106 @@ class ScientificStageParityTests(unittest.TestCase):
                         algorithm_version=execution.ATR_ALGORITHM_VERSION, config_version=config.version)
                     self.assertEqual(adapt_candidate_result(prepared.period, descriptor, single),
                                      adapt_candidate_result(prepared.period, descriptor, multi))
+            finally:
+                prepared.archive_dataset.close()
+
+    def test_populated_extension_builders_share_exact_projected_inputs(self):
+        from market_analysis.historical_mark_price_evidence import CompletedMarkPriceCandle
+        from market_analysis.historical_open_interest_evidence import OpenInterestObservation
+        from market_analysis.historical_funding_evidence import SettledFundingEvent
+        from market_analysis.historical_liquidation_evidence import LiquidationSnapshot
+        with TemporaryDirectory() as folder:
+            prepared, compact, sources, model, v1, states = self._fixture(Path(folder))
+            try:
+                replay = compact.canonical_replay_result
+                projected = tuple(replay.points)
+                local = SimpleNamespace(**{**vars(compact),
+                    "canonical_replay_result": runtime.CompactStudyReplay(
+                        replay.manifest, projected, replay.diagnostics, replay.final_checkpoint),
+                    "experiment_points": tuple(point.experiment_point() for point in projected)})
+                populated = {}
+                sha = "e" * 64
+                for name, source in sources.items():
+                    evidence = source["evidence"]
+                    if name == "mark_trade":
+                        candles = tuple(CompletedMarkPriceCandle(symbol, opening, opening + 59_999,
+                            Decimal("100"), Decimal("103"), Decimal("99"), Decimal("102"),
+                            opening + 60_000) for symbol in execution.ORDERED_SYMBOLS
+                            for opening in range(evidence.expected_open_time_start_ms,
+                                evidence.expected_open_time_end_ms_exclusive, 60_000))
+                        packages = tuple(replace(package, archive_present=True, checksum_present=True,
+                            checksum_verified=True, archive_sha256=sha, status="VERIFIED",
+                            statuses=("VERIFIED",)) for package in evidence.packages)
+                        evidence = replace(evidence, packages=packages, candles=candles)
+                    elif name in ("funding", "open_interest"):
+                        packages = tuple(replace(package, archive_present=True, checksum_present=True,
+                            checksum_verified=True, sha256=sha, status="VERIFIED")
+                            for package in evidence.packages)
+                        package_by_symbol = {package.symbol: package for package in packages}
+                        rows = []
+                        for symbol, package in package_by_symbol.items():
+                            if name == "funding":
+                                timestamp = (OUTPUT // 28_800_000) * 28_800_000
+                                rows.append(SettledFundingEvent(symbol, timestamp, Decimal("0.0001"),
+                                    8, timestamp + 1, package.relative_path, sha))
+                            else:
+                                latest = (OUTPUT // 300_000) * 300_000
+                                for index in range(5):
+                                    timestamp = latest - (4 - index) * 300_000
+                                    rows.append(OpenInterestObservation(symbol, timestamp,
+                                        Decimal(100 + index), Decimal(10_000 + index * 100),
+                                        timestamp + 300_000, package.relative_path, sha))
+                        evidence = replace(evidence, packages=packages, rows=tuple(rows))
+                    else:
+                        packages = tuple(replace(package, archive_present=True,
+                            compressed_sha256=sha, status="ARCHIVE_DAY_AVAILABLE")
+                            for package in evidence.packages)
+                        package = next(package for package in packages if package.utc_day == prepared.period.utc_date)
+                        rows = tuple(LiquidationSnapshot(symbol, (OUTPUT - 10_000) * 1000,
+                            (OUTPUT - 5_000) * 1000, str(index), "buy" if index % 2 else "sell",
+                            Decimal("100"), Decimal("2"), package.relative_path, sha, index)
+                            for index, symbol in enumerate(execution.ORDERED_SYMBOLS))
+                        evidence = replace(evidence, packages=packages, rows=rows)
+                    populated[name] = {**source, "evidence": evidence,
+                        "coverage": execution._source_coverage_summary(evidence, source_kind=name)}
+                for selector in ("taker-flow", *populated):
+                    with self.subTest(extension=selector):
+                        expected = execution._candidate_execution(prepared, populated, model,
+                                                                    stage_selector=selector)
+                        actual = execution._candidate_execution(local, populated, model,
+                                                                  stage_selector=selector)
+                        self.assertEqual(execution._canonical(actual), execution._canonical(expected))
+                        # Each extension's complete native point output also matches,
+                        # not only the minute-grid evidence sampled by its adapter.
+                        specs = {
+                            "mark_trade": (execution.HistoricalMarkTradeExtensionPrepared,
+                                "mark_evidence", "mark_archive_root", execution.build_historical_study_mark_trade_points),
+                            "open_interest": (execution.HistoricalOpenInterestExtensionPrepared,
+                                "oi_evidence", "oi_archive_root", execution.build_historical_study_open_interest_points),
+                            "funding": (execution.HistoricalFundingExtensionPrepared,
+                                "funding_evidence", "funding_archive_root", execution.build_historical_study_funding_points),
+                            "liquidation": (execution.HistoricalLiquidationExtensionPrepared,
+                                "liquidation_evidence", "liquidation_archive_root", execution.build_historical_study_liquidation_points),
+                        }
+                        if selector == "taker-flow":
+                            expected_points = execution.build_historical_study_taker_flow_points(
+                                prepared.archive_dataset, prepared.canonical_replay_result,
+                                prepared.experiment_points, prepared.period.phase)
+                            actual_points = execution.build_historical_study_taker_flow_points(
+                                local.archive_dataset, local.canonical_replay_result,
+                                local.experiment_points, local.period.phase)
+                        else:
+                            cls, evidence_field, root_field, builder = specs[selector]
+                            def extension_input(item):
+                                return cls(archive_dataset=item.archive_dataset,
+                                    replay_result=item.canonical_replay_result,
+                                    experiment_points=item.experiment_points, partition_plan=None,
+                                    study_phase=item.period.phase, **{
+                                        evidence_field: populated[selector]["evidence"],
+                                        root_field: populated[selector]["root"]})
+                            expected_points = builder(extension_input(prepared))
+                            actual_points = builder(extension_input(local))
+                        self.assertEqual(execution._canonical(actual_points), execution._canonical(expected_points))
             finally:
                 prepared.archive_dataset.close()
 

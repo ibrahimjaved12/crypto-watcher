@@ -820,7 +820,10 @@ coverage and source roots as the failed run:
 ```bash
 CODE_REV="c277011a3c1d3e0db2c5224e49386a375a6afc59"
 ACCEPTANCE_OUTPUT="$OUTPUT_ROOT/issue-152-post-replay-acceptance"
-test ! -e "$ACCEPTANCE_OUTPUT"  # Choose another new path if this exists.
+if [ -e "$ACCEPTANCE_OUTPUT" ]; then
+  echo "Choose a NEW acceptance output directory" >&2
+  exit 1
+fi
 mkdir "$ACCEPTANCE_OUTPUT"
 /usr/bin/time -v -o "$ACCEPTANCE_OUTPUT/resource.txt" \
 python3 -m market_analysis.historical_market_state_study_execution execute \
