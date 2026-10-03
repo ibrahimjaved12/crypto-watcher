@@ -49,7 +49,7 @@ class HistoricalTakerFlowExtensionTests(unittest.TestCase):
         self.assertEqual(output.total_aggtrade_count, 2)
         self.assertTrue(Decimal(-1) <= output.imbalance <= Decimal(1))
         self.assertEqual(TAKER_FLOW_ALGORITHM_VERSION,
-                         "taker-buy-sell-imbalance-v1")
+                         "taker-buy-sell-imbalance-v2-exact-sign")
         self.assertIn("1m-5m-15m", TAKER_FLOW_CONFIG_VERSION)
 
     def test_balanced_activity_and_empty_window_have_distinct_statuses(self):
