@@ -99,6 +99,6 @@ notification preference table. No scheduler, new provider, delivery service, or
 real/paper execution is enabled by the migration.
 
 For collector mode, recreate the disposable pre-release operational database from
-the repository migration chain, which defines the subscription-aware health RPC
-in the base collector schema.
+`operational-db/supabase/migrations/20261004000000_operational_schema.sql`, the single
+current baseline containing the subscription-aware health RPC.
 See the [operational reset policy](binance-futures-collector.md#pre-release-operational-database-reset).

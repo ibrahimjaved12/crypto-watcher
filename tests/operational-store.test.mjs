@@ -50,43 +50,7 @@ before(async () => {
   await db.exec(
     await readFile(
       new URL(
-        "../operational-db/supabase/migrations/20260925090000_operational_store.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260925120000_binance_collector.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260925180000_market_movement_episodes.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260925200000_movement_normalization_history.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260926140000_collector_candle_retention.sql",
+        "../operational-db/supabase/migrations/20261004000000_operational_schema.sql",
         import.meta.url,
       ),
       "utf8",

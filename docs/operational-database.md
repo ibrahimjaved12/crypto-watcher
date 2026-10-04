@@ -44,7 +44,7 @@ substituted with another calculator or live source. TanStack still determines du
 versioned Python request from that persisted evidence, validates responses, and is the sole
 privileged `ta_signals` writer in Lovable.
 
-## Configuration and migrations
+## Configuration and baseline schema
 
 Server-only variables:
 
@@ -62,9 +62,15 @@ Never create `VITE_*` forms. Startup validation rejects them. The collector work
 operational variables above plus `BINANCE_COLLECTOR_ENABLED` and `MOVEMENT_FINALIZATION_GRACE_MS`;
 it never requires the main Lovable `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY`, because it holds no
 Lovable credentials. Only the TanStack application is configured for the main database. Apply only
-`operational-db/supabase/migrations/` to the operational project; never add these files to or
-apply them through the root `supabase/migrations/`, which remains the Lovable chain. The nested
+`operational-db/supabase/migrations/20261004000000_operational_schema.sql` to the operational
+project; never add this file to or apply it through the root `supabase/migrations/`, which
+remains the Lovable chain. The nested
 `supabase/` directory is required by the CLI when `operational-db` is its workdir.
+
+The operational database is disposable pre-release working state. Recreate/reset it from
+this single current baseline; historical operational migration evolution is intentionally
+not preserved yet, and no production-data migration path is required. Once production data
+must survive upgrades, freeze the baseline and use forward migrations for future changes.
 
 For a hosted operational project, use its direct PostgreSQL connection string (not a Lovable
 connection) and run:
@@ -109,7 +115,7 @@ and never returns the operational service-role credential.
 The active application adapter defaults shared and legacy completed-candle retention to **8 days**
 (`OPERATIONAL_CANDLE_RETENTION_DAYS`, allowed range 1–30 days) and supplies the retention argument to
 SQL. Existing SQL functions retain a legacy **7-day fallback only when that argument is omitted**;
-that fallback is not the active application default, and migration history is unchanged.
+that fallback is not the active application default and remains unchanged in the baseline.
 Default V1 needs approximately **7 days + 16 minutes** of raw candles: seven scientific lookback days,
 the longest 15-minute return window and its prior 1m boundary candle. The collector worker requires
 the 8-day whole-day setting for these inputs. Retention is a resource bound: increasing surplus with
@@ -146,7 +152,7 @@ purged. A future domain must define its Lovable destination before activating de
 
 ## Cutover and rollback
 
-Deploy the operational migration and credentials first, then start the collector worker and switch
+Deploy the operational baseline and credentials first, then start the collector worker and switch
 the application fleet to `OPERATIONAL_DB_ENABLED=true` and `BINANCE_COLLECTOR_ENABLED=true`
 together. Roll the collector back by stopping the worker and switching
 `BINANCE_COLLECTOR_ENABLED=false` across the whole fleet; the legacy request-driven operational
