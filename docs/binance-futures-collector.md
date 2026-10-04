@@ -64,7 +64,7 @@ WebSocket live candle is never recorded with REST provenance and vice versa. Can
 always the deterministic boundary `open + timeframe`; the exchange event time is provenance, not the
 definition of completion, and REST bootstrap/recovery records no exchange event at all. The
 worker owns no TA: the application's completed-candle orchestration determines due work, reads
-canonical completed candles back from the operational store (`readCollectorTACandles`) rather than
+canonical completed candles back from the operational store (`readCollectorCompletedCandles`) rather than
 fetching a second live exchange series, calls the shared Python service, validates the response, and
 writes conclusions to Lovable. The direct 15m/1h/4h streams remain
 authoritative; they are not assembled from 1m data. Spot or non-USD-M events are rejected.
@@ -157,7 +157,7 @@ With the collector enabled, `collector_recent_candles`, `collector_health`, and 
 in the operational database are the only shared completed-candle/checkpoint working-state path, and
 `collector_subscriptions` holds the application-assigned subscription universe. The old
 request-driven per-user operational candle/checkpoint writes are disabled. The application reads
-canonical completed candles back through `get_collector_ta_candles` for its own TA input; the read
+canonical completed candles back through `get_collector_completed_candles` for its own TA input; the read
 transports each candle's recorded endpoint, transport, close time, source event time and receive
 time rather than reconstructing them, and missing or
 stale operational history fails the affected TA frame visibly instead of falling back to a live
@@ -229,3 +229,26 @@ durable result domain, so no synchronization timestamp is presented.
 Paper trading is still out of scope. Before issue #39 enables simulated positions, that domain must
 add its own durable single-owner/fencing mechanism; the monitor-run and collector leases do not grant
 paper-position ownership.
+
+
+### Shared completed-candle contract (#91)
+
+`completed-candle-v1` exposes collector-recorded native Binance USD-M perpetual
+trade 1m candles as immutable market facts, separately from observation provenance.
+A candle covers `[open_time_ms, open_time_ms + 60_000)`; the stored Binance
+inclusive close label remains `open_time_ms + 59_999`. Python derives
+`end_time_exclusive_ms = close_time_ms + 1`. Admission attests completion;
+provenance timestamps do not define it.
+
+WebSocket provenance preserves the actual Binance `E` and local receive time.
+REST provenance carries the actual retrieval time and has no source-event field.
+The generic operational read returns full identity, OHLC, base/quote volumes and
+recorded provenance for native 1m/15m/1h/4h, newest-N bounded and chronologically
+ordered. Gaps remain explicit; no candles are filled. The pre-production baseline
+replaces the TA-specific RPC with `get_collector_completed_candles`; recreate the
+disposable operational database from that baseline after review.
+
+TA still consumes only 15m/1h/4h. #71 keeps its compact close/base/quote-volume
+projection from the same authoritative `collector_recent_candles` table. #70's
+five-second aggTrade buckets remain distinct. This adds no source, WebSocket,
+scheduler, strategy, or per-message Python call.

@@ -1008,3 +1008,47 @@ def verify_binance_usdm_historical_core_archives(
         content_sha256, request.universe.symbols, tuple(ohlc_candles))
     return BinanceHistoricalCoreArchiveEvidence(
         manifest, ohlc_evidence, raw_replayable_trade_evidence_present)
+
+
+def completed_candle_series_from_archive(dataset, symbol):
+    """Project paired native 1m archive facts without changing replay availability."""
+    from .completed_candles import (
+        COMPLETED_CANDLE_CONTRACT_VERSION, ArchiveCandleProvenance, CompletedCandle,
+        CompletedCandleObservation, CompletedCandleSeries, CompletedCandleSeriesIdentity,
+    )
+    if not isinstance(dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset)):
+        raise ValueError("completed candles require a paired replay/archive dataset")
+    manifest = dataset.archive_manifest
+    replay = dataset.replay_request if isinstance(dataset, BinanceHistoricalReplayDataset) else dataset
+    identity = CompletedCandleSeriesIdentity("binance-usdm", "binance", "futures", "perpetual",
+        f"binance-usdm:{symbol}", symbol, symbol, "trade", "native-kline", 1)
+    if symbol not in replay.universe.symbols or not any(
+            item.symbol == symbol and item.instrument_id == identity.instrument_id for item in replay.instruments):
+        raise ValueError("archive instrument identity mismatch")
+    evidence = dataset.ohlc_evidence
+    if (manifest.dataset_id, manifest.dataset_version, manifest.content_sha256) != (
+            evidence.dataset_id, evidence.dataset_version, evidence.dataset_content_sha256):
+        raise ValueError("archive dataset identity mismatch")
+    movement = {}
+    ohlc = {}
+    for rows, target in ((replay.candles, movement), (evidence.candles, ohlc)):
+        for row in rows:
+            if row.symbol != symbol:
+                continue
+            previous = target.setdefault(row.open_time_ms, row)
+            if previous != row:
+                raise ValueError("conflicting paired archive candle")
+    if movement.keys() != ohlc.keys():
+        raise ValueError("missing paired archive candle")
+    provenance = ArchiveCandleProvenance(manifest.dataset_id, manifest.dataset_version,
+                                        manifest.content_sha256)
+    observations = []
+    for opening in sorted(ohlc):
+        full, compact = ohlc[opening], movement[opening]
+        _check_ohlc_movement_parity(full, compact)
+        if full.instrument_id != identity.instrument_id:
+            raise ValueError("archive candle instrument identity mismatch")
+        observations.append(CompletedCandleObservation(CompletedCandle(identity,
+            full.open_time_ms, full.close_time_ms, full.open, full.high, full.low, full.close,
+            compact.volume, compact.quote_volume), provenance))
+    return CompletedCandleSeries(COMPLETED_CANDLE_CONTRACT_VERSION, identity, tuple(observations))

@@ -488,5 +488,73 @@ class ApiTests(unittest.TestCase):
         asyncio.run(check())
 
 
+
+
+
+class CompletedCandleApiTests(unittest.IsolatedAsyncioTestCase):
+    def payload(self):
+        return {
+            "contract_version": "completed-candle-v1",
+            "identity": {"provider": "binance-usdm", "exchange": "binance",
+                "market_type": "futures", "contract_type": "perpetual",
+                "instrument_id": "binance-usdm:BTCUSDT", "symbol": "BTCUSDT",
+                "native_symbol": "BTCUSDT", "price_type": "trade", "series_basis": "native-kline",
+                "timeframe_minutes": 1},
+            "observations": [{"candle": {"open_time_ms": 60_000, "close_time_ms": 119_999,
+                "open": "100", "high": "102", "low": "99", "close": "101",
+                "base_volume": "2", "quote_volume": "202.25"},
+                "provenance": {"source_kind": "rest", "endpoint": "/fapi/v1/klines",
+                               "retrieved_at_ms": 120_100}}],
+        }
+
+    async def test_authenticated_deterministic_counts_range_and_gaps(self):
+        body = self.payload()
+        websocket = deepcopy(body["observations"][0])
+        websocket["provenance"] = {"source_kind": "websocket", "endpoint": "wss://stream",
+                                    "source_event_time_ms": 119_997, "received_at_ms": 120_123}
+        later = deepcopy(body["observations"][0])
+        later["candle"].update(open_time_ms=180_000, close_time_ms=239_999)
+        body["observations"].extend((websocket, later))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(token=TOKEN)),
+                                    base_url="http://test") as client:
+            response = await client.post("/v1/completed-candles/validate", json=body, headers=HEADERS)
+            self.assertEqual(response.status_code, 200)
+            result = response.json()
+            self.assertEqual(result["observation_count"], 3)
+            self.assertEqual(result["candle_count"], 2)
+            self.assertEqual(result["first_open_time_ms"], 60_000)
+            self.assertEqual(result["last_open_time_ms"], 180_000)
+            self.assertEqual(result["missing_open_times_ms"], [120_000])
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            again = await client.post("/v1/completed-candles/validate", json=body, headers=HEADERS)
+            self.assertEqual(again.json(), result)
+            unauthorized = await client.post("/v1/completed-candles/validate", json=body)
+            self.assertEqual(unauthorized.status_code, 401)
+        from market_analysis.api_models import CompletedCandleSeriesRequest
+        domain = CompletedCandleSeriesRequest.model_validate(body).domain()
+        self.assertEqual(domain.observations[1].provenance.source_event_time_ms, 119_997)
+
+    async def test_invalid_contract_provenance_and_intervals(self):
+        mutations = [lambda b: b.update(contract_version="v2"),
+            lambda b: b["identity"].update(timeframe_minutes=15),
+            lambda b: b["identity"].update(price_type="mark"),
+            lambda b: b["identity"].update(instrument_id="binance-usdm:ETHUSDT"),
+            lambda b: b["observations"][0]["provenance"].update(source_event_time_ms=120_000),
+            lambda b: b["observations"][0]["candle"].update(close_time_ms=120_000),
+            lambda b: b["observations"][0]["candle"].update(open_time_ms=60_001),
+            lambda b: b["observations"][0].update(provenance={"source_kind": "archive",
+                "dataset_id": "d", "dataset_version": "v1", "dataset_content_sha256": "a" * 64,
+                "received_at_ms": 120_000}),
+            lambda b: b["observations"][0].update(provenance={"source_kind": "websocket",
+                "endpoint": "ws", "received_at_ms": 120_000})]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(token=TOKEN)),
+                                    base_url="http://test") as client:
+            for mutation in mutations:
+                body = self.payload()
+                mutation(body)
+                response = await client.post("/v1/completed-candles/validate", json=body, headers=HEADERS)
+                self.assertEqual(response.status_code, 422)
+
+
 if __name__ == "__main__":
     unittest.main()

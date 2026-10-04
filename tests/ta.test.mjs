@@ -16,6 +16,21 @@ async function moduleUrl(path, imports = {}) {
 const { completedCandles, outcomeDue, TA_VERSION } = await import(
   await moduleUrl("../src/lib/ta/schedule.ts")
 );
+function completedCollectorSeries(symbol, timeframe, candles) {
+  return {
+    contractVersion: "completed-candle-v1",
+    identity: { provider: "binance-usdm", exchange: "binance", marketType: "futures",
+      contractType: "perpetual", instrumentId: `binance-usdm:${symbol}`, symbol,
+      nativeSymbol: symbol, priceType: "trade", seriesBasis: "native-kline", timeframeMinutes: timeframe },
+    observations: candles.map((c) => ({
+      candle: { openTime: c.time, closeTime: c.closeTime, open: c.open, high: c.high,
+        low: c.low, close: c.close, baseVolume: c.volume, quoteVolume: 123.25 },
+      provenance: c.transport === "websocket"
+        ? { sourceKind: "websocket", endpoint: c.endpoint, sourceEventTime: c.sourceEventTime, receivedAt: c.receivedAt }
+        : { sourceKind: "rest", endpoint: c.endpoint, retrievedAt: c.receivedAt },
+    })),
+  };
+}
 const duration = 15 * 60_000;
 const now = 1800000000000;
 const end = Math.floor(now / duration) * duration;
@@ -726,14 +741,9 @@ test("collector mode reads canonical completed candles and never a second live s
     const capturedRequests = [];
     const store = {
       enabled: true,
-      async readCollectorTACandles(symbol, timeframe) {
+      async readCollectorCompletedCandles(symbol, timeframe) {
         collectorReads.push([symbol, timeframe]);
-        return {
-          source: "binance-usdm",
-          instrument: { id: `binance-usdm:${symbol}` },
-          priceType: "trade",
-          candles: collectorSeries(timeframe),
-        };
+        return completedCollectorSeries(symbol, timeframe, collectorSeries(timeframe));
       },
     };
     const context = {
@@ -881,13 +891,8 @@ test("collector mode reads canonical completed candles and never a second live s
     // Missing canonical history fails visibly instead of fetching a live series.
     const emptyStore = {
       enabled: true,
-      async readCollectorTACandles(symbol) {
-        return {
-          source: "binance-usdm",
-          instrument: { id: `binance-usdm:${symbol}` },
-          priceType: "trade",
-          candles: [],
-        };
+      async readCollectorCompletedCandles(symbol, timeframe) {
+        return completedCollectorSeries(symbol, timeframe, []);
       },
     };
     const missing = await runTA(db, "owner", "BTCUSDT", context, pythonResults, emptyStore);
@@ -898,13 +903,9 @@ test("collector mode reads canonical completed candles and never a second live s
     // Stale canonical history also fails visibly.
     const staleStore = {
       enabled: true,
-      async readCollectorTACandles(symbol, timeframe) {
-        return {
-          source: "binance-usdm",
-          instrument: { id: `binance-usdm:${symbol}` },
-          priceType: "trade",
-          candles: collectorSeries(timeframe, latest(timeframe) - 50 * timeframe * 60_000),
-        };
+      async readCollectorCompletedCandles(symbol, timeframe) {
+        return completedCollectorSeries(symbol, timeframe,
+          collectorSeries(timeframe, latest(timeframe) - 50 * timeframe * 60_000));
       },
     };
     const stale = await runTA(db, "owner", "BTCUSDT", context, pythonResults, staleStore);

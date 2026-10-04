@@ -303,3 +303,93 @@ class MovementClassificationRequest(MovementMetricsRequest):
 class MovementLifecycleRequest(MovementMetricsRequest):
     previous_lifecycle_state: dict[str, Any] | None
     interrupt_previous_state: bool = Field(strict=True)
+
+
+# #91 uses safe millisecond integers and exact Decimal facts without imposing
+# unrelated TA/analysis numerical precision or date limits.
+CandleTimestamp = Annotated[int, Field(strict=True, ge=0, le=9_007_199_254_740_991)]
+
+
+class CompletedCandleIdentityRequest(InputModel):
+    provider: Literal["binance-usdm"]
+    exchange: Literal["binance"]
+    market_type: Literal["futures"]
+    contract_type: Literal["perpetual"]
+    instrument_id: str
+    symbol: str
+    native_symbol: str
+    price_type: Literal["trade"]
+    series_basis: Literal["native-kline"]
+    timeframe_minutes: Annotated[int, Field(strict=True)]
+
+    def domain(self):
+        from .completed_candles import CompletedCandleSeriesIdentity
+        return CompletedCandleSeriesIdentity(**self.model_dump())
+
+
+class WebSocketCandleProvenanceRequest(InputModel):
+    source_kind: Literal["websocket"]
+    endpoint: str
+    source_event_time_ms: CandleTimestamp
+    received_at_ms: CandleTimestamp
+
+    def domain(self):
+        from .completed_candles import WebSocketCandleProvenance
+        return WebSocketCandleProvenance(**self.model_dump(exclude={"source_kind"}))
+
+
+class RestCandleProvenanceRequest(InputModel):
+    source_kind: Literal["rest"]
+    endpoint: str
+    retrieved_at_ms: CandleTimestamp
+
+    def domain(self):
+        from .completed_candles import RestCandleProvenance
+        return RestCandleProvenance(**self.model_dump(exclude={"source_kind"}))
+
+
+class ArchiveCandleProvenanceRequest(InputModel):
+    source_kind: Literal["archive"]
+    dataset_id: str
+    dataset_version: str
+    dataset_content_sha256: str
+
+    def domain(self):
+        from .completed_candles import ArchiveCandleProvenance
+        return ArchiveCandleProvenance(**self.model_dump(exclude={"source_kind"}))
+
+
+class CompletedCandleMarketRequest(InputModel):
+    open_time_ms: CandleTimestamp
+    close_time_ms: CandleTimestamp
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    base_volume: Decimal
+    quote_volume: Decimal
+
+
+class CompletedCandleObservationRequest(InputModel):
+    candle: CompletedCandleMarketRequest
+    provenance: Annotated[
+        WebSocketCandleProvenanceRequest | RestCandleProvenanceRequest | ArchiveCandleProvenanceRequest,
+        Field(discriminator="source_kind")]
+
+
+class CompletedCandleSeriesRequest(InputModel):
+    contract_version: Literal["completed-candle-v1"]
+    identity: CompletedCandleIdentityRequest
+    observations: tuple[CompletedCandleObservationRequest, ...]
+
+    def domain(self):
+        from .completed_candles import CompletedCandle, CompletedCandleObservation, CompletedCandleSeries
+        identity = self.identity.domain()
+        return CompletedCandleSeries(self.contract_version, identity, tuple(
+            CompletedCandleObservation(CompletedCandle(identity=identity, **item.candle.model_dump()),
+                                       item.provenance.domain()) for item in self.observations))
+
+    @model_validator(mode="after")
+    def valid_domain(self):
+        self.domain()
+        return self
