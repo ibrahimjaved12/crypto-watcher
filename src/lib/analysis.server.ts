@@ -5,6 +5,23 @@ import { pythonServiceConfig } from "./python-service.server";
 
 type Client = Pick<SupabaseClient<Database>, "from">;
 
+type PythonAnalysisStage =
+  | "fetch"
+  | "response-status"
+  | "response-text"
+  | "size-guard"
+  | "json-parse"
+  | "schema-validation";
+
+function pythonAnalysisDiagnostic(stage: PythonAnalysisStage, status?: number) {
+  // Never pass exception details, request state, service configuration or bodies.
+  try {
+    console.error("[python-analysis]", status === undefined ? { stage } : { stage, status });
+  } catch {
+    // Diagnostics must not alter the safe failure returned to the caller.
+  }
+}
+
 function milliseconds(value: string | null) {
   if (value === null) return null;
   const time = Date.parse(value);
@@ -125,6 +142,8 @@ export async function analyzeForUser(
   const requestBody = JSON.stringify(payload);
   const requestBytes = new TextEncoder().encode(requestBody).byteLength;
   const startedAt = Date.now();
+  let failureStage: PythonAnalysisStage = "fetch";
+  let status: number | undefined;
   try {
     const response = await send(config.url, {
       method: "POST",
@@ -140,6 +159,11 @@ export async function analyzeForUser(
       },
       body: requestBody,
     });
+    failureStage = "response-status";
+    const responseStatus = response.status;
+    if (Number.isInteger(responseStatus) && responseStatus >= 0 && responseStatus <= 599) {
+      status = responseStatus;
+    }
     if (!response.ok) {
       // Release unused bodies without letting cleanup replace the original failure.
       try {
@@ -147,35 +171,42 @@ export async function analyzeForUser(
       } catch {
         // The runtime may already have canceled the response.
       }
-      if (response.status >= 300 && response.status < 400) {
+      if (responseStatus >= 300 && responseStatus < 400) {
         throw new Error("Python analysis service redirect rejected");
       }
       const [error, category] =
-        response.status === 504
+        responseStatus === 504
           ? ["Python analysis timed out. Please retry.", "timeout"]
-          : response.status === 422
+          : responseStatus === 422
             ? [
                 "Your saved monitoring state was rejected by Python. Check your settings and try again.",
                 "invalid_request",
               ]
-            : [401, 403].includes(response.status)
+            : [401, 403].includes(responseStatus)
               ? [
                   "Python service authentication failed. Its server configuration needs checking.",
                   "service_auth",
                 ]
               : ["The Python analysis service is unavailable. Please retry later.", "service"];
+      pythonAnalysisDiagnostic(failureStage, status);
       return { ok: false, error, category };
     }
+    failureStage = "response-text";
     const raw = await response.text();
+    failureStage = "size-guard";
     const responseBytes = new TextEncoder().encode(raw).byteLength;
     if (responseBytes > 128_000) throw new Error("oversized response");
-    const parsed = analysisResponse.safeParse(JSON.parse(raw));
+    failureStage = "json-parse";
+    const data = JSON.parse(raw);
+    failureStage = "schema-validation";
+    const parsed = analysisResponse.safeParse(data);
     if (
       !parsed.success ||
       parsed.data.symbol !== symbol ||
       parsed.data.instrument.id !== expectedInstrumentId ||
       parsed.data.instrument.native_symbol !== symbol
     ) {
+      pythonAnalysisDiagnostic(failureStage, status);
       return {
         ok: false,
         error: "The Python service returned an invalid analysis response.",
@@ -192,6 +223,7 @@ export async function analyzeForUser(
       },
     };
   } catch {
+    pythonAnalysisDiagnostic(failureStage, status);
     return {
       ok: false,
       error: controller.signal.aborted
