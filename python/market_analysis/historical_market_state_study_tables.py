@@ -19,6 +19,7 @@ from . import historical_market_state_study_execution as part_b
 from . import historical_market_state_study_adapter as adapter
 from .historical_market_state_study_artifacts import TrackAReference, decode, encode
 from .historical_market_state_study_features import UpstreamInputProvenance
+from .historical_market_state_study_json import canonical_study_json
 
 TABLE_VERSION = 'historical-market-state-analysis-table-v1'
 HEADER_KEYS = ('period', 'study_manifest_sha256', 'extension_coverage_manifest_sha256',
@@ -33,6 +34,7 @@ TABLE_KEYS = frozenset(('table_version', 'report_header', 'report_file_sha256', 
 HMM_SCOPE_KEYS = ('movement_algorithm_version', 'movement_config_version', 'universe_id',
                   'universe_version', 'configured_universe', 'provider', 'exchange', 'price_type')
 HMM_FAMILY = 'EXP-75-09'
+_ROW_FIELDS = ('day', 'contexts', 'exclusions')
 _JOIN_RECORD_KEYS = ('experiment_id', 'algorithm_version', 'config_version', 'evidence_kind', 'decision_time_ms')
 
 
@@ -157,10 +159,31 @@ def build_period_table(report, manifest, period, *, report_file_sha256, cross_fi
         'development_hmm_join': join,
         'adapted': adapted,
     }
-    return json.loads(part_b._artifact_json(body, 'table_sha256'))
+    table = _parse_sealed(part_b._artifact_json(body, 'table_sha256'))
+    # Consumers rebuild rows from the parsed table: every stored row must read
+    # back with exactly the canonical JSON spelling it was encoded with
+    # (canonical strings, so int/float drift such as 1 vs 1.0 is caught).
+    for encoded, stored in zip(adapted, table['adapted']):
+        if any(canonical_study_json(encoded[name]) != canonical_study_json(stored[name]) for name in _ROW_FIELDS):
+            raise ValueError('analysis table row does not survive the JSON round trip')
+    return table
 
 
-def _load_validated_report(path, manifest, coverage, period, code_revision):
+def _parse_sealed(content):
+    return json.loads(content)
+
+
+def _load_validated_report(path, manifest, coverage, period, code_revision, *, create_sidecar=True):
+    """Load, fully validate and bind one report to its sidecar.
+
+    derive-table may create a missing sidecar for the report it just validated
+    (as period_report_sha_for_verification's full path does); verify-table
+    (``create_sidecar=False``) never writes and requires the existing one.
+    """
+    if not create_sidecar:
+        sidecar = Path(path).parent.parent / '.period-manifests' / Path(path).name
+        if not sidecar.is_file():
+            raise ValueError(f'verify-table requires the existing period sidecar: {sidecar}')
     report = part_b.load_finalized_period_report(
         path, manifest, period, coverage_sha256=coverage['coverage_manifest_sha256'], code_revision=code_revision)
     adapter.validate_candidate_registry(report)
@@ -266,19 +289,22 @@ def adapt_phase_from_tables(manifest, coverage, table_dir, phase, revision, cros
 def verify_period_table(path, table_file, manifest, coverage, period, code_revision, *,
                         cross_fit_sha, final_model_sha, identities):
     """Audit: re-derive byte-for-byte, then recompute rows with the default adapter path."""
-    report, file_sha = _load_validated_report(path, manifest, coverage, period, code_revision)
+    report, file_sha = _load_validated_report(path, manifest, coverage, period, code_revision,
+                                              create_sidecar=False)
     table = build_period_table(report, manifest, period, report_file_sha256=file_sha,
                                cross_fit_sha=cross_fit_sha, final_model_sha=final_model_sha, identities=identities)
     if Path(table_file).read_bytes() != _table_bytes(table):
         raise ValueError('analysis table differs from its re-derivation')
+    stored_rows = part_b._read_json(Path(table_file))['adapted']
     source = adapter.period_provenance(report, cross_fit_sha, final_model_sha)
-    for entry in table['adapted']:
+    for entry in stored_rows:
         identity = decode(entry['identity'])
         # Default path: full report hash, full candidate_evidence scans, no index.
+        # Canonical strings, not ==, so int/float drift (1 vs 1.0) is a difference.
         expected = adapter.adapt_period(report, source, identity)
-        if (decode(entry['day']) != replace(expected.day, source_provenance=None)
-                or decode(entry['contexts']) != expected.contexts
-                or decode(entry['exclusions']) != expected.exclusions):
+        recomputed = {'day': encode(replace(expected.day, source_provenance=None)),
+                      'contexts': encode(expected.contexts), 'exclusions': encode(expected.exclusions)}
+        if any(canonical_study_json(recomputed[name]) != canonical_study_json(entry[name]) for name in _ROW_FIELDS):
             raise ValueError('analysis table row differs from the default adapter path')
     report = None
     part_b._log_peak_memory(f'verify period {period.study_period_index}')

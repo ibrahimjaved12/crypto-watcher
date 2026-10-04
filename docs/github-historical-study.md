@@ -548,7 +548,12 @@ Part-C operations are not controller tasks:
    authorization is exact and has authorized members).
 7. Part-C test with `--analysis-table-dir`.
 
-`verify-table` (same arguments as `derive-table`) audits any table against its report.
+`verify-table` (same arguments as `derive-table`, plus the period's existing sidecar,
+which it never creates) audits a table against its report. Part C does not re-check a
+table against its report, so before any phase run with `--analysis-table-dir`, run
+`verify-table` on at least one development, one validation and one test period of the
+table set. It decodes a full report (~2.5 GB, ~10 GB RSS): a campaign/operator step,
+not CI.
 Without `--analysis-table-dir`, every step still reads the period reports directly and
 produces byte-identical artifacts.
 

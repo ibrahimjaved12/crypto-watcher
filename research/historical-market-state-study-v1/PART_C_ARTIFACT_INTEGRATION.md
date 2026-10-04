@@ -104,11 +104,13 @@ read only a small part of it. An analysis table
   minute boundaries) and the report side of the EXP-75-09 join.
 
 `derive-table` opens one report, validates it fully once (finalized loader, candidate
-registry, sidecar), derives the table and releases it. The table is sealed by
-`table_sha256` and bound to its report by `report_sha256` and by
-`report_file_sha256` from the verified sidecar, so a table always names the exact
-report bytes it came from. Tables are create-only; an existing table must be
-byte-identical.
+registry, sidecar), derives the table and releases it. If the report's sidecar is
+missing, `derive-table` creates it from the report it has just validated, as the
+full report-validation path does. The table is sealed by `table_sha256` and records
+the report's `report_sha256` and its `report_file_sha256` from the sidecar. Every
+stored row is checked at derive time to read back from the table with exactly the
+canonical JSON spelling it was written with. Tables are create-only; an existing
+table must be byte-identical.
 
 EXP-75-09 development rows need the held-out cross-fit folds, which only exist after
 all ten development reports. Development tables therefore store only the report side
@@ -123,5 +125,24 @@ least one authorized member), checked before the report is opened.
 
 `verify-table` re-derives a table from its report, requires byte-equality, and
 recomputes every stored row through the default adapter path (full report hash, no
-index) as an audit of the shortcuts. Every Part-C and HMM artifact and hash is
-byte-identical whether it is produced from tables or from the reports.
+index), comparing canonical JSON (so `1` and `1.0` differ) as an audit of the
+shortcuts. It never writes: it requires the report's existing sidecar and fails if
+it is missing. Every Part-C and HMM artifact and hash is byte-identical whether it
+is produced from tables or from the reports.
+
+### Trust model
+
+A table is a self-hashed derived artifact. `table_sha256` proves only that the table
+is internally intact. Part C and the HMM tools reading tables check that seal and the
+table's frozen identity (manifest, period, producer revision, coverage, HMM
+prerequisites), but they do **not** re-check `report_sha256` or `report_file_sha256`
+against the Part-B report or its sidecar; they never open either. The binding between
+a table and its report is established only by `derive-table`, when the table is
+built from a fully validated report, and by `verify-table`, when it is audited
+against that report.
+
+Operator step (campaign, not CI): before any phase run with `--analysis-table-dir`,
+run `verify-table` on at least one development, one validation and one test period
+of the table set (validation and test as soon as they exist). Each run decodes one
+full report (~2.5 GB on disk, ~10 GB RSS), so it belongs on campaign runners, never
+in CI. Do not use a table set until its sampled periods verify.

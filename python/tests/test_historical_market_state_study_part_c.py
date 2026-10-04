@@ -1142,6 +1142,83 @@ class AnalysisTableTests(unittest.TestCase):
                 tables.verify_period_table(path, table_file, self.manifest, self.coverage, period, REVISION,
                     cross_fit_sha=CROSS, final_model_sha=FINAL, identities=identities)
 
+    def sidecar(self, root, index):
+        return Path(root) / 'part-b' / '.period-manifests' / part_b._period_filename(self.period(index))
+
+    def test_derive_rejects_rows_that_do_not_survive_the_json_round_trip(self):
+        def drifting(content):
+            table = json.loads(content)
+            fields = table['adapted'][0]['day']['fields']
+            fields['study_period_index'] = float(fields['study_period_index'])  # 10 read back as 10.0
+            return table
+
+        report = generated_report(10)
+        self.build(report, 10, (identity(),), CROSS, FINAL)  # clean round trip
+        with patch.object(tables, '_parse_sealed', side_effect=drifting), \
+                self.assertRaisesRegex(ValueError, 'analysis table row does not survive the JSON round trip'):
+            self.build(report, 10, (identity(),), CROSS, FINAL)
+
+    def test_verify_period_table_rejects_int_float_drift(self):
+        period, identities = self.period(10), (identity(),)
+        with TemporaryDirectory() as root:
+            path = self.write_report(root, 10, generated_report(10))
+            table = tables.derive_period_table(path, self.manifest, self.coverage, period, REVISION,
+                cross_fit_sha=CROSS, final_model_sha=FINAL, identities=identities)
+            table_file = tables.write_period_table(tables.table_path(Path(root) / 'tables', period), table)
+            verify = lambda: tables.verify_period_table(path, table_file, self.manifest, self.coverage, period,
+                REVISION, cross_fit_sha=CROSS, final_model_sha=FINAL, identities=identities)
+            verify()
+            self.assertTrue(json.loads(table_file.read_text())['adapted'][0]['contexts'])
+
+            # Default-path audit: a context bucket recomputed as 1.0 instead of 1 compares equal
+            # with ==, but not as canonical JSON.
+            original = adapter.adapt_period
+
+            def drifting(report, source, identity, **options):
+                item = original(report, source, identity, **options)
+                if options:
+                    return item  # the derive path (report_verified/index) stays exact
+                return adapter.AdaptedDay(item.day, tuple((c[0], c[1], float(c[2]), c[3]) for c in item.contexts),
+                                          item.exclusions)
+
+            with patch.object(adapter, 'adapt_period', side_effect=drifting), \
+                    self.assertRaisesRegex(ValueError, 'differs from the default adapter path'):
+                verify()
+
+            # Stored table: one int rewritten as a float, correctly re-sealed.
+            altered = deepcopy(table)
+            fields = altered['adapted'][0]['day']['fields']
+            fields['study_period_index'] = float(fields['study_period_index'])
+            table_file.write_text(part_b._artifact_json(altered, 'table_sha256') + '\n')
+            with self.assertRaises(ValueError):
+                verify()
+
+    def test_verify_requires_the_existing_sidecar_and_never_writes_one(self):
+        period, identities = self.period(10), (identity(),)
+        report = generated_report(10)
+        with TemporaryDirectory() as root:
+            path = self.write_report(root, 10, report)
+            table = tables.build_period_table(report, self.manifest, period, report_file_sha256='0' * 64,
+                cross_fit_sha=CROSS, final_model_sha=FINAL, identities=identities)
+            table_file = tables.write_period_table(tables.table_path(Path(root) / 'tables', period), table)
+            with patch.object(part_b, 'load_finalized_period_report') as loader, \
+                    self.assertRaisesRegex(ValueError, 'requires the existing period sidecar'):
+                tables.verify_period_table(path, table_file, self.manifest, self.coverage, period, REVISION,
+                    cross_fit_sha=CROSS, final_model_sha=FINAL, identities=identities)
+            loader.assert_not_called()
+            self.assertFalse(self.sidecar(root, 10).parent.exists())
+
+    def test_derive_creates_a_missing_sidecar(self):
+        period = self.period(10)
+        with TemporaryDirectory() as root:
+            path = self.write_report(root, 10, generated_report(10))
+            self.assertFalse(self.sidecar(root, 10).exists())
+            table = tables.derive_period_table(path, self.manifest, self.coverage, period, REVISION,
+                cross_fit_sha=CROSS, final_model_sha=FINAL, identities=(identity(),))
+            sidecar = part_b._read_json(self.sidecar(root, 10))
+            self.assertEqual(sidecar['report_file_sha256'], table['report_file_sha256'])
+            self.assertEqual(sidecar['report_sha256'], table['report_header']['report_sha256'])
+
     def table_args(self, index, *extra):
         return cli.build_cli_parser().parse_args([
             'derive-table', '--study-manifest', 'manifest', '--coverage-manifest', 'coverage',
