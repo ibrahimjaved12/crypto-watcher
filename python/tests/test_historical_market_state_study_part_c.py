@@ -1185,12 +1185,14 @@ class AnalysisTableTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, 'differs from the default adapter path'):
                 verify()
 
-            # Stored table: one int rewritten as a float, correctly re-sealed.
+            # Stored table: one int rewritten as a float, correctly re-sealed. This is caught by
+            # the byte-for-byte re-derivation, before the canonical row comparison runs (that
+            # comparison is exercised by the patched adapt_period case above).
             altered = deepcopy(table)
             fields = altered['adapted'][0]['day']['fields']
             fields['study_period_index'] = float(fields['study_period_index'])
             table_file.write_text(part_b._artifact_json(altered, 'table_sha256') + '\n')
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, 'differs from its re-derivation'):
                 verify()
 
     def test_verify_requires_the_existing_sidecar_and_never_writes_one(self):
