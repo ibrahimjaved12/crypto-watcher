@@ -7,6 +7,7 @@ not alter V1 state decisions and does not estimate forward returns.
 from __future__ import annotations
 
 import argparse
+
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
 from pathlib import Path
@@ -25,7 +26,8 @@ from .historical_experiment_batch import (
 )
 from .experiments.market_state_common import validate_experiment_points
 from .historical_replay import (
-    HistoricalMarketReplayResult, HistoricalReplayConfig, ReplayPartitionPlan,
+    CompactStudyReplay, HistoricalMarketReplayResult, HistoricalReplayConfig,
+    ReplayPartitionPlan,
     run_historical_market_replay, to_market_state_experiment_points,
 )
 from .historical_taker_flow_evidence import (
@@ -118,7 +120,9 @@ class HistoricalTakerFlowExtensionPrepared:
 
     def __post_init__(self):
         if (not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
-                or not isinstance(self.replay_result, HistoricalMarketReplayResult)
+                or not (isinstance(self.replay_result, HistoricalMarketReplayResult)
+                        or (self.study_phase is not None
+                            and isinstance(self.replay_result, CompactStudyReplay)))
                 or ((self.partition_plan is None) == (self.study_phase is None))
                 or (self.partition_plan is not None
                     and not isinstance(self.partition_plan, ReplayPartitionPlan))

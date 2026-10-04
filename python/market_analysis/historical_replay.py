@@ -368,6 +368,15 @@ class HistoricalMarketReplayResult:
 
 
 @dataclass(frozen=True)
+class CompactStudyReplay:
+    """Minimal replay projection shared by study adapters and extensions."""
+    manifest: HistoricalReplayRunManifest
+    points: object
+    diagnostics: HistoricalReplayDiagnostics
+    final_checkpoint: HistoricalReplayCheckpoint | None
+
+
+@dataclass(frozen=True)
 class ReplayPartitionPlan:
     development_end_boundary_time_ms: int
     validation_end_boundary_time_ms: int
@@ -487,7 +496,8 @@ def _run_replay_core(
     request, trades: Iterable[HistoricalReplayTrade], candles, source_intervals,
     duplicate_count: int, manifest: HistoricalReplayRunManifest,
     checkpoint: HistoricalReplayCheckpoint | None,
-    *, runtime_state: HistoricalReplayRuntimeState | None = None,
+    *, retain_points: bool = True,
+    runtime_state: HistoricalReplayRuntimeState | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     boundary_callback: Callable[[HistoricalMarketReplayPoint,
                                  HistoricalReplayRuntimeState | None], None] | None = None,
@@ -559,6 +569,7 @@ def _run_replay_core(
     trade_iterator = iter(trades)
     lookahead = next(trade_iterator, None)
     points = []
+    last_point = None
     output_boundary_count = ((config.output_end_boundary_time_ms
                               - config.output_start_boundary_time_ms)
                              // BUCKET_INTERVAL_MS + 1)
@@ -652,7 +663,9 @@ def _run_replay_core(
             endpoint_buckets=tuple((symbol, endpoint_buckets[symbol]) for symbol in symbols),
             source_time_evidence=tuple(source_evidence),
             source_states=tuple((symbol, current_states[symbol]) for symbol in symbols))
-        points.append(point)
+        last_point = point
+        if retain_points:
+            points.append(point)
         emitted_count += 1
         if boundary_callback is not None:
             checkpoint_due = (boundary == config.output_end_boundary_time_ms
@@ -684,8 +697,12 @@ def _run_replay_core(
         market_wide_ineligible_point_counts=tuple((window, ineligible_counts[window])
                                                   for window in WINDOWS))
     final_checkpoint = (HistoricalReplayCheckpoint(
-        manifest.run_fingerprint, points[-1].evaluation_boundary_time_ms,
-        points[-1].point_id) if points else checkpoint)
+        manifest.run_fingerprint, last_point.evaluation_boundary_time_ms,
+        last_point.point_id) if last_point is not None else (
+            HistoricalReplayCheckpoint(manifest.run_fingerprint,
+                runtime_state.completed_boundary_time_ms,
+                _point_id(manifest.run_fingerprint, runtime_state.completed_boundary_time_ms))
+            if runtime_state is not None else checkpoint))
     return HistoricalMarketReplayResult(manifest, tuple(points), diagnostics, final_checkpoint)
 
 
@@ -706,7 +723,7 @@ def run_historical_market_replay(
 
 
 def run_bounded_historical_market_replay(
-    dataset, *, runtime_state: HistoricalReplayRuntimeState | None = None,
+    dataset, *, retain_points: bool = True, runtime_state: HistoricalReplayRuntimeState | None = None,
     boundary_callback: Callable[[HistoricalMarketReplayPoint,
                                  HistoricalReplayRuntimeState | None], None] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
@@ -729,7 +746,7 @@ def run_bounded_historical_market_replay(
     return _run_replay_core(
         dataset, dataset._index.iter_replay_trades(dataset.universe.symbols, after),
         candles, intervals, 0,
-        manifest, None, runtime_state=runtime_state,
+        manifest, None, runtime_state=runtime_state, retain_points=retain_points,
         boundary_callback=boundary_callback, progress_callback=progress_callback)
 
 
@@ -754,3 +771,8 @@ def to_market_state_experiment_points(
     ) for point in result.points)
     validate_experiment_points(points)
     return points
+
+
+def canonical_replay_point_id(run_fingerprint: str, boundary: int) -> str:
+    """Canonical identity shared by replay and runtime-only study projections."""
+    return _point_id(run_fingerprint, boundary)

@@ -245,8 +245,11 @@ def validate_study_phase_prepared(prepared) -> None:
                 != (replay.manifest.output_start_boundary_time_ms,
                     replay.manifest.output_end_boundary_time_ms)):
             raise ValueError("supplementary source evidence differs from the frozen period")
+    from .historical_replay import canonical_replay_point_id
     for replay_point, point in zip(replay.points, points):
-        if (point.movement_evaluation is not replay_point.movement_evaluation
+        if (replay_point.point_id != canonical_replay_point_id(
+                    replay.manifest.run_fingerprint, replay_point.evaluation_boundary_time_ms)
+                or point.movement_evaluation is not replay_point.movement_evaluation
                 or point.source_time_evidence != replay_point.source_time_evidence
                 or point.partition != phase):
             raise ValueError("study extension requires the exact uniform-phase replay stream")

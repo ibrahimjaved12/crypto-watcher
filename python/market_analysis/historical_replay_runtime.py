@@ -16,7 +16,7 @@ from typing import Union, get_args, get_origin, get_type_hints
 from .historical_market_state_study_json import canonical_study_json
 from .historical_replay import (
     HISTORICAL_REPLAY_RUNTIME_VERSION, HistoricalMarketReplayPoint,
-    HistoricalReplayRuntimeState, HistoricalReplayTrade,
+    HistoricalReplayRuntimeState, HistoricalReplayTrade, canonical_replay_point_id,
 )
 from .movement import (
     MarketObservation, MovementBucket, MovementBucketEngineState,
@@ -159,7 +159,12 @@ def _atomic_write(path: Path, data: bytes) -> None:
             if path.read_bytes() != data:
                 raise ValueError(f"conflicting replay checkpoint file: {path.name}")
             return
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != data:
+                raise ValueError(f"conflicting replay checkpoint file: {path.name}")
+        temporary.unlink()
         temporary = None
         descriptor = os.open(path.parent, os.O_RDONLY)
         try:
@@ -183,7 +188,7 @@ class ReplayCheckpointStore:
         self.progress = progress
         self.previous_sha = None
         self.previous_boundary = None
-        self.points = []
+        self.point_count = 0
         self.chunk_points = []
         self._complete = False
 
@@ -194,10 +199,14 @@ class ReplayCheckpointStore:
             boundary += 3_600_000
         yield self.end_boundary
 
-    def load_latest(self):
+    def _iter_validated_chunks(self):
+        self.point_count = 0
+        self.previous_sha = None
+        self.previous_boundary = None
+        self._complete = False
         paths = sorted(self.root.glob("checkpoint-*.json"))
         if not paths:
-            return None
+            return
         expected = iter(self._checkpoint_boundaries())
         state = None
         for path in paths:
@@ -290,17 +299,26 @@ class ReplayCheckpointStore:
                 raise ValueError("noncanonical replay state")
             if (state.run_fingerprint != self.identity["run_fingerprint"]
                     or state.completed_boundary_time_ms != boundary
-                    or state.emitted_point_count != len(self.points) + len(chunk)
+                    or state.emitted_point_count != self.point_count + len(chunk)
                     or metadata["cumulative_point_count"] != state.emitted_point_count):
                 raise ValueError("replay state boundary/count mismatch")
-            self.points.extend(chunk)
+            self.point_count += len(chunk)
+            del lines, chunk_raw, point
             self.previous_sha = current_sha
             self.previous_boundary = boundary
             self._complete = metadata.get("status") == "REPLAY_COMPLETE"
             if self._complete and boundary != self.end_boundary:
                 raise ValueError("premature replay complete checkpoint")
+            yield chunk, state
+            del chunk
         if self.previous_boundary == self.end_boundary and not self._complete:
             raise ValueError("final replay checkpoint is not complete")
+
+    def load_latest(self):
+        """Validate each bounded chunk once, retaining only the final state."""
+        state = None
+        for chunk, state in self._iter_validated_chunks():
+            del chunk
         return state
 
     def add_point(self, point: HistoricalMarketReplayPoint,
@@ -351,7 +369,7 @@ class ReplayCheckpointStore:
         metadata = {**body, "checkpoint_sha256": checkpoint_sha}
         _atomic_write(self.root / f"checkpoint-{boundary}.json",
                       _canonical_bytes(metadata))
-        self.points.extend(self.chunk_points)
+        self.point_count += len(self.chunk_points)
         self.chunk_points.clear()
         self.previous_sha = checkpoint_sha
         self.previous_boundary = boundary
@@ -362,11 +380,18 @@ class ReplayCheckpointStore:
                 "completed_output_boundaries": state.emitted_point_count,
                 "total_output_boundaries": (self.end_boundary - self.start_boundary) // 5_000 + 1,
                 "checkpoint_sha256": checkpoint_sha,
-                "point_count": len(self.points),
+                "point_count": self.point_count,
             })
             if self._complete:
                 self.progress("REPLAY_COMPLETE", {"completed_boundary": boundary})
 
 
+    def iter_points(self):
+        """Revalidate the chain and read immutable chunks without retaining the day."""
+        for chunk, state in self._iter_validated_chunks():
+            yield from chunk
+            del chunk, state
+
+
 def _point_id(fingerprint, boundary):
-    return _sha(f"{fingerprint}|movement|{boundary}".encode("ascii"))
+    return canonical_replay_point_id(fingerprint, boundary)

@@ -23,7 +23,8 @@ from .historical_open_interest_evidence import (
     BinanceOpenInterestEvidence, load_binance_usdm_open_interest_evidence,
 )
 from .historical_replay import (
-    HistoricalMarketReplayResult, HistoricalReplayConfig, ReplayPartitionPlan,
+    CompactStudyReplay, HistoricalMarketReplayResult, HistoricalReplayConfig,
+    ReplayPartitionPlan,
     run_historical_market_replay, to_market_state_experiment_points,
 )
 from .movement_metrics import MarketMovementConfig, MarketUniverseInput
@@ -111,7 +112,9 @@ class HistoricalOpenInterestExtensionPrepared:
 
     def __post_init__(self):
         if (not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
-                or not isinstance(self.replay_result, HistoricalMarketReplayResult)
+                or not (isinstance(self.replay_result, HistoricalMarketReplayResult)
+                        or (self.study_phase is not None
+                            and isinstance(self.replay_result, CompactStudyReplay)))
                 or ((self.partition_plan is None) == (self.study_phase is None))
                 or (self.partition_plan is not None
                     and not isinstance(self.partition_plan, ReplayPartitionPlan))
