@@ -530,13 +530,27 @@ membership validation; never concatenate JSON or delete conflicts to force succe
 The broader scientific sequence remains owned by existing modules; HMM/freeze and
 Part-C operations are not controller tasks:
 
-1. Development Part-B reports for all ten frozen development periods.
-2. `historical_market_state_hmm_crossfit` plus Part-B `freeze-hmm`.
-3. `historical_market_state_study_part_c development` freeze.
-4. Validation Part-B with frozen HMM/development prerequisites.
-5. Part-C validation and its exact aggregate test authorization.
-6. Untouched test Part-B with `--allow-test` and the validated chain.
-7. Part-C test.
+1. Development Part-B reports for all ten frozen development periods; after each
+   report, `historical_market_state_study_part_c derive-table --period-index N`
+   (no HMM prerequisites for development tables).
+2. `historical_market_state_hmm_crossfit` plus Part-B `freeze-hmm`, both with
+   `--analysis-table-dir`.
+3. `historical_market_state_study_part_c development --analysis-table-dir` freeze.
+4. Validation Part-B with frozen HMM/development prerequisites; after each report,
+   `derive-table --period-index N` with `--development-freeze`,
+   `--hmm-crossfit-index`, `--final-hmm-model` and the tables directory (it
+   re-validates the cross-fit index against the ten development tables).
+5. Part-C validation with `--analysis-table-dir`, and its exact aggregate test
+   authorization.
+6. Untouched test Part-B with `--allow-test` and the validated chain; after each
+   report, `derive-table` additionally with `--validation-freeze` and
+   `--test-authorization` (refused before the report is opened unless the
+   authorization is exact and has authorized members).
+7. Part-C test with `--analysis-table-dir`.
+
+`verify-table` (same arguments as `derive-table`) audits any table against its report.
+Without `--analysis-table-dir`, every step still reads the period reports directly and
+produces byte-identical artifacts.
 
 Those modules' existing CLIs own the science. The controller supports only explicitly declared preflight, exact-period Part-B
 execution and aggregation. It cannot generate HMM/freeze/Part-C prerequisites or

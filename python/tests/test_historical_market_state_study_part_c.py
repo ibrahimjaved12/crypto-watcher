@@ -1,4 +1,5 @@
 """Small generated artifacts only. No market archives, replay or study execution."""
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from market_analysis import historical_market_state_study_part_c as cli
 from market_analysis import historical_market_state_study_execution as part_b
 from market_analysis import historical_market_state_study_evaluation as core
 from market_analysis import historical_market_state_study_features as f
+from market_analysis import historical_market_state_study_tables as tables
 from market_analysis.historical_market_state_candidate_evidence import (
     HistoricalStudyCandidateEvidence, adapt_v1_evidence, _native_point, CANDIDATE_EVIDENCE_VERSION,
 )
@@ -164,6 +166,19 @@ def generated_report(index=0, config=None, timestamp=None, evidence=None):
         body['hmm_development_training_block'] = study_json_safe(block)
         body['hmm_development_training_block_sha256'] = block.block_sha256
     return seal(body)
+
+
+@contextmanager
+def period_files(phase, missing=()):
+    """Empty report files at the real period paths of one phase (loaders are patched)."""
+    manifest = part_b.load_study_manifest(MANIFEST_PATH)
+    with TemporaryDirectory() as root:
+        for period in manifest.selected_periods:
+            if period.phase == phase and period.study_period_index not in missing:
+                path = Path(root) / part_b.PERIOD_DIRECTORY / part_b._period_filename(period)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('')
+        yield root
 
 
 def phase_visitor(reports, upstream):
@@ -788,16 +803,18 @@ class PartCArtifactIntegrationTests(unittest.TestCase):
     def test_exact_phase_loader_never_scans_other_phase_or_accepts_wrong_final_hmm(self):
         manifest = part_b.load_study_manifest(MANIFEST_PATH)
         reports = tuple(generated_report(i) for i in range(10, 18))
-        with patch.object(part_b, 'load_finalized_period_report', side_effect=reports) as loader:
+        with period_files('validation') as root, \
+                patch.object(part_b, 'load_finalized_period_report', side_effect=reports) as loader:
             _, upstream = adapter.load_phase_reports(manifest, {'coverage_manifest_sha256': COVERAGE},
-                '/synthetic/output', 'validation', REVISION, CROSS, FINAL)
+                root, 'validation', REVISION, CROSS, FINAL)
             self.assertEqual(len(loader.call_args_list), 8)
             self.assertEqual([p.study_period_index for p in upstream.periods], list(range(10, 18)))
             self.assertTrue(all('/periods/01' in str(c.args[0]) for c in loader.call_args_list))
         wrong = deepcopy(reports[0])
         wrong['hmm_model_sha256'] = '0' * 64
-        with patch.object(part_b, 'load_finalized_period_report', return_value=wrong), self.assertRaises(ValueError):
-            adapter.load_phase_reports(manifest, {'coverage_manifest_sha256': COVERAGE}, '.', 'validation', REVISION, CROSS, FINAL)
+        with period_files('validation') as root, \
+                patch.object(part_b, 'load_finalized_period_report', return_value=wrong), self.assertRaises(ValueError):
+            adapter.load_phase_reports(manifest, {'coverage_manifest_sha256': COVERAGE}, root, 'validation', REVISION, CROSS, FINAL)
 
     def test_track_a_pelt_is_separate_and_cannot_be_predictive(self):
         reports = tuple(generated_report(i) for i in range(10))
@@ -861,16 +878,18 @@ class OneReportAtATimeTests(unittest.TestCase):
                 self.assertEqual(tuple(actual[0]), tuple(expected[0]))  # identity order too
 
     def test_adapt_phase_requires_the_complete_roster(self):
+        manifest = part_b.load_study_manifest(MANIFEST_PATH)
         reports, upstream = self.phase('validation', range(10, 18))
 
-        def incomplete(*inputs, visit):
+        def one_fewer(*inputs, visit):
             for report, source in zip(reports[:-1], upstream.periods):
                 visit(report, source)
             return upstream
 
-        with patch.object(cli, 'for_each_phase_report', side_effect=incomplete), \
+        with patch.object(cli, 'for_each_phase_report', side_effect=one_fewer), \
                 self.assertRaisesRegex(ValueError, 'complete phase report roster'):
-            cli.adapt_phase(None, None, 'output', 'validation', REVISION, CROSS, FINAL, (identity(),))
+            cli.adapt_phase(manifest, {'coverage_manifest_sha256': COVERAGE}, 'output', 'validation',
+                            REVISION, CROSS, FINAL, (identity(),))
 
     def test_verified_and_indexed_adapt_period_equals_default(self):
         fixtures = [generated_report(10)] + [generated_report(10, config) for config in adapter.PREDICTIVE_CONFIGS]
@@ -930,9 +949,9 @@ class OneReportAtATimeTests(unittest.TestCase):
         def visit(report, source):
             events.append('visit')
 
-        with patch.object(part_b, 'load_finalized_period_report', side_effect=load):
+        with period_files('validation') as root, patch.object(part_b, 'load_finalized_period_report', side_effect=load):
             upstream = adapter.for_each_phase_report(manifest, {'coverage_manifest_sha256': COVERAGE},
-                '/synthetic/output', 'validation', REVISION, CROSS, FINAL, visit=visit)
+                root, 'validation', REVISION, CROSS, FINAL, visit=visit)
         self.assertEqual(events, ['load', 'visit'] * 8)
         self.assertEqual(upstream, f.UpstreamInputProvenance('validation',
             tuple(adapter.period_provenance(r, CROSS, FINAL) for r in reports), CROSS, FINAL))
@@ -945,24 +964,280 @@ class OneReportAtATimeTests(unittest.TestCase):
             if len(events) == 4:
                 raise ValueError('synthetic visit failure')
 
-        with patch.object(part_b, 'load_finalized_period_report', side_effect=lambda *a, **k: (
-                events.append('load'), pending.pop(0))[1]), \
+        with period_files('validation') as root, \
+                patch.object(part_b, 'load_finalized_period_report', side_effect=lambda *a, **k: (
+                    events.append('load'), pending.pop(0))[1]), \
                 self.assertRaisesRegex(ValueError, 'synthetic visit failure'):
             adapter.for_each_phase_report(manifest, {'coverage_manifest_sha256': COVERAGE},
-                '/synthetic/output', 'validation', REVISION, CROSS, FINAL, visit=failing)
+                root, 'validation', REVISION, CROSS, FINAL, visit=failing)
         self.assertEqual(events, ['load', 'visit', 'load', 'visit'])
+
+    def test_for_each_phase_report_requires_every_file_before_any_load(self):
+        manifest = part_b.load_study_manifest(MANIFEST_PATH)
+        visit = []
+        with period_files('validation', missing=(14,)) as root, \
+                patch.object(part_b, 'load_finalized_period_report') as loader, \
+                self.assertRaisesRegex(ValueError, r'validation period 14 report is missing: .*periods'):
+            adapter.for_each_phase_report(manifest, {'coverage_manifest_sha256': COVERAGE},
+                root, 'validation', REVISION, CROSS, FINAL, visit=lambda report, source: visit.append(source))
+        loader.assert_not_called()
+        self.assertEqual(visit, [])
 
     def test_load_phase_reports_unchanged(self):
         manifest = part_b.load_study_manifest(MANIFEST_PATH)
         reports = tuple(generated_report(i) for i in range(10, 18))
-        with patch.object(part_b, 'load_finalized_period_report', side_effect=reports):
+        with period_files('validation') as root, patch.object(part_b, 'load_finalized_period_report', side_effect=reports):
             loaded, upstream = adapter.load_phase_reports(manifest, {'coverage_manifest_sha256': COVERAGE},
-                '/synthetic/output', 'validation', REVISION, CROSS, FINAL)
+                root, 'validation', REVISION, CROSS, FINAL)
         self.assertIsInstance(loaded, tuple)
         self.assertEqual(len(loaded), len(reports))
         self.assertTrue(all(a is b for a, b in zip(loaded, reports)))
         self.assertEqual(upstream, f.UpstreamInputProvenance('validation',
             tuple(adapter.period_provenance(r, CROSS, FINAL) for r in reports), CROSS, FINAL))
+
+
+class AnalysisTableTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.manifest = part_b.load_study_manifest(MANIFEST_PATH)
+        cls.coverage = {'coverage_manifest_sha256': COVERAGE}
+        cls.hmm = identity('EXP-75-09')
+
+    def period(self, index):
+        return self.manifest.selected_periods[index]
+
+    def build(self, report, index, identities, cross=None, final=None):
+        return tables.build_period_table(report, self.manifest, self.period(index), report_file_sha256='0' * 64,
+                                         cross_fit_sha=cross, final_model_sha=final, identities=identities)
+
+    def write_tables(self, table_dir, reports, identities, cross=None, final=None):
+        for report in reports:
+            index = report['period']['study_period_index']
+            tables.write_period_table(tables.table_path(table_dir, self.period(index)),
+                                      self.build(report, index, identities, cross, final))
+
+    def from_reports(self, phase, reports, identities, folds=None):
+        upstream = f.UpstreamInputProvenance(phase, tuple(adapter.period_provenance(r, CROSS, FINAL) for r in reports),
+                                             CROSS, FINAL)
+        with patch.object(cli, 'for_each_phase_report', side_effect=phase_visitor(reports, upstream)):
+            return cli.adapt_phase(self.manifest, self.coverage, 'output', phase, REVISION, CROSS, FINAL,
+                                   identities, folds)
+
+    def from_tables(self, table_dir, phase, identities, folds=None, cross=CROSS, final=FINAL):
+        return tables.adapt_phase_from_tables(self.manifest, self.coverage, table_dir, phase, REVISION,
+                                              cross, final, identities, folds)
+
+    def test_build_write_load_round_trip_and_identity_checks(self):
+        period = self.period(10)
+        table = self.build(generated_report(10), 10, (identity(),), CROSS, FINAL)
+        with TemporaryDirectory() as root:
+            path = tables.table_path(root, period)
+            tables.write_period_table(path, table)
+            tables.write_period_table(path, table)  # identical content is a safe resume
+            with self.assertRaises(part_b.StudyArtifactConflictError):
+                tables.write_period_table(path, dict(table, report_file_sha256='1' * 64))
+            self.assertEqual(tables.load_period_table(path, self.manifest, period, code_revision=REVISION,
+                                                      coverage_sha256=COVERAGE), table)
+            other_manifest = SimpleNamespace(manifest_sha256='0' * 64, study_version=self.manifest.study_version)
+            for manifest, target, revision, coverage in ((other_manifest, period, REVISION, COVERAGE),
+                                                         (self.manifest, period, 'other-revision', COVERAGE),
+                                                         (self.manifest, period, REVISION, '0' * 64),
+                                                         (self.manifest, self.period(11), REVISION, COVERAGE)):
+                with self.subTest(revision=revision, coverage=coverage, period=target.study_period_index), \
+                        self.assertRaises(part_b.StudyArtifactConflictError):
+                    tables.load_period_table(path, manifest, target, code_revision=revision, coverage_sha256=coverage)
+            tampered = json.loads(path.read_text())
+            tampered['report_file_sha256'] = '2' * 64
+            path.write_text(canonical_study_json(tampered) + '\n')
+            with self.assertRaisesRegex(ValueError, 'analysis table SHA-256 mismatch'):
+                tables.load_period_table(path, self.manifest, period, code_revision=REVISION)
+            path.write_text(part_b._artifact_json(dict(table, table_version='other-version'), 'table_sha256') + '\n')
+            with self.assertRaises(part_b.StudyArtifactConflictError):
+                tables.load_period_table(path, self.manifest, period, code_revision=REVISION)
+
+    def test_development_tables_equal_reports_including_hmm_join(self):
+        for config in (None, self.hmm):
+            reports = tuple(generated_report(i, config) for i in range(10))
+            folds = development_folds(reports)
+            expected = self.from_reports('development', reports, adapter.PREDICTIVE_CONFIGS, folds)
+            with self.subTest(config=config), TemporaryDirectory() as table_dir:
+                self.write_tables(table_dir, reports, adapter.PREDICTIVE_CONFIGS)
+                actual = self.from_tables(table_dir, 'development', adapter.PREDICTIVE_CONFIGS, folds)
+                self.assertEqual(actual, expected)
+                self.assertEqual(tuple(actual[0]), tuple(expected[0]))
+                # The stored rows never include development EXP-75-09.
+                stored = tables.load_period_table(tables.table_path(table_dir, self.period(0)), self.manifest,
+                                                  self.period(0), code_revision=REVISION)['adapted']
+                self.assertNotIn(self.hmm, [io.decode(entry['identity']) for entry in stored])
+        self.assertTrue(any(item.day.observations for item in actual[0][self.hmm]))
+
+    def test_validation_tables_equal_reports_for_the_derived_subset(self):
+        identities = (identity('EXP-75-02'), identity(), self.hmm)
+        for config in (identity('EXP-75-02'), self.hmm):
+            reports = tuple(generated_report(i, config) for i in range(10, 18))
+            expected = self.from_reports('validation', reports, identities)
+            with self.subTest(config=config), TemporaryDirectory() as table_dir:
+                self.write_tables(table_dir, reports, identities, CROSS, FINAL)
+                actual = self.from_tables(table_dir, 'validation', identities)
+                self.assertEqual(actual, expected)
+                self.assertEqual(tuple(actual[0]), tuple(expected[0]))
+
+    def test_non_development_tables_fail_closed(self):
+        report = generated_report(10)
+        with self.assertRaisesRegex(ValueError, 'frozen final HMM'):
+            self.build(report, 10, (identity(),), CROSS, '0' * 64)
+        with self.assertRaises(ValueError):
+            self.build(report, 10, (identity(),))
+        with self.assertRaises(ValueError):
+            self.build(generated_report(0), 0, (identity(),), CROSS, FINAL)
+        reports = tuple(generated_report(i) for i in range(10, 18))
+        with TemporaryDirectory() as table_dir:
+            self.write_tables(table_dir, reports, (identity(),), CROSS, FINAL)
+            with self.assertRaisesRegex(ValueError, 'different HMM prerequisites'):
+                self.from_tables(table_dir, 'validation', (identity(),), final='0' * 64)
+            with self.assertRaisesRegex(ValueError, 'lacks the requested config'):
+                self.from_tables(table_dir, 'validation', (identity('EXP-75-02'),))
+            tables.table_path(table_dir, self.period(13)).unlink()
+            with patch.object(tables, 'load_period_table') as loader, \
+                    self.assertRaisesRegex(ValueError, 'validation period 13 analysis table is missing'):
+                self.from_tables(table_dir, 'validation', (identity(),))
+            loader.assert_not_called()
+
+    def test_slim_hmm_join_equals_full_report_and_self_checks(self):
+        report = generated_report(0, self.hmm)
+        fold = development_folds((report,))[0]
+        source = adapter.period_provenance(report, CROSS, FINAL)
+        join = tables.development_hmm_join(report)
+        header = {key: report.get(key) for key in tables.HEADER_KEYS}
+        full = adapter.adapt_period(report, source, self.hmm, held_out_fold=fold)
+        slim = adapter.adapt_period({**header, **join}, source, self.hmm, held_out_fold=fold, report_verified=True)
+        self.assertEqual(slim, full)
+        self.assertTrue(full.day.observations)
+        windows = join['candidate_evidence'][0]['native_evidence']['classification']['windows']
+        self.assertEqual([entry[0] for entry in windows], [5])
+        with patch.object(tables, '_slim_v1_native_evidence',
+                          side_effect=lambda native: {'classification': {**native['classification'], 'windows': []}}), \
+                self.assertRaisesRegex(ValueError, 'slim V1 classification differs'):
+            tables.development_hmm_join(report)
+
+    def write_report(self, root, index, report):
+        path = Path(root) / 'part-b' / part_b.PERIOD_DIRECTORY / part_b._period_filename(self.period(index))
+        path.parent.mkdir(parents=True)
+        path.write_text(canonical_study_json(report))
+        return path
+
+    def test_verify_period_table_passes_fresh_and_fails_on_altered_row(self):
+        period, identities = self.period(10), (identity(), identity('EXP-75-02'))
+        with TemporaryDirectory() as root:
+            path = self.write_report(root, 10, generated_report(10))
+            table = tables.derive_period_table(path, self.manifest, self.coverage, period, REVISION,
+                cross_fit_sha=CROSS, final_model_sha=FINAL, identities=identities)
+            table_file = tables.write_period_table(tables.table_path(Path(root) / 'tables', period), table)
+            tables.verify_period_table(path, table_file, self.manifest, self.coverage, period, REVISION,
+                cross_fit_sha=CROSS, final_model_sha=FINAL, identities=identities)
+            altered = deepcopy(table)
+            altered['adapted'][0]['exclusions'] = io.encode((('synthetic exclusion', 1),))
+            table_file.write_text(part_b._artifact_json(altered, 'table_sha256') + '\n')
+            with self.assertRaises(ValueError):
+                tables.verify_period_table(path, table_file, self.manifest, self.coverage, period, REVISION,
+                    cross_fit_sha=CROSS, final_model_sha=FINAL, identities=identities)
+
+    def table_args(self, index, *extra):
+        return cli.build_cli_parser().parse_args([
+            'derive-table', '--study-manifest', 'manifest', '--coverage-manifest', 'coverage',
+            '--part-b-output-dir', 'part-b', '--analysis-table-dir', 'tables', '--part-b-revision', REVISION,
+            '--period-index', str(index), *extra])
+
+    def test_table_cli_gates_run_before_any_report_is_opened(self):
+        development = unavailable_freeze()
+        validation = empty_validation(development)
+        authorization = core.authorize_test(development, validation)
+        parents = ('--development-freeze', 'dev', '--hmm-crossfit-index', 'index', '--final-hmm-model', 'model',
+                   '--validation-freeze', 'val', '--test-authorization', 'auth')
+        cases = ((replace(authorization, validation_freeze_sha256='0' * 64), 'not the exact current aggregate'),
+                 (authorization, 'no authorized test members'))
+        for supplied, message in cases:
+            with self.subTest(message=message), \
+                    patch.object(cli, 'verify_inputs', return_value=(self.manifest, self.coverage)), \
+                    patch.object(cli, 'read_artifact', side_effect=((development, {}), (validation, {}), (supplied, {}))), \
+                    patch.object(cli, 'load_hmm_prerequisites') as prerequisites, \
+                    patch.object(part_b, 'load_finalized_period_report') as loader, \
+                    self.assertRaisesRegex(ValueError, message):
+                cli.run_table_command(self.table_args(18, *parents))
+            prerequisites.assert_not_called()
+            loader.assert_not_called()
+        with patch.object(cli, 'verify_inputs', return_value=(self.manifest, self.coverage)), \
+                patch.object(cli, 'read_artifact') as reader, \
+                patch.object(part_b, 'load_finalized_period_report') as loader, \
+                self.assertRaisesRegex(ValueError, '--development-freeze is required'):
+            cli.run_table_command(self.table_args(10, '--hmm-crossfit-index', 'index', '--final-hmm-model', 'model'))
+        reader.assert_not_called()
+        loader.assert_not_called()
+
+    def test_phase_runs_with_tables_never_open_reports(self):
+        manifest = self.manifest
+        reports = tuple(generated_report(i) for i in range(10))
+        folds = development_folds(reports)
+        expected = self.from_reports('development', reports, adapter.PREDICTIVE_CONFIGS, folds)
+        args = SimpleNamespace(study_manifest='manifest', coverage_manifest='coverage', part_b_revision=REVISION,
+            hmm_crossfit_index='index', final_hmm_model='model', part_b_output_dir=None,
+            analysis_table_dir='tables', output='dev')
+        with patch.object(cli, 'verify_inputs', return_value=(manifest, self.coverage)), \
+                patch.object(cli, 'load_hmm_prerequisites', return_value=(CROSS, FINAL, folds)) as prerequisites, \
+                patch.object(tables, 'adapt_phase_from_tables', return_value=expected) as from_tables, \
+                patch.object(cli, 'for_each_phase_report') as from_reports, \
+                patch.object(cli, 'write_artifact') as writer:
+            cli.run_development(args)
+        from_reports.assert_not_called()
+        self.assertEqual(from_tables.call_args.args[2:4], ('tables', 'development'))
+        self.assertEqual(prerequisites.call_args.kwargs['table_dir'], 'tables')
+        self.assertEqual(writer.call_args.kwargs['track_a'], expected[1])
+
+        development = unavailable_freeze()
+        validation_reports = tuple(generated_report(i) for i in range(10, 18))
+        validation_args = SimpleNamespace(development_freeze='dev', study_manifest='manifest',
+            coverage_manifest='coverage', part_b_revision=REVISION, hmm_crossfit_index='index',
+            final_hmm_model='model', part_b_output_dir=None, analysis_table_dir='tables', output='val',
+            test_authorization_output='auth')
+        with patch.object(cli, 'read_artifact', return_value=(development, {})), \
+                patch.object(cli, 'verify_inputs', return_value=(manifest, self.coverage)), \
+                patch.object(cli, 'load_hmm_prerequisites', return_value=(CROSS, FINAL, {})), \
+                patch.object(tables, 'adapt_phase_from_tables',
+                             return_value=self.from_reports('validation', validation_reports, ())) as from_tables, \
+                patch.object(cli, 'for_each_phase_report') as from_reports, \
+                patch.object(cli, 'write_artifact'):
+            cli.run_validation(validation_args)
+        from_reports.assert_not_called()
+        self.assertEqual(from_tables.call_args.args[2:4], ('tables', 'validation'))
+
+        development = nominated_freeze()
+        validation, _ = nominated_validation(development)
+        authorization = core.authorize_test(development, validation)
+        members = tuple(m.identity for m in authorization.members if m.status == 'AUTHORIZED')
+        test_reports = tuple(generated_report(i, development.predictive_pairs[0].identity) for i in range(18, 30))
+        metadata = {'track_a': (), 'layer_one': (), 'exclusions': ()}
+        test_args = SimpleNamespace(development_freeze='dev', validation_freeze='val', test_authorization='auth',
+            study_manifest='manifest', coverage_manifest='coverage', part_b_revision=REVISION,
+            part_b_output_dir=None, analysis_table_dir='tables', output='report')
+        with patch.object(cli, 'read_artifact', side_effect=((development, metadata), (validation, metadata),
+                                                             (authorization, {}))), \
+                patch.object(cli, 'verify_inputs', return_value=(manifest, self.coverage)), \
+                patch.object(tables, 'adapt_phase_from_tables',
+                             return_value=self.from_reports('test', test_reports, members)) as from_tables, \
+                patch.object(cli, 'for_each_phase_report') as from_reports, \
+                patch.object(cli, 'write_artifact'):
+            cli.run_test(test_args)
+        from_reports.assert_not_called()
+        self.assertEqual(from_tables.call_args.args[2:4], ('tables', 'test'))
+
+    def test_phase_runs_require_a_report_or_table_source(self):
+        args = SimpleNamespace(study_manifest='manifest', coverage_manifest='coverage', part_b_revision=REVISION,
+            hmm_crossfit_index='index', final_hmm_model='model', part_b_output_dir=None,
+            analysis_table_dir=None, output='dev')
+        with patch.object(cli, 'verify_inputs') as inputs, \
+                self.assertRaisesRegex(ValueError, '--part-b-output-dir is required without --analysis-table-dir'):
+            cli.run_development(args)
+        inputs.assert_not_called()
 
 
 if __name__ == '__main__':

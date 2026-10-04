@@ -92,13 +92,16 @@ def for_each_phase_report(manifest, coverage, output_dir, phase, revision, cross
     decoded report is alive at a time (a plain loop, not a generator: a
     suspended generator frame would keep its report alive).
     """
+    periods = tuple(period for period in manifest.selected_periods if period.phase == phase)
+    paths = tuple(Path(output_dir) / part_b.PERIOD_DIRECTORY / part_b._period_filename(period) for period in periods)
+    # Fail before any (multi-GB) load when the phase roster is incomplete.
+    for period, path in zip(periods, paths):
+        if not path.is_file():
+            raise ValueError(f'{phase} period {period.study_period_index} report is missing: {path}')
     sources = []
-    for period in manifest.selected_periods:
-        if period.phase != phase:
-            continue
+    for period, path in zip(periods, paths):
         report = part_b.load_finalized_period_report(
-            Path(output_dir) / part_b.PERIOD_DIRECTORY / part_b._period_filename(period),
-            manifest, period, coverage_sha256=coverage['coverage_manifest_sha256'], code_revision=revision)
+            path, manifest, period, coverage_sha256=coverage['coverage_manifest_sha256'], code_revision=revision)
         validate_candidate_registry(report)
         if phase != 'development' and report.get('hmm_model_sha256') != final_model_sha:
             raise ValueError('period was not generated with the frozen final HMM')
