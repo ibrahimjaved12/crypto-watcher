@@ -12,6 +12,7 @@ import httpx
 
 from .api_models import (
     AnalysisRequest,
+    CompletedCandleSeriesRequest,
     MovementBoundaryRequest,
     MovementClassificationRequest,
     MovementHistoryRegistrationRequest,
@@ -74,6 +75,21 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
         except Exception:
             # No raw provider error, URL, token or baseline payload in responses/logs.
             raise HTTPException(502, "Analysis could not be completed") from None
+
+    @app.post("/v1/completed-candles/validate", dependencies=[Depends(authorize)])
+    async def completed_candles(body: CompletedCandleSeriesRequest):
+        series = body.domain()
+        candles = series.market_candles
+        return {
+            "schema_version": 1, "contract_version": series.contract_version,
+            "provider": series.identity.provider, "exchange": series.identity.exchange,
+            "instrument_id": series.identity.instrument_id, "price_type": series.identity.price_type,
+            "timeframe_minutes": series.identity.timeframe_minutes,
+            "observation_count": len(series.observations), "candle_count": len(candles),
+            "first_open_time_ms": candles[0].open_time_ms if candles else None,
+            "last_open_time_ms": candles[-1].open_time_ms if candles else None,
+            "missing_open_times_ms": series.missing_open_times_ms,
+        }
 
     @app.post("/v1/technical-analysis", dependencies=[Depends(authorize)])
     async def technical_analysis(body: TechnicalAnalysisRequest):

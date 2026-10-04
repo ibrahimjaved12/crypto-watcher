@@ -30,6 +30,7 @@ const symbolsStub = stub(`
   }
 `);
 const repositoryStubs = {
+  "../market/completed-candle-contract": await moduleUrl("../src/lib/market/completed-candle-contract.ts"),
   "@supabase/supabase-js": stub("export const createClient=()=>({});"),
   "./config.server": stub("export const operationalDbConfig=()=>({enabled:false});"),
   "../market/symbols": symbolsStub,
@@ -646,7 +647,7 @@ test("movement normalization history RPC returns compact one-minute candles per 
       close: 100 + index,
       volume: 5,
       quote_volume: 551 + index,
-      source_event_at: new Date(openTime + 60_000).toISOString(),
+      source_event_at: null,
       received_at: new Date(openTime + 60_000).toISOString(),
       transport: "rest",
     };
@@ -675,6 +676,44 @@ test("movement normalization history RPC returns compact one-minute candles per 
     ])
   ).rows[0].history;
   assert.deepEqual(empty, {});
+});
+
+test("baseline exposes only the generic completed candle RPC", async () => {
+  const sql = await readFile(new URL("../operational-db/supabase/migrations/20261004000000_operational_schema.sql", import.meta.url), "utf8");
+  assert.match(sql, /CREATE FUNCTION public.get_collector_completed_candles/);
+  assert.doesNotMatch(sql, /get_collector_ta_candles/);
+});
+
+test("collector persistence binds transport, endpoint and source event without clock ordering", async () => {
+  const opening = Math.floor(Date.now() / 60_000) * 60_000 - 60_000;
+  const rest = {
+    provider: "binance-usdm", instrument_id: "binance-usdm:BTCUSDT", symbol: "BTCUSDT",
+    native_symbol: "BTCUSDT", price_type: "trade", timeframe_minutes: 1,
+    open_time: new Date(opening).toISOString(), close_time: new Date(opening + 59_999).toISOString(),
+    open: 100, high: 102, low: 99, close: 101, volume: 2, quote_volume: 202,
+    transport: "rest", endpoint: "/fapi/v1/klines", source_event_at: null,
+    received_at: new Date(opening + 60_100).toISOString(),
+  };
+  const websocket = { ...rest, transport: "websocket", endpoint: "wss://fstream.binance.com/market/stream",
+    source_event_at: new Date(opening + 60_107).toISOString() };
+  for (const bad of [
+    { ...rest, endpoint: websocket.endpoint },
+    { ...websocket, endpoint: rest.endpoint },
+    { ...rest, source_event_at: websocket.source_event_at },
+    { ...websocket, source_event_at: null },
+  ]) {
+    await assert.rejects(db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([bad])]),
+      /collector_candle_provenance/);
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM collector_recent_candles")).rows[0].count, 0);
+  }
+  // Correct duplicates are admitted only after malformed first observations failed.
+  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([rest])]);
+  await db.query("DELETE FROM collector_recent_candles");
+  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([websocket])]);
+  const stored = (await db.query("SELECT get_collector_completed_candles('BTCUSDT',1,1) AS candles")).rows[0].candles[0];
+  assert.equal(stored.source_event_at_ms, opening + 60_107);
+  assert.equal(stored.received_at_ms, opening + 60_100);
+  assert.ok(stored.received_at_ms < stored.source_event_at_ms);
 });
 
 test("collector TA candle RPC returns full ascending provenance for one frame", async () => {
@@ -711,7 +750,7 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
   });
   await db.query("SELECT record_collector_candles($1,$2)", [JSON.stringify(rows), 7]);
 
-  const candles = (await db.query("SELECT get_collector_ta_candles('btcusdt',15,10) AS candles"))
+  const candles = (await db.query("SELECT get_collector_completed_candles('btcusdt',15,10) AS candles"))
     .rows[0].candles;
   assert.equal(candles.length, 3);
   // Ascending order, and every candle keeps its recorded provenance rather than a
@@ -739,6 +778,11 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
   assert.equal(candles[2].instrument_id, "binance-usdm:BTCUSDT");
   assert.equal(candles[2].native_symbol, "BTCUSDT");
   assert.equal(candles[2].price_type, "trade");
+  assert.equal(candles[2].symbol, "BTCUSDT");
+  assert.equal(candles[2].market_type, "futures");
+  assert.equal(candles[2].contract_type, "perpetual");
+  assert.equal(candles[2].timeframe_minutes, 15);
+  assert.equal(candles[2].quote_volume, 507);
   assert.equal(candles[2].close_time_ms, observed + 2 * duration + duration - 1);
   // The exchange event time is transported exactly as recorded (never rewritten to the
   // completion boundary), and a REST candle honestly reports no exchange event.
@@ -749,16 +793,16 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
 
   // Another timeframe or symbol has no history rather than leaking the wrong series.
   assert.deepEqual(
-    (await db.query("SELECT get_collector_ta_candles('BTCUSDT',60,10) AS candles")).rows[0].candles,
+    (await db.query("SELECT get_collector_completed_candles('BTCUSDT',60,10) AS candles")).rows[0].candles,
     [],
   );
   assert.deepEqual(
-    (await db.query("SELECT get_collector_ta_candles('ETHUSDT',15,10) AS candles")).rows[0].candles,
+    (await db.query("SELECT get_collector_completed_candles('ETHUSDT',15,10) AS candles")).rows[0].candles,
     [],
   );
   await assert.rejects(
-    db.query("SELECT get_collector_ta_candles('BTCUSDT',7,10)"),
-    /Invalid collector TA candle timeframe/,
+    db.query("SELECT get_collector_completed_candles('BTCUSDT',7,10)"),
+    /Invalid collector completed candle timeframe/,
   );
 });
 
@@ -774,6 +818,7 @@ test("repository collector TA read transports recorded provenance without fabric
     provider: "binance-usdm",
     instrument_id: "binance-usdm:BTCUSDT",
     native_symbol: "BTCUSDT",
+    symbol: "BTCUSDT", market_type: "futures", contract_type: "perpetual", timeframe_minutes: 15,
     price_type: "trade",
     endpoint,
     transport,
@@ -789,6 +834,7 @@ test("repository collector TA read transports recorded provenance without fabric
     low: 90,
     close: 101,
     volume: 3,
+    quote_volume: 303.5,
   });
   const rows = [
     row(0, "rest", "/fapi/v1/klines"),
@@ -797,7 +843,7 @@ test("repository collector TA read transports recorded provenance without fabric
   const store = createOperationalStore(
     {
       async rpc(name, args) {
-        assert.equal(name, "get_collector_ta_candles");
+        assert.equal(name, "get_collector_completed_candles");
         assert.deepEqual(args, {
           p_symbol: "BTCUSDT",
           p_timeframe_minutes: 15,
@@ -808,44 +854,20 @@ test("repository collector TA read transports recorded provenance without fabric
     },
     { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
   );
-  const result = await store.readCollectorTACandles("btcusdt", 15);
-  assert.equal(result.source, "binance-usdm");
-  assert.equal(result.instrument.id, "binance-usdm:BTCUSDT");
-  assert.equal(result.priceType, "trade");
-  assert.equal("endpoint" in result, false);
-  assert.equal("retrievedAt" in result, false);
-  assert.deepEqual(result.candles, [
-    {
-      time: base,
-      open: 100,
-      high: 110,
-      low: 90,
-      close: 101,
-      volume: 3,
-      complete: true,
-      closeTime: base + step - 1,
-      // REST provenance: no exchange event is invented.
-      sourceEventTime: null,
-      receivedAt: base + step + 120,
-      endpoint: "/fapi/v1/klines",
-      transport: "rest",
-    },
-    {
-      time: base + step,
-      open: 100,
-      high: 110,
-      low: 90,
-      close: 101,
-      volume: 3,
-      complete: true,
-      closeTime: base + 2 * step - 1,
-      // WebSocket provenance: even an event before completion survives unchanged.
-      sourceEventTime: base + 2 * step - 7,
-      receivedAt: base + 2 * step + 120,
-      endpoint: "wss://fstream.binance.com/market/stream",
-      transport: "websocket",
-    },
-  ]);
+  const result = await store.readCollectorCompletedCandles("btcusdt", 15);
+  assert.equal(result.identity.provider, "binance-usdm");
+  assert.equal(result.identity.instrumentId, "binance-usdm:BTCUSDT");
+  assert.equal(result.identity.timeframeMinutes, 15);
+  assert.deepEqual(result.observations, rows.map((row) => ({
+    candle: { openTime: row.open_time_ms, closeTime: row.close_time_ms, open: row.open,
+      high: row.high, low: row.low, close: row.close, baseVolume: row.volume,
+      quoteVolume: row.quote_volume },
+    provenance: row.transport === "rest"
+      ? { sourceKind: "rest", endpoint: row.endpoint, retrievedAt: row.received_at_ms }
+      : { sourceKind: "websocket", endpoint: row.endpoint,
+          sourceEventTime: row.source_event_at_ms, receivedAt: row.received_at_ms },
+  })));
+  assert.equal("sourceEventTime" in result.observations[0].provenance, false);
 
   const malformed = createOperationalStore(
     {
@@ -859,8 +881,8 @@ test("repository collector TA read transports recorded provenance without fabric
     { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
   );
   await assert.rejects(
-    malformed.readCollectorTACandles("BTCUSDT", 15),
-    /invalid collector TA candle row/,
+    malformed.readCollectorCompletedCandles("BTCUSDT", 15),
+    /invalid collector completed candle row/,
   );
 
   // Structural corruption remains rejected instead of being silently normalised.
@@ -874,8 +896,8 @@ test("repository collector TA read transports recorded provenance without fabric
       { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
     );
     await assert.rejects(
-      invalid.readCollectorTACandles("BTCUSDT", 15),
-      /invalid collector TA candle row/,
+      invalid.readCollectorCompletedCandles("BTCUSDT", 15),
+      /invalid collector completed candle row/,
     );
   }
 });

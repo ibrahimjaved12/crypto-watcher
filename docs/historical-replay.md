@@ -849,3 +849,20 @@ python3 -m market_analysis.historical_market_state_study_execution execute \
 
 This manual run is the merge/Issue #152 closure acceptance gate. Do not close
 #152 based on synthetic tests alone or rerun against the old runtime directory.
+
+### Neutral native completed-candle projection (#91)
+
+`completed_candle_series_from_archive(dataset, symbol)` joins existing native 1m
+OHLC evidence and movement/archive volume rows by symbol/open time, failing on
+missing or conflicting pairs. It adds `completed-candle-v1` market facts without
+changing historical scientific dataclasses, fingerprints, evidence hashes, or
+availability policy. Intervals are `[open, open + 60_000)` and the Binance close
+label stays `open + 59_999`; gaps are reported and never filled.
+
+Archive observation provenance contains only dataset ID, version and content
+SHA-256. No historical WebSocket event, socket receipt or REST retrieval timestamp
+is fabricated. Existing `first_seen_at_ms` remains the close+1 replay availability
+surrogate, not transport/source-event provenance or market identity. Live
+collector observations and archive observations can describe equal market facts
+while retaining different provenance. #70's five-second buckets and #71's compact
+normalization projection remain separate from this additive representation.

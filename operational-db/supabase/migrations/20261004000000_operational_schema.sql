@@ -124,6 +124,11 @@ CREATE TABLE public.collector_recent_candles (
   transport TEXT NOT NULL CHECK (transport IN ('rest', 'websocket')),
   inserted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (provider, instrument_id, price_type, timeframe_minutes, open_time),
+  CONSTRAINT collector_candle_provenance CHECK (
+    (transport = 'rest' AND endpoint = '/fapi/v1/klines' AND source_event_at IS NULL)
+    OR (transport = 'websocket' AND endpoint = 'wss://fstream.binance.com/market/stream'
+        AND source_event_at IS NOT NULL)
+  ),
   CHECK (instrument_id = provider || ':' || native_symbol),
   CHECK (high >= greatest(open, close) AND low <= least(open, close) AND high >= low),
   CHECK (close_time = open_time + make_interval(mins => timeframe_minutes) - interval '1 millisecond'),
@@ -787,9 +792,9 @@ AS $$
     (SELECT max(open_time) FROM public.collector_recent_candles);
 $$;
 
--- Read canonical completed-candle evidence for application-owned TA. REST rows
+-- Read native completed-candle evidence for application-owned consumers. REST rows
 -- have no exchange event timestamp; stored provenance is returned as recorded.
-CREATE FUNCTION public.get_collector_ta_candles(
+CREATE FUNCTION public.get_collector_completed_candles(
   p_symbol TEXT, p_timeframe_minutes INTEGER, p_limit INTEGER
 ) RETURNS JSONB
 LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = public
@@ -799,13 +804,13 @@ DECLARE
   recent JSONB;
 BEGIN
   IF p_symbol IS NULL OR btrim(p_symbol) = '' THEN
-    RAISE EXCEPTION 'Invalid collector TA candle request';
+    RAISE EXCEPTION 'Invalid collector completed candle request';
   END IF;
   IF p_timeframe_minutes IS NULL OR p_timeframe_minutes NOT IN (1, 15, 60, 240) THEN
-    RAISE EXCEPTION 'Invalid collector TA candle timeframe';
+    RAISE EXCEPTION 'Invalid collector completed candle timeframe';
   END IF;
   IF p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
-    RAISE EXCEPTION 'Invalid collector TA candle limit';
+    RAISE EXCEPTION 'Invalid collector completed candle limit';
   END IF;
   normalized := upper(btrim(p_symbol));
   SELECT coalesce(
@@ -814,6 +819,10 @@ BEGIN
           'provider', newest.provider,
           'instrument_id', newest.instrument_id,
           'native_symbol', newest.native_symbol,
+          'symbol', newest.symbol,
+          'market_type', newest.market_type,
+          'contract_type', newest.contract_type,
+          'timeframe_minutes', newest.timeframe_minutes,
           'price_type', newest.price_type,
           'endpoint', newest.endpoint,
           'transport', newest.transport,
@@ -827,7 +836,8 @@ BEGIN
           'high', newest.high,
           'low', newest.low,
           'close', newest.close,
-          'volume', newest.volume
+          'volume', newest.volume,
+          'quote_volume', newest.quote_volume
         )
         ORDER BY newest.open_time
       ),
@@ -835,9 +845,10 @@ BEGIN
     )
     INTO recent
     FROM (
-      SELECT c.provider, c.instrument_id, c.native_symbol, c.price_type, c.endpoint,
+      SELECT c.provider, c.instrument_id, c.symbol, c.native_symbol, c.market_type,
+             c.contract_type, c.timeframe_minutes, c.price_type, c.endpoint,
              c.transport, c.open_time, c.close_time, c.source_event_at, c.received_at,
-             c.open, c.high, c.low, c.close, c.volume
+             c.open, c.high, c.low, c.close, c.volume, c.quote_volume
       FROM public.collector_recent_candles c
       WHERE c.provider = 'binance-usdm'
         AND c.price_type = 'trade'
@@ -1087,7 +1098,7 @@ REVOKE ALL ON FUNCTION
   public.renew_collector_lease(UUID, INTEGER),
   public.release_collector_lease(UUID),
   public.get_collector_storage_diagnostics(),
-  public.get_collector_ta_candles(TEXT, INTEGER, INTEGER),
+  public.get_collector_completed_candles(TEXT, INTEGER, INTEGER),
   public.get_collector_movement_candles(TEXT[], TIMESTAMPTZ, TIMESTAMPTZ),
   public.record_collector_candles(JSONB, INTEGER)
   FROM PUBLIC, anon, authenticated;
@@ -1109,7 +1120,7 @@ GRANT EXECUTE ON FUNCTION
   public.renew_collector_lease(UUID, INTEGER),
   public.release_collector_lease(UUID),
   public.get_collector_storage_diagnostics(),
-  public.get_collector_ta_candles(TEXT, INTEGER, INTEGER),
+  public.get_collector_completed_candles(TEXT, INTEGER, INTEGER),
   public.get_collector_movement_candles(TEXT[], TIMESTAMPTZ, TIMESTAMPTZ),
   public.record_collector_candles(JSONB, INTEGER)
   TO service_role;

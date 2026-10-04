@@ -47,7 +47,7 @@ type MarketCandle = Candle & { endpoint: string; sourceEventTime: number | null 
 
 type MarketHistory = {
   source: MarketSource;
-  instrument: FuturesContract;
+  instrument: Pick<FuturesContract, "id">;
   priceType: string;
   candles: MarketCandle[];
 };
@@ -143,14 +143,20 @@ export async function runTA(
                 `Collector owns ${MARKET_SOURCE} candles; ${requestedSource} history is unavailable`,
               );
             }
-            const history = await collectorStore.readCollectorTACandles(symbol, timeframe);
-            validate(history.candles);
+            const history = await collectorStore.readCollectorCompletedCandles(symbol, timeframe);
+            const candles = history.observations.map(({ candle, provenance }) => {
+              if (provenance.sourceKind === "archive") throw new Error("TA requires collector observations");
+              return { time: candle.openTime, open: candle.open, high: candle.high, low: candle.low,
+                close: candle.close, volume: candle.baseVolume, complete: true,
+                endpoint: provenance.endpoint,
+                sourceEventTime: provenance.sourceKind === "websocket" ? provenance.sourceEventTime : null };
+            });
+            validate(candles);
             return {
               market: {
-                source: history.source,
-                instrument: history.instrument,
-                priceType: history.priceType,
-                candles: history.candles,
+                source: history.identity.provider,
+                instrument: { id: history.identity.instrumentId },
+                priceType: history.identity.priceType, candles,
               },
               provider: null,
             };
