@@ -10,20 +10,30 @@ is a background monitoring run.
 
 | Website control                     | Stored field                     | Default | Current effect                                                                                                                                                                                             |
 | ----------------------------------- | -------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Monitoring master switch            | `monitoring_enabled`             | On      | Off skips the whole user's monitoring run before watchlist or provider work. Individual choices and saved state remain unchanged.                                                                          |
-| Market-data collection              | `market_data_collection_enabled` | On      | On fetches the latest completed one-minute candle and advances a per-user/pair checkpoint even if downstream consumers are paused. Off prevents those requests and pauses all consumers that require them. |
+| Monitoring master switch            | `monitoring_enabled`             | On      | Off skips the user's monitoring run and removes that account's contribution to the shared collector universe. Individual choices and saved state remain unchanged. |
+| Market-data collection              | `market_data_collection_enabled` | On      | In collector mode, On includes the account's watched symbols in the shared universe. Off removes that account's contribution and pauses its consumers that require collection. Other eligible watchers can keep a symbol assigned. |
 | Movement-alert generation           | `movement_alerts_enabled`        | On      | Off skips completed-one-minute observation processing, baseline advancement, cooldown checks, and alert insertion.                                                                                         |
 | Completed-candle technical analysis | `completed_candle_ta_enabled`    | On      | Off skips new 15m/1h/4h TA snapshots and current pending TA-outcome evaluation.                                                                                                                            |
 
-Collection is a prerequisite, not a promise that the current application has a
-persistent shared collector. Today's REST monitor stores only the newest accepted
-completed-one-minute checkpoint per account/pair. It does not archive the missing
-path or provide rolling shared candles. A durable shared collector, WebSocket gap
-recovery, richer rolling state, and their sole-writer allocation remain planned in
-issues #25–#26.
+When collector mode is enabled, TanStack reads account watchlists/settings, derives
+the shared subscription universe, and assigns it to the operational database. The
+independent persistent worker reads that assignment and owns Binance public
+WebSocket collection plus REST bootstrap/recovery. Current collector health and
+bounded completed-candle history live in the operational database; the worker never
+reads Lovable watchlists/settings. See [collector ownership](binance-futures-collector.md).
 
-The checkpoint database function re-reads the master and collection switches, and
-the movement database function also re-reads the movement switch, while holding
+Disabling collection or removing the final eligible watcher removes the symbol
+from the shared universe. Assignment atomically makes its current health
+`UNAVAILABLE` with reason `collection disabled/unsubscribed`, and the worker
+unsubscribes when it reconciles. Late health writes cannot restore active health
+outside the assigned universe. Historical completed candles remain subject to the
+existing retention policy. Re-enable assigns the symbol again but leaves its health
+unavailable until the worker establishes current evidence through normal
+bootstrap/recovery.
+
+In legacy request-driven mode, the checkpoint database function re-reads the master
+and collection switches. The movement database function also re-reads the movement
+switch while holding
 their transactional locks. This prevents an already-started request from advancing
 state or saving an alert after a concurrent pause. TA and provider work already in
 flight may finish; user-setting changes govern the next unit of orchestration and do
@@ -44,7 +54,8 @@ See [temporary activity controls](activity-controls.md) for those deployment fla
 
 | Activity                | While paused                                                                                | On resume                                                                                                                                                                                                                                 |
 | ----------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Current REST collection | No monitoring provider request or checkpoint advancement.                                   | A new run requests fresh data and atomically advances only to a newer completed candle. It does not invent the missing intraperiod path.                                                                                                  |
+| Shared collector (enabled) | The account stops requiring the symbol. If no eligible watcher remains, assignment makes current health `UNAVAILABLE` and the worker unsubscribes. Historical completed candles remain retained. | Reassignment allows normal worker bootstrap/recovery; health becomes `LIVE` only after current evidence is re-established. |
+| Legacy REST collection | No monitoring provider request or checkpoint advancement. | A new run requests fresh data and atomically advances only to a newer completed candle. It does not invent the missing intraperiod path. |
 | Movement alerts         | The saved baseline, last observation, and directional cooldown timestamps remain unchanged. | The next fresh completed one-minute close is compared with the preserved baseline, so net movement across the pause can alert. There is no queue of one alert per missed threshold crossing.                                              |
 | Completed-candle TA     | No new snapshot and no pending outcome update.                                              | The latest completed candle can create one current snapshot; missed signals are not backfilled. Pending outcomes are retried from available provider history and become unavailable when their required candle can no longer be obtained. |
 
@@ -86,3 +97,8 @@ movement RPC with the transaction-level independent pause checks, adds the
 RLS-readable/service-written REST checkpoint, and creates the RLS-protected
 notification preference table. No scheduler, new provider, delivery service, or
 real/paper execution is enabled by the migration.
+
+For collector mode, recreate the disposable pre-release operational database from
+`operational-db/supabase/migrations/20261004000000_operational_schema.sql`, the single
+current baseline containing the subscription-aware health RPC.
+See the [operational reset policy](binance-futures-collector.md#pre-release-operational-database-reset).

@@ -50,52 +50,7 @@ before(async () => {
   await db.exec(
     await readFile(
       new URL(
-        "../operational-db/supabase/migrations/20260925090000_operational_store.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260925120000_binance_collector.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260926120000_collector_subscriptions.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260925180000_market_movement_episodes.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260925200000_movement_normalization_history.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  await db.exec(
-    await readFile(
-      new URL(
-        "../operational-db/supabase/migrations/20260926140000_collector_candle_retention.sql",
+        "../operational-db/supabase/migrations/20261004000000_operational_schema.sql",
         import.meta.url,
       ),
       "utf8",
@@ -295,6 +250,108 @@ test("the collector subscription universe is normalized and replaced as one shar
   await db.query(`SELECT assign_collector_subscriptions('{}'::text[])`);
   const empty = await db.query("SELECT get_collector_subscriptions() AS symbols");
   assert.deepEqual(empty.rows[0].symbols, []);
+});
+
+async function recordCollectorHealth(symbol, status = "LIVE") {
+  return db.query("SELECT record_collector_health($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [
+    `binance-usdm:${symbol}`, symbol, 1, status,
+    "2026-09-26T12:01:00Z", "2026-09-26T12:00:00Z",
+    250, 4, 3, "worker health detail",
+  ]);
+}
+
+async function collectorHealth(symbol) {
+  return (await db.query("SELECT * FROM collector_health WHERE symbol=$1", [symbol])).rows[0];
+}
+
+test("removing the last subscription invalidates current health and preserves factual history", async () => {
+  await db.query("SELECT assign_collector_subscriptions($1)", [["BTCUSDT"]]);
+  await recordCollectorHealth("BTCUSDT");
+  const before = await collectorHealth("BTCUSDT");
+  assert.equal(before.status, "LIVE");
+  // Repair an old persisted row even though it was never in this assignment.
+  await db.query(`INSERT INTO collector_health
+    (instrument_id, symbol, timeframe_minutes, status)
+    VALUES ('binance-usdm:ETHUSDT', 'ETHUSDT', 15, 'LIVE')`);
+  const openTime = Math.floor(Date.now() / 60_000) * 60_000 - 60_000;
+  await db.query("SELECT record_collector_candles($1,$2)", [JSON.stringify([{
+    instrument_id: "binance-usdm:BTCUSDT", symbol: "BTCUSDT", native_symbol: "BTCUSDT",
+    provider: "binance-usdm", endpoint: "/fapi/v1/klines", price_type: "trade",
+    timeframe_minutes: 1, open_time: new Date(openTime).toISOString(),
+    close_time: new Date(openTime + 59_999).toISOString(),
+    open: 100, high: 102, low: 99, close: 101, volume: 10, quote_volume: 1010,
+    source_event_at: null, received_at: new Date(openTime + 60_000).toISOString(),
+    transport: "rest",
+  }]), 8]);
+  const candles = (await db.query("SELECT * FROM collector_recent_candles")).rows;
+
+  await db.query("SELECT assign_collector_subscriptions($1)", [[]]);
+  assert.deepEqual((await db.query("SELECT get_collector_subscriptions() AS symbols")).rows[0].symbols, []);
+  const after = await collectorHealth("BTCUSDT");
+  assert.equal(after.status, "UNAVAILABLE");
+  assert.equal(after.error_message, "collection disabled/unsubscribed");
+  assert.equal(after.lag_ms, null);
+  assert.equal(after.queue_depth, 0);
+  const orphan = await collectorHealth("ETHUSDT");
+  assert.equal(orphan.status, "UNAVAILABLE");
+  assert.equal(orphan.error_message, "collection disabled/unsubscribed");
+  for (const field of ["last_event_at", "last_completed_open_time", "reconnect_count"])
+    assert.deepEqual(after[field], before[field]);
+  assert.ok(after.updated_at >= before.updated_at);
+  assert.equal(candles.length, 1);
+  assert.deepEqual((await db.query("SELECT * FROM collector_recent_candles")).rows, candles);
+});
+
+test("removing one subscription leaves another symbol's active health unchanged", async () => {
+  await db.query("SELECT assign_collector_subscriptions($1)", [["BTCUSDT", "ETHUSDT"]]);
+  await recordCollectorHealth("BTCUSDT");
+  await recordCollectorHealth("ETHUSDT");
+  const eth = await collectorHealth("ETHUSDT");
+  assert.equal(eth.status, "LIVE");
+  await db.query("SELECT assign_collector_subscriptions($1)", [["ETHUSDT"]]);
+  assert.equal((await collectorHealth("BTCUSDT")).status, "UNAVAILABLE");
+  assert.equal((await collectorHealth("BTCUSDT")).error_message, "collection disabled/unsubscribed");
+  assert.deepEqual(await collectorHealth("ETHUSDT"), eth);
+});
+
+test("late health intents cannot resurrect an unsubscribed symbol", async () => {
+  // No assignment row is also an empty authoritative universe.
+  await recordCollectorHealth("ETHUSDT");
+  assert.equal((await collectorHealth("ETHUSDT")).status, "UNAVAILABLE");
+  await db.query("SELECT assign_collector_subscriptions($1)", [["BTCUSDT"]]);
+  await recordCollectorHealth("BTCUSDT");
+  const factual = await collectorHealth("BTCUSDT");
+  assert.equal(factual.status, "LIVE");
+  await db.query("SELECT assign_collector_subscriptions($1)", [[]]);
+  for (const status of ["LIVE", "RECOVERING", "STALE", "UNAVAILABLE"]) {
+    await recordCollectorHealth("BTCUSDT", status);
+    const health = await collectorHealth("BTCUSDT");
+    assert.equal(health.status, "UNAVAILABLE");
+    assert.equal(health.error_message, "collection disabled/unsubscribed");
+    assert.equal(health.lag_ms, null);
+    assert.equal(health.queue_depth, 0);
+    for (const field of ["last_event_at", "last_completed_open_time", "reconnect_count"])
+      assert.deepEqual(health[field], factual[field]);
+  }
+});
+
+test("reassignment leaves health unavailable until the worker reports recovery and live evidence", async () => {
+  await db.query("SELECT assign_collector_subscriptions($1)", [["BTCUSDT"]]);
+  await recordCollectorHealth("BTCUSDT");
+  await db.query("SELECT assign_collector_subscriptions($1)", [[]]);
+  const unavailable = await collectorHealth("BTCUSDT");
+  assert.equal(unavailable.status, "UNAVAILABLE");
+  assert.equal(unavailable.error_message, "collection disabled/unsubscribed");
+  await db.query("SELECT assign_collector_subscriptions($1)", [["BTCUSDT"]]);
+  assert.deepEqual(await collectorHealth("BTCUSDT"), unavailable);
+  for (const status of ["RECOVERING", "LIVE"]) {
+    await recordCollectorHealth("BTCUSDT", status);
+    const health = await collectorHealth("BTCUSDT");
+    assert.equal(health.status, status);
+    assert.equal(health.error_message, "worker health detail");
+    assert.equal(Number(health.lag_ms), 250);
+    assert.equal(health.queue_depth, 4);
+  }
 });
 
 test("server config is opt-in, bounded and requires a separate secure target", async () => {

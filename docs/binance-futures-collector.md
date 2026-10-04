@@ -4,8 +4,9 @@ The collector is an independently runnable persistent backend worker. It owns on
 USD-M WebSocket connection for the application-assigned shared subscription universe, runs without
 an open dashboard, and is enabled only when both `BINANCE_COLLECTOR_ENABLED=true` and the
 operational database are enabled. The application owns user watchlists; it derives the union of
-watched contracts and assigns that set to the operational database as collector input, and the
-worker reads it there rather than querying Lovable user tables. That reconciliation is
+watched contracts required by accounts with monitoring and market-data collection enabled
+and assigns that set to the operational database as collector input. The worker reads it
+there rather than querying Lovable user tables. That reconciliation is
 application-owned and independent of scheduled monitoring: the dedicated authenticated
 `/api/public/hooks/sync-collector-subscriptions` hook is the initial and ongoing mechanism the
 deployment schedules, and the server's best-effort first-request pass is only a safety net for a
@@ -15,6 +16,33 @@ lease prevents two worker instances from acting as authoritative collectors. The
 application server does not start the collector: importing or starting the app never opens a market
 stream. Production hosting for the worker remains an open decision in
 [#19](https://github.com/ibrahimjaved12/crypto-watcher/issues/19).
+
+## Collection pause and re-enable
+
+The current-state lifecycle is:
+
+- Collection enabled and a symbol required by an eligible watcher: TanStack assigns
+  the symbol, the worker reconciles and performs REST bootstrap/recovery, and health
+  becomes `LIVE` when current evidence is established.
+- The final relevant watcher is removed or disables collection: TanStack removes
+  the symbol from the shared universe. The assignment RPC immediately sets every
+  persisted health row outside that universe to `UNAVAILABLE`, with reason
+  `collection disabled/unsubscribed`, null lag, and zero queue depth. The worker
+  unsubscribes during reconciliation. An empty assignment invalidates all health rows.
+- Collection re-enabled: the symbol re-enters the assigned universe, and its existing
+  health remains `UNAVAILABLE` until normal worker bootstrap/recovery establishes
+  current evidence. Assignment itself never marks it `LIVE`.
+
+Assignment and health invalidation share one transaction. Health persistence checks
+the authoritative assignment under a database lock held through the write, so queued
+or in-flight intents cannot restore `LIVE`, `RECOVERING`, or `STALE` for an unsubscribed
+symbol. These intents safely persist `UNAVAILABLE` with the collection-disabled reason.
+Subscribed symbols retain the normal worker health behavior.
+
+Removal preserves factual last-event time, last completed open time, and reconnect
+count. It never deletes `collector_recent_candles`: historical completed observations
+remain true and continue under the existing retention policy. Other eligible watchers
+keep the symbol assigned even if one account pauses collection.
 
 ## Inputs and candle semantics
 
@@ -109,11 +137,14 @@ transaction.
 
 ### Pre-release operational database reset
 
-The operational database contains disposable pre-release working state. When adopting
-this schema, wipe/reset the operational database and recreate it from the current
-repository migration chain rather than migrating old collector rows forward. The base
-collector schema already defines the final candle provenance and TA read semantics, so
-no compatibility or provenance-reset migration is required.
+The operational database contains disposable pre-release working state. Recreate/reset
+it from the single current baseline,
+`operational-db/supabase/migrations/20261004000000_operational_schema.sql`. This file
+directly defines the final operational store, collector, subscription-aware health,
+retention, and movement persistence/read semantics. Historical operational migration
+evolution is intentionally not preserved yet; no production-data migration path is
+required. Once production data must survive upgrades, freeze the baseline and make
+future changes through forward migrations.
 
 After recreation, WebSocket `source_event_at` is the actual Binance event time (`E`),
 REST `source_event_at` is `NULL`, and `received_at` is the actual collector receive
@@ -136,8 +167,7 @@ is written only by TanStack: the worker holds no Lovable credentials and never r
 settings or writes TA. No candle is dual-written to Lovable.
 
 Apply all unapplied SQL migrations in filename order to the application database. Recreate the
-disposable pre-release operational database from its repository migrations; the base collector
-schema defines the final candle provenance and TA read function. The operational retention migration
+disposable pre-release operational database from its single current baseline. Its final candle writer
 keeps each canonical series' newest 260 completed candles even when that spans more than the day window,
 protecting TA history/catch-up availability independently of age-based retention. This storage floor
 is distinct from Python's 200-candle minimum and the application's 260-candle TA read horizon.
@@ -188,7 +218,7 @@ sources its candle history from the operational store; when the collector is dis
 exchange REST provider, and the two modes are never mixed for one frame.
 
 Apply `supabase/migrations/20260926090000_monitor_run_leases.sql` through the normal Lovable/main
-database migration chain. It does not belong in the external operational migration chain.
+database migration chain. It does not belong in the external operational baseline.
 
 Settings reports the collector's exchange source-event time and latest completed candle separately,
 plus movement progress, successful TA evaluation/candle times by timeframe, and monitor results.

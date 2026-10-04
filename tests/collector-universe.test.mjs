@@ -164,6 +164,32 @@ test("the universe sync runs while scheduled monitoring is disabled", async () =
   assert.deepEqual(result.symbols, ["ETHUSDT"]);
 });
 
+test("collection settings retain another watcher and assign empty when the last watcher pauses", async () => {
+  const { syncCollectorUniverse } = await load();
+  const store = fakeStore(["BTCUSDT"]);
+  const env = { BINANCE_COLLECTOR_ENABLED: "true" };
+  const watchers = [
+    { user_id: "a", symbol: "BTCUSDT" },
+    { user_id: "b", symbol: "BTCUSDT" },
+  ];
+  const paused = { monitoring_enabled: true, market_data_collection_enabled: false };
+  const retained = await syncCollectorUniverse(admin({
+    watchers,
+    settings: [{ user_id: "a", ...paused }, { user_id: "b", ...enabled }],
+  }), store, env);
+  assert.equal(retained.status, "unchanged");
+  assert.deepEqual(retained.symbols, ["BTCUSDT"]);
+  assert.deepEqual(store.assigned, []);
+
+  const removed = await syncCollectorUniverse(admin({
+    watchers,
+    settings: [{ user_id: "a", ...paused }, { user_id: "b", ...paused }],
+  }), store, env);
+  assert.equal(removed.status, "assigned");
+  assert.deepEqual(removed.symbols, []);
+  assert.deepEqual(store.assigned, [[]]);
+});
+
 test("the universe sync skips without collector mode or an operational store", async () => {
   const { syncCollectorUniverse } = await load();
   let lovableReads = 0;

@@ -222,10 +222,10 @@ These are separate correctness/design work, not changes to the current constants
   deployment settings such as `WEB_CONCURRENCY` may change the worker count.
 - The collector's exact 5m/2,000-item snapshot sizing lacks a demonstrated consumer-derived invariant.
 
-## Migration
+## Operational baseline
 
-Apply only to the external operational database:
+Apply the current baseline only to a fresh or reset external operational database:
 
 ```text
-operational-db/supabase/migrations/20260925200000_movement_normalization_history.sql
+operational-db/supabase/migrations/20261004000000_operational_schema.sql
 ```
