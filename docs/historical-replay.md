@@ -769,49 +769,96 @@ Its metadata binds the complete replay identity (including both scientific
 producer and actual runtime Git revisions, study/coverage manifest SHAs,
 period/date/phase, run fingerprint, archive identities and replay versions),
 final checkpoint SHA, point count and first/last boundary. Its operational
-schema is `historical-study-point-spool-v1`.
+schema is `historical-study-point-spool-v2`.
 
-Canonical V1 runs sequentially in its own worker and returns only evidence and
-the compact boundary-to-direction path. Fixed candidates use the existing
-`canonical_branch_by_boundary=None` path; the parent retains no full-day
-classification/lifecycle map. Sparse event context is produced in a separate
-worker by one chronological scan of the compact stream, advancing the same V1
-branch at every boundary.
+Canonical V1 now publishes `shared-v1.jsonl` and its verified manifest alongside
+compact evidence. Fixed candidates, ATR and exact event context read the full
+five-second classifier/lifecycle branch sequentially, keeping only the current
+and predecessor branch. Movement windows and source evidence refer to the
+validated current point spool; the reader reconstructs equivalent scientific
+evidence and checks configuration, source identity and previous-state equality.
+Standalone runners retain their uncached calculation path.
 
-The stage order is V1 preparation, HMM study handling, each non-HMM fixed-suite
-**configuration** in registered order, one ATR configuration per worker, taker
-flow, mark/trade, open interest, funding, liquidation, then sparse event context
-and forward outcomes. V1 evidence is appended after candidate evidence exactly
-as before. Each fixed stage calls its registered runner and immediately reduces
-its native result through the existing candidate evidence adapter. ATR calls
-the existing suite with exactly one configuration. Extension study contracts
-accept a distinct compact replay projection and reuse their existing builders
-and formulas; standalone materialized extension APIs remain available. Workers
-use `sys.executable` and an argv list with a fresh interpreter, never a fork of
-the populated parent. Fixed workers receive no archive/provider handle.
+### Issue #162: repeated computation and retention
 
-Completed stage artifacts are create-only and atomic. Their operational schema
-is `historical-study-stage-v1`; identity includes the spool's complete identity,
-compact stream SHA, stage ID, experiment/algorithm/config identity where
-applicable, supplementary source SHA, and SHA of the complete lossless request.
-HMM stages also bind the model SHA explicitly. Dependent event-context/outcome
-stages bind every required upstream stage identity SHA and stage result SHA.
-The request SHA also binds model, OHLC/taker evidence and required prior compact
-outputs for dependent stages. The stage-result SHA covers this identity and the
-compact result. Restart validates and reuses completed stages, computing missing
-stages only. Conflicting, corrupt or stale inputs fail explicitly; a failed
-worker leaves earlier completed stages available for reuse. Stage cache SHAs,
-worker IDs, progress, RSS and timing never enter scientific report hashes.
-Progress includes `POST_REPLAY_STAGE_STARTED`, `POST_REPLAY_STAGE_COMPLETED`,
-`POST_REPLAY_STAGE_REUSED`, experiment/config identity, stage SHA when available,
-and optional parent/worker current/peak RSS without `psutil`.
+Operational formats are `historical-study-point-spool-v2`,
+`historical-study-stage-v2`, `historical-shared-v1-branch-v1` and
+`historical-prepared-replay-v1`. Incompatible artifacts fail explicitly; runtime
+Git revision must match exactly before worker scientific decoding. Do not relabel
+old checkpoints. A COMPLETE replay's `prepared-replay.json` retains normalized
+stream metadata, OHLC and taker-flow evidence. Resume checks the frozen study,
+coverage, eligibility, configurations and raw ZIP checksums, then restores the
+validated spool without reparsing trades. Partial replay or a missing prepared
+bundle uses fresh indexing. The temporary SQLite trade index remains disposable
+and is never promoted to durable recovery storage.
 
-Scientific algorithms, versions, dates, phases, universe and five-second
-boundaries are unchanged. Keep the scientific producer revision
-`c277011a3c1d3e0db2c5224e49386a375a6afc59`. Runtime checkpoint binding is still
-exact: checkpoints from `d5023c6cb6dbec7b7a0451562631fd1d8e34834d` are rejected
-by the new runtime. CI parity/retention fixtures are necessary but cannot
-establish real-day memory acceptance.
+Spool open validates metadata; consuming it validates canonical rows, schema,
+IDs, phase, digest, count, range and five-second continuity in the same pass that
+returns decoded points. Exhaustion is required before publishing stage results;
+`validate()` remains available for integrity-only callers. Matching spools are
+checked before any replacement is constructed. Atomic publication still uses
+fsync and rejects conflicts. A per-period writer lock permits cleanup of owned
+abandoned temporary files. Each fresh worker inherits the same acquired open-file
+description through `pass_fds`; its descriptor travels only in ephemeral launch
+arguments, outside request/job artifacts and scientific hashes. The worker checks
+the lease against the intended period lock file and holds it through observation
+writing. Each process closes its own descriptor without `LOCK_UN`, so a surviving
+worker prevents restart cleanup after parent death. Handled cancellation terminates
+and reaps the owned child before parent ownership is dropped. Failed request/job
+diagnostics are retained until verified durable completion.
+
+Stage lookup uses small input descriptors before lossless request encoding.
+Descriptors bind full configurations, frozen period/manifests, producer/runtime,
+spool identity/hash, evidence/coverage hashes, HMM model and upstream stage hashes.
+Workers independently check the consumed payload against its descriptor and
+transport SHA. Exactly one fresh scientific interpreter runs at a time; missing
+supplementary evidence is published locally through the same stage identity gate.
+Each extension receives only its required archive metadata and evidence.
+
+`post-replay/` holds small stage manifests, operational record JSONL, canonical
+scientific record JSONL, optional HMM block files and observation sidecars. The
+parent retains verified references and summaries, streams narrow event inputs,
+and hashes/serializes deterministic scientific bytes without rebuilding all
+candidate graphs or an encode/decode round trip. `.period-manifests/` binds index
+metadata to report file hashes. Full five-second extension outputs still feed
+native summaries and output hashes, while continuous evidence stays minute-spaced.
+Exact distinct-endpoint counts and mark/trade median values use disposable local
+SQLite storage. Forward outcomes share only raw labels and V1 paths through a
+disk lookup; confirmatory selection remains specific to each event group and
+PELT remains retrospective-only.
+
+PELT reuses equal observed prefixes and endpoint costs and uses predecessor links
+with exact lexicographic path ties. BOCPD caches static work while retaining every
+run-length hypothesis and the existing normalization/arithmetic order; it remains
+potentially quadratic. OI and completed mark/trade calculations use bounded caches
+keyed by endpoints and Decimal policy. Liquidation quote notionals are computed
+once per captured row; receipt-time cutoffs and late arrivals remain enforced.
+Fixed/ATR/HMM workers can still materialize observations required by their exact
+algorithms, and event/outcome workers can materialize their scientific outputs.
+These changes do not establish constant-memory execution or measured speedups.
+
+The explicit correctness exception is taker-flow
+`taker-buy-sell-imbalance-v2-exact-sign`: prefix subtraction and net flow use
+`Decimal.copy_negate()` before exact summation. Ambient precision previously
+rounded the operand's coefficient. Affected high-precision outputs and derived
+hashes may change; old derived evidence/results are rejected. Raw archive
+identities and unrelated algorithm versions are unchanged.
+Frozen source coverage may retain the exact legacy source-identity map whose sole
+difference is taker-flow `algorithm_version=taker-buy-sell-imbalance-v1`. Validation
+compares the entire current or expected legacy map and verifies the original
+coverage hash without modifying or re-hashing the artifact. New coverage uses v2;
+derived evidence, stage descriptors and finalized results still require v2, and
+old-runtime checkpoints remain incompatible. No coverage regeneration, migration,
+archive reselection or input wiping is needed for this compatibility.
+
+Progress records per-stage UTC observation times, monotonic durations, reuse,
+artifact sizes and separately labeled parent/worker current and peak RSS samples.
+Worker observations are sampled after encoding, hashing, fsync and durable
+publication; this is a post-publication sample, not a process-exit peak guarantee.
+All operational measurements remain outside scientific hashes. No local tests,
+benchmarks, builds or study runs were performed for #162; GitHub checks and later
+scientific/recovery verification must be initiated or reviewed separately. The
+historical #152 acceptance instructions below are not a prerequisite for #162.
 
 After GitHub Actions is green, repeat the **three full development-day**
 acceptance run with the intended PR/runtime commit checked out and a clean

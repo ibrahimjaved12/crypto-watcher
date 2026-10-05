@@ -18,7 +18,7 @@ from .movement import BUCKET_INTERVAL_MS, MovementBucketEngine
 
 
 TAKER_FLOW_EVIDENCE_SCHEMA_VERSION = "historical-taker-flow-evidence-v1"
-TAKER_FLOW_ALGORITHM_VERSION = "taker-buy-sell-imbalance-v1"
+TAKER_FLOW_ALGORITHM_VERSION = "taker-buy-sell-imbalance-v2-exact-sign"
 TAKER_FLOW_CONFIG_VERSION = "EXP-75-12-fixed-1m-5m-15m-decimal50-v1"
 TAKER_FLOW_BUCKET_RULE = "movement-engine-right-closed-ceil-5s-v1"
 TAKER_FLOW_SIDE_MAPPING = "buyer_is_maker=false:aggressive_buy;true:aggressive_sell"
@@ -134,8 +134,8 @@ class HistoricalTakerFlowSymbolBuckets:
             raise ValueError("flow query endpoints must be ordered five-second boundaries")
         left = bisect_right(self._boundaries, start)
         right = bisect_right(self._boundaries, end)
-        buy = _sum_decimals_exact((self._buy_prefix[right], -self._buy_prefix[left]))
-        sell = _sum_decimals_exact((self._sell_prefix[right], -self._sell_prefix[left]))
+        buy = _sum_decimals_exact((self._buy_prefix[right], self._buy_prefix[left].copy_negate()))
+        sell = _sum_decimals_exact((self._sell_prefix[right], self._sell_prefix[left].copy_negate()))
         return TakerFlowWindowSums(
             buy,
             sell,
@@ -238,6 +238,9 @@ class HistoricalTakerFlowEvidence:
                      "side_mapping", "availability_basis"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
                 raise ValueError(f"{name} is required")
+        if (self.algorithm_version != TAKER_FLOW_ALGORITHM_VERSION
+                or self.schema_version != TAKER_FLOW_EVIDENCE_SCHEMA_VERSION):
+            raise ValueError("incompatible taker-flow calculation identity")
         for item in series:
             if any(not start <= bucket.boundary_time_ms <= end
                    for bucket in item.buckets):

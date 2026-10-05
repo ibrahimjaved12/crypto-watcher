@@ -4,6 +4,11 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, replace
 from decimal import Decimal, localcontext
+from functools import lru_cache
+from .historical_study_inputs import HistoricalStudyArchiveInputs
+from .historical_extension_stream import paired_study_points
+
+from .historical_decimal_policy import decimal_policy, policy_context
 from pathlib import Path
 import subprocess
 import sys
@@ -102,7 +107,7 @@ class HistoricalOpenInterestExtensionRequest:
 
 @dataclass(frozen=True)
 class HistoricalOpenInterestExtensionPrepared:
-    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset
+    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset | HistoricalStudyArchiveInputs
     replay_result: HistoricalMarketReplayResult
     experiment_points: tuple
     partition_plan: ReplayPartitionPlan | None
@@ -111,7 +116,8 @@ class HistoricalOpenInterestExtensionPrepared:
     study_phase: str | None = None
 
     def __post_init__(self):
-        if (not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
+        if (not (isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
+                         or (self.study_phase is not None and isinstance(self.archive_dataset, HistoricalStudyArchiveInputs)))
                 or not (isinstance(self.replay_result, HistoricalMarketReplayResult)
                         or (self.study_phase is not None
                             and isinstance(self.replay_result, CompactStudyReplay)))
@@ -122,7 +128,11 @@ class HistoricalOpenInterestExtensionPrepared:
                     and self.study_phase not in ("development", "validation", "test"))
                 or not isinstance(self.oi_evidence, BinanceOpenInterestEvidence)):
             raise ValueError("invalid prepared extension contract")
-        object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
+        if self.experiment_points is None:
+            if self.study_phase is None or not isinstance(self.replay_result, CompactStudyReplay):
+                raise ValueError("streamed extension requires uniform-phase compact replay")
+        else:
+            object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
         object.__setattr__(self, "oi_archive_root", Path(self.oi_archive_root).expanduser().resolve())
 
 
@@ -216,6 +226,12 @@ def _validate_prepared(prepared):
             raise ValueError("extension requires exact exported V1 replay objects and partition labels")
     experiment_stream_sha256(replay, prepared.experiment_points, prepared.partition_plan)
 
+@lru_cache(maxsize=4096)
+def _endpoint_log(symbol, current_time, prior_time, current_quantity, prior_quantity, policy):
+    with localcontext(policy_context(policy)):
+        return (Decimal(current_quantity) / Decimal(prior_quantity)).ln()
+
+
 def _symbol_output(evidence, point, symbol, minutes):
     boundary = point.evaluation_boundary_time_ms
     current = evidence.as_of(symbol, boundary)
@@ -230,9 +246,9 @@ def _symbol_output(evidence, point, symbol, minutes):
         reason = evidence.reason_at(symbol, current.source_time_ms - minutes * 60_000)
     value = None
     if reason is None:
-        with localcontext() as context:
-            context.prec = DECIMAL_PRECISION
-            value = (current.quantity / prior.quantity).ln()
+        value = _endpoint_log(symbol, current.source_time_ms, prior.source_time_ms,
+                              str(current.quantity), str(prior.quantity),
+                              decimal_policy(DECIMAL_PRECISION))
     return _freeze({"symbol": symbol, "window_minutes": minutes,
         "status": "UNAVAILABLE" if reason else "READY", "reason": reason,
         "expected_current_source_time_ms": expected_current,
@@ -259,46 +275,28 @@ def _market_summary(rows):
 
 
 
-def _build_candidate_points(prepared):
+def _iter_candidate_points(prepared):
     evidence = prepared.oi_evidence
     symbols = prepared.replay_result.manifest.configured_universe
-    outputs = []
-    for replay_point, point in zip(prepared.replay_result.points, prepared.experiment_points):
+    for replay_point, point in paired_study_points(prepared):
         windows = []
         for minutes in OI_WINDOWS_MINUTES:
             rows = tuple(_symbol_output(evidence, replay_point, symbol, minutes) for symbol in symbols)
             windows.append(_freeze({"window_minutes": minutes, "symbols": rows,
                                     "market_summary": _market_summary(rows)}))
-        outputs.append(OpenInterestPointOutput(replay_point.point_id, replay_point.evaluation_boundary_time_ms,
-                                         point.partition, tuple(windows)))
-    return tuple(outputs)
+        yield OpenInterestPointOutput(replay_point.point_id, replay_point.evaluation_boundary_time_ms,
+                                         point.partition, tuple(windows))
+
+
+def _build_candidate_points(prepared, *, retain=True):
+    points = _iter_candidate_points(prepared)
+    return tuple(points) if retain else points
 
 
 def _partition_summaries(points, symbols):
-    summaries = {}
-    for partition in REPORT_PARTITIONS:
-        selected = tuple(p for p in points if partition == "all" or p.partition == partition)
-        windows = []
-        for minutes in OI_WINDOWS_MINUTES:
-            rows = [row for p in selected for window in p.windows
-                    if window["window_minutes"] == minutes for row in window["symbols"]]
-            ready = [r for r in rows if r["status"] == "READY"]
-            per_symbol = []
-            for symbol in symbols:
-                projected = [r for r in rows if r["symbol"] == symbol]
-                usable = [r for r in ready if r["symbol"] == symbol]
-                per_symbol.append({"symbol": symbol, "point_count": len(projected),
-                    "ready_count": len(usable), "unavailable_count": len(projected) - len(usable),
-                    "ready_coverage_ratio": _ratio(len(usable), len(projected)),
-                    "unavailable_reasons": dict(sorted(Counter(r["reason"] for r in projected if r["status"] == "UNAVAILABLE").items())),
-                    "unique_source_endpoint_pair_count": len({(r["current_source_time_ms"], r["prior_source_time_ms"]) for r in usable}),})
-            windows.append({"window_minutes": minutes, "point_count": len(selected),
-                "configured_symbol_point_count": len(rows), "ready_symbol_point_count": len(ready),
-                "unavailable_symbol_point_count": len(rows) - len(ready),
-                "summary_denominator": len(ready), "per_symbol": per_symbol,
-                "unique_source_endpoint_pair_count": len({(r["symbol"], r["current_source_time_ms"], r["prior_source_time_ms"]) for r in ready}),})
-        summaries[partition] = windows
-    return _freeze(summaries)
+    from .historical_extension_summaries import projection_summaries
+    return _freeze(projection_summaries(points, symbols, REPORT_PARTITIONS,
+                                       OI_WINDOWS_MINUTES, "oi", _ratio))
 
 
 def _ratio(numerator, denominator):
@@ -322,11 +320,11 @@ def _source_coverage(evidence):
             for symbol in evidence.configured_symbols),})
 
 
-def build_historical_study_open_interest_points(prepared):
+def build_historical_study_open_interest_points(prepared, *, retain=True):
     """Run OI context over an already prepared uniform-phase study day."""
     from .historical_market_state_candidate_evidence import validate_study_phase_prepared
     validate_study_phase_prepared(prepared)
-    return _build_candidate_points(prepared)
+    return _build_candidate_points(prepared, retain=retain)
 
 
 def run_historical_open_interest_extension(prepared, *, code_revision):

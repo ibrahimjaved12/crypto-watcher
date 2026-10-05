@@ -9,6 +9,9 @@ import subprocess
 import sys
 from types import MappingProxyType
 
+from .historical_study_inputs import HistoricalStudyArchiveInputs
+from .historical_extension_stream import paired_study_points
+
 from .binance_historical_archive import (
     BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset, BinanceUSDMArchiveRequest,
     load_binance_usdm_historical_replay_dataset,
@@ -102,7 +105,7 @@ class HistoricalFundingExtensionRequest:
 
 @dataclass(frozen=True)
 class HistoricalFundingExtensionPrepared:
-    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset
+    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset | HistoricalStudyArchiveInputs
     replay_result: HistoricalMarketReplayResult
     experiment_points: tuple
     partition_plan: ReplayPartitionPlan | None
@@ -111,7 +114,8 @@ class HistoricalFundingExtensionPrepared:
     study_phase: str | None = None
 
     def __post_init__(self):
-        if (not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
+        if (not (isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
+                         or (self.study_phase is not None and isinstance(self.archive_dataset, HistoricalStudyArchiveInputs)))
                 or not (isinstance(self.replay_result, HistoricalMarketReplayResult)
                         or (self.study_phase is not None
                             and isinstance(self.replay_result, CompactStudyReplay)))
@@ -122,7 +126,11 @@ class HistoricalFundingExtensionPrepared:
                     and self.study_phase not in ("development", "validation", "test"))
                 or not isinstance(self.funding_evidence, BinanceFundingEvidence)):
             raise ValueError("invalid prepared extension contract")
-        object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
+        if self.experiment_points is None:
+            if self.study_phase is None or not isinstance(self.replay_result, CompactStudyReplay):
+                raise ValueError("streamed extension requires uniform-phase compact replay")
+        else:
+            object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
         object.__setattr__(self, "funding_archive_root", Path(self.funding_archive_root).expanduser().resolve())
 
 
@@ -255,46 +263,28 @@ def _market_summary(rows):
 
 
 
-def _build_candidate_points(prepared):
+def _iter_candidate_points(prepared):
     evidence = prepared.funding_evidence
     symbols = prepared.replay_result.manifest.configured_universe
-    outputs = []
-    for replay_point, point in zip(prepared.replay_result.points, prepared.experiment_points):
+    for replay_point, point in paired_study_points(prepared):
         windows = []
         for minutes in FUNDING_CONTEXT_WINDOWS_MINUTES:
             rows = tuple(_symbol_output(evidence, replay_point, symbol, minutes) for symbol in symbols)
             windows.append(_freeze({"window_minutes": minutes, "symbols": rows,
                                     "market_summary": _market_summary(rows)}))
-        outputs.append(FundingPointOutput(replay_point.point_id, replay_point.evaluation_boundary_time_ms,
-                                         point.partition, tuple(windows)))
-    return tuple(outputs)
+        yield FundingPointOutput(replay_point.point_id, replay_point.evaluation_boundary_time_ms,
+                                         point.partition, tuple(windows))
+
+
+def _build_candidate_points(prepared, *, retain=True):
+    points = _iter_candidate_points(prepared)
+    return tuple(points) if retain else points
 
 
 def _partition_summaries(points, symbols):
-    summaries = {}
-    for partition in REPORT_PARTITIONS:
-        selected = tuple(p for p in points if partition == "all" or p.partition == partition)
-        windows = []
-        for minutes in FUNDING_CONTEXT_WINDOWS_MINUTES:
-            rows = [row for p in selected for window in p.windows
-                    if window["window_minutes"] == minutes for row in window["symbols"]]
-            ready = [r for r in rows if r["status"] == "READY"]
-            per_symbol = []
-            for symbol in symbols:
-                projected = [r for r in rows if r["symbol"] == symbol]
-                usable = [r for r in ready if r["symbol"] == symbol]
-                per_symbol.append({"symbol": symbol, "point_count": len(projected),
-                    "ready_count": len(usable), "unavailable_count": len(projected) - len(usable),
-                    "ready_coverage_ratio": _ratio(len(usable), len(projected)),
-                    "unavailable_reasons": dict(sorted(Counter(r["reason"] for r in projected if r["status"] == "UNAVAILABLE").items())),
-                    "unique_settlement_event_count": len({r["settlement_time_ms"] for r in usable}),})
-            windows.append({"window_minutes": minutes, "point_count": len(selected),
-                "configured_symbol_point_count": len(rows), "ready_symbol_point_count": len(ready),
-                "unavailable_symbol_point_count": len(rows) - len(ready),
-                "summary_denominator": len(ready), "per_symbol": per_symbol,
-                "unique_settlement_event_count": len({(r["symbol"], r["settlement_time_ms"]) for r in ready}),})
-        summaries[partition] = windows
-    return _freeze(summaries)
+    from .historical_extension_summaries import projection_summaries
+    return _freeze(projection_summaries(points, symbols, REPORT_PARTITIONS,
+                                       FUNDING_CONTEXT_WINDOWS_MINUTES, "funding", _ratio))
 
 
 def _ratio(numerator, denominator):
@@ -318,11 +308,11 @@ def _source_coverage(evidence):
             for symbol in evidence.configured_symbols),})
 
 
-def build_historical_study_funding_points(prepared):
+def build_historical_study_funding_points(prepared, *, retain=True):
     """Run settled funding context over an already prepared study day."""
     from .historical_market_state_candidate_evidence import validate_study_phase_prepared
     validate_study_phase_prepared(prepared)
-    return _build_candidate_points(prepared)
+    return _build_candidate_points(prepared, retain=retain)
 
 
 def run_historical_funding_extension(prepared, *, code_revision):

@@ -6,6 +6,8 @@ not alter V1 state decisions and does not estimate forward returns.
 
 from __future__ import annotations
 
+from collections import Counter
+
 import argparse
 
 from dataclasses import dataclass, replace
@@ -15,6 +17,9 @@ import subprocess
 import sys
 from types import MappingProxyType
 from typing import Mapping
+
+from .historical_study_inputs import HistoricalStudyArchiveInputs
+from .historical_extension_stream import paired_study_points
 
 from .binance_historical_archive import (
     BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset, BinanceUSDMArchiveRequest,
@@ -112,14 +117,15 @@ class HistoricalTakerFlowExtensionRequest:
 
 @dataclass(frozen=True)
 class HistoricalTakerFlowExtensionPrepared:
-    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset
+    archive_dataset: BinanceHistoricalReplayDataset | BinanceBoundedHistoricalReplayDataset | HistoricalStudyArchiveInputs
     replay_result: HistoricalMarketReplayResult
     experiment_points: tuple
     partition_plan: ReplayPartitionPlan | None
     study_phase: str | None = None
 
     def __post_init__(self):
-        if (not isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
+        if (not (isinstance(self.archive_dataset, (BinanceHistoricalReplayDataset, BinanceBoundedHistoricalReplayDataset))
+                         or (self.study_phase is not None and isinstance(self.archive_dataset, HistoricalStudyArchiveInputs)))
                 or not (isinstance(self.replay_result, HistoricalMarketReplayResult)
                         or (self.study_phase is not None
                             and isinstance(self.replay_result, CompactStudyReplay)))
@@ -129,7 +135,11 @@ class HistoricalTakerFlowExtensionPrepared:
                 or (self.study_phase is not None
                     and self.study_phase not in ("development", "validation", "test"))):
             raise ValueError("taker flow preparation has invalid contract types")
-        object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
+        if self.experiment_points is None:
+            if self.study_phase is None or not isinstance(self.replay_result, CompactStudyReplay):
+                raise ValueError("streamed extension requires uniform-phase compact replay")
+        else:
+            object.__setattr__(self, "experiment_points", tuple(self.experiment_points))
 
 
 @dataclass(frozen=True)
@@ -361,7 +371,7 @@ def _flow_symbol_output(symbol: str, window_minutes: int,
     buy = sums.buy_quote_notional
     sell = sums.sell_quote_notional
     gross = sums.gross_quote_notional
-    net = _exact_sum((buy, -sell))
+    net = _exact_sum((buy, sell.copy_negate()))
     buy_count, sell_count = sums.buy_aggtrade_count, sums.sell_aggtrade_count
     total_count = buy_count + sell_count
     if gross == 0:
@@ -456,12 +466,10 @@ def _comparison(window, symbol_outputs, v1_window) -> TakerFlowComparisonDiagnos
     )
 
 
-def _build_candidate_points(prepared) -> tuple[TakerFlowPointOutput, ...]:
+def _iter_candidate_points(prepared):
     evidence = prepared.archive_dataset.taker_flow_evidence
     symbols = prepared.replay_result.manifest.configured_universe
-    output = []
-    for replay_point, experiment_point in zip(
-            prepared.replay_result.points, prepared.experiment_points):
+    for replay_point, experiment_point in paired_study_points(prepared):
         evaluation = replay_point.movement_evaluation
         window_outputs = []
         for window_minutes in TAKER_FLOW_WINDOWS:
@@ -480,81 +488,69 @@ def _build_candidate_points(prepared) -> tuple[TakerFlowPointOutput, ...]:
                 window_minutes, metrics, _market_summary(window_minutes, metrics),
                 _comparison(window_minutes, metrics, v1_window),
             ))
-        output.append(TakerFlowPointOutput(
+        yield TakerFlowPointOutput(
             replay_point.point_id, replay_point.evaluation_boundary_time_ms,
             experiment_point.partition, tuple(window_outputs),
-        ))
-    return tuple(output)
+        )
+
+
+def _build_candidate_points(prepared, *, retain=True):
+    points = _iter_candidate_points(prepared)
+    return tuple(points) if retain else points
 
 
 def _partition_summaries(candidate_points, symbols) -> Mapping[str, tuple[TakerFlowPartitionWindowSummary, ...]]:
+    accumulators = {(partition, window): Counter() for partition in REPORT_PARTITIONS
+                    for window in TAKER_FLOW_WINDOWS}
+    for point in candidate_points:
+        for partition in (point.partition, "all"):
+            for item in point.windows:
+                counter = accumulators[(partition, item.window_minutes)]
+                market, comparison = item.market_summary, item.comparison
+                counter["point_count"] += 1
+                for target, value in (
+                    ("active_symbol_window_count", market.active_symbol_count),
+                    ("no_observation_symbol_window_count", market.no_observation_symbol_count),
+                    ("unavailable_symbol_window_count", market.unavailable_symbol_count),
+                    ("partial_coverage_point_count", market.partial_coverage),
+                    ("flow_buy_sign_count", market.buy_sign_count),
+                    ("flow_sell_sign_count", market.sell_sign_count),
+                    ("flow_balanced_sign_count", market.balanced_sign_count),
+                    ("v1_breadth_available_point_count", comparison.v1_breadth_available),
+                    ("paired_v1_direction_count", comparison.paired_symbol_count),
+                    ("v1_direction_agreement_count", comparison.direction_agreement_count),
+                    ("common_breadth_denominator", comparison.common_breadth_denominator),
+                    ("flow_buy_count_on_common", comparison.flow_buy_count_on_common),
+                    ("flow_sell_count_on_common", comparison.flow_sell_count_on_common),
+                    ("flow_balanced_count_on_common", comparison.flow_balanced_count_on_common),
+                    ("v1_rising_count_on_common", comparison.v1_rising_count_on_common),
+                    ("v1_falling_count_on_common", comparison.v1_falling_count_on_common),
+                    ("v1_flat_count_on_common", comparison.v1_flat_count_on_common),
+                    ("parity_compared_symbol_window_count", comparison.parity_compared_symbol_count),
+                ):
+                    counter[target] += value
+                if comparison.v1_breadth_available:
+                    counter["v1_breadth_denominator_total"] += comparison.v1_breadth_denominator
+                    counter["v1_rising_breadth_count_total"] += comparison.v1_rising_breadth_count or 0
+                    counter["v1_falling_breadth_count_total"] += comparison.v1_falling_breadth_count or 0
+                    counter["v1_flat_breadth_count_total"] += comparison.v1_flat_breadth_count or 0
     result = {}
+    from dataclasses import fields
     for partition in REPORT_PARTITIONS:
-        selected = tuple(point for point in candidate_points
-                         if partition == "all" or point.partition == partition)
-        by_window = []
+        summaries = []
         for window in TAKER_FLOW_WINDOWS:
-            rows = tuple(next(item for item in point.windows
-                              if item.window_minutes == window) for point in selected)
-            active = sum(item.market_summary.active_symbol_count for item in rows)
-            no_observation = sum(item.market_summary.no_observation_symbol_count
-                                 for item in rows)
-            unavailable = sum(item.market_summary.unavailable_symbol_count for item in rows)
-            available = active + no_observation
-            universe_window_count = len(rows) * len(symbols)
-            pair_count = sum(item.comparison.paired_symbol_count for item in rows)
-            agreement = sum(item.comparison.direction_agreement_count for item in rows)
-            common_count = sum(item.comparison.common_breadth_denominator for item in rows)
-            breadth_points = sum(item.comparison.v1_breadth_available for item in rows)
-            breadth_rows = tuple(item.comparison for item in rows
-                                 if item.comparison.v1_breadth_available)
-            by_window.append(TakerFlowPartitionWindowSummary(
-                partition=partition,
-                window_minutes=window,
-                point_count=len(rows),
-                universe_symbol_window_count=universe_window_count,
-                flow_available_symbol_window_count=available,
-                active_symbol_window_count=active,
-                no_observation_symbol_window_count=no_observation,
-                unavailable_symbol_window_count=unavailable,
-                partial_coverage_point_count=sum(
-                    item.market_summary.partial_coverage for item in rows),
+            counter = accumulators[(partition, window)]
+            values = {item.name: counter[item.name] for item in fields(TakerFlowPartitionWindowSummary)}
+            pair_count = counter["paired_v1_direction_count"]
+            active = counter["active_symbol_window_count"]
+            values.update(partition=partition, window_minutes=window,
+                universe_symbol_window_count=counter["point_count"] * len(symbols),
+                flow_available_symbol_window_count=active + counter["no_observation_symbol_window_count"],
                 eligible_symbol_window_count=active,
-                flow_buy_sign_count=sum(item.market_summary.buy_sign_count for item in rows),
-                flow_sell_sign_count=sum(item.market_summary.sell_sign_count for item in rows),
-                flow_balanced_sign_count=sum(
-                    item.market_summary.balanced_sign_count for item in rows),
-                v1_breadth_available_point_count=breadth_points,
-                v1_breadth_denominator_total=sum(
-                    item.v1_breadth_denominator for item in breadth_rows),
-                v1_rising_breadth_count_total=sum(
-                    item.v1_rising_breadth_count or 0 for item in breadth_rows),
-                v1_falling_breadth_count_total=sum(
-                    item.v1_falling_breadth_count or 0 for item in breadth_rows),
-                v1_flat_breadth_count_total=sum(
-                    item.v1_flat_breadth_count or 0 for item in breadth_rows),
-                paired_v1_direction_count=pair_count,
-                v1_direction_agreement_count=agreement,
-                v1_direction_agreement_fraction=(
-                    _ratio(Decimal(agreement), Decimal(pair_count))
-                    if pair_count else None),
-                common_breadth_denominator=common_count,
-                flow_buy_count_on_common=sum(
-                    item.comparison.flow_buy_count_on_common for item in rows),
-                flow_sell_count_on_common=sum(
-                    item.comparison.flow_sell_count_on_common for item in rows),
-                flow_balanced_count_on_common=sum(
-                    item.comparison.flow_balanced_count_on_common for item in rows),
-                v1_rising_count_on_common=sum(
-                    item.comparison.v1_rising_count_on_common for item in rows),
-                v1_falling_count_on_common=sum(
-                    item.comparison.v1_falling_count_on_common for item in rows),
-                v1_flat_count_on_common=sum(
-                    item.comparison.v1_flat_count_on_common for item in rows),
-                parity_compared_symbol_window_count=sum(
-                    item.comparison.parity_compared_symbol_count for item in rows),
-            ))
-        result[partition] = tuple(by_window)
+                v1_direction_agreement_fraction=(_ratio(Decimal(counter["v1_direction_agreement_count"]),
+                                                        Decimal(pair_count)) if pair_count else None))
+            summaries.append(TakerFlowPartitionWindowSummary(**values))
+        result[partition] = tuple(summaries)
     return MappingProxyType(result)
 
 
@@ -624,16 +620,16 @@ def run_historical_taker_flow_extension(
 
 
 def build_historical_study_taker_flow_points(
-    archive_dataset, replay_result, experiment_points, study_phase: str,
+    archive_dataset, replay_result, experiment_points, study_phase: str, *, retain=True,
 ):
     """Reuse the core-loaded taker evidence and one canonical study replay."""
     prepared = HistoricalTakerFlowExtensionPrepared(
-        archive_dataset, replay_result, tuple(experiment_points), None, study_phase)
+        archive_dataset, replay_result, experiment_points, None, study_phase)
     from .historical_market_state_candidate_evidence import validate_study_phase_prepared
     validate_study_phase_prepared(prepared)
     if archive_dataset.taker_flow_evidence is None:
         raise ValueError("the canonical study core load must include taker-flow evidence")
-    return _build_candidate_points(prepared)
+    return _build_candidate_points(prepared, retain=retain)
 
 
 def run_historical_taker_flow_extension_from_archive(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from decimal import Decimal
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -66,6 +67,13 @@ def _read_json_bytes(data: bytes):
                               ValueError(f"invalid checkpoint constant: {value}")))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("malformed checkpoint JSON") from exc
+
+
+@lru_cache(maxsize=None)
+def _dataclass_metadata(cls):
+    # Type variables remain unresolved here: substitutions belong to each call.
+    declared = fields(cls)
+    return declared, frozenset(item.name for item in declared), get_type_hints(cls)
 
 
 def _decode(annotation, value, substitutions=None):
@@ -131,13 +139,12 @@ def _decode(annotation, value, substitutions=None):
     if cls in _ALLOWED and is_dataclass(cls):
         if type(value) is not dict:
             raise ValueError("checkpoint dataclass must be an object")
-        declared = fields(cls)
-        if set(value) != {item.name for item in declared}:
+        declared, names, hints = _dataclass_metadata(cls)
+        if set(value) != names:
             raise ValueError(f"checkpoint {cls.__name__} fields mismatch")
         local = dict(substitutions)
         if origin is not None:
             local.update(zip(cls.__parameters__, args))
-        hints = get_type_hints(cls)
         kwargs = {item.name: _decode(hints[item.name], value[item.name], local)
                   for item in declared}
         return cls(**kwargs)
@@ -313,6 +320,59 @@ class ReplayCheckpointStore:
             del chunk
         if self.previous_boundary == self.end_boundary and not self._complete:
             raise ValueError("final replay checkpoint is not complete")
+
+    def load_complete_metadata(self):
+        """Verify a COMPLETE chain's bytes without reconstructing point graphs.
+
+        Used only with a separately validated compact spool and prepared bundle.
+        Partial recovery keeps load_latest's full state/point reconstruction.
+        """
+        final = self.root / f"checkpoint-{self.end_boundary}.json"
+        if not final.exists():
+            return False
+        previous_sha = None
+        count = 0
+        paths = sorted(self.root.glob("checkpoint-*.json"))
+        boundaries = tuple(self._checkpoint_boundaries())
+        if len(paths) != len(boundaries):
+            raise ValueError("complete replay chain has missing checkpoints")
+        previous_boundary = None
+        for path, boundary in zip(paths, boundaries):
+            raw = path.read_bytes()
+            metadata = _read_json_bytes(raw)
+            required = {"schema_version", "runtime_version", "identity", "boundary", "status",
+                        "point_chunk_sha256", "replay_state_sha256", "point_count",
+                        "cumulative_point_count", "previous_checkpoint_sha256", "checkpoint_sha256"}
+            if type(metadata) is not dict or set(metadata) != required:
+                raise ValueError("invalid completed replay metadata fields")
+            body = dict(metadata)
+            sha = body.pop("checkpoint_sha256", None)
+            start = self.start_boundary if previous_boundary is None else previous_boundary + 5_000
+            chunk_count = (boundary - start) // 5_000 + 1
+            count += chunk_count
+            if (path.name != f"checkpoint-{boundary}.json"
+                    or raw != _canonical_bytes(metadata) or sha != _sha(_canonical_bytes(body))
+                    or body.get("schema_version") != REPLAY_CHECKPOINT_SCHEMA_VERSION
+                    or body.get("runtime_version") != HISTORICAL_REPLAY_RUNTIME_VERSION
+                    or body.get("identity") != self.identity
+                    or body.get("boundary") != boundary
+                    or body.get("previous_checkpoint_sha256") != previous_sha
+                    or body.get("point_count") != chunk_count
+                    or body.get("cumulative_point_count") != count
+                    or body.get("status") != ("REPLAY_COMPLETE" if boundary == self.end_boundary else "IN_PROGRESS")):
+                raise ValueError("completed replay metadata chain mismatch")
+            for directory, key, suffix in (("chunks", "point_chunk_sha256", ".jsonl"),
+                                            ("states", "replay_state_sha256", ".json")):
+                digest = hashlib.sha256()
+                with (self.root / directory / f"{body[key]}{suffix}").open("rb") as handle:
+                    for block in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(block)
+                if digest.hexdigest() != body[key]:
+                    raise ValueError("completed replay artifact SHA mismatch")
+            previous_sha, previous_boundary = sha, boundary
+        self.previous_sha, self.previous_boundary = previous_sha, previous_boundary
+        self.point_count, self._complete = count, True
+        return True
 
     def load_latest(self):
         """Validate each bounded chunk once, retaining only the final state."""

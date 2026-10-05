@@ -129,7 +129,7 @@ from .historical_replay import (
 from .historical_replay_runtime import ReplayCheckpointStore
 from .historical_study_runtime import (
     create_study_point_stream, current_runtime_implementation_revision,
-    run_stage, stage_dependencies,
+    run_stage, stage_dependencies, input_descriptor,
 )
 from .historical_taker_flow_extension import (
     TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
@@ -328,11 +328,13 @@ class PreparedHistoricalMarketStatePeriod:
 
 
 def _canonical(value) -> str:
-    return canonical_study_json(value)
+    from .historical_market_state_study_json import iter_canonical_study_json
+    return "".join(iter_canonical_study_json(value))
 
 
 def _digest(value) -> str:
-    return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+    from .historical_market_state_study_json import canonical_study_sha256
+    return canonical_study_sha256(value)
 
 
 def _artifact_json(payload: Mapping[str, Any], hash_field: str) -> str:
@@ -437,6 +439,18 @@ def load_study_manifest(path: Path | str) -> HistoricalMarketStateStudyManifest:
         path.read_text(encoding="utf-8"))
 
 
+def _compatible_coverage_source_identities(supplied):
+    """Accept only current coverage or the exact pre-correction source map.
+
+    This compatibility is for frozen source facts, never derived calculations.
+    Build independent comparison dictionaries; leave the artifact/hash intact.
+    """
+    legacy = {**SOURCE_IDENTITIES, "taker_flow": {
+        **SOURCE_IDENTITIES["taker_flow"],
+        "algorithm_version": "taker-buy-sell-imbalance-v1"}}
+    return _canonical(supplied) in (_canonical(SOURCE_IDENTITIES), _canonical(legacy))
+
+
 def load_and_validate_coverage(path: Path | str,
                                manifest: HistoricalMarketStateStudyManifest,
                                code_revision: str | None = None):
@@ -450,8 +464,7 @@ def load_and_validate_coverage(path: Path | str,
             or artifact.get("study_version") != STUDY_VERSION
             or artifact.get("study_manifest_sha256") != manifest.manifest_sha256
             or artifact.get("ordered_periods") != expected_dates
-            or _canonical(artifact.get("source_identities"))
-            != _canonical(SOURCE_IDENTITIES)
+            or not _compatible_coverage_source_identities(artifact.get("source_identities"))
             or artifact.get("tool_config_version") != TOOL_CONFIG_VERSION
             or not isinstance(artifact.get("code_revision"), str)
             or not artifact["code_revision"]
@@ -924,7 +937,7 @@ def _label_price_evidence(dataset, archive_root, period):
         dataset.archive_manifest.content_sha256, start - MINUTE_MS, label_end)
 
 
-def _build_v1_evidence(period, replay_points, *, retain_branch=True):
+def _build_v1_evidence(period, replay_points, *, retain_branch=True, branch_writer=None):
     classifier_config = MarketClassifierConfig()
     lifecycle_config = MarketEpisodeLifecycleConfig()
     lifecycle_state = None
@@ -938,6 +951,8 @@ def _build_v1_evidence(period, replay_points, *, retain_branch=True):
             replay_point.movement_evaluation, replay_point.source_time_evidence,
             lifecycle_state, classifier_config, lifecycle_config)
         lifecycle_state = lifecycle.next_state
+        if branch_writer is not None:
+            branch_writer.append(replay_point, classification, lifecycle)
         if retain_branch:
             branch_by_boundary[boundary] = (classification, lifecycle)
         if not period.start_boundary_time_ms <= boundary < period.end_boundary_time_ms:
@@ -1112,12 +1127,13 @@ def _candidate_execution(prepared_period, supplementary, hmm_model,
     symbols = replay.manifest.configured_universe
     if stage_selector in (None, "taker-flow"):
         with _runtime_measure(runtime_metrics, "taker_flow_seconds"):
-            taker_points = build_historical_study_taker_flow_points(
-                dataset, replay, points, period.phase)
-            taker_summary = _taker_summaries(taker_points, symbols)
-            _append_extension_records(records, native_summaries, period, "EXP-75-12",
-                                      TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
-                                      taker_points, taker_summary[period.phase])
+            from .historical_extension_stream import temporary_points
+            with temporary_points(build_historical_study_taker_flow_points(
+                    dataset, replay, points, period.phase, retain=False)) as taker_points:
+                taker_summary = _taker_summaries(taker_points, symbols)
+                _append_extension_records(records, native_summaries, period, "EXP-75-12",
+                                          TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
+                                          taker_points, taker_summary[period.phase])
 
     extension_specs = (
         ("mark_trade", "EXP-75-10", MARK_TRADE_ALGORITHM_VERSION,
@@ -1165,17 +1181,18 @@ def _candidate_execution(prepared_period, supplementary, hmm_model,
                 root_field: source["root"],
             }
             prepared = prepared_type(**kwargs)
-            candidate_points = builder(prepared)
-            summary = summarize(candidate_points, symbols)[period.phase]
-            extension_reports[name] = {
-                "execution_status": "EXECUTED",
-                "coverage_state": source_coverage["coverage_state"],
-                "source_coverage_sha256": _digest(source_coverage),
-                "candidate_output_sha256": _digest(candidate_points),
-                "native_summary": summary,
-            }
-            _append_extension_records(records, native_summaries, period, experiment_id,
-                                      algorithm, config, candidate_points, summary)
+            from .historical_extension_stream import temporary_points
+            with temporary_points(builder(prepared, retain=False)) as candidate_points:
+                summary = summarize(candidate_points, symbols)[period.phase]
+                extension_reports[name] = {
+                    "execution_status": "EXECUTED",
+                    "coverage_state": source_coverage["coverage_state"],
+                    "source_coverage_sha256": _digest(source_coverage),
+                    "candidate_output_sha256": _digest(candidate_points),
+                    "native_summary": summary,
+                }
+                _append_extension_records(records, native_summaries, period, experiment_id,
+                                          algorithm, config, candidate_points, summary)
 
     return (tuple(records), tuple(native_summaries), fixed_identities,
             extension_reports, hmm_block, hmm_model_sha)
@@ -1186,12 +1203,20 @@ def _stage_prepared(prepared, selector):
     dataset = prepared.archive_dataset
     if selector in ("v1", "event-context", "hmm") or selector.startswith("fixed-"):
         dataset = None
-    elif selector.startswith("atr-"):
-        dataset = SimpleNamespace(ohlc_evidence=dataset.ohlc_evidence)
-    return SimpleNamespace(**{**vars(prepared), "archive_dataset": dataset})
+    else:
+        from .historical_study_inputs import HistoricalStudyArchiveInputs
+        dataset = HistoricalStudyArchiveInputs(dataset.archive_manifest, dataset.universe,
+            dataset.config,
+            dataset.ohlc_evidence if selector.startswith("atr-") or selector == "mark_trade" else None,
+            dataset.taker_flow_evidence if selector == "taker-flow" else None)
+    branch = (prepared.canonical_v1_branch_by_boundary
+              if selector == "event-context" or selector.startswith(("fixed-", "atr-"))
+              else None)
+    return SimpleNamespace(**{**vars(prepared), "archive_dataset": dataset,
+                              "canonical_v1_branch_by_boundary": branch})
 
 
-def _stage_science_identity(selector):
+def _stage_science_identity_base(selector):
     if selector in ("v1", "event-context"):
         from .market_episode_lifecycle import ALGORITHM_VERSION as lifecycle_algorithm
         return {"experiment_id": "V1", "algorithm_version": V1_CLASSIFIER_ALGORITHM_VERSION,
@@ -1221,6 +1246,29 @@ def _stage_science_identity(selector):
     return dict(zip(("experiment_id", "algorithm_version", "config_version"), identity))
 
 
+def _stage_science_identity(selector):
+    identity = _stage_science_identity_base(selector)
+    identity["classifier_config"] = report_json_safe(MarketClassifierConfig())
+    identity["lifecycle_config"] = report_json_safe(MarketEpisodeLifecycleConfig())
+    if selector == "hmm":
+        identity["candidate_config"] = report_json_safe(HMM_CONFIG_V1)
+    elif selector.startswith("fixed-"):
+        identity["candidate_config"] = report_json_safe(EXPERIMENT_SUITE_V1[int(selector.split("-")[1])].config)
+    elif selector.startswith("atr-"):
+        identity["candidate_config"] = report_json_safe(ATR_CONFIGURATIONS[int(selector.split("-")[1])])
+    elif selector in ("taker-flow", "mark_trade", "open_interest", "funding", "liquidation"):
+        import importlib
+        module_name = {"taker-flow": "taker_flow", "mark_trade": "mark_trade", "open_interest": "open_interest",
+                       "funding": "funding", "liquidation": "liquidation"}[selector]
+        module = importlib.import_module(f"market_analysis.historical_{module_name}_extension")
+        identity["calculation_parameters"] = {name: report_json_safe(getattr(module, name))
+            for name in ("CALCULATION_RULE", "DECIMAL_PRECISION", "MARK_TRADE_DECIMAL_PRECISION",
+                         "TAKER_FLOW_WINDOWS", "MARK_TRADE_WINDOWS_MINUTES", "OI_WINDOWS_MINUTES",
+                         "FUNDING_CONTEXT_WINDOWS_MINUTES", "LIQUIDATION_WINDOWS_MINUTES")
+            if hasattr(module, name)}
+    return identity
+
+
 def _candidate_stage_selectors():
     return ("hmm", *(f"fixed-{index:02d}" for index, item in enumerate(EXPERIMENT_SUITE_V1)
                           if item.experiment_id != "EXP-75-09"),
@@ -1228,15 +1276,17 @@ def _candidate_stage_selectors():
                  "taker-flow", "mark_trade", "open_interest", "funding", "liquidation")
 
 def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=None,
-                                runtime_metrics=None):
+                                runtime_metrics=None, worker_lease=None):
     stream = prepared.canonical_replay_result.points
     selectors = _candidate_stage_selectors()
-    records, summaries, reports = [], [], {}
+    upstream_v1 = stage_dependencies(stream, ("v1",))
+    record_sources, summaries, reports = [], [], {}
     hmm_block = hmm_sha = identities = None
     for selector in selectors:
         source = {selector: supplementary[selector]} if selector in supplementary else {}
         request = {"action": "candidate", "prepared": _stage_prepared(prepared, selector),
                    "supplementary": source, "hmm_model": hmm_model,
+                   "prepared_stream": stream, "required_stage_results": upstream_v1,
                    "selector": selector, "scientific_stage": _stage_science_identity(selector),
                    "supplementary_source_sha256": _digest({
                        name: {"coverage": item["coverage"], "evidence_sha256":
@@ -1249,15 +1299,22 @@ def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=
         bocpd_field = ("bocpd_seconds" if request["scientific_stage"]["experiment_id"] == "EXP-75-04B"
                        else None)
         with _runtime_measure(runtime_metrics, timing_field), _runtime_measure(runtime_metrics, bocpd_field):
-            result = run_stage(stream, selector, request, progress=progress)
+            descriptor = input_descriptor(request)
+            unavailable = selector in source and source[selector]["evidence"] is None
+            result = run_stage(stream, selector, descriptor=descriptor,
+                prepare=lambda request=request: request, progress=progress, worker_lease=worker_lease,
+                local_result=(lambda request=request: _candidate_execution(
+                    request["prepared"], request["supplementary"], request["hmm_model"],
+                    stage_selector=request["selector"])) if unavailable else None)
         stage_records, stage_summaries, fixed, extension, block, model_sha = result
-        records.extend(stage_records)
+        record_sources.append(stage_records)
         summaries.extend(stage_summaries)
         reports.update(extension)
         identities = fixed
         if selector == "hmm":
             hmm_block, hmm_sha = block, model_sha
-    return tuple(records), tuple(summaries), identities, reports, hmm_block, hmm_sha
+    from .historical_stage_records import JoinedStageRecords
+    return JoinedStageRecords(tuple(record_sources)), tuple(summaries), identities, reports, hmm_block, hmm_sha
 
 
 def _append_extension_records(records, summaries, period, experiment_id,
@@ -1265,7 +1322,7 @@ def _append_extension_records(records, summaries, period, experiment_id,
     descriptor = SimpleNamespace(experiment_id=experiment_id,
                                  algorithm_version=algorithm,
                                  config_version=config)
-    result = SimpleNamespace(points=tuple(points),
+    result = SimpleNamespace(points=points,
                              summaries={period.phase: summary})
     bundle = adapt_candidate_result(period, descriptor, result)
     records.extend(bundle.records)
@@ -1291,9 +1348,7 @@ def _verify_hashed_payload(payload, hash_field, label):
 
 
 def _verify_existing_period(path, manifest, coverage, period, code_revision):
-    payload = _read_json(path)
-    return _validate_period_report(payload, manifest, period, code_revision,
-                                   coverage["coverage_manifest_sha256"])
+    return _period_sidecar(path, manifest, coverage, period, code_revision)["report_sha256"]
 
 
 def _validate_period_report(payload, manifest, period, code_revision, coverage_sha=None):
@@ -1315,6 +1370,10 @@ def _validate_period_report(payload, manifest, period, code_revision, coverage_s
             or any(char not in "0123456789abcdef" for char in current_coverage)
             or coverage_sha is not None and current_coverage != coverage_sha):
         raise StudyArtifactConflictError("period report scientific identity mismatch")
+    taker_identity = payload.get("taker_flow_evidence_identity")
+    if (not isinstance(taker_identity, dict)
+            or taker_identity.get("algorithm_version") != TAKER_FLOW_ALGORITHM_VERSION):
+        raise StudyArtifactConflictError("period report uses an incompatible taker-flow calculation")
     records = payload.get("candidate_evidence")
     if not isinstance(records, list) or payload.get("candidate_evidence_sha256") != _digest(records):
         raise ValueError("period candidate evidence hash mismatch")
@@ -1322,6 +1381,9 @@ def _validate_period_report(payload, manifest, period, code_revision, coverage_s
         raise ValueError("period candidate evidence contains a malformed record")
     for record in records:
         _verify_hashed_payload(record, "candidate_evidence_sha256", "candidate evidence")
+        if (record.get("experiment_id") == "EXP-75-12"
+                and record.get("algorithm_version") != TAKER_FLOW_ALGORITHM_VERSION):
+            raise StudyArtifactConflictError("candidate uses an incompatible taker-flow calculation")
         if (record.get("study_period_index") != period.study_period_index
                 or record.get("utc_date") != period.utc_date.isoformat()
                 or record.get("phase") != period.phase):
@@ -1533,14 +1595,19 @@ def _load_source_evidence(period, roots):
 
 
 
-def _event_time_v1_context(prepared_period, candidate_records):
+def _event_time_v1_context(prepared_period, candidate_records, *, event_times=None):
     """Persist the exact canonical V1 branch at every causal event boundary."""
     event_times = tuple(sorted({
         item.decision_time_ms for item in candidate_records
         if item.evidence_kind == "EVENT" and item.decision_time_ms is not None
-    }))
-    if not event_times:
+    })) if event_times is None else tuple(event_times)
+    if not event_times and prepared_period.canonical_v1_branch_by_boundary is None:
         return ()
+    if (event_times != tuple(sorted(set(event_times)))
+            or any(type(boundary) is not int or boundary % 5_000
+                   or not prepared_period.period.start_boundary_time_ms <= boundary < prepared_period.period.end_boundary_time_ms
+                   for boundary in event_times)):
+        raise ValueError("event context requires sorted unique causal period boundaries")
     requested = set(event_times)
     records = []
     lifecycle_state = None
@@ -1553,6 +1620,12 @@ def _event_time_v1_context(prepared_period, candidate_records):
             classification, lifecycle = advance_canonical_branch(
                 replay_point.movement_evaluation, replay_point.source_time_evidence,
                 lifecycle_state, classifier_config, lifecycle_config)
+            lifecycle_state = lifecycle.next_state
+        elif hasattr(branch_map, "branch_for_point"):
+            from .experiments.market_state_common import canonical_branch_for_point
+            classification, lifecycle = canonical_branch_for_point(
+                replay_point.movement_evaluation, replay_point.source_time_evidence,
+                lifecycle_state, classifier_config, lifecycle_config, branch_map)
             lifecycle_state = lifecycle.next_state
         elif boundary in requested:
             branch = branch_map.get(boundary)
@@ -1626,10 +1699,32 @@ def _bocpd_onset_evidence(candidate_records):
 
 
 
-def _continuous_and_event_outcomes(evidence, candidate_records, v1_state_by_boundary,
-                                   period):
+def _continuous_and_event_outcomes(evidence, candidate_records, v1_state_by_boundary, period):
+    from .historical_forward_lookup import ForwardLookup
+    with ForwardLookup() as lookup:
+        return _continuous_and_event_outcomes_cached(evidence, candidate_records,
+                                                    v1_state_by_boundary, period, lookup)
+
+
+def _continuous_and_event_outcomes_cached(evidence, candidate_records, v1_state_by_boundary,
+                                          period, lookup):
+    from .historical_market_state_forward_outcomes import evaluate_forward_outcome
+    raw_identity = _digest({"evidence_sha256": evidence.evidence_sha256,
+                            "version": FORWARD_OUTCOMES_VERSION, "numeric_policy": FORWARD_NUMERIC_POLICY})
+    state_identity = _digest({"states": v1_state_by_boundary, "period": period,
+                              "version": FORWARD_OUTCOMES_VERSION})
+
+    def raw_outcome(decision, horizon):
+        return lookup.get("raw", raw_identity, decision, horizon,
+                          lambda: evaluate_forward_outcome(evidence, decision, horizon))
+
+    def state_path(decision, horizon):
+        return lookup.get("v1", state_identity, decision, horizon,
+                          lambda: evaluate_v1_state_path(v1_state_by_boundary, decision, horizon,
+                              period.start_boundary_time_ms, period.end_boundary_time_ms))
     continuous = evaluate_continuous_grids(
-        evidence, period.start_boundary_time_ms, period.end_boundary_time_ms)
+        evidence, period.start_boundary_time_ms, period.end_boundary_time_ms,
+        outcome_lookup=raw_outcome)
     event_groups = {}
     for item in candidate_records:
         if item.evidence_kind == "RETROSPECTIVE":
@@ -1643,7 +1738,7 @@ def _continuous_and_event_outcomes(evidence, candidate_records, v1_state_by_boun
     for (experiment_id, algorithm, config), times in sorted(event_groups.items()):
         by_horizon = []
         for horizon in HORIZONS_MINUTES:
-            rows = evaluate_event_outcomes(evidence, sorted(times), horizon)
+            rows = evaluate_event_outcomes(evidence, sorted(times), horizon, outcome_lookup=raw_outcome)
             by_horizon.append((horizon, rows))
             for row in rows:
                 state_outcomes.append({
@@ -1652,9 +1747,7 @@ def _continuous_and_event_outcomes(evidence, candidate_records, v1_state_by_boun
                     "config_version": config,
                     "decision_time_ms": row["decision_time_ms"],
                     "horizon_minutes": horizon,
-                    "state_path": evaluate_v1_state_path(
-                        v1_state_by_boundary, row["decision_time_ms"], horizon,
-                        period.start_boundary_time_ms, period.end_boundary_time_ms),
+                    "state_path": state_path(row["decision_time_ms"], horizon),
                 })
         event_outcomes.append({
             "experiment_id": experiment_id, "algorithm_version": algorithm,
@@ -1671,18 +1764,116 @@ def _continuous_and_event_outcomes(evidence, candidate_records, v1_state_by_boun
                 "experiment_id": "CONTINUOUS_GRID", "algorithm_version": FORWARD_OUTCOMES_VERSION,
                 "config_version": f"{horizon}m", "decision_time_ms": outcome.decision_time_ms,
                 "horizon_minutes": horizon,
-                "state_path": evaluate_v1_state_path(
-                    v1_state_by_boundary, outcome.decision_time_ms, horizon,
-                    period.start_boundary_time_ms, period.end_boundary_time_ms),
+                "state_path": state_path(outcome.decision_time_ms, horizon),
             })
     return continuous, tuple(event_outcomes), tuple(state_outcomes)
 
 
+def _replay_identity(manifest, coverage, period, dataset, config, code_revision,
+                     runtime_implementation_revision):
+    run_manifest = historical_replay_run_manifest(dataset)
+    return {
+        "study_version": STUDY_VERSION,
+        "study_manifest_sha256": manifest.manifest_sha256,
+        "extension_coverage_manifest_sha256": coverage["coverage_manifest_sha256"],
+        "scientific_producer_revision": code_revision,
+        "runtime_implementation_revision": (
+            runtime_implementation_revision
+            if runtime_implementation_revision is not None
+            else _current_code_revision()),
+        "study_period_index": period.study_period_index,
+        "utc_date": period.utc_date.isoformat(),
+        "phase": period.phase,
+        "run_fingerprint": run_manifest.run_fingerprint,
+        "replay_algorithm_version": run_manifest.algorithm_version,
+        "replay_policy_version": run_manifest.policy_version,
+        "movement_algorithm_version": run_manifest.movement_algorithm_version,
+        "movement_config_version": run_manifest.movement_config_version,
+        "movement_config_parameters": report_json_safe(
+            run_manifest.movement_config_parameters),
+        "universe_id": dataset.universe.id,
+        "universe_version": dataset.universe.version,
+        "configured_symbols": report_json_safe(dataset.universe.symbols),
+        "finalization_grace_ms": config.finalization_grace_ms,
+        "archive_content_sha256": dataset.archive_manifest.content_sha256,
+        "archive_files": report_json_safe(dataset.archive_manifest.archive_files),
+        "trade_stream_manifest": report_json_safe(dataset.trade_stream_manifest),
+    }
+
+
 def _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
+                          runtime_metrics=None, checkpoint_root=None, progress=None,
+                          runtime_implementation_revision=None, worker_lease=None):
+    """Restore verified post-replay inputs before opening the raw trade index."""
+    root = (Path(checkpoint_root) / f"period-{period.study_period_index:02d}-{period.utc_date.isoformat()}-{period.phase}"
+            if checkpoint_root is not None else None)
+    bundle = root / "prepared-replay.json" if root is not None else None
+    config = study_replay_config(period.utc_date)
+    if bundle is None or not bundle.exists() or not (root / f"checkpoint-{config.output_end_boundary_time_ms}.json").exists():
+        return _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_revision,
+                    runtime_metrics, checkpoint_root, progress, runtime_implementation_revision, worker_lease)
+    from .historical_study_runtime import decode
+    from .historical_replay_runtime import _canonical_bytes, _read_json_bytes, _sha
+    raw = bundle.read_bytes()
+    value = _read_json_bytes(raw)
+    body = dict(value)
+    sha = body.pop("bundle_sha256", None)
+    if (raw != _canonical_bytes(value) or sha != _sha(_canonical_bytes(body))
+            or body.get("version") != "historical-prepared-replay-v1"):
+        raise StudyArtifactConflictError("prepared replay bundle version/SHA mismatch")
+    # Verify operational identity before scientific reconstruction.
+    expected_prefix = {"study_manifest_sha256": manifest.manifest_sha256,
+                       "extension_coverage_manifest_sha256": coverage["coverage_manifest_sha256"],
+                       "scientific_producer_revision": code_revision,
+                       "runtime_implementation_revision": runtime_implementation_revision or _current_code_revision(),
+                       "study_period_index": period.study_period_index,
+                       "utc_date": period.utc_date.isoformat(), "phase": period.phase}
+    if any(body["identity"].get(key) != item for key, item in expected_prefix.items()):
+        raise StudyArtifactConflictError("prepared replay producer/runtime identity mismatch")
+    eligibility = _frozen_eligibility(manifest, period)
+    dataset = decode(body["dataset"])
+    if (body["eligibility_sha256"] != eligibility.eligibility_sha256
+            or dataset.archive_manifest != eligibility.provenance.archive_manifest
+            or dataset.config != config or dataset.universe != study_universe()):
+        raise StudyArtifactConflictError("prepared replay differs from frozen archive/configuration")
+    identity = _replay_identity(manifest, coverage, period, dataset, config,
+                               code_revision, runtime_implementation_revision)
+    if identity != body["identity"]:
+        raise StudyArtifactConflictError("prepared normalized stream identity mismatch")
+    frozen_coverage = coverage["periods"][period.study_period_index]
+    if frozen_coverage["core"]["archive_content_sha256"] != dataset.archive_manifest.content_sha256:
+        raise StudyArtifactConflictError("prepared archive differs from frozen coverage")
+    for package in dataset.archive_manifest.archive_files:
+        if _checksum(Path(archive_root), PurePosixPath(package.relative_path), package.symbol,
+                     package.data_type, package.utc_date) != package.sha256:
+            raise StudyArtifactConflictError("raw archive checksum changed since prepared replay")
+    store = ReplayCheckpointStore(root, identity, config.output_start_boundary_time_ms,
+                                  config.output_end_boundary_time_ms, progress=progress)
+    if not store.load_complete_metadata():
+        raise StudyArtifactConflictError("prepared replay lacks COMPLETE metadata")
+    stream = create_study_point_stream(store)
+    replay = CompactStudyReplay(decode(body["manifest"]), stream,
+                               decode(body["diagnostics"]), decode(body["final_checkpoint"]))
+    if replay.manifest != historical_replay_run_manifest(dataset):
+        raise StudyArtifactConflictError("prepared replay manifest differs from normalized inputs")
+    prepared = SimpleNamespace(period=period, archive_dataset=dataset,
+        canonical_replay_result=replay, experiment_points=None, canonical_v1_branch_by_boundary=None,
+        study_manifest_sha256=manifest.manifest_sha256,
+        core_eligibility_sha256=eligibility.eligibility_sha256, code_revision=code_revision)
+    records, states, branch = run_stage(stream, "v1", {"action": "v1",
+        "prepared": _stage_prepared(prepared, "v1"), "scientific_stage": _stage_science_identity("v1")},
+        progress=progress, worker_lease=worker_lease)
+    prepared.canonical_v1_branch_by_boundary = branch
+    if progress:
+        progress("PREPARED_REPLAY_RESTORED", {"bundle_sha256": sha})
+    return prepared, frozen_coverage, records, states
+
+
+def _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_revision,
                           runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
                           checkpoint_root: Path | None = None,
                           progress=None,
-                          runtime_implementation_revision: str | None = None):
+                          runtime_implementation_revision: str | None = None, worker_lease=None):
     """Load and replay core evidence once, then freeze shared V1 study context."""
     config = study_replay_config(period.utc_date)
     with _runtime_measure(runtime_metrics, "core_archive_load_seconds"):
@@ -1714,33 +1905,8 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
                 replay = run_bounded_historical_market_replay(dataset)
             else:
                 run_manifest = historical_replay_run_manifest(dataset)
-                identity = {
-                    "study_version": STUDY_VERSION,
-                    "study_manifest_sha256": manifest.manifest_sha256,
-                    "extension_coverage_manifest_sha256": coverage["coverage_manifest_sha256"],
-                    "scientific_producer_revision": code_revision,
-                    "runtime_implementation_revision": (
-                        runtime_implementation_revision
-                        if runtime_implementation_revision is not None
-                        else _current_code_revision()),
-                    "study_period_index": period.study_period_index,
-                    "utc_date": period.utc_date.isoformat(),
-                    "phase": period.phase,
-                    "run_fingerprint": run_manifest.run_fingerprint,
-                    "replay_algorithm_version": run_manifest.algorithm_version,
-                    "replay_policy_version": run_manifest.policy_version,
-                    "movement_algorithm_version": run_manifest.movement_algorithm_version,
-                    "movement_config_version": run_manifest.movement_config_version,
-                    "movement_config_parameters": report_json_safe(
-                        run_manifest.movement_config_parameters),
-                    "universe_id": dataset.universe.id,
-                    "universe_version": dataset.universe.version,
-                    "configured_symbols": report_json_safe(dataset.universe.symbols),
-                    "finalization_grace_ms": config.finalization_grace_ms,
-                    "archive_content_sha256": dataset.archive_manifest.content_sha256,
-                    "archive_files": report_json_safe(dataset.archive_manifest.archive_files),
-                    "trade_stream_manifest": report_json_safe(dataset.trade_stream_manifest),
-                }
+                identity = _replay_identity(manifest, coverage, period, dataset, config,
+                                            code_revision, runtime_implementation_revision)
                 store = ReplayCheckpointStore(
                     checkpoint_root / f"period-{period.study_period_index:02d}-{period.utc_date.isoformat()}-{period.phase}",
                     identity, config.output_start_boundary_time_ms,
@@ -1757,15 +1923,26 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
     finally:
         dataset.close()
     if checkpoint_root is not None:
+        from .historical_study_runtime import encode
+        from .historical_replay_runtime import _atomic_write, _canonical_bytes, _sha
+        bundle_body = {"version": "historical-prepared-replay-v1", "identity": identity,
+                       "eligibility_sha256": eligibility.eligibility_sha256,
+                       "dataset": encode(dataset), "manifest": encode(replay.manifest),
+                       "diagnostics": encode(replay.diagnostics),
+                       "final_checkpoint": encode(replay.final_checkpoint)}
+        _atomic_write(store.root / "prepared-replay.json", _canonical_bytes({**bundle_body,
+                      "bundle_sha256": _sha(_canonical_bytes(bundle_body))}))
         prepared_period = SimpleNamespace(
             period=period, archive_dataset=dataset, canonical_replay_result=replay,
             experiment_points=None, canonical_v1_branch_by_boundary=None,
             study_manifest_sha256=manifest.manifest_sha256,
             core_eligibility_sha256=eligibility.eligibility_sha256, code_revision=code_revision)
         with _runtime_measure(runtime_metrics, "v1_preparation_seconds"):
-            v1_records, v1_state_by_boundary = run_stage(
+            v1_records, v1_state_by_boundary, branch_reference = run_stage(
                 stream, "v1", {"action": "v1", "prepared": _stage_prepared(prepared_period, "v1"),
-                            "scientific_stage": _stage_science_identity("v1")}, progress=progress)
+                            "scientific_stage": _stage_science_identity("v1")}, progress=progress,
+                worker_lease=worker_lease)
+        prepared_period.canonical_v1_branch_by_boundary = branch_reference
         return prepared_period, frozen_coverage, v1_records, v1_state_by_boundary
     with _runtime_measure(runtime_metrics, "v1_preparation_seconds"):
         points = _study_experiment_points(replay, period)
@@ -1777,23 +1954,36 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
     return prepared_period, frozen_coverage, v1_records, v1_state_by_boundary
 
 
-def _execute_period(
+def _execute_period(*args, **kwargs):
+    checkpoint_root = kwargs.get("checkpoint_root")
+    if checkpoint_root is None:
+        return _execute_period_unlocked(*args, **kwargs)
+    period = args[2] if len(args) > 2 else kwargs["period"]
+    from .historical_run_directory import owned_run_directory
+    root = Path(checkpoint_root) / f"period-{period.study_period_index:02d}-{period.utc_date.isoformat()}-{period.phase}"
+    with owned_run_directory(root) as lease:
+        return _execute_period_unlocked(*args, **kwargs, worker_lease=lease)
+
+
+def _execute_period_unlocked(
     manifest, coverage, period, archive_root, roots, code_revision,
     hmm_model, runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
     checkpoint_root: Path | None = None, progress=None,
-    runtime_implementation_revision: str | None = None,
+    runtime_implementation_revision: str | None = None, worker_lease=None,
 ):
     if runtime_metrics is None:
         prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
             _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
                                   checkpoint_root=checkpoint_root, progress=progress,
-                                  runtime_implementation_revision=runtime_implementation_revision))
+                                  runtime_implementation_revision=runtime_implementation_revision,
+                                  worker_lease=worker_lease))
     else:
         prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
             _prepare_study_period(manifest, coverage, period, archive_root, code_revision,
                                   runtime_metrics=runtime_metrics,
                                   checkpoint_root=checkpoint_root, progress=progress,
-                                  runtime_implementation_revision=runtime_implementation_revision))
+                                  runtime_implementation_revision=runtime_implementation_revision,
+                                  worker_lease=worker_lease))
     dataset = prepared_period.archive_dataset
     replay = prepared_period.canonical_replay_result
     points = prepared_period.experiment_points
@@ -1809,7 +1999,8 @@ def _execute_period(
 
     if isinstance(replay, CompactStudyReplay):
         extension_results = _staged_candidate_execution(
-            prepared_period, supplementary, hmm_model, progress=progress, runtime_metrics=runtime_metrics)
+            prepared_period, supplementary, hmm_model, progress=progress, runtime_metrics=runtime_metrics,
+            worker_lease=worker_lease)
     elif runtime_metrics is None:
         extension_results = _candidate_execution(
             prepared_period, supplementary, hmm_model)
@@ -1818,33 +2009,46 @@ def _execute_period(
             prepared_period, supplementary, hmm_model, runtime_metrics=runtime_metrics)
     (candidate_records, native_summaries, fixed_identities,
      extension_reports, hmm_block, hmm_model_sha) = extension_results
-    candidate_records = tuple((*candidate_records, *v1_records))
+    if isinstance(replay, CompactStudyReplay):
+        from .historical_stage_records import JoinedStageRecords, extract_candidate_inputs
+        candidate_records = JoinedStageRecords((candidate_records, v1_records))
+        decision_records, bocpd_onset_evidence = extract_candidate_inputs(candidate_records)
+    else:
+        candidate_records = tuple((*candidate_records, *v1_records))
+        decision_records = candidate_records
+        bocpd_onset_evidence = _bocpd_onset_evidence(candidate_records)
     dependencies = (stage_dependencies(replay.points, ("v1", *_candidate_stage_selectors()))
                     if isinstance(replay, CompactStudyReplay) else ())
     event_time_v1_context = (run_stage(
         replay.points, "event-context", {"action": "event-context",
-            "prepared": _stage_prepared(prepared_period, "event-context"), "records": candidate_records,
+            "prepared": _stage_prepared(prepared_period, "event-context"),
+            "boundaries": tuple(sorted({item.decision_time_ms for item in decision_records
+                if item.evidence_kind == "EVENT" and item.decision_time_ms is not None})),
             "scientific_stage": _stage_science_identity("event-context"),
-            "required_stage_results": dependencies}, progress=progress)
+            "required_stage_results": dependencies}, progress=progress, worker_lease=worker_lease)
         if isinstance(replay, CompactStudyReplay) else
         _event_time_v1_context(prepared_period, candidate_records))
-    bocpd_onset_evidence = _bocpd_onset_evidence(candidate_records)
     with _runtime_measure(runtime_metrics, "forward_label_evidence_seconds"):
         forward_evidence = _label_price_evidence(dataset, archive_root, period)
     with _runtime_measure(runtime_metrics, "forward_outcomes_seconds"):
         if isinstance(replay, CompactStudyReplay):
             continuous, events, state_outcomes = run_stage(
                 replay.points, "outcomes", {"action": "outcomes", "period": period,
-                    "forward_evidence": forward_evidence, "records": candidate_records,
+                    "forward_evidence": forward_evidence, "records": decision_records,
                     "states": v1_state_by_boundary, "scientific_stage": _stage_science_identity("outcomes"),
-                    "required_stage_results": dependencies}, progress=progress)
+                    "required_stage_results": dependencies}, progress=progress, worker_lease=worker_lease)
         else:
             continuous, events, state_outcomes = _continuous_and_event_outcomes(
                 forward_evidence, candidate_records, v1_state_by_boundary, period)
-    continuous_state_labels = tuple(item for item in state_outcomes
-                                    if item["experiment_id"] == "CONTINUOUS_GRID")
-    event_state_labels = tuple(item for item in state_outcomes
-                               if item["experiment_id"] != "CONTINUOUS_GRID")
+    if isinstance(replay, CompactStudyReplay):
+        from .historical_stage_records import FilteredStageRecords
+        continuous_state_labels = FilteredStageRecords(state_outcomes, "CONTINUOUS_GRID", True)
+        event_state_labels = FilteredStageRecords(state_outcomes, "CONTINUOUS_GRID", False)
+    else:
+        continuous_state_labels = tuple(item for item in state_outcomes
+                                        if item["experiment_id"] == "CONTINUOUS_GRID")
+        event_state_labels = tuple(item for item in state_outcomes
+                                   if item["experiment_id"] != "CONTINUOUS_GRID")
 
     body = {
         "period_report_schema_version": PERIOD_REPORT_SCHEMA_VERSION,
@@ -1900,7 +2104,7 @@ def _execute_period(
             "version": BOCPD_ONSET_EVIDENCE_VERSION,
             "records": bocpd_onset_evidence,
         }),
-        "hmm_development_training_block": report_json_safe(hmm_block),
+        "hmm_development_training_block": hmm_block,
         "hmm_development_training_block_sha256": (
             hmm_block.block_sha256 if hmm_block is not None else None),
         "hmm_model_sha256": hmm_model_sha,
@@ -1927,8 +2131,62 @@ def _execute_period(
     if pelt_label_count != 0:
         raise ValueError("PELT retrospective evidence received a forward label")
     body["pelt_no_causal_outcomes"] = True
-    content = _artifact_json(body, "report_sha256")
-    return json.loads(content)
+    return {**body, "report_sha256": _digest(body)}
+
+
+def _write_period_stream(path, payload):
+    from .historical_market_state_study_json import iter_canonical_study_json
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent,
+                prefix=f".{path.name}.", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            for part in iter_canonical_study_json(payload):
+                stream.write(part.encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.exists():
+            from .historical_shared_v1 import _file_sha
+            if _file_sha(path) != _file_sha(temporary):
+                raise StudyArtifactConflictError("conflicting period artifact")
+        else:
+            os.link(temporary, path)
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _period_sidecar(path, manifest, coverage, period, code_revision, report_sha=None):
+    """Verified small index metadata; report bytes are checked without decoding."""
+    from .historical_shared_v1 import _file_sha
+    sidecar = path.parent.parent / ".period-manifests" / path.name
+    expected = {"version": "historical-period-index-metadata-v1",
+        "study_manifest_sha256": manifest.manifest_sha256,
+        "coverage_sha256": coverage["coverage_manifest_sha256"],
+        "code_revision": code_revision, "period": report_json_safe(period),
+        "taker_flow_algorithm_version": TAKER_FLOW_ALGORITHM_VERSION,
+        "report_file": path.name}
+    if sidecar.exists():
+        value = _read_json(sidecar)
+        _verify_hashed_payload(value, "metadata_sha256", "period index metadata")
+        if (any(value.get(key) != item for key, item in expected.items())
+                or value["report_file_sha256"] != _file_sha(path)
+                or (report_sha is not None and value["report_sha256"] != report_sha)):
+            raise StudyArtifactConflictError("period index metadata identity/file mismatch")
+        return value
+    if report_sha is None:
+        report = _read_json(path)
+        report_sha = _validate_period_report(report, manifest, period, code_revision,
+                                            coverage["coverage_manifest_sha256"])
+    body = {**expected, "report_file_sha256": _file_sha(path), "report_sha256": report_sha}
+    sidecar.parent.mkdir(exist_ok=True)
+    _write_atomic_new(sidecar, _artifact_json(body, "metadata_sha256"))
+    return body
 
 
 def _update_execution_index(output_dir, manifest, coverage, code_revision):
@@ -1936,15 +2194,13 @@ def _update_execution_index(output_dir, manifest, coverage, code_revision):
     entries = []
     if period_dir.exists():
         for path in sorted(period_dir.glob("*.json")):
-            payload = _read_json(path)
-            identity = payload.get("period", {})
             selected = next((item for item in _manifest_periods(manifest)
-                             if item.study_period_index == identity.get("study_period_index")), None)
-            if selected is None or path.name != _period_filename(selected):
+                             if path.name == _period_filename(item)), None)
+            if selected is None:
                 raise StudyArtifactConflictError("period directory contains an unknown report")
-            sha = _validate_period_report(payload, manifest, selected, code_revision,
-                                          coverage["coverage_manifest_sha256"])
-            period = payload["period"]
+            metadata = _period_sidecar(path, manifest, coverage, selected, code_revision)
+            sha = metadata["report_sha256"]
+            period = metadata["period"]
             entries.append({"study_period_index": period["study_period_index"],
                             "utc_date": period["utc_date"], "phase": period["phase"],
                             "report_file": path.name, "report_sha256": sha})
@@ -2109,8 +2365,8 @@ def execute_study_periods(
                                       runtime_implementation_revision=runtime_implementation_revision)
         if runtime_metrics is not None:
             artifact_write_started_ns = time.perf_counter_ns()
-        content = _canonical(payload)
-        _write_atomic_new(path, content)
+        _write_period_stream(path, payload)
+        _period_sidecar(path, manifest, coverage, period, code_revision, payload["report_sha256"])
         progress("PERIOD_ARTIFACT_FINALIZED", {"report_sha256": payload["report_sha256"]})
         if runtime_metrics is not None:
             finalized_at_ns = time.perf_counter_ns()

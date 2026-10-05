@@ -276,10 +276,11 @@ def continuous_decision_times(start_boundary_time_ms: int,
 
 
 def evaluate_continuous_grids(evidence, start_boundary_time_ms,
-                              end_boundary_time_ms):
+                              end_boundary_time_ms, *, outcome_lookup=None):
     """Return the 1/5/15/30/60-minute non-overlapping UTC grids (1,896 keys)."""
     result = tuple((horizon, tuple(
-        evaluate_forward_outcome(evidence, decision, horizon)
+        (outcome_lookup(decision, horizon) if outcome_lookup is not None
+         else evaluate_forward_outcome(evidence, decision, horizon))
         for decision in continuous_decision_times(
             start_boundary_time_ms, end_boundary_time_ms, horizon)))
         for horizon in HORIZONS_MINUTES)
@@ -289,7 +290,7 @@ def evaluate_continuous_grids(evidence, start_boundary_time_ms,
 
 
 def evaluate_event_outcomes(evidence, event_times_ms: Iterable[int],
-                            horizon_minutes: int):
+                            horizon_minutes: int, *, outcome_lookup=None):
     """Retain all events and mark overlapping later confirmatory windows."""
     if horizon_minutes not in HORIZONS_MINUTES:
         raise ValueError("unsupported event horizon")
@@ -309,7 +310,8 @@ def evaluate_event_outcomes(evidence, event_times_ms: Iterable[int],
             "decision_time_ms": decision,
             "horizon_minutes": horizon_minutes,
             "confirmatory_independent": independent,
-            "outcome": evaluate_forward_outcome(evidence, decision, horizon_minutes),
+            "outcome": (outcome_lookup(decision, horizon_minutes) if outcome_lookup is not None
+                        else evaluate_forward_outcome(evidence, decision, horizon_minutes)),
         })
     return tuple(observations)
 
