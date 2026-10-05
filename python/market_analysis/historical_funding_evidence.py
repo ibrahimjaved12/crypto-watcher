@@ -288,21 +288,28 @@ class BinanceFundingEvidence:
         return "EXPECTED_SETTLEMENT_MISSING"
 
 
+def funding_package_months(start, end):
+    first = (_day(start).replace(day=1) - timedelta(days=1)).replace(day=1)
+    last = _day(end).replace(day=1)
+    months = []
+    while first <= last:
+        months.append(first)
+        first = (first + timedelta(days=32)).replace(day=1)
+    return tuple(months)
+
+
 def load_binance_usdm_funding_evidence(archive_root, configured_symbols,
                                       start: int, end: int, *, download=False):
     symbols = _validate_request(configured_symbols, start, end, download)
-    start_day = _day(start)
-    first = date(start_day.year, start_day.month, 1)
-    first = (first - timedelta(days=1)).replace(day=1)
-    last = _day(end).replace(day=1)
+    months = funding_package_months(start, end)
+    first = months[0]
     history_start = (datetime(first.year, first.month, 1, tzinfo=timezone.utc) - _EPOCH) // timedelta(milliseconds=1)
     if history_start < 0:
         raise ValueError("funding prehistory precedes epoch")
     root = Path(archive_root).expanduser().resolve()
     packages, observations, issues = [], {}, {}
     for symbol in symbols:
-        month = first
-        while month <= last:
+        for month in months:
             relative = monthly_funding_relative_path(symbol, month)
             package, rows, row_issues = _load_package(root, symbol, month, relative, download)
             packages.append(package)
@@ -315,7 +322,6 @@ def load_binance_usdm_funding_evidence(archive_root, configured_symbols,
                     issues[key] = "DUPLICATE_SOURCE_TIMESTAMP"
                 else:
                     observations[key] = row
-            month = (month + timedelta(days=32)).replace(day=1)
     return BinanceFundingEvidence(symbols, start, end, history_start,
                                    tuple(packages), tuple(observations.values()),
                                    tuple((s, t, r) for (s, t), r in sorted(issues.items())))

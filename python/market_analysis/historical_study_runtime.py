@@ -352,7 +352,7 @@ def memory_usage():
         return {}
 
 
-def _stage_metadata(path, identity=None, stream=None):
+def _stage_metadata(path, identity=None, stream=None, *, reference_path=None):
     raw = path.read_bytes()
     payload = _read_json_bytes(raw)
     if type(payload) is not dict or set(payload) != {
@@ -372,10 +372,19 @@ def _stage_metadata(path, identity=None, stream=None):
     from .historical_stage_records import StageRecords, StageValue
     for item in (result if isinstance(result, tuple) else (result,)):
         if isinstance(item, (StageRecords, StageValue)):
+            if reference_path is not None:
+                from dataclasses import replace
+                updates = {"path": str(reference_path(item.path))}
+                if isinstance(item, StageRecords) and item.scientific_path is not None:
+                    updates["scientific_path"] = str(reference_path(item.scientific_path))
+                item = replace(item, **updates)
             item.verify()
     if actual.get("stage_id") == "v1":
         from .historical_shared_v1 import _file_sha
         reference = result[2]
+        if reference_path is not None:
+            from dataclasses import replace
+            reference = replace(reference, path=str(reference_path(reference.path)))
         metadata_raw = Path(reference.path).with_suffix(".manifest.json").read_bytes()
         metadata = _read_json_bytes(metadata_raw)
         if (metadata_raw != _canonical_bytes(metadata)
@@ -484,6 +493,8 @@ def run_stage(stream, stage_id, request=None, *, descriptor=None, prepare=None,
                      "stage_result_sha256": sha, **_observation(started, reused=True,
                      path=path, worker=measurements)})
         return result
+    if progress:
+        progress("BEFORE_NEW_STAGE", {"stage_id": stage_id})
     if local_result is not None:
         _publish_stage(path, identity, local_result())
     else:

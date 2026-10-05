@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import fcntl
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 
@@ -50,7 +51,7 @@ def inherited_run_directory_lease(descriptor, root):
 
 
 @contextmanager
-def owned_run_directory(root):
+def owned_run_directory(root, *, cleanup=True):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     with (root / ".writer.lock").open("a+b") as lock:
@@ -60,18 +61,35 @@ def owned_run_directory(root):
             raise ValueError("historical period already has an active local writer") from exc
         lease = RunDirectoryLease(lock.fileno(), root)
         lease.validate(root)
-        # Only runtime-created names under this owned period; requests/jobs
-        # from failed stages remain available for diagnosis and retry.
-        for path in root.glob(".study-points-*"):
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path)
-        for directory in (root, root / "post-replay"):
-            if not directory.exists():
-                continue
-            for pattern in (".*.tmp", ".shared-v1-*", ".*.records-*"):
-                for path in directory.glob(pattern):
-                    if path.is_file() and not path.is_symlink():
-                        path.unlink()
+        if cleanup:
+            cleanup_owned_temporaries(root, lease)
         yield lease
         # File context closes the parent's fd even on cancellation. Inherited
         # worker fds retain the exclusive lock until they too are closed.
+
+
+def cleanup_owned_temporaries(root, lease):
+    """Unlink only established runtime temporary names under exclusive ownership.
+
+    NamedTemporaryFile/mkdtemp use eight lowercase/digit/underscore characters.
+    Removing an abandoned publication alias preserves its published destination.
+    Never acquire a second lock descriptor or follow a directory/file symlink.
+    """
+    root = Path(root)
+    lease.validate(root)
+    if any(path.is_symlink() for path in (root, *root.parents)):
+        raise ValueError("owned temporary cleanup requires real directory paths")
+    for path in root.glob(".study-points-*"):
+        if (re.fullmatch(r"\.study-points-[a-z0-9_]{8}", path.name)
+                and not path.is_symlink() and path.is_dir()):
+            # rmtree removes child symlinks themselves, never their targets.
+            shutil.rmtree(path)
+    patterns = (r"\..+\.[a-z0-9_]{8}\.tmp", r"\.shared-v1-[a-z0-9_]{8}",
+                r"\..+\.records-[a-z0-9_]{8}")
+    for directory in (root, root / "post-replay", root / "chunks", root / "states"):
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if (any(re.fullmatch(pattern, path.name) for pattern in patterns)
+                    and stat.S_ISREG(path.lstat().st_mode)):
+                path.unlink()

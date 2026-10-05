@@ -1,0 +1,130 @@
+name: Manual frozen historical study
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [preflight, execute-period, aggregate]
+        required: true
+        default: preflight
+      campaign_spec:
+        description: Trusted main-branch research/campaigns JSON path
+        type: string
+        required: true
+      phase:
+        type: choice
+        options: [development, validation, test]
+        required: true
+        default: development
+      period_index:
+        description: Exact frozen index 0..29; ignored for aggregate
+        type: string
+        default: '0'
+      allow_test:
+        description: Explicit authorization in addition to validated frozen parents
+        type: boolean
+        default: false
+      resume_generation:
+        description: Exact private recovery Release tag; empty only for first run
+        type: string
+      resume_manifest_sha:
+        description: Trusted sealed recovery inventory SHA (required with tag)
+        type: string
+      job_minutes:
+        description: Whole-job allocation; includes 15-minute setup/upload reserve
+        type: choice
+        options: ['16', '20', '30', '50', '60', '120', '180', '240', '300', '350']
+        default: '60'
+
+permissions:
+  contents: read
+  actions: read # Read this job's start timestamp only; no dispatch/cancel permission.
+
+# Initially serialize every campaign, including differently named spec files.
+concurrency:
+  group: historical-study-platform
+  cancel-in-progress: false
+
+jobs:
+  study:
+    if: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["16","20","30","50","60","120","180","240","300","350"]'), inputs.job_minutes) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.job_minutes) }}
+    env:
+      STUDY_OPERATION: ${{ inputs.operation }}
+      STUDY_CAMPAIGN_SPEC: ${{ inputs.campaign_spec }}
+      STUDY_PHASE: ${{ inputs.phase }}
+      STUDY_PERIOD_INDEX: ${{ inputs.period_index }}
+      STUDY_ALLOW_TEST: ${{ inputs.allow_test }}
+      STUDY_RESUME_GENERATION: ${{ inputs.resume_generation }}
+      STUDY_RESUME_SHA: ${{ inputs.resume_manifest_sha }}
+      STUDY_JOB_MINUTES: ${{ inputs.job_minutes }}
+    steps:
+      - name: Record actual job start before checkout/setup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          started=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq '.jobs[] | select(.name == "study") | .started_at')
+          epoch=$(date -u -d "$started" +%s)
+          echo "STUDY_JOB_STARTED_EPOCH=$epoch" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+          path: historical-platform
+      - name: Establish stable layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/crypto-study
+          mv "$GITHUB_WORKSPACE/historical-platform" /tmp/crypto-study/repo
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Validate main-reachable full pins and checkout exact runtime
+        run: python /tmp/crypto-study/repo/scripts/research/github_study.py bootstrap
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: |
+            /tmp/crypto-study/repo/python/requirements.txt
+            /tmp/crypto-study/repo/python/requirements-research.txt
+      - name: Install both pinned dependency sets within setup deadline
+        run: python /tmp/crypto-study/repo/scripts/research/github_study.py install-dependencies
+      - name: Reserve campaign allocation and acquire verified metadata only
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: python /tmp/crypto-study/repo/scripts/research/github_study.py metadata
+      - name: Validate frozen phase parents before raw/test input access
+        run: python /tmp/crypto-study/repo/scripts/research/github_study.py validate-parents
+      - name: Acquire explicit verified recovery generation to staging
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: python /tmp/crypto-study/repo/scripts/research/github_study.py restore
+      - name: Acquire only selected-period original input chunks
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: python /tmp/crypto-study/repo/scripts/research/github_study.py inputs
+      - name: Run portable supervised operation without data credentials
+        id: scientific
+        run: python /tmp/crypto-study/repo/scripts/research/github_study.py run
+      - name: Validate and snapshot committed recovery with ownership held
+        if: always() && steps.scientific.outcome != 'skipped'
+        id: snapshot
+        run: python /tmp/crypto-study/repo/scripts/research/github_study.py snapshot
+      - name: Publish private parts then sealed manifest and verify publication
+        if: always() && steps.snapshot.outcome == 'success'
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: python /tmp/crypto-study/repo/scripts/research/github_study.py publish
+      # No upload-artifact: raw data, requests, logs and scientific evidence stay
+      # private. Only the allowlisted publication receipt enters the job summary.

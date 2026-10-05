@@ -240,6 +240,11 @@ class TardisLiquidationEvidence:
         return tuple(r for r in rows[first:last] if r.local_timestamp_us <= end_us)
 
 
+def liquidation_package_days(start, end):
+    first, last = _day(start - 900_000), _day(end)
+    return tuple(first + timedelta(days=offset) for offset in range((last - first).days + 1))
+
+
 def load_tardis_liquidation_evidence(archive_root, configured_symbols, start, end, *, download=False):
     if type(download) is not bool:
         raise ValueError("download must be boolean")
@@ -247,10 +252,9 @@ def load_tardis_liquidation_evidence(archive_root, configured_symbols, start, en
     symbols = tuple(configured_symbols)
     empty = TardisLiquidationEvidence(symbols, start, end, start - 900_000, (), ())
     root = Path(archive_root).expanduser().resolve()
-    first, last = _day(empty.history_start_time_ms), _day(end)
     packages, rows = [], []
-    for offset in range((last - first).days + 1):
-        package, observations = _load_day(root, first + timedelta(days=offset), symbols, download)
+    for day in liquidation_package_days(start, end):
+        package, observations = _load_day(root, day, symbols, download)
         packages.append(package)
         rows.extend(observations)
     return TardisLiquidationEvidence(symbols, start, end, start - 900_000, tuple(packages), tuple(rows))

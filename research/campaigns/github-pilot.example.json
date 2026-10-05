@@ -1,0 +1,22 @@
+{
+  "version": "historical-study-campaign-v1",
+  "campaign_id": "OWNER_MUST_CHOOSE_CAMPAIGN_ID",
+  "runtime_sha": null,
+  "orchestration_sha": null,
+  "producer_revision": null,
+  "study_manifest_sha256": null,
+  "coverage_manifest_sha256": null,
+  "study_file_sha256": null,
+  "coverage_file_sha256": null,
+  "dependency_locks": {"requirements.txt": null, "requirements-research.txt": null},
+  "expected_membership": {"development": [0, 1, 2], "validation": [], "test": []},
+  "inputs": {"0": {"release_tag": null, "manifest_sha256": null}},
+  "max_new_stages": 1,
+  "limits": {
+    "max_transfer_bytes": 5368709120,
+    "max_uncompressed_bytes": 5368709120,
+    "headroom_bytes": 6442450944
+  },
+  "budget": {"ceiling_minutes": 120, "max_runs": 4, "no_progress_cap": 2},
+  "expanded_budget_authorized": false
+}
