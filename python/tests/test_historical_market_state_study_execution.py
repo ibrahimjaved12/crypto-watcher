@@ -406,7 +406,8 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
             def execute_once(manifest, frozen_coverage, period, archive, roots,
                              code_revision, hmm_model, runtime_metrics=None,
                              checkpoint_root=None, progress=None,
-                             runtime_implementation_revision=None):
+                             runtime_implementation_revision=None,
+                             source_validation=None):
                 executed.append(period.study_period_index)
                 if runtime_metrics is not None:
                     for name in execution.RUNTIME_MEASURED_FIELDS:

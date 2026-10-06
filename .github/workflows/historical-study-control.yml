@@ -1,0 +1,59 @@
+name: Historical campaign Start Stop Resume
+run-name: '${{ inputs.operation }} campaign ${{ inputs.campaign_spec }}'
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [start, stop, resume, retention-plan, retention-apply]
+        default: start
+        required: true
+      campaign_spec:
+        description: Trusted main-branch pinned research/campaigns JSON
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  control:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    # No scientific concurrency queue: Stop remains responsive during a slice.
+    env:
+      STUDY_CAMPAIGN_SPEC: ${{ inputs.campaign_spec }}
+      STUDY_CONTROL_OPERATION: ${{ inputs.operation }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Validate trusted pins and re-enter stdlib control implementation
+        id: pins
+        run: python scripts/research/github_campaign.py bootstrap
+      - name: Detect bounded diagnostics in the exact pinned stdlib helper
+        id: capabilities
+        shell: bash
+        run: |
+          if grep -q "'diagnostic'" scripts/research/github_campaign.py; then
+            echo "diagnostics=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Apply manual campaign control
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/research/github_campaign.py "$STUDY_CONTROL_OPERATION"
+      - name: Retain bounded control diagnostics after failure
+        if: failure() && steps.pins.outcome == 'success' && steps.capabilities.outputs.diagnostics == 'true'
+        env:
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: python scripts/research/github_campaign.py diagnostic

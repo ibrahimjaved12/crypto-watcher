@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import sqlite3
 import tempfile
+import time
 import zipfile
 
 from .historical_replay import (
@@ -692,6 +693,12 @@ def load_binance_usdm_bounded_historical_replay_dataset(
         engine_start_boundary_time_ms=config.engine_start_boundary_time_ms,
         output_end_boundary_time_ms=config.output_end_boundary_time_ms,
         finalization_grace_ms=config.finalization_grace_ms)
+    from . import historical_operational_events as events
+    events.emit("STARTED", stage="sqlite-preparation")
+    preparation_started = time.monotonic()
+    def observed_rows(relative, schema, parser, day):
+        with events.span("archive-parsing"):
+            yield from _iter_archive_rows(request.archive_root, relative, schema, parser, day)
     index = _AggTradeDuplicateIndex(replay=True)
     index.__enter__()
     try:
@@ -705,12 +712,11 @@ def load_binance_usdm_bounded_historical_replay_dataset(
             ):
                 for day in dates:
                     relative = path_builder(symbol, day)
-                    sha256 = _checksum(request.archive_root, relative, symbol,
-                                       family, day)
+                    with events.span("archive-verification"):
+                        sha256 = _checksum(request.archive_root, relative, symbol, family, day)
                     files.append(BinanceArchiveFileIdentity(
                         relative.as_posix(), family, symbol, day, sha256))
-                    for row in _iter_archive_rows(request.archive_root, relative,
-                                                  schema, parser, day):
+                    for row in observed_rows(relative, schema, parser, day):
                         if family == "aggTrades":
                             trade_rows += 1
                             earliest_trade = (row.timestamp_ms if earliest_trade is None
@@ -812,6 +818,7 @@ def load_binance_usdm_bounded_historical_replay_dataset(
             len(kline_dates) * len(request.universe.symbols), trade_rows, kline_rows,
             duplicate_trades, missing_minutes, tuple(gap_symbols),
             earliest_trade, latest_trade, earliest_kline, latest_kline)
+        events.emit("COMPLETED", stage="sqlite-preparation", duration_seconds=time.monotonic() - preparation_started)
         return BinanceBoundedHistoricalReplayDataset(
             manifest, stream_manifest,
             HistoricalReplayDatasetManifest(BINANCE_ARCHIVE_DATASET_ID,

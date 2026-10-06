@@ -18,7 +18,8 @@ import stat
 from . import historical_market_state_study_execution as execution
 
 BASE = Path('/tmp/crypto-study')
-VERSION = 'historical-study-file-bundle-v1'
+V1 = 'historical-study-file-bundle-v1'
+VERSION = 'historical-study-file-bundle-v2'
 PART_LIMIT = 1024 ** 3
 BLOCK = 1024 ** 2
 
@@ -80,104 +81,195 @@ def sealed(body):
     return {**body, 'bundle_sha256': execution._digest(body)}
 
 
-def read_bundle(path, expected):
-    sha(expected)
-    value = execution._read_json(Path(path))
-    execution._verify_hashed_payload(value, 'bundle_sha256', 'bundle')
-    if value['bundle_sha256'] != expected or value['version'] != VERSION:
-        raise ValueError('trusted inventory hash/version mismatch')
-    names, assets = set(), set()
+def asset_table(value):
+    """Unique required assets; v1 inventories retain their original hashes."""
+    if value['version'] == VERSION:
+        needed = {part['asset'] for row in value['files'] for part in row['extents']}
+        return {row['asset']: row for row in value['assets'] if row['asset'] in needed}
+    return {part['asset']: part for row in value['files'] for part in row['parts']}
+
+
+def _partition(path, facts, identity):
+    if path.startswith('manifests/'):
+        return 'metadata'
+    parts = safe_relative(path).parts
+    if path.startswith('inputs/'):
+        period = identity.get('period', {})
+        return 'inputs:' + str(period.get('phase', 'unspecified')) + ':' + str(facts.get('partition', period.get('study_period_index', 'unspecified')))
+    if facts.get('partition_version') == 'period-results-v1' and len(parts) > 4 and parts[0] == 'campaigns' and parts[2] == 'outputs':
+        # Reports/sidecars never share transfer assets with another period.
+        # Existing immutable v1/v2 inventories retain their original partition.
+        return 'outputs:' + parts[3] + ':' + parts[4]
+    if len(parts) > 3 and parts[0] == 'campaigns' and parts[2] in ('checkpoints', 'outputs'):
+        return parts[2] + ':' + parts[3]
+    return 'operational'
+
+
+def validate_bundle(value, *, selected=False):
+    if value['version'] not in (V1, VERSION):
+        raise ValueError('unsupported bundle version')
+    names, used, ranges = set(), set(), {}
+    table = {}
+    if value['version'] == VERSION:
+        for asset in value['assets']:
+            if set(asset) != {'asset', 'size', 'sha256', 'partition'}:
+                raise ValueError('invalid asset table fields')
+            identifier(asset['asset'])
+            sha(asset['sha256'])
+            if (asset['asset'] in table or type(asset['size']) is not int
+                    or not 0 < asset['size'] <= PART_LIMIT or not isinstance(asset['partition'], str)):
+                raise ValueError('invalid asset table size/membership')
+            table[asset['asset']] = asset
     total = 0
     for row in value['files']:
         name = str(safe_relative(row['path']))
-        if name in names:
-            raise ValueError('duplicate inventory path')
+        if name in names or type(row['absent']) is not bool or type(row['size']) is not int or row['size'] < 0:
+            raise ValueError('invalid duplicate path/absence/size')
         names.add(name)
-        if type(row['absent']) is not bool:
-            raise ValueError('absence must be an explicit boolean')
+        parts = row['parts'] if value['version'] == V1 else row['extents']
         if row['absent']:
-            if row['parts'] or row['size'] != 0 or row['sha256'] is not None:
+            if parts or row['size'] != 0 or row['sha256'] is not None:
                 raise ValueError('invalid absence inventory')
             continue
         sha(row['sha256'])
         offset = 0
-        for part in row['parts']:
+        for part in parts:
             identifier(part['asset'])
-            sha(part['sha256'])
-            if (part['asset'] in assets or type(part['size']) is not int
-                    or not 0 < part['size'] <= PART_LIMIT or part['offset'] != offset):
-                raise ValueError('invalid chunk ordering/size/asset')
-            assets.add(part['asset'])
-            offset += part['size']
-        if type(row['size']) is not int or row['size'] < 0 or offset != row['size']:
-            raise ValueError('invalid file size')
+            if value['version'] == V1:
+                sha(part['sha256'])
+                if (part['asset'] in used or type(part['size']) is not int
+                        or not 0 < part['size'] <= PART_LIMIT or type(part['offset']) is not int
+                        or part['offset'] != offset):
+                    raise ValueError('invalid v1 chunk ordering/size/asset')
+                offset += part['size']
+            else:
+                if set(part) != {'asset', 'asset_offset', 'file_offset', 'length'}:
+                    raise ValueError('invalid extent fields')
+                asset = table.get(part['asset'])
+                if (asset is None or any(type(part[k]) is not int for k in ('asset_offset', 'file_offset', 'length'))
+                        or part['file_offset'] != offset or part['asset_offset'] < 0 or part['length'] <= 0
+                        or part['asset_offset'] + part['length'] > asset['size']
+                        or asset['partition'] != _partition(name, row['facts'], value['identity'])):
+                    raise ValueError('invalid extent coverage/bounds/partition')
+                ranges.setdefault(part['asset'], []).append((part['asset_offset'], part['asset_offset'] + part['length']))
+                offset += part['length']
+            used.add(part['asset'])
+        if offset != row['size']:
+            raise ValueError('invalid file extent coverage')
         total += offset
-    if total != value['uncompressed_bytes'] or total != value['transfer_bytes']:
+    if value['version'] == VERSION:
+        for name, intervals in ranges.items():
+            end = 0
+            for start, stop in sorted(intervals):
+                if start < end or (not selected and start != end):
+                    raise ValueError('overlapping/incomplete asset extents')
+                end = stop
+            if not selected and end != table[name]['size']:
+                raise ValueError('unclaimed packed asset bytes')
+        if not selected and used != set(table):
+            raise ValueError('unreferenced asset inventory')
+        transfer = sum(table[name]['size'] for name in used)
+    else:
+        transfer = total
+    if (type(value['uncompressed_bytes']) is not int or type(value['transfer_bytes']) is not int
+            or total != value['uncompressed_bytes'] or transfer != value['transfer_bytes']):
         raise ValueError('bundle measured footprint mismatch')
     return value
 
 
+def read_bundle(path, expected):
+    sha(expected)
+    value = execution._read_json(Path(path))
+    execution._verify_hashed_payload(value, 'bundle_sha256', 'bundle')
+    if value['bundle_sha256'] != expected:
+        raise ValueError('trusted inventory hash mismatch')
+    return validate_bundle(value)
+
+
 def pack_files(files, destination, *, kind, identity, metadata=None, check=None,
                max_bytes=12 * 1024 ** 3):
-    """files: (stable relative destination, original source or None, facts)."""
+    """Deterministic bounded raw packing, isolated by metadata/period/phase."""
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
-    rows, total, names = [], 0, set()
-    for relative, source, facts in sorted(files, key=lambda x: x[0]):
-        relative = str(safe_relative(relative))
-        if relative in names:
-            raise ValueError('duplicate source inventory entry')
-        names.add(relative)
-        row = {'path': relative, 'facts': facts, 'absent': source is None,
-               'size': 0, 'sha256': None, 'parts': []}
-        if source is not None:
-            info = regular(source)
-            total += info.st_size
-            free = shutil.disk_usage(destination).free
-            if total > max_bytes or free < info.st_size + BLOCK:
-                raise BundleFootprintError('bundle-packing-limit', measured_bytes=total, limit_bytes=max_bytes,
-                                           free_bytes=free, required_next_file_bytes=info.st_size + BLOCK)
-            digest = hashlib.sha256()
-            offset = 0
-            with Path(source).open('rb') as handle:
-                while offset < info.st_size:
-                    asset = 'part-%06d-%06d' % (len(rows), len(row['parts']))
-                    part_digest = hashlib.sha256()
-                    size = 0
-                    with (destination / asset).open('xb') as output:
-                        while size < min(PART_LIMIT, info.st_size - offset):
+    rows, assets, total, names = [], [], 0, set()
+    output = None
+    partition = None
+    asset_size = 0
+    def finish():
+        nonlocal output
+        if output is not None:
+            output.flush()
+            os.fsync(output.fileno())
+            output.close()
+            assets.append({'asset': asset, 'size': asset_size, 'sha256': asset_digest.hexdigest(), 'partition': partition})
+            output = None
+    try:
+        ordered = sorted(files, key=lambda x: (_partition(x[0], x[2], identity), x[0]))
+        for relative, source, facts in ordered:
+            relative = str(safe_relative(relative))
+            if relative in names:
+                raise ValueError('duplicate source inventory entry')
+            names.add(relative)
+            row = {'path': relative, 'facts': facts, 'absent': source is None,
+                   'size': 0, 'sha256': None, 'extents': []}
+            if source is not None:
+                info = regular(source)
+                total += info.st_size
+                free = shutil.disk_usage(destination).free
+                if total > max_bytes or free < info.st_size + BLOCK:
+                    raise BundleFootprintError('bundle-packing-limit', measured_bytes=total, limit_bytes=max_bytes,
+                                               free_bytes=free, required_next_file_bytes=info.st_size + BLOCK)
+                group = _partition(relative, facts, identity)
+                digest = hashlib.sha256()
+                offset = 0
+                with Path(source).open('rb') as handle:
+                    while offset < info.st_size:
+                        if output is not None and (partition != group or asset_size == PART_LIMIT):
+                            finish()
+                        if output is None:
+                            partition = group
+                            asset = 'pack-%06d' % len(assets)
+                            output = (destination / asset).open('xb')
+                            asset_digest = hashlib.sha256()
+                            asset_size = 0
+                        length = min(PART_LIMIT - asset_size, info.st_size - offset)
+                        row['extents'].append({'asset': asset, 'asset_offset': asset_size, 'file_offset': offset, 'length': length})
+                        remaining = length
+                        while remaining:
                             if check:
                                 check()
-                            chunk = handle.read(min(BLOCK, PART_LIMIT - size, info.st_size - offset - size))
+                            chunk = handle.read(min(BLOCK, remaining))
                             if not chunk:
                                 raise ValueError('source changed while packing')
                             output.write(chunk)
                             digest.update(chunk)
-                            part_digest.update(chunk)
-                            size += len(chunk)
-                        output.flush()
-                        os.fsync(output.fileno())
-                    row['parts'].append({'asset': asset, 'offset': offset, 'size': size,
-                                         'sha256': part_digest.hexdigest()})
-                    offset += size
-                if handle.read(1):
-                    raise ValueError('source grew while packing')
-            final_info = regular(source)
-            if (final_info.st_size, final_info.st_mtime_ns, final_info.st_ino) != (info.st_size, info.st_mtime_ns, info.st_ino):
-                raise ValueError('source changed during streaming bundle creation')
-            row.update(size=offset, sha256=digest.hexdigest())
-            expected = facts.get('frozen_sha256')
-            if expected is not None and row['sha256'] != expected:
-                raise ValueError('original package differs from frozen SHA')
-        rows.append(row)
+                            asset_digest.update(chunk)
+                            asset_size += len(chunk)
+                            remaining -= len(chunk)
+                        offset += length
+                    if handle.read(1):
+                        raise ValueError('source grew while packing')
+                final_info = regular(source)
+                if (final_info.st_size, final_info.st_mtime_ns, final_info.st_ino) != (info.st_size, info.st_mtime_ns, info.st_ino):
+                    raise ValueError('source changed during streaming bundle creation')
+                row.update(size=offset, sha256=digest.hexdigest())
+                if facts.get('frozen_sha256') is not None and row['sha256'] != facts['frozen_sha256']:
+                    raise ValueError('original package differs from frozen SHA')
+            rows.append(row)
+        finish()
+    finally:
+        if output is not None:
+            output.close()
     value = sealed({'version': VERSION, 'kind': kind, 'identity': identity,
-                    'metadata': metadata or {}, 'files': rows,
-                    'uncompressed_bytes': total, 'transfer_bytes': total})
+                    'metadata': metadata or {}, 'files': sorted(rows, key=lambda r: r['path']), 'assets': assets,
+                    'uncompressed_bytes': total, 'transfer_bytes': sum(a['size'] for a in assets)})
+    validate_bundle(value)
     execution._replace_atomic(destination / 'manifest.json', execution._canonical(value))
     return value
 
 
 def unpack_files(value, parts, staging, *, max_bytes, headroom_bytes, check=None):
+    validate_bundle(value, selected=True)
     staging = Path(staging)
     staging.mkdir(parents=True, exist_ok=False)
     total = value['uncompressed_bytes']
@@ -185,27 +277,42 @@ def unpack_files(value, parts, staging, *, max_bytes, headroom_bytes, check=None
     if total > max_bytes or free < total + headroom_bytes:
         raise BundleFootprintError('staging-disk-limit', assembled_bytes=total, limit_bytes=max_bytes,
                                    free_bytes=free, required_bytes=total + headroom_bytes)
+    # Shared assets are hashed once, never once per reconstructed file.
+    for name, asset in asset_table(value).items():
+        source = Path(parts) / identifier(name)
+        if regular(source).st_size != asset['size'] or file_sha(source, check) != asset['sha256']:
+            raise ValueError('downloaded asset size/SHA mismatch')
     for row in value['files']:
         path = staging.joinpath(*safe_relative(row['path']).parts)
         if row['absent']:
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open('xb') as output:
-            for part in row['parts']:
-                if check:
-                    check()
-                source = Path(parts) / identifier(part['asset'])
-                if regular(source).st_size != part['size'] or file_sha(source, check) != part['sha256']:
-                    raise ValueError('downloaded chunk size/SHA mismatch')
-                with source.open('rb') as handle:
-                    while chunk := handle.read(BLOCK):
-                        if check:
-                            check()
-                        output.write(chunk)
-            output.flush()
-            os.fsync(output.fileno())
-        if regular(path).st_size != row['size'] or file_sha(path, check) != row['sha256']:
-            raise ValueError('restored whole-file size/SHA mismatch')
+        temporary = path.with_name('.' + path.name + '.reconstruct-tmp')
+        digest = hashlib.sha256()
+        try:
+            with temporary.open('xb') as output:
+                extents = row['extents'] if value['version'] == VERSION else [
+                    {'asset': p['asset'], 'asset_offset': 0, 'length': p['size']} for p in row['parts']]
+                for extent in extents:
+                    with (Path(parts) / extent['asset']).open('rb') as handle:
+                        handle.seek(extent['asset_offset'])
+                        remaining = extent['length']
+                        while remaining:
+                            if check:
+                                check()
+                            chunk = handle.read(min(BLOCK, remaining))
+                            if not chunk:
+                                raise ValueError('truncated packed extent')
+                            output.write(chunk)
+                            digest.update(chunk)
+                            remaining -= len(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if regular(temporary).st_size != row['size'] or digest.hexdigest() != row['sha256']:
+                raise ValueError('restored whole-file size/SHA mismatch')
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
     return staging
 
 
@@ -268,6 +375,34 @@ def classify_recovery_inventory(inventory, manifest, campaign, expected_membersh
     return tuple(included[index] for index in sorted(included))
 
 
+def last_verified_unit(files, work, index=None):
+    """Derive claims ONLY from the transitive closure returned by validation."""
+    units = []
+    selectors = ['v1', *execution._candidate_stage_selectors(), 'event-context', 'outcomes']
+    for path in files:
+        if path.suffix != '.json' or path.name.endswith(('.observations.json', '.job.json', '.manifest.json')):
+            continue
+        if path.name.startswith('checkpoint-') or path.stem in selectors or path.parent.name == execution.PERIOD_DIRECTORY:
+            value = execution._read_json(path)
+            identity = value.get('identity', value.get('period', {}))
+            number = identity.get('study_period_index', value.get('study_period_index'))
+            if index is not None and number != index:
+                continue
+            for field, kind, rank in (('checkpoint_sha256', 'checkpoint', 0), ('stage_result_sha256', 'stage', 1), ('report_sha256', 'period', 2)):
+                digest = value.get(field)
+                if digest in work:
+                    unit = {'kind': kind, 'sha256': digest, 'study_period_index': number}
+                    if kind == 'checkpoint':
+                        unit.update(checkpoint_sha256=digest, completed_boundary=value['boundary'],
+                                    completed_output_boundaries=value['cumulative_point_count'])
+                    if kind == 'stage':
+                        unit.update(stage_id=identity['stage_id'], stage_result_sha256=digest)
+                    position = value.get('boundary', 0) if kind == 'checkpoint' else selectors.index(path.stem) if kind == 'stage' else 0
+                    units.append(((number if number is not None else -1, rank, position), unit))
+    return max(units, key=lambda item: item[0])[1] if units else None
+
+
+
 def planned_packages(period):
     from .binance_historical_archive import BinanceUSDMArchiveRequest, daily_kline_relative_path
     from .historical_mark_price_evidence import _package_days, daily_mark_price_relative_path
@@ -296,6 +431,14 @@ def planned_packages(period):
     return {key: sorted(set(rows)) for key, rows in result.items()}
 
 
+def metadata_paths(phase):
+    names = [] if phase == 'development' else ['development', 'crossfit-index', 'hmm-model']
+    if phase == 'test':
+        names += ['validation', 'authorization']
+    return {'manifests/study.json', 'manifests/coverage.json',
+            *(f'manifests/prerequisites/{name}.json' for name in names)}
+
+
 def prepare_inputs(manifest_path, coverage_path, phase, index, roots, destination, prerequisites):
     manifest = execution.load_study_manifest(manifest_path)
     coverage = execution.load_and_validate_coverage(coverage_path, manifest)
@@ -305,6 +448,8 @@ def prepare_inputs(manifest_path, coverage_path, phase, index, roots, destinatio
              ('manifests/coverage.json', Path(coverage_path), {'role': 'coverage'})]
     for name, source in prerequisites.items():
         safe_relative(name)
+        if f'manifests/prerequisites/{name}.json' not in metadata_paths(phase):
+            raise ValueError('metadata contains later-phase or unknown prerequisite evidence')
         files.append((f'manifests/prerequisites/{name}.json', Path(source), {'role': name}))
     for source, packages in planned_packages(period).items():
         summary = frozen['core'] if source == 'core' else frozen['sources'][source]
@@ -382,7 +527,7 @@ def _walk_strings(value):
             yield from _walk_strings(item)
 
 
-def verify_recovery_tree(base, campaign, manifest, coverage, identity, *, check=None, locks_held=False):
+def verify_recovery_tree(base, campaign, manifest, coverage, identity, *, check=None, locks_held=False, validated=None):
     """Validate committed units at stable paths or a verified staging mirror.
 
     Reference resolution is validation-only. Stored requests are never rewritten.
@@ -494,6 +639,16 @@ def verify_recovery_tree(base, campaign, manifest, coverage, identity, *, check=
                     raise ValueError('spool identity differs from COMPLETE checkpoint')
                 stream = StudyPointStream(spool, spool_identity)
                 stream.validate()
+                if validated is not None and prepared.exists():
+                    from .historical_owned_validation import CompleteReplayValidation
+                    closure = [prepared, spool / 'manifest.json', spool / 'points.jsonl', *paths]
+                    for checkpoint_path in paths:
+                        checkpoint = execution._read_json(checkpoint_path)
+                        closure.extend((root / 'chunks' / (checkpoint['point_chunk_sha256'] + '.jsonl'),
+                                        root / 'states' / (checkpoint['replay_state_sha256'] + '.json')))
+                    validated[str(root.relative_to(base))] = CompleteReplayValidation(
+                        replay_identity, store.previous_sha, store.point_count, store.start_boundary,
+                        store.end_boundary, tuple(str(path.relative_to(root)) for path in closure))
                 if check:
                     check()
                 add(spool / 'manifest.json')

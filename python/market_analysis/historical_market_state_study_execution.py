@@ -1859,8 +1859,14 @@ def _prepare_study_period(manifest, coverage, period, archive_root, code_revisio
             raise StudyArtifactConflictError("raw archive checksum changed since prepared replay")
     store = ReplayCheckpointStore(root, identity, config.output_start_boundary_time_ms,
                                   config.output_end_boundary_time_ms, progress=progress)
-    if not store.load_complete_metadata():
-        raise StudyArtifactConflictError("prepared replay lacks COMPLETE metadata")
+    from .historical_owned_validation import consume_complete
+    if worker_lease is None or not consume_complete(store, worker_lease):
+        # Metadata-only is safe only after equivalent full semantic validation
+        # in this owned unchanged tree. A standalone/new trust boundary decodes
+        # the exact chain/state/points before it can claim COMPLETE.
+        store.load_latest()
+    if not store._complete:
+        raise StudyArtifactConflictError("prepared replay lacks COMPLETE validation")
     stream = create_study_point_stream(store)
     replay = CompactStudyReplay(decode(body["manifest"]), stream,
                                decode(body["diagnostics"]), decode(body["final_checkpoint"]))
@@ -1886,11 +1892,22 @@ def _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_r
                           runtime_implementation_revision: str | None = None, worker_lease=None):
     """Load and replay core evidence once, then freeze shared V1 study context."""
     config = study_replay_config(period.utc_date)
-    with _runtime_measure(runtime_metrics, "core_archive_load_seconds"):
-        dataset = load_binance_usdm_bounded_historical_replay_dataset(
-            BinanceUSDMArchiveRequest(archive_root, study_universe(), config),
-        )
+    from . import historical_operational_events as events
+    from . import historical_prepared_core as prepared_core
     eligibility = _frozen_eligibility(manifest, period)
+    request = BinanceUSDMArchiveRequest(archive_root, study_universe(), config)
+    with events.span("core-preparation"), _runtime_measure(runtime_metrics, "core_archive_load_seconds"):
+        # Cache never bypasses original source verification. Missing/corrupt raw
+        # inputs are fatal, independently of optional-cache validation failures.
+        if prepared_core.enabled():
+            with events.span("raw-source-verification"):
+                for package in eligibility.provenance.archive_manifest.archive_files:
+                    if _checksum(Path(archive_root), PurePosixPath(package.relative_path), package.symbol,
+                                 package.data_type, package.utc_date) != package.sha256:
+                        raise StudyArtifactConflictError("raw archive differs from frozen preparation")
+        dataset = prepared_core.restore(request, eligibility.provenance.archive_manifest)
+        if dataset is None:
+            dataset = load_binance_usdm_bounded_historical_replay_dataset(request)
     expected_archive = eligibility.provenance.archive_manifest
     if (dataset.archive_manifest.content_sha256 != expected_archive.content_sha256
             or dataset.archive_manifest.archive_files != expected_archive.archive_files):
@@ -1905,14 +1922,19 @@ def _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_r
         dataset.close()
         raise ValueError("frozen coverage does not match verified core packages for this date")
     try:
+        prepared_core.publish_local(dataset)
         if progress is not None:
             progress("CORE_ARCHIVE_INDEX_READY", {
                 "archive_content_sha256": dataset.archive_manifest.content_sha256,
                 "trade_stream_sha256": dataset.trade_stream_manifest.normalized_row_stream_sha256,
             })
-        with _runtime_measure(runtime_metrics, "canonical_replay_seconds"):
+        def replay_progress(completed, total):
+            if progress:
+                progress("REPLAY_CURRENT_PROGRESS", {"completed_output_boundaries": completed,
+                         "total_output_boundaries": total})
+        with events.span("replay"), _runtime_measure(runtime_metrics, "canonical_replay_seconds"):
             if checkpoint_root is None:
-                replay = run_bounded_historical_market_replay(dataset)
+                replay = run_bounded_historical_market_replay(dataset, progress_callback=replay_progress)
             else:
                 run_manifest = historical_replay_run_manifest(dataset)
                 identity = _replay_identity(manifest, coverage, period, dataset, config,
@@ -1921,10 +1943,16 @@ def _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_r
                     checkpoint_root / f"period-{period.study_period_index:02d}-{period.utc_date.isoformat()}-{period.phase}",
                     identity, config.output_start_boundary_time_ms,
                     config.output_end_boundary_time_ms, progress=progress)
-                state = store.load_latest()
+                with events.span("recovery-validation"):
+                    state = store.load_latest()
+                if progress:
+                    progress("REPLAY_RESUMED", {"resumed_boundaries": store.point_count,
+                             "completed_output_boundaries": store.point_count,
+                             "total_output_boundaries": (config.output_end_boundary_time_ms - config.output_start_boundary_time_ms) // 5000 + 1,
+                             "checkpoint_sha256": store.previous_sha})
                 partial = run_bounded_historical_market_replay(
                     dataset, runtime_state=state, boundary_callback=store.add_point,
-                    retain_points=False)
+                    retain_points=False, progress_callback=replay_progress)
                 if not store._complete:
                     raise ValueError("replay ended without a complete durable checkpoint")
                 stream = create_study_point_stream(store)
@@ -1967,13 +1995,14 @@ def _prepare_study_period_fresh(manifest, coverage, period, archive_root, code_r
 
 
 def _execute_period(*args, **kwargs):
+    from . import historical_operational_events as events
     checkpoint_root = kwargs.get("checkpoint_root")
     if checkpoint_root is None:
         return _execute_period_unlocked(*args, **kwargs)
     period = args[2] if len(args) > 2 else kwargs["period"]
     from .historical_run_directory import owned_run_directory
     root = Path(checkpoint_root) / f"period-{period.study_period_index:02d}-{period.utc_date.isoformat()}-{period.phase}"
-    with owned_run_directory(root) as lease:
+    with owned_run_directory(root) as lease, events.span("period-compute"):
         return _execute_period_unlocked(*args, **kwargs, worker_lease=lease)
 
 
@@ -1981,7 +2010,7 @@ def _execute_period_unlocked(
     manifest, coverage, period, archive_root, roots, code_revision,
     hmm_model, runtime_metrics: StudyPeriodRuntimeMetrics | None = None,
     checkpoint_root: Path | None = None, progress=None,
-    runtime_implementation_revision: str | None = None, worker_lease=None,
+    runtime_implementation_revision: str | None = None, worker_lease=None, source_validation=None,
 ):
     if runtime_metrics is None:
         prepared_period, frozen_coverage, v1_records, v1_state_by_boundary = (
@@ -2003,7 +2032,9 @@ def _execute_period_unlocked(
     if taker_evidence is None:
         raise ValueError("the shared core load did not provide EXP-75-12 taker-flow evidence")
     with _runtime_measure(runtime_metrics, "supplementary_source_load_seconds"):
-        supplementary = _load_source_evidence(period, roots)
+        supplementary = source_validation.current(period, coverage) if source_validation is not None else None
+        if supplementary is None:
+            supplementary = _load_source_evidence(period, roots)
     if _canonical({name: item["coverage"] for name, item in supplementary.items()}) != _canonical(
             frozen_coverage["sources"]):
         raise StudyArtifactConflictError(
@@ -2289,6 +2320,7 @@ def execute_study_periods(
     period_limit: int | None = None,
     period_index: int | None = None,
     slice_controller=None,
+    source_validation=None,
     allow_test: bool = False,
     code_revision: str,
     mark_archive_root: Path | str | None = None,
@@ -2372,13 +2404,15 @@ def execute_study_periods(
             payload = _execute_period(manifest, coverage, period, archive, roots,
                                       code_revision, hmm_model,
                                       checkpoint_root=checkpoints, progress=progress,
-                                      runtime_implementation_revision=runtime_implementation_revision)
+                                      runtime_implementation_revision=runtime_implementation_revision,
+                                      source_validation=source_validation)
         else:
             payload = _execute_period(manifest, coverage, period, archive, roots,
                                       code_revision, hmm_model,
                                       runtime_metrics=runtime_metrics,
                                       checkpoint_root=checkpoints, progress=progress,
-                                      runtime_implementation_revision=runtime_implementation_revision)
+                                      runtime_implementation_revision=runtime_implementation_revision,
+                                      source_validation=source_validation)
         if runtime_metrics is not None:
             artifact_write_started_ns = time.perf_counter_ns()
         if slice_controller is not None:
