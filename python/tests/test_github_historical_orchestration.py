@@ -1,6 +1,8 @@
 """Focused snapshot presentation/path and pinned-source hygiene regressions."""
 
 from contextlib import ExitStack, nullcontext
+import base64
+from copy import deepcopy
 from datetime import date
 import hashlib
 import importlib.util
@@ -197,6 +199,137 @@ class PinnedSourceHygieneTests(unittest.TestCase):
             transferred.write_text(json.dumps(spec))
             with self.assertRaisesRegex(ValueError, "exact pinned runtime"):
                 campaign.pinned_spec()
+
+
+class ContentsDecodingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.campaign = load_script("github_campaign")
+
+    def test_unwrapped_and_ascii_whitespace_wrapped_contents(self):
+        raw = json.dumps({"synthetic": "Contents fixture", "items": list(range(30))}).encode()
+        encoded = base64.b64encode(raw).decode("ascii")
+        wrapped = [encoded,
+                   "\n".join(encoded[i:i + 60] for i in range(0, len(encoded), 60)) + "\n",
+                   "\r\n".join(encoded[i:i + 60] for i in range(0, len(encoded), 60)) + "\r\n",
+                   " \t" + encoded[:4] + "\v\f" + encoded[4:] + "\r\n"]
+        for content in wrapped:
+            with self.subTest(content=content):
+                self.assertEqual(self.campaign.decode_contents({"encoding": "base64", "content": content}), raw)
+
+    def test_malformed_base64_and_non_ascii_content_are_integrity_errors(self):
+        for content in ("Zm?8=", "Zg==!", "Zg=", "Zg===", "Zg==\u00a0", "Zg==\u2003"):
+            with self.subTest(content=content):
+                with self.assertRaises(ValueError) as rejected:
+                    self.campaign.decode_contents({"encoding": "base64", "content": content})
+                self.assertEqual(self.campaign.safe_error(rejected.exception, "record-receipt")["category"], "INTEGRITY")
+
+    def test_unexpected_file_response_shapes_are_rejected(self):
+        responses = (None, [], {}, {"encoding": "utf-8", "content": "Zg=="},
+                     {"encoding": "base64"}, {"encoding": "base64", "content": None},
+                     {"encoding": "base64", "content": b"Zg=="},
+                     {"encoding": "base64", "content": 123})
+        for response in responses:
+            with self.subTest(response=response):
+                with self.assertRaises(ValueError):
+                    self.campaign.decode_contents(response)
+
+    def test_decoded_contents_still_use_bounded_json_reader(self):
+        raw = b'{"duplicate":1,"duplicate":2}'
+        decoded = self.campaign.decode_contents({"encoding": "base64", "content": base64.b64encode(raw).decode()})
+        with self.assertRaisesRegex(ValueError, "duplicate JSON field"):
+            self.campaign.read(decoded)
+        with patch.object(self.campaign, "MAX", 1):
+            with self.assertRaisesRegex(ValueError, "bounded control metadata"):
+                self.campaign.read(decoded)
+
+
+class WrappedAccountingReceiptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.campaign = load_script("github_campaign")
+
+    def receipt_fixture(self, newline):
+        campaign = self.campaign
+        control = campaign.control
+        spec = {
+            "version": "historical-study-campaign-v1", "campaign_id": "synthetic-contents",
+            "runtime_sha": "a" * 40, "orchestration_sha": "a" * 40, "producer_revision": "b" * 40,
+            **{key: "c" * 64 for key in ("study_manifest_sha256", "coverage_manifest_sha256",
+                                       "study_file_sha256", "coverage_file_sha256")},
+            "dependency_locks": {"requirements.txt": "d" * 64, "requirements-research.txt": "e" * 64},
+            "expected_membership": {"development": [0], "validation": [], "test": []},
+            "inputs": {"0": {"release_tag": "synthetic-inputs", "manifest_sha256": "f" * 64}},
+            "publication_reserve_minutes": 15, "max_new_stages": 1, "job_minutes": 20,
+            "budget": {"ceiling_minutes": 120, "max_runs": 2, "no_progress_cap": 2},
+            "control": {"version": control.PLAN, "allow_test": False, "tasks": [{
+                "id": "preflight-development-0", "operation": "preflight", "phase": "development",
+                "period_index": 0, "depends_on": [], "expected_outputs": ["preflight"]}]},
+            "retention": {"version": "historical-retention-v1", "redundant_recovery": "verified-consolidation-only",
+                          "abandoned_drafts": "retain-unless-proven", "inputs_and_results": "retain"},
+        }
+        record = control.initial(spec)
+        control.control_action(record, spec, "start", "100")
+        key = record["handoff"]["key"]
+        bindings = {"STUDY_OPERATION": "preflight", "STUDY_PHASE": "development", "STUDY_JOB_MINUTES": "20",
+                    "STUDY_PERIOD_INDEX": "0", "STUDY_ALLOW_TEST": "false",
+                    "STUDY_RESUME_GENERATION": "", "STUDY_RESUME_SHA": ""}
+        self.assertTrue(control.claim(record, spec, key, "123", "1", "9" * 64, bindings))
+        locator = {"control_commit": "1" * 40, "control_blob_sha": "2" * 40}
+        typed = {"receipt_contract": control.RECEIPT, "task_id": "preflight-development-0", "handoff_key": key,
+                 "operation": "preflight", "run_id": "123", "attempt": "1", "task_complete": True,
+                 "campaign_complete": True, "verified_outputs": ["preflight"], "setup_outcome": "success",
+                 "scientific_state": "YIELDED", "termination_reason": "completed"}
+        value = {"version": "historical-study-file-bundle-v2", "kind": "recovery", "identity": control.identity(spec),
+                 "assets": [{"asset": "part-0001.tar", "size": 10, "sha256": "3" * 64}],
+                 "metadata": {"generation": "recovery-synthetic-123-1", "parent": None,
+                              "local_completed_work": ["4" * 64], "completed_work": ["4" * 64],
+                              "measured_minutes": 1, "task_receipt": typed,
+                              "lineage": {"reserved_minutes": record["reserved_minutes"],
+                                          "run_count": record["run_count"], "no_progress_runs": 0},
+                              "consolidation": {"version": control.COMPACT_LINEAGE,
+                                                "accounting": control.accounting_reference(record, locator),
+                                                "parent_receipt": None, "finalized_receipts": []}}}
+        value["bundle_sha256"] = control.digest(value)
+        receipt = control.receipt_reference(value, 1)
+        encoded = base64.b64encode(control.canonical(record).encode()).decode("ascii")
+        row = {"sha": locator["control_blob_sha"], "encoding": "base64",
+               "content": newline.join(encoded[i:i + 60] for i in range(0, len(encoded), 60)) + newline}
+        assets = [{"id": 10, "name": "manifest.json"},
+                  {"id": 11, "name": "part-0001.tar", "state": "uploaded", "size": 10,
+                   "digest": "sha256:" + "3" * 64}]
+        requested = []
+
+        def request(path):
+            requested.append(path)
+            if path.startswith("/releases/tags/"):
+                return {"id": 1, "draft": False}
+            if path.startswith("/releases/1/assets?"):
+                return deepcopy(assets)
+            if path == "/contents/campaigns/synthetic-contents/control.json?ref=" + locator["control_commit"]:
+                return deepcopy(row)
+            self.fail("Unexpected synthetic receipt request")
+
+        store = SimpleNamespace(spec=spec, path="/contents/campaigns/synthetic-contents/control.json",
+                                api=SimpleNamespace(request=request))
+        return store, receipt, value, row, requested, locator
+
+    def test_receipt_verification_accepts_line_wrapped_immutable_accounting(self):
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                store, receipt, value, row, requested, locator = self.receipt_fixture(newline)
+                self.assertTrue(row["content"].endswith(newline))
+                self.assertGreater(row["content"].count(newline), 1)
+                with patch.object(self.campaign, "remote_manifest", return_value=value):
+                    self.assertEqual(self.campaign.verify_receipt(store, receipt), value)
+                self.assertIn(store.path + "?ref=" + locator["control_commit"], requested)
+
+    def test_wrapped_accounting_still_rejects_wrong_immutable_blob(self):
+        store, receipt, value, row, _, _ = self.receipt_fixture("\n")
+        row["sha"] = "6" * 40
+        with patch.object(self.campaign, "remote_manifest", return_value=value):
+            with self.assertRaisesRegex(ValueError, "immutable accounting blob reference mismatch"):
+                self.campaign.verify_receipt(store, receipt)
 
 
 if __name__ == "__main__":

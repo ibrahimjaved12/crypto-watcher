@@ -42,6 +42,18 @@ def read(raw):
     return json.loads(raw, object_pairs_hook=pairs)
 
 
+def decode_contents(row):
+    """Strict GitHub Contents Base64, allowing only ASCII line-wrap whitespace."""
+    if not isinstance(row, dict) or row.get('encoding') != 'base64':
+        raise ValueError('base64 Contents file response required')
+    content = row.get('content')
+    if not isinstance(content, str):
+        raise ValueError('ASCII Contents content string required')
+    encoded = content.encode('ascii')
+    normalized = encoded.translate(None, b' \t\r\n\v\f')
+    return base64.b64decode(normalized, validate=True)
+
+
 def spec_path():
     path = os.environ['STUDY_CAMPAIGN_SPEC']
     if not re.fullmatch(r'research/campaigns/[A-Za-z0-9_.-]+\.json', path):
@@ -228,7 +240,7 @@ class Store:
             return None, None
         if row['encoding'] != 'base64':
             raise ValueError('control record exceeds Contents bound')
-        current = control.validate(read(base64.b64decode(row['content'])), self.spec)
+        current = control.validate(read(decode_contents(row)), self.spec)
         # Git commit history anchors append-only entries across separate control
         # invocations, not just within one process's conflict retry loop.
         history = self.api.request('/commits?path=' + urllib.parse.quote(self.path[len('/contents/'):], safe='') + '&sha=' + urllib.parse.quote(self.api.branch, safe='') + '&per_page=2')
@@ -239,7 +251,7 @@ class Store:
             raise Conflict('control changed while reading committed history')
         if len(history) > 1:
             prior = self.api.request(self.path + '?ref=' + history[1]['sha'])
-            previous = control.validate(read(base64.b64decode(prior['content'])), self.spec)
+            previous = control.validate(read(decode_contents(prior)), self.spec)
             control.validate(current, self.spec, previous)
         self.control_commit, self.control_blob_sha = history[0]['sha'], row['sha']
         return current, row['sha']
@@ -327,8 +339,8 @@ class Store:
     def write_view(self, view_api, status, record, activity):
         path = self.path.replace('control.json', 'status.json')
         old = view_api.request(path + '?ref=' + urllib.parse.quote(self.api.branch, safe=''), missing=True)
-        if activity is None and old and old.get('encoding') == 'base64':
-            old_status = read(base64.b64decode(old['content'], validate=True))
+        if activity is None and old:
+            old_status = read(decode_contents(old))
             activity = old_status.get('activity')
             if old_status.get('identity') != record['identity'] or len(control.canonical(activity)) > 24000:
                 raise ValueError('invalid optional activity metadata')
@@ -609,7 +621,7 @@ def sealed_accounting(store, closure):
         row = store.api.request(store.path + '?ref=' + proof['control_commit'])
         if row['sha'] != proof['control_blob_sha'] or row['encoding'] != 'base64':
             raise ValueError('immutable accounting blob reference mismatch')
-        record = control.validate(read(base64.b64decode(row['content'], validate=True)), store.spec)
+        record = control.validate(read(decode_contents(row)), store.spec)
         store._accounting_cache[key] = record
     record = store._accounting_cache[key]
     expected = control.accounting_reference(record, {k: proof[k] for k in ('control_commit', 'control_blob_sha')})
@@ -800,7 +812,7 @@ def reconcile_study(store, actions, record, job):
         path = '/contents/campaigns/' + control.identifier(store.spec['campaign_id']) + '/diagnostics/' + h['run_id'] + '-' + h['attempt'] + '-' + diagnostic_operation + suffix + '.json'
         row = store.api.request(path, missing=True)
         if row:
-            details = read(base64.b64decode(row['content'], validate=True))
+            details = read(decode_contents(row))
             binding_matches = (details.get('category') == 'OWNER_STOP' if diagnostic_operation == 'claim-refusal'
                                else details.get('claim_mutation_id') == h.get('mutation_id'))
             if details.get('run_id') == h['run_id'] and details.get('attempt') == h['attempt'] and details.get('operation') == diagnostic_operation and details.get('handoff_key') == key and binding_matches:
