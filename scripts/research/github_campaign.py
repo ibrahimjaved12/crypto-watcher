@@ -24,6 +24,7 @@ import urllib.request
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / 'python/market_analysis'))
 import historical_campaign_control as control
+from historical_resource_limits import resource_details
 MAX = 8 * 1024 * 1024
 
 
@@ -174,12 +175,13 @@ DIAGNOSTIC_OPERATIONS = {'claim', 'claim-refusal', 'dispatch', 'start', 'stop', 
     'diagnostic', 'bootstrap', 'validate', 'validate-settings', 'retention-plan', 'retention-apply',
     'cache-restore', 'cache-publish', 'dependency-key', 'setup'}
 DIAGNOSTIC_CATEGORIES = {'OWNER_STOP', 'SETUP_BUDGET', 'CANCELLED', 'DEADLINE', 'HTTP', 'NETWORK',
-    'AMBIGUOUS_WRITE', 'CAS_LIMIT', 'INTEGRITY', 'PROCESS', 'CONTROL', 'CONFLICT', 'CAPTURE_UNAVAILABLE', 'EVIDENCE_UNAVAILABLE'}
+    'AMBIGUOUS_WRITE', 'CAS_LIMIT', 'INTEGRITY', 'PROCESS', 'CONTROL', 'CONFLICT', 'CAPTURE_UNAVAILABLE', 'EVIDENCE_UNAVAILABLE', 'RESOURCE_LIMIT'}
 
 
 def safe_diagnostic(details):
     status, code = details.get('http_status'), details.get('exit_code')
-    return {'version': 'historical-campaign-diagnostic-v1',
+    return {**(resource_details(details) if details.get('category') == 'RESOURCE_LIMIT' else {}),
+            'version': 'historical-campaign-diagnostic-v1',
             'operation': details.get('operation') if details.get('operation') in DIAGNOSTIC_OPERATIONS else 'setup',
             'category': details.get('category') if details.get('category') in DIAGNOSTIC_CATEGORIES else 'CONTROL',
             'http_status': status if type(status) is int and 100 <= status <= 599 else None,
@@ -187,6 +189,9 @@ def safe_diagnostic(details):
 
 
 def safe_error(exc, operation):
+    resource = resource_details(getattr(exc, 'measurements', None))
+    if getattr(exc, 'diagnostic_category', None) == 'RESOURCE_LIMIT' and resource:
+        return safe_diagnostic({'operation': operation, 'category': 'RESOURCE_LIMIT', **resource})
     return safe_diagnostic({'version': 'historical-campaign-diagnostic-v1',
             'operation': operation if operation in DIAGNOSTIC_OPERATIONS else 'setup',
             'category': exc.code if isinstance(exc, TransportError) else 'CONFLICT' if isinstance(exc, Conflict) else 'CANCELLED' if isinstance(exc, (InterruptedError, KeyboardInterrupt)) else 'DEADLINE' if isinstance(exc, TimeoutError) else 'INTEGRITY' if isinstance(exc, (ValueError, KeyError)) else 'PROCESS' if isinstance(exc, subprocess.CalledProcessError) else 'CONTROL',
@@ -751,6 +756,8 @@ def finalizer(store):
         failure = safe_diagnostic({'operation': 'install-dependencies', 'category': 'PROCESS'})
     outcome['reason'] = failure['category'] if failure else next((d['category'] for d in reversed(required)), 'job-outcome-pending')
     outcome['failure_operation'] = failure['operation'] if failure else None
+    if failure and failure['category'] == 'RESOURCE_LIMIT':
+        outcome['resource_failure'] = resource_details(failure)
     key = h['key']
     def save(r):
         current = r['handoff']
@@ -829,6 +836,8 @@ def reconcile_study(store, actions, record, job):
             reason = capture_reason(details['category']) if entry_details else details['category']
             outcome = {'reason': reason, 'failure_operation': None if reason in ('CAPTURE_UNAVAILABLE', 'CANCELLED', 'SETUP_BUDGET', 'OWNER_STOP') else details['operation'],
                        'setup': 'not-started', 'scientific': 'not-started', 'publication': 'not-verified'}
+            if reason == 'RESOURCE_LIMIT':
+                outcome['resource_failure'] = resource_details(details)
             control.append(r, 'STUDY_OUTCOME', key=key, run_id=current['run_id'], attempt=current['attempt'], outcome_sha256=control.digest(outcome))
             current['outcome'] = outcome
         control.study_outcome(r, store.spec, key, job['conclusion'], steps,

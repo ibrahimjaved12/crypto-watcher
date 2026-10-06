@@ -16,6 +16,7 @@ import shutil
 import stat
 
 from . import historical_market_state_study_execution as execution
+from .historical_resource_limits import resource_details
 
 BASE = Path('/tmp/crypto-study')
 V1 = 'historical-study-file-bundle-v1'
@@ -25,9 +26,13 @@ BLOCK = 1024 ** 2
 
 
 class BundleFootprintError(ValueError):
+    diagnostic_category = "RESOURCE_LIMIT"
+
     def __init__(self, reason, **measurements):
         super().__init__(reason)
-        self.measurements = {'reason': reason, **measurements}
+        self.measurements = resource_details({'reason': reason, **measurements})
+        if not self.measurements:
+            raise ValueError('unknown resource reason')
 
 
 SOURCES = {'core': 'core', 'mark_trade': 'mark', 'open_interest': 'open-interest',
@@ -65,6 +70,49 @@ def regular(path):
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise ValueError('bundle files must be regular files without hardlinks')
     return info
+
+
+# One bounded manifest plus one streaming buffer; source bytes are copied raw.
+MAX_MANIFEST_BYTES = 8 * BLOCK
+PUBLICATION_OVERHEAD = MAX_MANIFEST_BYTES + BLOCK
+MAX_FOOTPRINT_FILES = 100000
+
+
+def footprint(paths, *, check=None):
+    """Deduplicated stat-only regular-file inventory; never decode scientific data."""
+    sizes = {}
+    for path in paths:
+        if check:
+            check()
+        path = Path(os.path.abspath(path))
+        if path in sizes:
+            continue
+        if len(sizes) >= MAX_FOOTPRINT_FILES:
+            raise ValueError('bounded footprint inventory exceeded')
+        sizes[path] = regular(path).st_size
+    return sum(sizes.values())
+
+
+def publication_capacity(measured_bytes, destination, *, max_bytes, max_transfer_bytes, check=None):
+    if check:
+        check()
+    if any(type(value) is not int or value < 0 for value in (measured_bytes, max_bytes, max_transfer_bytes)):
+        raise ValueError('invalid publication capacity')
+    if measured_bytes > max_bytes:
+        raise BundleFootprintError('assembled-inventory-limit', measured_bytes=measured_bytes, limit_bytes=max_bytes)
+    if measured_bytes > max_transfer_bytes:
+        raise BundleFootprintError('transfer-limit', measured_bytes=measured_bytes, limit_bytes=max_transfer_bytes)
+    # The destination need not exist: preflight must precede mkdir/part creation.
+    parent = Path(destination)
+    while not parent.exists():
+        parent = parent.parent
+    free = shutil.disk_usage(parent).free
+    required = measured_bytes + PUBLICATION_OVERHEAD
+    if free < required:
+        raise BundleFootprintError('publication-disk-limit', measured_bytes=measured_bytes,
+                                   free_bytes=free, required_bytes=required)
+    return {'measured_bytes': measured_bytes, 'transfer_bytes': measured_bytes,
+            'free_bytes': free, 'required_bytes': required}
 
 
 def file_sha(path, check=None):
@@ -187,9 +235,23 @@ def read_bundle(path, expected):
 
 
 def pack_files(files, destination, *, kind, identity, metadata=None, check=None,
-               max_bytes=12 * 1024 ** 3):
+               max_bytes=12 * 1024 ** 3, max_transfer_bytes=None):
     """Deterministic bounded raw packing, isolated by metadata/period/phase."""
     destination = Path(destination)
+    files = list(files)
+    source_paths = [Path(os.path.abspath(source)) for _, source, _ in files if source is not None]
+    if len(source_paths) != len(set(source_paths)):
+        raise ValueError('duplicate source file in publication inventory')
+    measured = footprint(source_paths, check=check)
+    publication_capacity(measured, destination, max_bytes=max_bytes,
+        max_transfer_bytes=max_bytes if max_transfer_bytes is None else max_transfer_bytes, check=check)
+    initial = {}
+    for path in source_paths:
+        if check:
+            check()
+        initial[path] = regular(path)
+    if sum(info.st_size for info in initial.values()) != measured:
+        raise ValueError('source sizes changed during publication preflight')
     destination.mkdir(parents=True, exist_ok=False)
     rows, assets, total, names = [], [], 0, set()
     output = None
@@ -214,11 +276,15 @@ def pack_files(files, destination, *, kind, identity, metadata=None, check=None,
                    'size': 0, 'sha256': None, 'extents': []}
             if source is not None:
                 info = regular(source)
-                total += info.st_size
+                previous = initial[Path(os.path.abspath(source))]
+                if (info.st_size, info.st_mtime_ns, info.st_ino) != (previous.st_size, previous.st_mtime_ns, previous.st_ino):
+                    raise ValueError('source changed after publication preflight')
                 free = shutil.disk_usage(destination).free
-                if total > max_bytes or free < info.st_size + BLOCK:
-                    raise BundleFootprintError('bundle-packing-limit', measured_bytes=total, limit_bytes=max_bytes,
-                                               free_bytes=free, required_next_file_bytes=info.st_size + BLOCK)
+                required = measured - total + PUBLICATION_OVERHEAD
+                if free < required:
+                    raise BundleFootprintError('publication-disk-limit', measured_bytes=measured,
+                                               free_bytes=free, required_bytes=required)
+                total += info.st_size
                 group = _partition(relative, facts, identity)
                 digest = hashlib.sha256()
                 offset = 0
@@ -264,7 +330,10 @@ def pack_files(files, destination, *, kind, identity, metadata=None, check=None,
                     'metadata': metadata or {}, 'files': sorted(rows, key=lambda r: r['path']), 'assets': assets,
                     'uncompressed_bytes': total, 'transfer_bytes': sum(a['size'] for a in assets)})
     validate_bundle(value)
-    execution._replace_atomic(destination / 'manifest.json', execution._canonical(value))
+    manifest_bytes = execution._canonical(value)
+    if len(manifest_bytes) > MAX_MANIFEST_BYTES:
+        raise ValueError('sealed inventory exceeds bounded manifest size')
+    execution._replace_atomic(destination / 'manifest.json', manifest_bytes)
     return value
 
 

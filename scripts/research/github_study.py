@@ -31,11 +31,12 @@ from market_analysis.historical_study_batch import (
 )
 from market_analysis.historical_study_bundles import (
     BLOCK, PART_LIMIT, BundleFootprintError, identifier, sha, safe_relative, regular, file_sha,
-    read_bundle, unpack_files, install_files, pack_files, verify_recovery_tree,
+    read_bundle, unpack_files, install_files, pack_files, verify_recovery_tree, footprint, publication_capacity,
     classify_recovery_inventory, asset_table, validate_bundle, last_verified_unit, metadata_paths, planned_packages, period_root,
 )
 from market_analysis.historical_run_directory import owned_run_directory
 from market_analysis import historical_operational_events as events
+from market_analysis.historical_resource_limits import resource_details
 
 
 class Deadline:
@@ -375,6 +376,8 @@ class OperationalInterruption(InterruptedError):
 
 
 def retain_outcome(details):
+    from github_campaign import safe_diagnostic
+    details = safe_diagnostic(details)
     try:
         path = BASE / 'transfers/operation-outcomes.json'
         records = execution._read_json(path) if path.exists() else []
@@ -549,14 +552,17 @@ def subset(value, predicate):
 
 
 def limits(spec, value):
-    if (value['transfer_bytes'] > spec['limits']['max_transfer_bytes']
-            or value['uncompressed_bytes'] > spec['limits']['max_uncompressed_bytes']):
-        raise BundleFootprintError('configured-bundle-limit', transfer_bytes=value['transfer_bytes'],
-            assembled_bytes=value['uncompressed_bytes'], max_transfer_bytes=spec['limits']['max_transfer_bytes'],
-            max_assembled_bytes=spec['limits']['max_uncompressed_bytes'])
-    if shutil_free() < value['uncompressed_bytes'] + value['transfer_bytes'] + spec['limits']['headroom_bytes']:
-        raise BundleFootprintError('transfer-staging-headroom', free_bytes=shutil_free(),
-            required_bytes=value['uncompressed_bytes'] + value['transfer_bytes'] + spec['limits']['headroom_bytes'])
+    if value['uncompressed_bytes'] > spec['limits']['max_uncompressed_bytes']:
+        raise BundleFootprintError('assembled-inventory-limit', measured_bytes=value['uncompressed_bytes'],
+            limit_bytes=spec['limits']['max_uncompressed_bytes'])
+    if value['transfer_bytes'] > spec['limits']['max_transfer_bytes']:
+        raise BundleFootprintError('transfer-limit', measured_bytes=value['transfer_bytes'],
+            limit_bytes=spec['limits']['max_transfer_bytes'])
+    free = shutil_free()
+    required = value['uncompressed_bytes'] + value['transfer_bytes'] + spec['limits']['headroom_bytes']
+    if free < required:
+        raise BundleFootprintError('staging-disk-limit', free_bytes=free, required_bytes=required,
+            assembled_bytes=value['uncompressed_bytes'], transfer_bytes=value['transfer_bytes'])
 
 
 def shutil_free():
@@ -848,11 +854,12 @@ def supervise(validate_only=False):
         status = execution._read_json(status_path) if status_path.exists() else {}
         prior_failure = status.get('failure_category')
         genuine = prior_failure not in (None, 'InterruptedError')
-        category = ('INTEGRITY' if prior_failure in ('ValueError', 'KeyError') else 'PROCESS' if genuine
+        category = ('RESOURCE_LIMIT' if prior_failure == 'RESOURCE_LIMIT' else 'INTEGRITY' if prior_failure in ('ValueError', 'KeyError') else 'PROCESS' if genuine
                     else supervision_failure or ('SETUP_BUDGET' if termination == 'compute-deadline'
                     else 'CANCELLED' if termination == 'external-cancellation' or prior_failure == 'InterruptedError' else 'PROCESS'))
         retain_outcome({'version': 'historical-campaign-diagnostic-v1', 'operation': 'validate-parents',
-                        'category': category, 'http_status': None, 'exit_code': result})
+                        'category': category, **(resource_details(status.get('resource_failure')) if category == 'RESOURCE_LIMIT' else {}),
+                        'http_status': None, 'exit_code': result})
     if not validate_only:
         status = execution._read_json(status_path) if status_path.exists() else {}
         prior_failure = status.get('failure_category')
@@ -890,7 +897,9 @@ def supervise(validate_only=False):
             execution._replace_atomic(status_path, execution._canonical(status))
         if status.get('scientific_state') == 'FAILED' or termination == 'external-cancellation':
             retain_outcome({'version': 'historical-campaign-diagnostic-v1', 'operation': 'run',
-                'category': 'PROCESS' if status.get('scientific_state') == 'FAILED' else 'CANCELLED', 'http_status': None, 'exit_code': result})
+                'category': 'RESOURCE_LIMIT' if status.get('failure_category') == 'RESOURCE_LIMIT' else 'PROCESS' if status.get('scientific_state') == 'FAILED' else 'CANCELLED',
+                **(resource_details(status.get('resource_failure')) if status.get('failure_category') == 'RESOURCE_LIMIT' else {}),
+                'http_status': None, 'exit_code': result})
         events.emit('SCIENTIFIC_STOP', scientific_state=status.get('scientific_state'), reason=termination, returncode=result)
     return result
 
@@ -980,15 +989,28 @@ def snapshot():
                               'date': period.utc_date.isoformat() if period else None,
                               'symbols': sorted({symbol for packages in planned_packages(period).values() for _, symbol in packages if symbol is not None}) if period else [],
                               'sources': sorted({row['facts']['source'] for row in execution._read_json(BASE / 'transfers/input-manifest.json')['files'] if 'source' in row.get('facts', {})}), 'sequence': record['sequence']})
-        value = pack_files([(str(path.relative_to(BASE)), path, {'role': 'committed-recovery', **({'partition_version': 'period-results-v1'} if record else {})}) for path in files],
-            BASE / 'transfers/publication', kind='recovery', identity=campaign_identity(spec),
-            metadata=metadata,
-            check=deadline.check, max_bytes=spec['limits']['max_uncompressed_bytes'])
+        # Included validation/status logs are now quiescent. Packing telemetry is
+        # outside the frozen closure, including span heartbeats and failures.
+        events.configure(BASE / 'transfers/snapshot-packing.events.jsonl', operation='snapshot',
+                         phase=phase, period=index, deadline_epoch=start + minutes * 60 - 120, public=True)
+        rows = [(str(path.relative_to(BASE)), path, {'role': 'committed-recovery',
+                **({'partition_version': 'period-results-v1'} if record else {})}) for path in files]
+        measured = footprint((source for _, source, _ in rows), check=deadline.check)
+        events.emit('RECOVERY_FOOTPRINT', measured_bytes=measured, transfer_bytes=measured,
+                    assembled_limit_bytes=spec['limits']['max_uncompressed_bytes'],
+                    transfer_limit_bytes=spec['limits']['max_transfer_bytes'])
+        capacity = publication_capacity(measured, BASE / 'transfers/publication',
+            max_bytes=spec['limits']['max_uncompressed_bytes'],
+            max_transfer_bytes=spec['limits']['max_transfer_bytes'], check=deadline.check)
+        events.emit('PACKING_STARTED', **capacity)
+        with events.span('recovery-packing'):
+            value = pack_files(rows, BASE / 'transfers/publication', kind='recovery',
+                identity=campaign_identity(spec), metadata=metadata, check=deadline.check,
+                max_bytes=spec['limits']['max_uncompressed_bytes'],
+                max_transfer_bytes=spec['limits']['max_transfer_bytes'])
         if regular(BASE / 'transfers/publication/manifest.json').st_size > 8 * BLOCK:
             raise ValueError('sealed ancestry inventory exceeds bounded manifest size')
-        if value['transfer_bytes'] > spec['limits']['max_transfer_bytes']:
-            raise BundleFootprintError('recovery-transfer-limit', transfer_bytes=value['transfer_bytes'],
-                                       limit_bytes=spec['limits']['max_transfer_bytes'])
+        events.emit('PACKING_COMPLETED', measured_bytes=value['uncompressed_bytes'], transfer_bytes=value['transfer_bytes'])
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             output.write('ready=true\n')
 
@@ -1354,12 +1376,14 @@ def main():
                 status = execution._read_json(status_path) if status_path.exists() else {}
                 prior_failure = status.get('failure_category')
                 if prior_failure not in (None, 'InterruptedError'):
-                    details['category'] = 'INTEGRITY' if prior_failure in ('ValueError', 'KeyError') else 'PROCESS'
+                    details['category'] = 'RESOURCE_LIMIT' if prior_failure == 'RESOURCE_LIMIT' else 'INTEGRITY' if prior_failure in ('ValueError', 'KeyError') else 'PROCESS'
+                    if prior_failure == 'RESOURCE_LIMIT':
+                        details.update(resource_details(status.get('resource_failure')))
             except (OSError, ValueError, KeyError):
                 details['category'] = 'INTEGRITY'
         retain_outcome(details)
         if events._sink is not None:
-            events.emit('OPERATION_FAILED', reason=details['category'])
+            events.emit('OPERATION_FAILED', **{key: value for key, value in details.items() if key not in ('version', 'operation', 'category')}, diagnostic_category=details['category'])
         print('Historical platform halted: ' + json.dumps(details, sort_keys=True))
         return 1
     finally:

@@ -641,6 +641,63 @@ asset; a large file may span assets. Metadata assets are separate from raw input
 and incompatible period/phase partitions cannot share assets. Unknown or
 later-phase prerequisite metadata is rejected before metadata asset acquisition.
 
+
+Newly produced operational stage records use streaming gzip at level 1, with no
+plaintext intermediate, no filename header, and a fixed zero mtime. Both
+`.records.jsonl.gz` and `.records.scientific.jsonl.gz` (including indexed outcomes
+streams) belong to the recovery closure. `StageRecords.storage_encoding` is
+`identity` or `gzip`; `stored_sha256` and `scientific_stored_sha256` bind the actual
+files and are required for gzip. The original `sha256` and `scientific_sha256`
+still bind the exact decompressed canonical bytes, including every newline.
+Scientific JSON, record ordering, Decimal values and scientific hashes do not
+change with storage encoding. Readers stream and check stored hashes, logical
+hashes and counts, and reject corrupt/truncated gzip. Exact legacy five-field
+record references decode as identity storage; partial new metadata is rejected.
+Existing evidence is neither rewritten nor migrated.
+
+Snapshot measures the exact deduplicated regular-file closure after recovery
+validation and the final included status/log writes. In raw v2 transport,
+`uncompressed_bytes` means assembled stored source bytes, and transfer payload
+bytes equal that same total; gzip's logical expanded record bytes are not a new
+bundle footprint. Before creating publication parts, packing enforces both
+configured caps and free space for the complete copy plus 9 MiB (an 8 MiB bounded
+manifest and a 1 MiB streaming buffer). Streaming source-change rejection and the
+1 GiB part limit remain enforced. Packing events and heartbeats use a separate
+sink under `transfers/`, outside the frozen campaign inventory.
+
+At durable execution boundaries, stat-only capacity observations conservatively
+check current owned files. They do not predict the next stage or guarantee that
+a finalized report will fit. Known capacity failure preserves local committed
+units, halts continuation with scientific state `FAILED`, and retains typed
+`RESOURCE_LIMIT` diagnostics. Snapshot capacity failures map to
+`PUBLICATION_FAILED`; genuine SHA, identity and canonicalization corruption stays
+`INTEGRITY`. Fixed reasons distinguish `assembled-inventory-limit`,
+`transfer-limit` and `publication-disk-limit`. Only allowlisted nonnegative integer
+measurements (such as measured, limit, free and required bytes) enter control,
+private diagnostics or public summaries. These failures are terminal, not success
+or automatic retry permission; receipts and campaign accounting remain intact.
+
+### Owner action after the capacity repair
+
+For run `37477364479`, the numerical worker yielded and recovery validation passed
+before snapshot failed. Capacity is the strongest explanation from observed
+storage pressure; the discarded original exception has not been conclusively
+reconstructed. The observed 4,906,447,311 stage bytes through atr-1 omit atr-2 and
+other recovery dependencies, so they are not an exact publication inventory.
+
+After merge, create a **fresh campaign identity** pinned to the actual merged
+runtime/orchestration SHA, keeping the frozen producer revision
+`aa981f1cbb4beca699623b2d16c99bb20b73539d`. Review the normal GitHub regressions and
+make explicit disk, assembled/transfer cap and budget decisions before starting
+it. Compression does not guarantee that the eventual complete report fits the
+existing 5 GiB caps or 6 GiB working headroom. The failed
+`development-0-post172-private-v1` campaign has reserved **615/625 minutes** and
+used **2/2 scientific runs**. Leave that terminal campaign and its stored evidence
+untouched. Its only accepted recovery is the earlier preflight receipt; completed
+stage logs from the failed publication are not independently verified resumable
+evidence. Do not reset it, migrate recovery across runtime pins, or dispatch a
+replacement automatically.
+
 Each required asset downloads once and is verified. Files reconstruct atomically
 using bounded reads and whole-file hashes. Readers reject unsafe paths, duplicate
 membership, overlapping/out-of-range extents, incomplete file/asset coverage,

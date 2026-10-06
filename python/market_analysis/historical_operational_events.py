@@ -13,11 +13,12 @@ import time
 VERSION = 'historical-study-operational-event-v1'
 MAX_EVENT_BYTES = 4096
 MAX_LOG_BYTES = 16 * 1024 * 1024
-TEXT_FIELDS = {'kind', 'operation', 'phase', 'stage', 'category', 'reason', 'checkpoint_sha256',
+TEXT_FIELDS = {'diagnostic_category', 'kind', 'operation', 'phase', 'stage', 'category', 'reason', 'checkpoint_sha256',
                'stage_result_sha256', 'cache_identity', 'scientific_state', 'publication_state'}
+RESOURCE_NUMBER_FIELDS = {'measured_bytes', 'limit_bytes', 'free_bytes', 'required_bytes', 'assembled_limit_bytes', 'transfer_limit_bytes', 'transfer_bytes'}
 NUMBER_FIELDS = {'period', 'remaining_compute_seconds', 'elapsed_seconds', 'duration_seconds',
     'requests_completed', 'assets_completed', 'downloaded_bytes', 'retries', 'selected_bytes',
-    'transfer_bytes', 'completed_output_boundaries', 'total_output_boundaries', 'resumed_boundaries',
+    'completed_output_boundaries', 'total_output_boundaries', 'resumed_boundaries',
     'durable_boundaries', 'boundary_time_ms', 'parent_rss_bytes', 'worker_rss_bytes', 'parent_peak_rss_bytes', 'worker_peak_rss_bytes',
     'parent_cpu_seconds', 'worker_cpu_seconds', 'free_disk_bytes', 'used_disk_bytes', 'returncode', 'new_stages', 'reused_stages'}
 _sink = None
@@ -48,6 +49,10 @@ def allowlisted(row):
     for key in NUMBER_FIELDS:
         item = row.get(key)
         if type(item) in (int, float) and -1e18 <= item <= 1e18 and math.isfinite(item):
+            result[key] = item
+    for key in RESOURCE_NUMBER_FIELDS:
+        item = row.get(key)
+        if type(item) is int and 0 <= item <= 2**63 - 1:
             result[key] = item
     utc = row.get('utc')
     if isinstance(utc, str) and re.fullmatch(r'[0-9T:.+Z-]{1,40}', utc):

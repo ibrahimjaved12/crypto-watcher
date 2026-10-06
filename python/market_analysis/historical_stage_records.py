@@ -1,9 +1,28 @@
 """Verified stage evidence retained on disk, with repeatable bounded readers."""
 from dataclasses import dataclass
 import hashlib
+import gzip
+import io
+import zlib
 from pathlib import Path
 
 from .historical_replay_runtime import _canonical_bytes, _read_json_bytes
+
+
+class _StoredReader(io.RawIOBase):
+    """Hash stored bytes as the buffered/decompression reader consumes them."""
+    def __init__(self, handle, digest):
+        super().__init__()
+        self.handle, self.digest = handle, digest
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        raw = self.handle.read(len(buffer))
+        self.digest.update(raw)
+        buffer[:len(raw)] = raw
+        return len(raw)
 
 
 @dataclass(frozen=True)
@@ -13,34 +32,65 @@ class StageRecords:
     sha256: str
     scientific_path: str | None = None
     scientific_sha256: str | None = None
+    storage_encoding: str = "identity"
+    stored_sha256: str | None = None
+    scientific_stored_sha256: str | None = None
 
     def __post_init__(self):
         if type(self.count) is not int or self.count < 0 or not isinstance(self.path, str) or not self.path:
             raise ValueError("invalid stage record reference")
-        for sha in (self.sha256, self.scientific_sha256):
+        if self.storage_encoding not in ("identity", "gzip"):
+            raise ValueError("invalid stage storage encoding")
+        for sha in (self.sha256, self.scientific_sha256, self.stored_sha256, self.scientific_stored_sha256):
             if sha is not None and (type(sha) is not str or len(sha) != 64
                                     or any(char not in "0123456789abcdef" for char in sha)):
                 raise ValueError("invalid stage record SHA")
-        if (self.scientific_path is None) != (self.scientific_sha256 is None):
+        if self.sha256 is None or (self.scientific_path is None) != (self.scientific_sha256 is None):
             raise ValueError("incomplete scientific record reference")
+        if self.scientific_path is not None and (type(self.scientific_path) is not str or not self.scientific_path):
+            raise ValueError("invalid scientific record path")
+        if self.scientific_path is None and self.scientific_stored_sha256 is not None:
+            raise ValueError("orphan scientific storage hash")
+        if self.storage_encoding == "gzip" and (self.stored_sha256 is None or
+                self.scientific_path is not None and self.scientific_stored_sha256 is None):
+            raise ValueError("gzip stage records require stored hashes")
 
     def __len__(self):
         return self.count
 
+    def _lines(self, scientific=False):
+        path = self.scientific_path if scientific else self.path
+        expected = self.scientific_sha256 if scientific else self.sha256
+        stored = self.scientific_stored_sha256 if scientific else self.stored_sha256
+        logical_digest, stored_digest, count = hashlib.sha256(), hashlib.sha256(), 0
+        try:
+            with Path(path).open("rb") as handle, io.BufferedReader(_StoredReader(handle, stored_digest)) as reader:
+                stream = gzip.GzipFile(fileobj=reader, mode="rb") if self.storage_encoding == "gzip" else reader
+                try:
+                    for raw in stream:
+                        if not raw.endswith(b"\n"):
+                            raise ValueError("truncated stage records")
+                        if scientific:
+                            raw.decode("ascii")
+                        elif raw != _canonical_bytes(_read_json_bytes(raw)):
+                            raise ValueError("noncanonical stage record")
+                        logical_digest.update(raw)
+                        count += 1
+                        yield raw
+                finally:
+                    if stream is not reader:
+                        stream.close()
+        except (gzip.BadGzipFile, EOFError, zlib.error, UnicodeError) as exc:
+            raise ValueError("corrupt stage record storage") from exc
+        if count != self.count or logical_digest.hexdigest() != expected:
+            raise ValueError("stage records count/logical SHA mismatch")
+        if stored is not None and stored_digest.hexdigest() != stored:
+            raise ValueError("stage records stored SHA mismatch")
+
     def __iter__(self):
         from .historical_study_runtime import decode
-        digest = hashlib.sha256()
-        count = 0
-        with Path(self.path).open("rb") as stream:
-            for raw in stream:
-                value = _read_json_bytes(raw)
-                if raw != _canonical_bytes(value):
-                    raise ValueError("noncanonical stage record")
-                digest.update(raw)
-                count += 1
-                yield decode(value)
-        if count != self.count or digest.hexdigest() != self.sha256:
-            raise ValueError("stage records count/digest mismatch")
+        for raw in self._lines():
+            yield decode(_read_json_bytes(raw))
 
     def __study_items__(self):
         return iter(self)
@@ -54,18 +104,11 @@ class StageRecords:
                 yield from iter_canonical_study_json(record)
                 separator = ","
             return
-        digest, count, separator = hashlib.sha256(), 0, ""
-        with Path(self.scientific_path).open("rb") as stream:
-            for raw in stream:
-                if not raw.endswith(b"\n"):
-                    raise ValueError("truncated scientific stage record")
-                digest.update(raw)
-                count += 1
-                yield separator
-                yield raw[:-1].decode("ascii")
-                separator = ","
-        if count != self.count or digest.hexdigest() != self.scientific_sha256:
-            raise ValueError("scientific stage records count/SHA mismatch")
+        separator = ""
+        for raw in self._lines(scientific=True):
+            yield separator
+            yield raw[:-1].decode("ascii")
+            separator = ","
 
     def __study_json_chunks__(self):
         yield "["
@@ -73,20 +116,11 @@ class StageRecords:
         yield "]"
 
     def verify(self):
-        digest = hashlib.sha256()
-        count = 0
-        with Path(self.path).open("rb") as stream:
-            for raw in stream:
-                if not raw.endswith(b"\n"):
-                    raise ValueError("truncated stage records")
-                digest.update(raw)
-                count += 1
-        if count != self.count or digest.hexdigest() != self.sha256:
-            raise ValueError("stage records count/digest mismatch")
+        for _ in self._lines():
+            pass
         if self.scientific_path is not None:
-            from .historical_shared_v1 import _file_sha
-            if _file_sha(self.scientific_path) != self.scientific_sha256:
-                raise ValueError("scientific stage records SHA mismatch")
+            for _ in self._lines(scientific=True):
+                pass
 
 
 @dataclass(frozen=True)

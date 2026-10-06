@@ -18,6 +18,7 @@ from . import historical_operational_events as events
 from .historical_study_bundles import (
     BASE, SOURCES, identifier, sha, file_sha, regular, read_bundle, safe_relative,
     install_files, verify_recovery_tree, classify_recovery_inventory, last_verified_unit,
+    footprint, publication_capacity, BundleFootprintError,
 )
 from .historical_study_runtime import current_runtime_implementation_revision
 
@@ -145,9 +146,10 @@ class SliceYield(Exception):
 
 
 class SliceController:
-    def __init__(self, max_new_stages, max_elapsed_seconds, status_path, identity, root, headroom, *, started=None, deadline_epoch=None):
+    def __init__(self, max_new_stages, max_elapsed_seconds, status_path, identity, root, headroom, *, started=None, deadline_epoch=None, capacity_limits=None):
         positive(max_new_stages, 'max_new_stages')
         positive(max_elapsed_seconds, 'max_elapsed_seconds')
+        self.capacity_limits = capacity_limits
         self.limit, self.seconds = max_new_stages, max_elapsed_seconds
         self.started = started if started is not None else time.monotonic()
         self.deadline = (time.monotonic() + deadline_epoch - time.time() if deadline_epoch else self.started + self.seconds)
@@ -163,7 +165,28 @@ class SliceController:
                        'scientific_state': 'FAILED', 'remote_published': False,
                        'yield_reason': None, 'failure_category': None}
 
+    def check_capacity(self):
+        if self.capacity_limits is None:
+            return
+        # Stat-only observations of durable owned files, not a prediction of the
+        # next stage. Snapshot's semantically verified closure remains authoritative.
+        paths = (path for path in Path(self.root).rglob('*') if path.is_file()
+                 and not any(part.startswith('.') and part != '.period-manifests'
+                             for part in path.relative_to(self.root).parts)
+                 and not path.name.endswith(('.request.json', '.job.json')))
+        def check_deadline():
+            if time.monotonic() >= self.deadline - (30 if self.absolute_deadline else 0):
+                self.stop('compute-deadline' if self.absolute_deadline else 'max-elapsed-seconds')
+        measured = footprint(paths, check=check_deadline)
+        events.emit('RECOVERY_FOOTPRINT', measured_bytes=measured, transfer_bytes=measured,
+                    assembled_limit_bytes=self.capacity_limits['max_uncompressed_bytes'],
+                    transfer_limit_bytes=self.capacity_limits['max_transfer_bytes'])
+        publication_capacity(measured, BASE / 'transfers/publication',
+            max_bytes=self.capacity_limits['max_uncompressed_bytes'],
+            max_transfer_bytes=self.capacity_limits['max_transfer_bytes'], check=check_deadline)
+
     def reason(self):
+        self.check_capacity()
         if len(self.new) >= self.limit:
             return 'max-new-stages'
         if time.monotonic() >= self.deadline - (30 if self.absolute_deadline else 0):
@@ -225,13 +248,16 @@ class SliceController:
             self.last = {'kind': 'stage', **details}
             (self.new if event.endswith('COMPLETED') else self.reused).append(
                 {'stage_id': details['stage_id'], 'sha256': details['stage_result_sha256']})
-            if event.endswith('COMPLETED') and self.reason():
-                self.stop(self.reason())
+            reason = self.reason()
+            if event.endswith('COMPLETED') and reason:
+                self.stop(reason)
         elif event in ('BEFORE_NEW_STAGE', 'BEFORE_PERIOD_FINALIZATION', 'CORE_ARCHIVE_INDEX_READY'):
-            if self.reason():
-                self.stop(self.reason())
+            reason = self.reason()
+            if reason:
+                self.stop(reason)
         elif event in ('PERIOD_ARTIFACT_FINALIZED', 'SKIPPED_EXISTING_ARTIFACT'):
             self.last = {'kind': 'period', **details}
+            self.check_capacity()
         if event != 'REPLAY_CURRENT_PROGRESS':
             self.save()
 
@@ -342,7 +368,9 @@ def run(args):
             execution._replace_atomic(prior_path, execution._canonical({
                 'version': STATUS_VERSION, 'identity': campaign_identity(spec),
                 'phase': args.phase, 'requested_period_index': args.period_index,
-                'scientific_state': 'FAILED', 'failure_category': type(exc).__name__,
+                'scientific_state': 'FAILED',
+                'failure_category': 'RESOURCE_LIMIT' if isinstance(exc, BundleFootprintError) else type(exc).__name__,
+                **({'resource_failure': exc.measurements} if isinstance(exc, BundleFootprintError) else {}),
                 'remote_published': False, 'last_verified_unit': prior.get('last_verified_unit'), 'disk': disk_sample(root)}))
             return 1
         finally:
@@ -405,7 +433,7 @@ def _run_owned(args):
                 'period': execution.report_json_safe(period) if period else None}
     controller = SliceController(args.max_new_stages, args.max_elapsed_seconds,
                 root / 'operations/status.json', identity, root, spec['limits']['headroom_bytes'],
-                started=args.slice_started, deadline_epoch=args.compute_deadline_epoch)
+                started=args.slice_started, deadline_epoch=args.compute_deadline_epoch, capacity_limits=spec['limits'])
     if args.restore_manifest:
         controller.status['restored_completed_work'] = recovery['metadata']['completed_work']
         controller.last = restored_unit
@@ -425,8 +453,9 @@ def _run_owned(args):
             configure(BASE / 'prepared-cache', spec, inventory)
             if args.operation == 'preflight':
                 controller.status['preflight_passed'] = True
-            if controller.reason():
-                controller.stop(controller.reason())
+            reason = controller.reason()
+            if reason:
+                controller.stop(reason)
             if args.operation == 'execute-period':
                 execution.execute_study_periods(manifest, BASE / 'manifests/coverage.json', BASE / 'inputs/core',
                     root / 'outputs', phase=args.phase, period_index=args.period_index, allow_test=args.allow_test,
@@ -446,7 +475,10 @@ def _run_owned(args):
     except BaseException as exc:
         import traceback
         execution._replace_atomic(root / 'operations/last-failure.txt', traceback.format_exc())
-        controller.status.update(scientific_state='FAILED', failure_category=type(exc).__name__)
+        controller.status.update(scientific_state='FAILED',
+            failure_category='RESOURCE_LIMIT' if isinstance(exc, BundleFootprintError) else type(exc).__name__)
+        if isinstance(exc, BundleFootprintError):
+            controller.status['resource_failure'] = exc.measurements
         controller.save()
         return 1
     finally:
