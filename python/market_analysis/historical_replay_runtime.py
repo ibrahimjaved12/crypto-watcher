@@ -76,11 +76,146 @@ def _dataclass_metadata(cls):
     return declared, frozenset(item.name for item in declared), get_type_hints(cls)
 
 
+_UNION, _NONE, _SCALAR, _DECIMAL, _TUPLE_VARIADIC, _TUPLE_FIXED, _INT_MAPPING, \
+    _MAPPING, _DATACLASS, _UNSUPPORTED = range(10)
+_NoneType = type(None)
+# id(annotation) -> (annotation, resolved dispatch plan or None); see _decode_plan.
+_DECODE_PLANS = {}
+
+
+def _decode_plan(annotation):
+    """Resolve, once per annotation, the branch _decode_resolved would take.
+
+    Returns None when the annotation must keep the reference code path.
+    """
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin in (Union, UnionType):
+        return (_UNION, _NoneType in args,
+                tuple(item for item in args if item is not _NoneType))
+    if annotation is _NoneType:
+        return (_NONE,)
+    if annotation in (str, int, float, bool):
+        return (_SCALAR, annotation)
+    if annotation is Decimal:
+        return (_DECIMAL,)
+    if origin is tuple:
+        if len(args) == 2 and args[1] is Ellipsis:
+            return (_TUPLE_VARIADIC, args[0])
+        return (_TUPLE_FIXED, args)
+    if origin in (Mapping, dict):
+        if len(args) != 2:
+            return None
+        key_kind, value_kind = args
+        if key_kind is int:
+            return (_INT_MAPPING, tuple[int, value_kind])
+        return (_MAPPING, key_kind, value_kind)
+    cls = origin or annotation
+    if cls in _ALLOWED and is_dataclass(cls):
+        return (_DATACLASS, cls, origin, args)
+    return (_UNSUPPORTED,)
+
+
+@lru_cache(maxsize=None)
+def _dataclass_field_hints(cls):
+    declared, names, hints = _dataclass_metadata(cls)
+    return tuple((item.name, hints[item.name]) for item in declared), names
+
+
 def _decode(annotation, value, substitutions=None):
     """Reconstruct only allowlisted replay value types, checking every field."""
     substitutions = substitutions or {}
     if annotation in substitutions:
         annotation = substitutions[annotation]
+    # Keyed by identity: typing treats Union[a, b] == Union[b, a], but the
+    # try-in-order semantics depend on each annotation's own argument order.
+    entry = _DECODE_PLANS.get(id(annotation))
+    if entry is not None and entry[0] is annotation:
+        plan = entry[1]
+    else:
+        plan = _decode_plan(annotation)
+        if len(_DECODE_PLANS) >= 4096:
+            _DECODE_PLANS.clear()
+        # Holding the annotation keeps its id from being reused.
+        _DECODE_PLANS[id(annotation)] = (annotation, plan)
+    if plan is None:
+        return _decode_resolved(annotation, value, substitutions)
+    kind = plan[0]
+    if kind == _DATACLASS:
+        cls, origin, args = plan[1], plan[2], plan[3]
+        if type(value) is not dict:
+            raise ValueError("checkpoint dataclass must be an object")
+        field_hints, names = _dataclass_field_hints(cls)
+        if set(value) != names:
+            raise ValueError(f"checkpoint {cls.__name__} fields mismatch")
+        if origin is not None:
+            local = dict(substitutions)
+            local.update(zip(cls.__parameters__, args))
+        else:
+            # _decode never mutates substitutions, so sharing equals copying.
+            local = substitutions
+        return cls(**{name: _decode(hint, value[name], local)
+                      for name, hint in field_hints})
+    if kind == _SCALAR:
+        if type(value) is not plan[1]:
+            raise ValueError("checkpoint scalar has wrong type")
+        return value
+    if kind == _UNION:
+        if value is None and plan[1]:
+            return None
+        for choice in plan[2]:
+            try:
+                return _decode(choice, value, substitutions)
+            except (TypeError, ValueError, KeyError, IndexError):
+                continue
+        raise ValueError("checkpoint union field has invalid value")
+    if kind == _DECIMAL:
+        if type(value) is not str:
+            raise ValueError("checkpoint Decimal must be a string")
+        try:
+            result = Decimal(value)
+        except Exception as exc:
+            raise ValueError("invalid checkpoint Decimal") from exc
+        if not result.is_finite():
+            raise ValueError("nonfinite checkpoint Decimal")
+        return result
+    if kind == _TUPLE_VARIADIC:
+        if type(value) is not list:
+            raise ValueError("checkpoint tuple must be an array")
+        item_kind = plan[1]
+        return tuple(_decode(item_kind, item, substitutions) for item in value)
+    if kind == _TUPLE_FIXED:
+        if type(value) is not list:
+            raise ValueError("checkpoint tuple must be an array")
+        args = plan[1]
+        if len(args) != len(value):
+            raise ValueError("checkpoint tuple length mismatch")
+        return tuple(_decode(item_kind, item, substitutions)
+                     for item_kind, item in zip(args, value))
+    if kind == _INT_MAPPING:
+        if type(value) is not list:
+            raise ValueError("checkpoint integer mapping must be pairs")
+        pair_kind = plan[1]
+        pairs = [_decode(pair_kind, row, substitutions) for row in value]
+        if len({key for key, _ in pairs}) != len(pairs):
+            raise ValueError("duplicate checkpoint mapping key")
+        return dict(pairs)
+    if kind == _MAPPING:
+        if type(value) is not dict:
+            raise ValueError("checkpoint mapping must be an object")
+        key_kind, value_kind = plan[1], plan[2]
+        return {_decode(key_kind, key, substitutions):
+                _decode(value_kind, item, substitutions)
+                for key, item in value.items()}
+    if kind == _NONE:
+        if value is not None:
+            raise ValueError("checkpoint field must be null")
+        return None
+    raise ValueError(f"unsupported checkpoint type: {annotation}")
+
+
+def _decode_resolved(annotation, value, substitutions):
+    """Original uncached dispatch after substitution; used when no plan applies."""
     origin = get_origin(annotation)
     args = get_args(annotation)
     if origin in (Union, UnionType):

@@ -21,7 +21,7 @@ from .movement import (
     MovementBucketEngineState,
 )
 from .movement_history import (
-    MINUTE_MS, CompletedMovementCandle, build_historical_window_inputs,
+    MINUTE_MS, CompletedMovementCandle, IncrementalHistoricalWindowInputs,
 )
 from .movement_metrics import (
     ALGORITHM_VERSION as MOVEMENT_ALGORITHM_VERSION,
@@ -60,10 +60,15 @@ def _eligible_historical_end_ranges(boundary: int, lookback_ms: int):
 
 
 class _ReplayHistoricalInputCache:
-    """Reuse a builder result only within one replay and one visible history."""
+    """Reuse a builder result only within one replay and one visible history.
+
+    Misses are served by a per-symbol incremental builder that appends only
+    newly visible candles and otherwise defers to build_historical_window_inputs.
+    """
 
     def __init__(self):
         self._entries = {}
+        self._incremental = {}
 
     def get(self, symbol, candles, boundary, config, generation):
         key = (generation, _eligible_historical_end_ranges(
@@ -71,7 +76,10 @@ class _ReplayHistoricalInputCache:
         entry = self._entries.get(symbol)
         if entry is not None and entry[0] == key:
             return entry[1]
-        result = build_historical_window_inputs(candles, boundary, config)
+        builder = self._incremental.get(symbol)
+        if builder is None:
+            builder = self._incremental[symbol] = IncrementalHistoricalWindowInputs()
+        result = builder.build(candles, boundary, config, generation)
         self._entries[symbol] = (key, result)
         return result
 
