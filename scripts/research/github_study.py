@@ -914,8 +914,8 @@ def snapshot():
     # period cleans only known abandoned runtime temporaries before validation.
     with ExitStack() as stack:
         stack.enter_context(owned_run_directory(root, cleanup=False))
-        for period_root in sorted((root / 'checkpoints').glob('period-*')):
-            stack.enter_context(owned_run_directory(period_root))
+        for checkpoint_root in sorted((root / 'checkpoints').glob('period-*')):
+            stack.enter_context(owned_run_directory(checkpoint_root))
         with events.span('recovery-validation'):
             files, work = verify_recovery_tree(BASE, spec['campaign_id'], manifest, coverage,
                                              campaign_identity(spec), check=deadline.check, locks_held=True)
@@ -978,7 +978,7 @@ def snapshot():
                                'parent_receipt': parent, 'accounting': accounting_reference(record, execution._read_json(BASE / 'transfers/control-claim-reference.json'))},
                 presentation={'phase': phase, 'period_index': index, 'operation': operation,
                               'date': period.utc_date.isoformat() if period else None,
-                              'symbols': sorted({symbol for packages in planned_packages(period).values() for _, symbol in packages}) if period else [],
+                              'symbols': sorted({symbol for packages in planned_packages(period).values() for _, symbol in packages if symbol is not None}) if period else [],
                               'sources': sorted({row['facts']['source'] for row in execution._read_json(BASE / 'transfers/input-manifest.json')['files'] if 'source' in row.get('facts', {})}), 'sequence': record['sequence']})
         value = pack_files([(str(path.relative_to(BASE)), path, {'role': 'committed-recovery', **({'partition_version': 'period-results-v1'} if record else {})}) for path in files],
             BASE / 'transfers/publication', kind='recovery', identity=campaign_identity(spec),

@@ -15,6 +15,15 @@ the scientific producer. Never substitute the new runtime SHA for that producer.
 
 ## New campaigns: the normal operating interface
 
+For the failed `development-0-post170-private-v1` campaign (Actions run
+`37467677040`), preserve its authority, append-only ledger, charged reservations
+and input Releases. Do not delete/reset `control.json` or revive
+`PUBLICATION_FAILED`. Existing v1 campaign files still pin the defective runtime.
+After the snapshot/finalizer repair merges, the owner must create fresh campaign
+IDs with both `runtime_sha` and `orchestration_sha` set to the actual repaired main
+merge SHA, retaining the frozen input identity and explicitly selecting the
+budget. Keep the frozen scientific producer revision unchanged.
+
 After this PR is integrated, create a **new** pinned campaign from
 `research/campaigns/github-production.template.json`. The template is deliberately
 non-dispatchable: its real pins, frozen membership/input locators, total budget and
