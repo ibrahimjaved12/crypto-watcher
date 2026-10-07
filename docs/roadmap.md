@@ -1,5 +1,9 @@
 # Implementation and deployment roadmap
 
+> **Provisional.** This document is AI-generated and is not the source of truth. The owner's
+> intent in [`CLAUDE.md`](../CLAUDE.md) takes precedence. Reconciliation is tracked in
+> [#181](https://github.com/ibrahimjaved12/crypto-watcher/issues/181).
+
 Snapshot: 2026-09-22, based on the revised GitHub issue bodies. This supersedes the
 earlier eight-stage roadmap. See [product direction and architecture](product-direction.md)
 for the futures-only product, current/target diagrams, evidence rules, and ownership.

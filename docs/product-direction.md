@@ -1,5 +1,9 @@
 # Product direction and architecture
 
+> **Provisional.** This document is AI-generated and is not the source of truth. The owner's
+> intent in [`CLAUDE.md`](../CLAUDE.md) takes precedence. Reconciliation is tracked in
+> [#181](https://github.com/ibrahimjaved12/crypto-watcher/issues/181).
+
 Decision snapshot: 2026-09-20, implementing [issue #12](https://github.com/ibrahimjaved12/crypto-watcher/issues/12).
 The [staged implementation and deployment roadmap](roadmap.md) separates current,
 proposed, and conditional work. [Analysis records and evaluation](analysis-evaluation.md)
