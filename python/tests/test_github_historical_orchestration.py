@@ -4,17 +4,22 @@ from contextlib import ExitStack, nullcontext
 import base64
 from copy import deepcopy
 from datetime import date
+from decimal import Decimal
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import threading
+import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+import urllib.parse
 
 from market_analysis import historical_campaign_control as control
 from market_analysis import historical_study_bundles as bundles
@@ -774,6 +779,689 @@ class ResourceDiagnosticTests(unittest.TestCase):
         self.assertEqual(row['assembled_limit_bytes'], 200)
         for field in ('required_bytes', 'limit_bytes', 'free_bytes', 'transfer_bytes', 'private_path'):
             self.assertNotIn(field, row)
+
+
+class UploadReconcileTests(unittest.TestCase):
+    PREFIX = "https://api.github.com/repos/owner/private"
+    UPLOAD_URL = "https://uploads.github.com/repos/owner/private/releases/1/assets{?name,label}"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.study = load_script("github_study")
+        cls.campaign = load_script("github_campaign")
+
+    def setUp(self):
+        # github_study imports TransportError lazily from github_campaign.
+        modules = patch.dict(sys.modules, {"github_campaign": self.campaign})
+        modules.start()
+        self.addCleanup(modules.stop)
+
+    def fake_github(self, uploads, patch_outcome="ok"):
+        """Synthetic release API. Upload outcomes: ok, stored-ambiguous (stored,
+        then the connection fails), partial-ambiguous, ambiguous (nothing stored)."""
+        campaign = self.campaign
+        github = object.__new__(self.study.GitHub)
+        github.prefix, github.branch = self.PREFIX, "main"
+        github.deadline = SimpleNamespace(check=lambda: None, remaining=lambda: 10_000)
+        state = SimpleNamespace(assets={}, next_id=100, calls=[], draft=True, uploads=list(uploads))
+
+        def reply(value):
+            return io.BytesIO(json.dumps(value).encode())
+
+        def response(url, *, accept="application/vnd.github+json", method="GET", body=None,
+                     content_type=None, size=None, timeout=30):
+            path = url[len(self.PREFIX):] if url.startswith(self.PREFIX) else url
+            state.calls.append((method, path.split("?")[0], timeout))
+            if method == "POST" and url.startswith("https://uploads.github.com/"):
+                name = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["name"][0]
+                outcome = state.uploads.pop(0)
+                if outcome == "ambiguous":
+                    raise campaign.TransportError("AMBIGUOUS_WRITE", method)
+                if name in state.assets:
+                    raise campaign.TransportError("HTTP", method, 422)
+                raw = Path(body).read_bytes()
+                stored = ({"state": "starter", "size": len(raw) // 2} if outcome == "partial-ambiguous" else
+                          {"state": "uploaded", "size": len(raw), "digest": "sha256:" + hashlib.sha256(raw).hexdigest()})
+                state.next_id += 1
+                state.assets[name] = {"id": state.next_id, "name": name, **stored}
+                if outcome != "ok":
+                    raise campaign.TransportError("AMBIGUOUS_WRITE", method)
+                return reply(state.assets[name])
+            if method == "POST" and path == "/releases":
+                return reply({"id": 1, "draft": True, "upload_url": self.UPLOAD_URL})
+            if method == "GET" and path.startswith("/releases/1/assets?"):
+                return reply(list(state.assets.values()))
+            if path.startswith("/releases/assets/"):
+                asset_id = int(path.rsplit("/", 1)[1])
+                name = next(key for key, asset in state.assets.items() if asset["id"] == asset_id)
+                if method == "DELETE":
+                    del state.assets[name]
+                    return io.BytesIO(b"")
+                return reply(state.assets[name])
+            if path == "/releases/1":
+                if method == "PATCH":
+                    if patch_outcome != "unapplied-ambiguous":
+                        state.draft = False
+                    if patch_outcome != "ok":
+                        raise campaign.TransportError("AMBIGUOUS_WRITE", method)
+                return reply({"id": 1, "draft": state.draft})
+            self.fail("unexpected synthetic request " + method + " " + path)
+
+        github.response = response
+        return github, state
+
+    def part(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "part-0001.tar"
+        path.write_bytes(b"synthetic release part bytes")
+        return path
+
+    def calls(self, state, method):
+        return [call for call in state.calls if call[0] == method]
+
+    def test_ambiguous_upload_with_correctly_stored_asset_succeeds(self):
+        github, state = self.fake_github(["stored-ambiguous"])
+        github.upload_verified({"id": 1, "upload_url": self.UPLOAD_URL}, self.part())
+        self.assertEqual(len(self.calls(state, "POST")), 1)
+        self.assertEqual(self.calls(state, "POST")[0][2], 600)
+        self.assertFalse(self.calls(state, "DELETE"))
+        self.assertEqual(state.assets["part-0001.tar"]["state"], "uploaded")
+
+    def test_ambiguous_upload_with_partial_asset_deletes_then_reuploads(self):
+        github, state = self.fake_github(["partial-ambiguous", "ok"])
+        path = self.part()
+        github.upload_verified({"id": 1, "upload_url": self.UPLOAD_URL}, path)
+        self.assertEqual(len(self.calls(state, "POST")), 2)
+        self.assertEqual(len(self.calls(state, "DELETE")), 1)
+        asset = state.assets["part-0001.tar"]
+        self.assertEqual((asset["state"], asset["size"]), ("uploaded", path.stat().st_size))
+        self.assertEqual(asset["digest"], "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_ambiguous_upload_with_absent_asset_retries_once(self):
+        github, state = self.fake_github(["ambiguous", "ok"])
+        github.upload_verified({"id": 1, "upload_url": self.UPLOAD_URL}, self.part())
+        self.assertEqual([call[2] for call in self.calls(state, "POST")], [600, 600])
+        self.assertFalse(self.calls(state, "DELETE"))
+        self.assertIn("part-0001.tar", state.assets)
+
+    def test_second_ambiguous_upload_failure_raises(self):
+        github, state = self.fake_github(["ambiguous", "ambiguous"])
+        with self.assertRaises(self.campaign.TransportError) as raised:
+            github.upload_verified({"id": 1, "upload_url": self.UPLOAD_URL}, self.part())
+        self.assertEqual(raised.exception.code, "AMBIGUOUS_WRITE")
+        self.assertEqual(len(self.calls(state, "POST")), 2)
+
+    def publish(self, patch_outcome):
+        github, state = self.fake_github(["ok"], patch_outcome)
+        directory = self.part().parent / "generation"
+        directory.mkdir()
+        (directory / "manifest.json").write_text("{}")
+        presentation = patch.object(self.study, "release_presentation", return_value=("title", "body"))
+        presentation.start()
+        self.addCleanup(presentation.stop)
+        return github, state, lambda: github.publish("recovery-synthetic-1-1", directory)
+
+    def test_ambiguous_publish_patch_with_published_release_succeeds(self):
+        github, state, publish = self.publish("applied-ambiguous")
+        self.assertIs(publish()["draft"], False)
+        self.assertEqual(state.calls[-1], ("GET", "/releases/1", 30))
+
+    def test_ambiguous_publish_patch_with_draft_release_raises(self):
+        github, state, publish = self.publish("unapplied-ambiguous")
+        with self.assertRaises(self.campaign.TransportError) as raised:
+            publish()
+        self.assertEqual(raised.exception.code, "AMBIGUOUS_WRITE")
+        self.assertTrue(state.draft)
+
+
+class PeriodReportVerificationTests(unittest.TestCase):
+    REVISION = "a" * 40
+
+    def setUp(self):
+        from market_analysis import historical_market_state_study_execution as execution
+        self.execution = execution
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.path = self.root / "outputs" / execution.PERIOD_DIRECTORY / "period.json"
+        self.path.parent.mkdir(parents=True)
+        self.path.write_bytes(json.dumps({"report_sha256": "d" * 64}).encode())
+        self.sidecar = self.root / "outputs" / ".period-manifests" / "period.json"
+        self.manifest = SimpleNamespace(manifest_sha256="b" * 64)
+        self.coverage = {"coverage_manifest_sha256": "c" * 64}
+        self.period = {"study_period_index": 0, "utc_date": "2024-01-01", "phase": "development"}
+        # Stands in for the complete decode/validation of a ~2.5 GB report.
+        full = patch.object(execution, "load_finalized_period_report",
+                            side_effect=lambda path, *args, **kwargs: json.loads(Path(path).read_bytes()))
+        self.full = full.start()
+        self.addCleanup(full.stop)
+
+    def sha(self, full):
+        return self.execution.period_report_sha_for_verification(
+            self.path, self.manifest, self.coverage, self.period, self.REVISION, full=full)
+
+    def test_fast_path_matches_full_validation_without_decoding(self):
+        expected = self.sha(True)
+        self.assertEqual(expected, "d" * 64)
+        self.assertTrue(self.sidecar.exists())
+        self.assertEqual(self.full.call_count, 1)
+        self.assertEqual(self.sha(False), expected)
+        self.assertEqual(self.full.call_count, 1)
+
+    def test_fast_path_without_sidecar_takes_full_path(self):
+        self.assertEqual(self.sha(False), "d" * 64)
+        self.assertEqual(self.full.call_count, 1)
+
+    def test_fast_path_rejects_one_byte_report_change(self):
+        self.sha(True)
+        raw = bytearray(self.path.read_bytes())
+        raw[-3] ^= 1
+        self.path.write_bytes(raw)
+        with self.assertRaises((ValueError, self.execution.StudyArtifactConflictError)):
+            self.sha(False)
+
+    def test_fast_path_rejects_altered_sidecar(self):
+        self.sha(True)
+        value = json.loads(self.sidecar.read_bytes())
+        value["report_sha256"] = "e" * 64
+        self.sidecar.write_bytes(json.dumps(value).encode())
+        with self.assertRaises((ValueError, self.execution.StudyArtifactConflictError)):
+            self.sha(False)
+
+    def test_recovery_tree_defaults_to_full_report_validation(self):
+        execution = self.execution
+        self.sidecar.parent.mkdir(parents=True)
+        self.sidecar.write_text("{}")
+        campaign_root = self.root / "base" / "campaigns" / "synthetic-campaign"
+        campaign_root.mkdir(parents=True)
+        (self.root / "outputs").rename(campaign_root / "outputs")
+        period = SimpleNamespace(study_period_index=0, phase="development")
+        manifest = SimpleNamespace(selected_periods=[period], manifest_sha256="b" * 64)
+        identity = {"expected_membership": {"development": [0]}, "producer_revision": self.REVISION}
+        verify = Mock(return_value="f" * 64)
+        with patch.object(execution, "_period_filename", return_value="period.json"), \
+             patch.object(execution, "period_report_sha_for_verification", verify):
+            for keywords, full in (({}, True), ({"full_report_validation": False}, False)):
+                with self.subTest(full=full):
+                    _, work = bundles.verify_recovery_tree(self.root / "base", "synthetic-campaign", manifest,
+                                                           self.coverage, identity, **keywords)
+                    self.assertEqual(work, ["f" * 64])
+                    self.assertIs(verify.call_args.kwargs["full"], full)
+
+
+def _reference_extract_candidate_inputs(records):
+    """The pre-optimization extract_candidate_inputs, kept as a differential oracle."""
+    from market_analysis.historical_stage_records import CandidateDecision
+    compact, bocpd = [], []
+    for item in records:
+        if item.evidence_kind in ("EVENT", "RETROSPECTIVE"):
+            compact.append(CandidateDecision(item.experiment_id, item.algorithm_version,
+                item.config_version, item.decision_time_ms, item.evidence_kind))
+        if item.experiment_id == "EXP-75-04B" and item.evidence_kind == "EVENT":
+            bocpd.append(item)
+    from market_analysis.historical_market_state_study_execution import _bocpd_onset_evidence
+    return tuple(compact), _bocpd_onset_evidence(bocpd)
+
+
+class StageVerificationTests(unittest.TestCase):
+    def setUp(self):
+        from market_analysis import historical_study_runtime as runtime
+        from market_analysis import historical_stage_records as records
+        self.runtime, self.records = runtime, records
+
+    def test_fast_canonical_record_encoder_matches_reference(self):
+        from market_analysis.historical_replay_runtime import _canonical_bytes, _read_json_bytes
+        texts = ["0", "-0", "0.0", "-0.0", "1.5", "-2.25e-10", "1e300", "5e-324", "1e-7", "0.1",
+                 "1.7976931348623157e308", "100000000000000000000.0", "123456789012345678901234567890",
+                 "-" + "9" * 80, "true", "false", "null", '""', "[]", "{}",
+                 '"snowman \\u2603 face \\ud83d\\ude00 nul \\u0000 tab \\t quote \\" slash \\/ e \\u00e9"',
+                 '"lone \\ud800 surrogate"', '"\xc3\xa9 raw utf-8"',
+                 '[1, 2.0, "x", [null, {"b": 1, "a": -0.0}], [], {}]',
+                 '{"z": {"y": [3, {"b": "\\u00e9", "a": 1e-7}]}, "a": 1e22, "m": 0.1, "": -1}',
+                 '{"experiment_id": "EXP-75-04B", "native_evidence": {"decimal": "1.2300"}, "n": -5000}']
+        for text in texts:
+            with self.subTest(text=text):
+                value = _read_json_bytes(text.encode("utf-8"))
+                self.assertEqual(self.records._canonical_record_bytes(value), _canonical_bytes(value))
+        for value in ({"k": -0.0, "big": 2 ** 70, "neg": -2 ** 70}, [2 ** 64, -2 ** 64, 0.5, -1e-300],
+                      {"☃": "\U0001F600", "nested": [[[{"deep": [True, False, None]}]]]}):
+            with self.subTest(value=value):
+                self.assertEqual(self.records._canonical_record_bytes(value), _canonical_bytes(value))
+        overflow = _read_json_bytes(b"1e999")
+        with self.assertRaises(ValueError) as reference:
+            _canonical_bytes(overflow)
+        with self.assertRaises(ValueError) as fast:
+            self.records._canonical_record_bytes(overflow)
+        self.assertEqual((type(fast.exception), str(fast.exception)),
+                         (type(reference.exception), str(reference.exception)))
+
+    def test_verification_memo_skips_only_unchanged_successful_references(self):
+        from dataclasses import replace
+        with TemporaryDirectory() as directory:
+            ref = self.runtime._write_records(Path(directory) / "stage.records.jsonl",
+                                              [{"experiment_id": "one"}, {"experiment_id": "two"}])
+            ref.verify()
+            with patch.object(self.records, "_read_json_bytes", side_effect=AssertionError("memo miss")):
+                ref.verify()  # same reference and unchanged files: no passes
+                with self.assertRaises(AssertionError):
+                    replace(ref, sha256="0" * 64).verify()  # different declared hash re-verifies
+            bad = replace(ref, scientific_sha256="0" * 64)
+            for _ in range(2):  # failures are never remembered
+                with self.assertRaises(ValueError):
+                    bad.verify()
+            path = Path(ref.path)
+            altered = bytearray(path.read_bytes())
+            altered[9] ^= 1  # same size, valid gzip, different stored bytes
+            replacement = path.with_name("replacement")
+            replacement.write_bytes(altered)
+            os.replace(replacement, path)
+            with self.assertRaisesRegex(ValueError, "stored SHA"):
+                ref.verify()
+
+    def evidence(self, experiment, kind, boundary, native):
+        from market_analysis.historical_market_state_candidate_evidence import HistoricalStudyCandidateEvidence
+        return HistoricalStudyCandidateEvidence(0, "2024-01-01", "development", experiment, "algo-1",
+                                                "cfg-☃", boundary, kind, "OK", native)
+
+    def test_extract_candidate_inputs_matches_full_decode_reference(self):
+        from market_analysis import historical_market_state_study_execution as execution
+        first = [self.evidence("EXP-75-01", "EVENT", 5_000, {"x": Decimal("1.50")}),
+                 self.evidence("EXP-75-04B", "EVENT", 10_000, {"causal_onset_observation": {"p": 0.5}}),
+                 self.evidence("EXP-75-04B", "RETROSPECTIVE", None, {}),
+                 self.evidence("EXP-75-04B", "CONTINUOUS", 60_000, {}),
+                 self.evidence("EXP-75-02", "RETROSPECTIVE", None, [1, 2]),
+                 self.evidence("EXP-75-03", "EVENT", None, {"empty": None})]
+        second = [self.evidence("V1", "CONTINUOUS", 120_000, {"s": "x"}),
+                  self.evidence("EXP-75-04B", "EVENT", 15_000, {"causal_onset_observation": {"p": 0.25}})]
+        in_memory = (self.evidence("EXP-75-04B", "EVENT", 20_000, {"causal_onset_observation": {"p": 1}}),)
+        decoded, depth = [], [0]
+        decode = self.runtime.decode
+
+        def counting_decode(value, *args, **kwargs):
+            # decode() recurses through the patched module name: count records only.
+            if not depth[0]:
+                decoded.append(1)
+            depth[0] += 1
+            try:
+                return decode(value, *args, **kwargs)
+            finally:
+                depth[0] -= 1
+
+        with TemporaryDirectory() as directory, \
+             patch.object(execution, "_bocpd_onset_evidence", side_effect=lambda items: tuple(items)):
+            root = Path(directory)
+
+            def spooled(prefix):
+                refs = (self.runtime._write_records(root / f"{prefix}-first.records.jsonl", first),
+                        self.runtime._write_records(root / f"{prefix}-second.records.jsonl", second))
+                joined = self.records.JoinedStageRecords((self.records.JoinedStageRecords((refs[0],)),
+                                                          refs[1], in_memory))
+                return refs, joined
+
+            expected = _reference_extract_candidate_inputs(spooled("reference")[1])
+            # fallback: verification cannot be memoized first, so every spooled line
+            # gets the typed decode. verify-first / already-verified: only the two
+            # spooled EXP-75-04B EVENT lines are decoded.
+            cases = (("fallback", spooled("fallback"), len(first) + len(second)),
+                     ("verify-first", spooled("verify-first"), 2))
+            cases += (("already-verified", cases[1][1], 2),)
+            for name, (refs, joined), expected_decodes in cases:
+                with self.subTest(path=name):
+                    decoded.clear()
+                    with patch.object(self.runtime, "decode", side_effect=counting_decode), \
+                         patch.object(self.records.StageRecords, "verify", lambda ref: None) \
+                            if name == "fallback" else nullcontext():
+                        actual = self.records.extract_candidate_inputs(joined)
+                    self.assertEqual(actual, expected)
+                    self.assertEqual([[type(field) for field in vars(item).values()] for item in actual[0]],
+                                     [[type(field) for field in vars(item).values()] for item in expected[0]])
+                    self.assertEqual(len(actual[1]), 3)
+                    self.assertEqual(len(decoded), expected_decodes)
+                    # Every path, the fallback included, leaves both references memoized.
+                    self.assertTrue(all(ref._verified() for ref in refs))
+
+    def test_extract_candidate_inputs_memoizes_verification(self):
+        from market_analysis import historical_market_state_study_execution as execution
+        with TemporaryDirectory() as directory, \
+             patch.object(execution, "_bocpd_onset_evidence", side_effect=lambda items: tuple(items)):
+            ref = self.runtime._write_records(Path(directory) / "stage.records.jsonl",
+                                              [self.evidence("EXP-75-01", "EVENT", 5_000, {})])
+            self.assertFalse(ref._verified())
+            self.records.extract_candidate_inputs(ref)
+            self.assertIn(ref._verification_key(), self.records._VERIFIED)
+            with patch.object(self.records.StageRecords, "_lines", side_effect=AssertionError("re-read")):
+                ref.verify()  # memoized: the files are not read again
+
+    def test_extract_candidate_inputs_rejects_corrupted_operational_file(self):
+        from market_analysis import historical_market_state_study_execution as execution
+        with TemporaryDirectory() as directory, \
+             patch.object(execution, "_bocpd_onset_evidence", side_effect=lambda items: tuple(items)):
+            ref = self.runtime._write_records(Path(directory) / "stage.records.jsonl",
+                                              [self.evidence("EXP-75-01", "EVENT", 5_000, {})])
+            path = Path(ref.path)
+            altered = bytearray(path.read_bytes())
+            altered[9] ^= 1  # same size and logical payload, different stored bytes
+            path.write_bytes(altered)
+            with self.assertRaisesRegex(ValueError, "stored SHA"):
+                self.records.extract_candidate_inputs(ref)
+            self.assertFalse(ref._verified())
+
+    def test_extract_candidate_inputs_keeps_stream_integrity_checks(self):
+        from dataclasses import replace
+        from market_analysis import historical_market_state_study_execution as execution
+        with TemporaryDirectory() as directory, \
+             patch.object(execution, "_bocpd_onset_evidence", side_effect=lambda items: tuple(items)):
+            ref = self.runtime._write_records(Path(directory) / "stage.records.jsonl",
+                                              [self.evidence("EXP-75-01", "EVENT", 5_000, {})])
+            for bad in (replace(ref, sha256="0" * 64), replace(ref, scientific_sha256="0" * 64),
+                        replace(ref, count=2)):
+                with self.assertRaises(ValueError):
+                    self.records.extract_candidate_inputs(bad)
+
+    def handmade(self, root, operational, scientific):
+        """Identity-encoded reference from separately chosen stream contents:
+        hash-valid and canonical, so only structural checks can reject it."""
+        from market_analysis.historical_market_state_study_json import iter_canonical_study_json
+        operational_raw = b"".join(self.runtime._canonical_bytes(value) for value in operational)
+        scientific_raw = b"".join("".join(iter_canonical_study_json(item)).encode("ascii") + b"\n"
+                                  for item in scientific)
+        path, science = root / "handmade.jsonl", root / "handmade.scientific.jsonl"
+        path.write_bytes(operational_raw)
+        science.write_bytes(scientific_raw)
+        return self.records.StageRecords(str(path), len(operational), hashlib.sha256(operational_raw).hexdigest(),
+                                         str(science), hashlib.sha256(scientific_raw).hexdigest())
+
+    def fallback(self):
+        """extract_candidate_inputs through the _candidate_decisions fallback path
+        (as for a reference whose verification could not be memoized first)."""
+        return patch.object(self.records.StageRecords, "verify", lambda ref: None)
+
+    def test_fallback_rejects_operational_scientific_disagreement(self):
+        from market_analysis import historical_market_state_study_execution as execution
+        consistent = self.evidence("EXP-75-01", "EVENT", 5_000, {})
+        for scientific in (self.evidence("EXP-75-02", "EVENT", 5_000, {}),
+                           self.evidence("EXP-75-01", "EVENT", 10_000, {})):
+            with self.subTest(scientific=scientific), TemporaryDirectory() as directory, \
+                 patch.object(execution, "_bocpd_onset_evidence", side_effect=lambda items: tuple(items)):
+                ref = self.handmade(Path(directory), [self.runtime.encode(consistent)], [scientific])
+                with self.fallback(), self.assertRaisesRegex(ValueError, "stage records stream mismatch"):
+                    self.records.extract_candidate_inputs(ref)
+                self.assertFalse(ref._verified())  # failures are never memoized
+
+    def test_structurally_malformed_record_rejected_only_by_fallback(self):
+        # The producer never decodes what it writes. The fallback's typed decode
+        # rejects a hash-valid but malformed record; verify() checks canonical
+        # bytes and hashes only, so after it, non-EVENT lines are not decoded.
+        from market_analysis import historical_market_state_study_execution as execution
+        item = self.evidence("EXP-75-01", "CONTINUOUS", 60_000, {})
+        malformed = self.runtime.encode(item)
+        malformed["fields"]["unknown"] = None
+        with TemporaryDirectory() as directory, \
+             patch.object(execution, "_bocpd_onset_evidence", side_effect=lambda items: tuple(items)):
+            ref = self.handmade(Path(directory), [malformed], [item])
+            with self.fallback(), self.assertRaises(ValueError):
+                self.records.extract_candidate_inputs(ref)
+            self.assertFalse(ref._verified())
+            self.assertEqual(self.records.extract_candidate_inputs(ref), ((), ()))
+
+    def test_verification_memo_key_uses_declared_values_not_dataclass_hash(self):
+        from dataclasses import dataclass, field, fields, replace
+        with TemporaryDirectory() as directory:
+            ref = self.runtime._write_records(Path(directory) / "stage.records.jsonl", [{"experiment_id": "one"}])
+            ref.verify()
+            self.assertIn(ref._verification_key(), self.records._VERIFIED)
+            for other in (replace(ref, sha256="0" * 64), replace(ref, scientific_sha256="0" * 64),
+                          replace(ref, stored_sha256="0" * 64), replace(ref, scientific_stored_sha256="0" * 64),
+                          replace(ref, count=2)):
+                with self.subTest(other=other):
+                    self.assertNotEqual(other._verification_key(), ref._verification_key())
+                    self.assertFalse(other._verified())
+                    with self.assertRaises(ValueError):
+                        other.verify()
+                    self.assertNotIn(other._verification_key(), self.records._VERIFIED)
+
+            @dataclass(frozen=True)
+            class Annotated(self.records.StageRecords):
+                notes: list = field(default_factory=list)
+
+            annotated = Annotated(**{item.name: getattr(ref, item.name) for item in fields(ref)}, notes=["x"])
+            with self.assertRaises(TypeError):
+                hash(annotated)
+            self.assertTrue(annotated._verified())  # same declared values and files as ref
+            annotated.verify()
+
+
+class CandidateBatchLayoutTests(unittest.TestCase):
+    SELECTORS = ("hmm", *(f"fixed-{index:02d}" for index in range(20)),
+                 *(f"atr-{index}" for index in range(10)), "taker-flow", "funding")
+
+    def layout(self, workers, batch_size_env=None, selectors=None):
+        from market_analysis import historical_market_state_study_execution as execution
+        with patch.dict(os.environ, {}):
+            os.environ.pop("STUDY_STAGE_BATCH_SIZE", None)
+            if batch_size_env is not None:
+                os.environ["STUDY_STAGE_BATCH_SIZE"] = batch_size_env
+            return execution._candidate_batch_layout(self.SELECTORS if selectors is None else selectors,
+                                                     {}, workers)
+
+    def test_small_batchable_counts(self):
+        from market_analysis import historical_market_state_study_execution as execution
+        tail = ("taker-flow", "funding")
+        one, two = ("hmm", *tail), ("hmm", "fixed-00", *tail)
+        # Derived default: balanced, floor 2, and no batching for <= 1 batchable stage.
+        self.assertEqual(self.layout(3, selectors=two), (2, 2))
+        self.assertEqual(self.layout(3), (11, 31))
+        self.assertEqual(self.layout(3, selectors=one)[1], 0)
+        self.assertEqual(self.layout(3, "", selectors=one)[1], 0)
+        self.assertEqual(self.layout(3, selectors=tail)[1], 0)
+        # One worker without the env, or an explicit size: exactly as before the pool.
+        self.assertEqual(self.layout(1, selectors=one), (execution.STAGE_BATCH_SIZE, 1))
+        for workers in (1, 3):
+            with self.subTest(workers=workers):
+                self.assertEqual(self.layout(workers, "5", selectors=one), (5, 1))
+                self.assertEqual(self.layout(workers, "1", selectors=one), (1, 0))
+                self.assertEqual(self.layout(workers, "5", selectors=tail), (5, 0))
+
+    def groups(self, batch_size, batched):
+        return [self.SELECTORS[start:min(start + batch_size, batched)] for start in range(0, batched, batch_size)]
+
+    def test_pool_batch_size_is_balanced_across_workers(self):
+        self.assertEqual(self.layout(3), (11, 31))
+        self.assertEqual([len(group) for group in self.groups(*self.layout(3))], [11, 11, 9])
+        self.assertEqual(self.layout(3, ""), (11, 31))
+
+    def test_single_worker_keeps_default_batch_size(self):
+        from market_analysis import historical_market_state_study_execution as execution
+        self.assertEqual(self.layout(1), (execution.STAGE_BATCH_SIZE, 31))
+        self.assertEqual(execution.STAGE_BATCH_SIZE, 9)
+
+    def test_explicit_batch_size_overrides_derivation(self):
+        for workers in (1, 3):
+            with self.subTest(workers=workers):
+                self.assertEqual(self.layout(workers, "5"), (5, 31))
+                self.assertEqual(self.layout(workers, "1"), (1, 0))
+                with self.assertRaises(ValueError):
+                    self.layout(workers, "0")
+
+    def test_batches_cover_each_batchable_selector_once_in_order(self):
+        for workers, env in ((1, None), (2, None), (3, None), (4, None), (3, "5"), (1, "31"), (3, "40")):
+            with self.subTest(workers=workers, env=env):
+                batch_size, batched = self.layout(workers, env)
+                flat = [selector for group in self.groups(batch_size, batched) for selector in group]
+                self.assertEqual(flat, list(self.SELECTORS[:31]))
+
+
+_FAKE_POOL_WORKER = """
+import os, sys, time
+from pathlib import Path
+from market_analysis import historical_study_runtime as runtime
+from market_analysis.historical_replay_runtime import _read_json_bytes
+
+def fake_stage(job_path, lease, *, batch_position=None):
+    job = _read_json_bytes(Path(job_path).read_bytes())
+    stage_id = job["identity"]["stage_id"]
+    with open(os.environ["FAKE_STAGE_LOG"], "a") as log:
+        log.write(stage_id + "\\n")
+    if stage_id == os.environ.get("FAKE_FAILING_STAGE"):
+        raise SystemExit(3)
+    if stage_id in os.environ.get("FAKE_SLOW_STAGES", "").split(","):
+        time.sleep(300)
+    runtime._publish_stage(Path(job["result_path"]), job["identity"], ("result", stage_id))
+
+runtime._worker_owned = fake_stage
+runtime._worker_pool(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]))
+"""
+
+
+class ParallelStageWorkerTests(unittest.TestCase):
+    BATCH = 3
+
+    def setUp(self):
+        from market_analysis import historical_study_runtime as runtime
+        self.runtime = runtime
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.log = self.root / "stages.log"
+        environment = patch.dict(os.environ, {"FAKE_STAGE_LOG": str(self.log)})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def stream(self, name):
+        period = self.root / name
+        (period / "study-points").mkdir(parents=True)
+        return SimpleNamespace(root=period / "study-points", metadata={"stream_sha256": "f" * 64},
+                               identity={"study_period_index": 0, "runtime_implementation_revision": "a" * 40})
+
+    def stages(self, count=8):
+        stages = []
+        for index in range(count):
+            request = {"action": "fake", "value": index}
+            stages.append((f"fake-{index:02d}", self.runtime.input_descriptor(request),
+                           lambda request=request: request))
+        return stages
+
+    def batches(self, stages):
+        return [stages[start:start + self.BATCH] for start in range(0, len(stages), self.BATCH)]
+
+    def fake_pool_arguments(self, pool_path, worker, lease):
+        return [sys.executable, "-c", _FAKE_POOL_WORKER, str(pool_path), str(worker), str(lease.descriptor)]
+
+    def in_process_batch(self, batch_path, environment, lease, *, stage_id=None, batch=False):
+        from market_analysis.historical_replay_runtime import _read_json_bytes
+        for job_path in _read_json_bytes(Path(batch_path).read_bytes())["batch"]:
+            job = _read_json_bytes(Path(job_path).read_bytes())
+            with self.log.open("a") as log:
+                log.write(job["identity"]["stage_id"] + "\n")
+            self.runtime._publish_stage(Path(job["result_path"]), job["identity"],
+                                        ("result", job["identity"]["stage_id"]))
+
+    def sequential(self, stream, stages, lease):
+        completed, position = [], 0
+        with patch.object(self.runtime, "_run_owned_worker", side_effect=self.in_process_batch):
+            while position < len(stages):
+                batch = self.runtime.run_stage_batch(stream, stages[position:position + self.BATCH],
+                                                     worker_lease=lease)
+                completed.extend(batch)
+                position += len(batch)
+        return completed
+
+    def parallel(self, stream, stages, lease, workers=3):
+        with patch.object(self.runtime, "_pool_worker_arguments", side_effect=self.fake_pool_arguments):
+            return [item for batch in self.runtime.run_stage_batches(
+                stream, self.batches(stages), workers=workers, worker_lease=lease) for item in batch]
+
+    def published(self, stream):
+        root = stream.root.parent / "post-replay"
+        return {path.name: path.read_bytes() for path in root.iterdir()}
+
+    def test_one_and_three_workers_produce_identical_ordered_outputs(self):
+        from market_analysis.historical_run_directory import owned_run_directory
+        stages = self.stages()
+        outputs = {}
+        for name, runner in (("one", self.sequential), ("three", self.parallel)):
+            stream = self.stream(name)
+            with owned_run_directory(stream.root.parent) as lease:
+                completed = runner(stream, stages, lease)
+            outputs[name] = ([(stage_id, result) for stage_id, result, _ in completed], self.published(stream))
+        self.assertEqual(outputs["one"], outputs["three"])
+        self.assertEqual([stage_id for stage_id, _ in outputs["three"][0]], [stage[0] for stage in stages])
+        self.assertEqual(set(outputs["three"][1]), {stage[0] + ".json" for stage in stages})
+        # Every stage ran exactly once per mode: each pool batch was claimed once.
+        ran = self.log.read_text().split()
+        self.assertEqual(sorted(ran), sorted([stage[0] for stage in stages] * 2))
+
+    def test_one_failing_worker_fails_the_run_and_terminates_the_others(self):
+        from market_analysis.historical_run_directory import owned_run_directory
+        stages = self.stages(9)
+        stream = self.stream("failing")
+        children, real_popen = [], subprocess.Popen
+
+        def recording_popen(*args, **kwargs):
+            children.append(real_popen(*args, **kwargs))
+            return children[-1]
+
+        slow = ",".join(stage[0] for stage in stages[1:])
+        with patch.dict(os.environ, {"FAKE_FAILING_STAGE": stages[0][0], "FAKE_SLOW_STAGES": slow}), \
+             patch.object(self.runtime.subprocess, "Popen", side_effect=recording_popen), \
+             owned_run_directory(stream.root.parent) as lease:
+            started = time.monotonic()
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                self.parallel(stream, stages, lease)
+        self.assertLess(time.monotonic() - started, 120)
+        self.assertEqual(raised.exception.returncode, 3)
+        self.assertEqual(len(children), 3)
+        self.assertTrue(all(child.returncode is not None for child in children))
+        self.assertTrue(any(child.returncode < 0 for child in children))
+        remaining = set(self.published(stream))
+        self.assertFalse({name for name in remaining if name.startswith((".pool-", ".batch-"))})
+        self.assertFalse({stage[0] + ".json" for stage in stages} & remaining)
+
+    def test_each_pool_batch_is_claimed_exactly_once(self):
+        runtime = self.runtime
+        root = self.root / "period" / "post-replay"
+        root.mkdir(parents=True)
+        batch_paths = []
+        for index in range(12):
+            path = root / f".batch-fake-{index:02d}.json"
+            path.write_bytes(runtime._canonical_bytes({"batch": [str(root / "unused.job.json")],
+                                                      "stop_after_epoch": float(time.time() + 3600)}))
+            batch_paths.append(str(path))
+        pool_path = root / ".pool-fake-00.json"
+        pool_path.write_bytes(runtime._canonical_bytes({"batches": batch_paths}))
+        ran, lock = [], threading.Lock()
+
+        def fake_batch(batch_path, lease):
+            time.sleep(0.01)
+            with lock:
+                ran.append(str(batch_path))
+
+        lease = SimpleNamespace(validate=lambda root: None)
+        with patch.object(runtime, "_worker_batch_owned", side_effect=fake_batch):
+            threads = [threading.Thread(target=runtime._worker_pool_owned, args=(pool_path, worker, lease))
+                       for worker in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(sorted(ran), sorted(batch_paths))
+        for index in range(len(batch_paths)):
+            self.assertRegex(runtime._pool_claim_path(pool_path, index).read_text(), r"^[0-3]\n$")
+
+    def test_stage_worker_count_is_clamped(self):
+        from market_analysis import historical_market_state_study_execution as execution
+        cpus = os.cpu_count() or 1
+        for raw, expected in ((None, min(3, cpus)), ("", min(3, cpus)), ("1", 1), ("0", 1),
+                              ("-4", 1), ("1000", cpus)):
+            with self.subTest(raw=raw):
+                with patch.dict(os.environ, {} if raw is None else {"STUDY_STAGE_WORKERS": raw}):
+                    if raw is None:
+                        os.environ.pop("STUDY_STAGE_WORKERS", None)
+                    self.assertEqual(execution._stage_workers(), expected)
+        with patch.dict(os.environ, {"STUDY_STAGE_WORKERS": "three"}):
+            with self.assertRaises(ValueError):
+                execution._stage_workers()
 
 
 if __name__ == "__main__":

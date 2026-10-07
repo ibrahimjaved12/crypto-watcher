@@ -384,7 +384,7 @@ def memory_usage():
         return {}
 
 
-def _stage_metadata(path, identity=None, stream=None, *, reference_path=None):
+def _stage_metadata(path, identity=None, stream=None, *, reference_path=None, verify_records=True):
     raw = path.read_bytes()
     payload = _read_json_bytes(raw)
     if type(payload) is not dict or set(payload) != {
@@ -402,7 +402,7 @@ def _stage_metadata(path, identity=None, stream=None, *, reference_path=None):
         raise ValueError("post-replay stage identity/SHA mismatch")
     result = decode(body["result"])
     from .historical_stage_records import StageRecords, StageValue
-    for item in (result if isinstance(result, tuple) else (result,)):
+    for item in (result if isinstance(result, tuple) else (result,)) if verify_records else ():
         if isinstance(item, (StageRecords, StageValue)):
             if reference_path is not None:
                 from dataclasses import replace
@@ -434,11 +434,14 @@ def _load_stage(path, identity):
     return result, sha, measurements
 
 
-def stage_dependencies(stream, stage_ids):
+def stage_dependencies(stream, stage_ids, verify_records=True):
+    """Upstream stage hashes. ``verify_records=False`` still checks each stage
+    file's canonical bytes, result SHA and identity (and the V1 shared artifact)
+    but skips re-reading its record/value streams."""
     dependencies = []
     for stage_id in stage_ids:
         path = stream.root.parent / "post-replay" / f"{stage_id}.json"
-        _, sha = _stage_metadata(path, stream=stream)
+        _, sha = _stage_metadata(path, stream=stream, verify_records=verify_records)
         payload = _read_json_bytes(path.read_bytes())
         identity = payload["identity"]
         if identity.get("stage_id") != stage_id:
@@ -615,6 +618,23 @@ def run_stage_batch(stream, stages, *, progress=None, worker_lease=None):
     A shorter prefix means a published stage ended the run or the worker
     stopped cleanly at its deadline; callers re-enter with the remainder.
     """
+    completed, plan = _begin_stage_batch(stream, stages, progress=progress, worker_lease=worker_lease)
+    if plan is None:
+        return completed
+    failure = None
+    try:
+        _run_owned_worker(plan.batch_path, _worker_environment(), worker_lease,
+                          stage_id=plan.label, batch=True)
+    except subprocess.CalledProcessError as exc:
+        failure = exc
+    return completed + _finish_stage_batch(stream, plan, failure, progress=progress,
+                                           worker_lease=worker_lease)
+
+
+def _begin_stage_batch(stream, stages, *, progress, worker_lease):
+    """Reuse leading published stages, then write the jobs of the following
+    unpublished run. Returns ``(completed, plan)``; ``plan`` is None when no
+    stage needs a worker."""
     if worker_lease is None:
         raise ValueError("post-replay stage requires period directory ownership")
     root = stream.root.parent / "post-replay"
@@ -635,7 +655,7 @@ def run_stage_batch(stream, stages, *, progress=None, worker_lease=None):
         batch.append(stages[index])
         index += 1
     if not batch:
-        return completed
+        return completed, None
     first, last = batch[0][0], batch[-1][0]
     if progress:
         progress("BEFORE_NEW_STAGE", {"stage_id": first})
@@ -658,12 +678,19 @@ def run_stage_batch(stream, stages, *, progress=None, worker_lease=None):
     if progress:
         progress("POST_REPLAY_STAGE_STARTED", {"stage_id": first,
                  **_observation(started, reused=False)})
-    failure = None
-    try:
-        _run_owned_worker(batch_path, _worker_environment(), worker_lease,
-                          stage_id=f"batch:{first}..{last}", batch=True)
-    except subprocess.CalledProcessError as exc:
-        failure = exc
+    return completed, SimpleNamespace(root=root, batch=batch, identities=identities,
+                                      batch_path=batch_path, status_path=status_path,
+                                      label=f"batch:{first}..{last}")
+
+
+def _finish_stage_batch(stream, plan, failure, *, progress, worker_lease, started=True):
+    """Load the published prefix of a worker-run batch in order and clean up.
+
+    ``started=False`` means no worker ever took the batch: like stages a
+    worker never started, its stages keep no job diagnostics.
+    """
+    root, batch, identities = plan.root, plan.batch, plan.identities
+    batch_path, status_path = plan.batch_path, plan.status_path
     stopped_before = None
     if failure is None and status_path.exists():
         status = _read_json_bytes(status_path.read_bytes())
@@ -675,11 +702,12 @@ def run_stage_batch(stream, stages, *, progress=None, worker_lease=None):
     clean_stop = failure is None and published < len(batch) and stopped_before == published
     # A failed/unpublished stage keeps its job diagnostics as today; stages the
     # worker never started leave none.
-    for stage_id, _, _ in batch[published + (0 if clean_stop else 1):]:
+    for stage_id, _, _ in batch[published + (0 if clean_stop or not started else 1):]:
         for suffix in ("request.json", "job.json"):
             (root / f"{stage_id}.{suffix}").unlink(missing_ok=True)
     batch_path.unlink(missing_ok=True)
     status_path.unlink(missing_ok=True)
+    completed = []
     for stage_id, descriptor, _ in batch[:published]:
         result = run_stage(stream, stage_id, descriptor=descriptor, progress=progress,
                            worker_lease=worker_lease, batch_completed=True)
@@ -727,6 +755,130 @@ def _run_owned_worker(job_path, environment, lease, *, stage_id=None, batch=Fals
             if child.poll() is None:
                 child.kill()
             child.wait()
+        raise
+
+
+def run_stage_batches(stream, batches, *, workers, progress=None, worker_lease=None):
+    """``[run_stage_batch(stream, stages) for stages in batches]``, with every
+    batch's unpublished run executed by up to ``workers`` concurrent workers.
+
+    Each stage keeps its own job files, identity and durable publication; the
+    pool only decides which process runs a batch. Results are loaded and
+    returned in the original batch/stage order. Any worker failure terminates
+    the whole pool and fails the call; no batch result is returned.
+    """
+    if worker_lease is None:
+        raise ValueError("post-replay stage requires period directory ownership")
+    begun = [_begin_stage_batch(stream, stages, progress=progress, worker_lease=worker_lease)
+             for stages in batches]
+    plans = [plan for _, plan in begun if plan is not None]
+    failure, claimed = None, set()
+    if plans:
+        pool_path = plans[0].root / f".pool-{plans[0].batch[0][0]}.json"
+        _clear_pool_files(pool_path)
+        _atomic_write(pool_path, _canonical_bytes({"batches": [str(plan.batch_path) for plan in plans]}))
+        try:
+            _run_owned_worker_pool(pool_path, min(workers, len(plans)), _worker_environment(),
+                                   worker_lease, labels=[plan.label for plan in plans])
+        except subprocess.CalledProcessError as exc:
+            failure = exc
+        claimed = {index for index in range(len(plans)) if _pool_claim_path(pool_path, index).exists()}
+        _clear_pool_files(pool_path)
+    results, position = [], 0
+    for completed, plan in begun:
+        if plan is not None:
+            started = position in claimed
+            position += 1
+            try:
+                completed = completed + _finish_stage_batch(
+                    stream, plan, failure, progress=progress, worker_lease=worker_lease,
+                    started=started)
+            except subprocess.CalledProcessError:
+                continue  # Clean up every batch, then raise the pool failure below.
+        results.append(completed)
+    if failure is not None:
+        raise failure
+    return results
+
+
+def _pool_claim_path(pool_path, index):
+    return pool_path.with_name(f"{pool_path.stem}.claim-{index}")
+
+
+def _pool_status_path(pool_path, worker):
+    return pool_path.with_name(f"{pool_path.stem}.worker-{worker}.json")
+
+
+def _clear_pool_files(pool_path):
+    # Dot-prefixed operational files only: the pool, its claims and statuses.
+    for path in pool_path.parent.glob(f"{pool_path.stem}.*"):
+        path.unlink(missing_ok=True)
+
+
+def _pool_worker_arguments(pool_path, worker, lease):
+    return [sys.executable, "-m", "market_analysis.historical_study_runtime",
+            "--pool", str(pool_path), str(worker), str(lease.descriptor)]
+
+
+def _pool_worker_stage(pool_path, worker, labels):
+    """Heartbeat label of the batch a worker last claimed, from its status file."""
+    try:
+        status = _read_json_bytes(_pool_status_path(pool_path, worker).read_bytes())
+        return labels[status["batch_index"]]
+    except (OSError, ValueError, TypeError, KeyError, IndexError):
+        return f"pool-worker:{worker}"
+
+
+def _run_owned_worker_pool(pool_path, count, environment, lease, *, labels):
+    """Run ``count`` pool workers that inherit only the lease, in this process
+    group. Heartbeats come from this parent only. A failed worker, or any
+    exception here, terminates then kills and reaps every worker."""
+    from . import historical_operational_events as events
+    lease.validate(Path(pool_path).parent.parent)
+    children = []
+    try:
+        for worker in range(count):
+            arguments = _pool_worker_arguments(pool_path, worker, lease)
+            children.append((arguments, subprocess.Popen(arguments, env=environment, close_fds=True,
+                                                         pass_fds=(lease.descriptor,))))
+        wait_started = last_heartbeat = time.monotonic()
+        while True:
+            for worker, (arguments, child) in enumerate(children):
+                returncode = child.poll()
+                if returncode:
+                    events.emit("WORKER_FAILED", stage=_pool_worker_stage(pool_path, worker, labels),
+                                returncode=returncode)
+                    raise subprocess.CalledProcessError(returncode, arguments)
+            running = [child for _, child in children if child.returncode is None]
+            if not running:
+                return
+            try:
+                running[0].wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            if time.monotonic() - last_heartbeat >= 45:
+                for worker, (_, child) in enumerate(children):
+                    if child.poll() is None:
+                        events.emit("HEARTBEAT", stage=_pool_worker_stage(pool_path, worker, labels),
+                                    duration_seconds=time.monotonic() - wait_started,
+                                    **events.resources(child.pid))
+                last_heartbeat = time.monotonic()
+    except BaseException:
+        try:
+            for _, child in children:
+                if child.poll() is None:
+                    child.terminate()
+            grace_end = time.monotonic() + 5
+            for _, child in children:
+                try:
+                    child.wait(timeout=max(0, grace_end - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    pass  # The finally block kills and reaps before lease release.
+        finally:
+            for _, child in children:
+                if child.poll() is None:
+                    child.kill()
+                child.wait()
         raise
 
 
@@ -930,6 +1082,57 @@ def _worker_batch_owned(batch_path, lease):
         _worker_owned(job_path, lease, batch_position=(position, size))
 
 
+def _worker_pool(pool_path, worker, lease_descriptor=None):
+    from .historical_run_directory import inherited_run_directory_lease
+    with inherited_run_directory_lease(lease_descriptor, Path(pool_path).parent.parent) as lease:
+        _worker_pool_owned(pool_path, worker, lease)
+
+
+def _worker_pool_owned(pool_path, worker, lease):
+    """Claim each pool batch exactly once and run it as a batch worker would.
+
+    A create-only claim file per batch index is the shared dynamic queue. A
+    batch claimed after its ``stop_after_epoch`` is recorded as cleanly
+    stopped before its first stage. Workers emit no study events; a small
+    status file tells the parent which batch this worker holds.
+    """
+    pool_path = Path(pool_path)
+    pool = _read_json_bytes(pool_path.read_bytes())
+    if (type(pool) is not dict or set(pool) != {"batches"} or type(pool["batches"]) is not list
+            or not pool["batches"] or any(type(item) is not str for item in pool["batches"])):
+        raise ValueError("invalid post-replay worker pool")
+    root = pool_path.parent.resolve()
+    if any(Path(item).parent.resolve() != root for item in pool["batches"]):
+        raise ValueError("post-replay pool batch lies outside the leased stage directory")
+    status_path = _pool_status_path(pool_path, worker)
+
+    def status(index):
+        temporary = status_path.with_name(status_path.name + ".tmp")
+        temporary.write_bytes(_canonical_bytes({"worker": worker, "batch_index": index}))
+        os.replace(temporary, status_path)
+
+    for index, batch_path in enumerate(pool["batches"]):
+        lease.validate(root.parent)
+        try:
+            claim = os.open(_pool_claim_path(pool_path, index), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            os.write(claim, f"{worker}\n".encode("ascii"))
+        finally:
+            os.close(claim)
+        status(index)
+        batch_path = Path(batch_path)
+        batch = _read_json_bytes(batch_path.read_bytes())
+        if (type(batch) is dict and type(batch.get("stop_after_epoch")) in (int, float)
+                and time.time() >= batch["stop_after_epoch"]):
+            _atomic_write(batch_path.with_name(f"{batch_path.stem}.status.json"),
+                          _canonical_bytes({"stopped_before_index": 0}))
+            continue
+        _worker_batch_owned(batch_path, lease)
+    status(None)
+
+
 def _worker_owned(job_path, lease, *, batch_position=None):
     started = time.perf_counter()
     job = _read_json_bytes(Path(job_path).read_bytes())
@@ -987,6 +1190,9 @@ if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--batch":
         from market_analysis.historical_study_runtime import _worker_batch as canonical_batch_worker
         canonical_batch_worker(sys.argv[2], int(sys.argv[3]) if len(sys.argv) == 4 else None)
+    elif len(sys.argv) >= 4 and sys.argv[1] == "--pool":
+        from market_analysis.historical_study_runtime import _worker_pool as canonical_pool_worker
+        canonical_pool_worker(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]) if len(sys.argv) == 5 else None)
     else:
         from market_analysis.historical_study_runtime import _worker as canonical_worker
         canonical_worker(sys.argv[1], int(sys.argv[2]) if len(sys.argv) == 3 else None)

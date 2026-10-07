@@ -541,7 +541,9 @@ class StagedCandidateBatchingTests(unittest.TestCase):
                 patch.object(execution, "_stage_prepared", lambda prepared, selector: None), \
                 patch.object(execution, "input_descriptor",
                              lambda request: {"selector": request["selector"]}), \
-                patch.dict(os.environ, {"STUDY_STAGE_BATCH_SIZE": str(batch_size)}):
+                patch.dict(os.environ, {"STUDY_STAGE_BATCH_SIZE": str(batch_size),
+                                        # The sequential run_stage_batch path; the pool has its own tests.
+                                        "STUDY_STAGE_WORKERS": "1"}):
             result = execution._staged_candidate_execution(
                 prepared, {}, None, runtime_metrics=metrics, worker_lease=object())
         return result, calls, metrics

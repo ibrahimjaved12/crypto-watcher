@@ -129,7 +129,7 @@ from .historical_replay import (
 from .historical_replay_runtime import ReplayCheckpointStore
 from .historical_study_runtime import (
     create_study_point_stream, current_runtime_implementation_revision,
-    run_stage, run_stage_batch, stage_dependencies, input_descriptor,
+    run_stage, run_stage_batch, run_stage_batches, stage_dependencies, input_descriptor,
 )
 from .historical_taker_flow_extension import (
     TAKER_FLOW_ALGORITHM_VERSION, TAKER_FLOW_CONFIG_VERSION,
@@ -1302,10 +1302,49 @@ def _stage_batch_size():
     return value
 
 
+STAGE_WORKERS = 3
+
+
+def _stage_workers():
+    """Concurrent candidate batch workers, clamped to [1, CPUs]; 1 is sequential."""
+    raw = os.environ.get("STUDY_STAGE_WORKERS")
+    if raw is None or raw == "":
+        value = STAGE_WORKERS
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            raise ValueError("STUDY_STAGE_WORKERS must be an integer") from None
+    return max(1, min(value, os.cpu_count() or 1))
+
+
 def _batchable_candidate_stage(selector, supplementary):
     # Core candidates only; extension stages keep their own per-stage workers.
     return ((selector == "hmm" or selector.startswith(("fixed-", "atr-")))
             and selector not in supplementary)
+
+
+def _candidate_batch_layout(selectors, supplementary, workers):
+    """``(batch_size, batched)`` for the leading batchable candidate stages.
+
+    Derived default (STUDY_STAGE_BATCH_SIZE unset/empty, ``workers > 1``):
+    ``max(2, ceil(batchable / workers))`` so every worker takes one batch in a
+    single round; ``batchable <= 1`` disables batching. Otherwise (explicit
+    size, or one worker) exactly as before the pool: ``_stage_batch_size()``,
+    and ``batch_size <= 1`` disables batching. Grouping only: stage identities
+    and outputs do not depend on it.
+    """
+    batchable = 0
+    while (batchable < len(selectors)
+           and _batchable_candidate_stage(selectors[batchable], supplementary)):
+        batchable += 1
+    raw = os.environ.get("STUDY_STAGE_BATCH_SIZE")
+    if (raw is None or raw == "") and workers > 1:
+        if batchable <= 1:
+            return STAGE_BATCH_SIZE, 0
+        return max(2, math.ceil(batchable / workers)), batchable
+    batch_size = _stage_batch_size()
+    return batch_size, (batchable if batch_size > 1 else 0)
 
 
 def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=None,
@@ -1344,28 +1383,18 @@ def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=
         if selector == "hmm":
             hmm_block, hmm_sha = block, model_sha
 
-    batch_size = _stage_batch_size()
-    batched = 0
-    if batch_size > 1:
-        while (batched < len(selectors)
-               and _batchable_candidate_stage(selectors[batched], supplementary)):
-            batched += 1
-    position = 0
-    while position < batched:
+    def batch_group(start):
         group = []
-        for selector in selectors[position:min(position + batch_size, batched)]:
+        for selector in selectors[start:min(start + batch_size, batched)]:
             _, request, timing_field, bocpd_field = stage_request(selector)
             descriptor_started = time.perf_counter_ns()
             descriptor = input_descriptor(request)
             group.append((selector, descriptor, (lambda request=request: request),
                           timing_field, bocpd_field,
                           time.perf_counter_ns() - descriptor_started))
-        completed = run_stage_batch(
-            stream, [(selector, descriptor, prepare)
-                     for selector, descriptor, prepare, *_ in group],
-            progress=progress, worker_lease=worker_lease)
-        if not completed:
-            raise ValueError("post-replay stage batch made no progress")
+        return group
+
+    def consume(completed, group):
         for (selector, result, seconds), entry in zip(completed, group):
             if selector != entry[0]:
                 raise ValueError("post-replay stage batch order mismatch")
@@ -1375,6 +1404,33 @@ def _staged_candidate_execution(prepared, supplementary, hmm_model, *, progress=
                 if runtime_metrics is not None and field_name is not None:
                     runtime_metrics.record_elapsed_ns(field_name, elapsed_ns)
             accept(selector, result)
+
+    workers = _stage_workers()
+    batch_size, batched = _candidate_batch_layout(selectors, supplementary, workers)
+    position = 0
+    if workers > 1 and batched:
+        # Same batches as a run where every batch completes; workers only decide
+        # which process runs each. Results are consumed in the original order;
+        # after a short batch the sequential loop below takes the remainder.
+        groups = [batch_group(start) for start in range(0, batched, batch_size)]
+        results = run_stage_batches(
+            stream, [[(selector, descriptor, prepare)
+                      for selector, descriptor, prepare, *_ in group] for group in groups],
+            workers=workers, progress=progress, worker_lease=worker_lease)
+        for completed, group in zip(results, groups):
+            consume(completed, group)
+            position += len(completed)
+            if len(completed) < len(group):
+                break
+    while position < batched:
+        group = batch_group(position)
+        completed = run_stage_batch(
+            stream, [(selector, descriptor, prepare)
+                     for selector, descriptor, prepare, *_ in group],
+            progress=progress, worker_lease=worker_lease)
+        if not completed:
+            raise ValueError("post-replay stage batch made no progress")
+        consume(completed, group)
         position += len(completed)
     for selector in selectors[batched:]:
         source, request, timing_field, bocpd_field = stage_request(selector)
@@ -2294,6 +2350,23 @@ def _period_sidecar(path, manifest, coverage, period, code_revision, report_sha=
     sidecar.parent.mkdir(exist_ok=True)
     _write_atomic_new(sidecar, _artifact_json(body, "metadata_sha256"))
     return body
+
+
+def period_report_sha_for_verification(path, manifest, coverage, period, code_revision, *, full):
+    """Finalized ``report_sha256``; ``full`` decodes and validates the whole report.
+
+    Without ``full`` the report is never decoded: the hashed sidecar binds its
+    identity and the recomputed report file SHA to the report SHA recorded when
+    the report was finalized, so the bytes are those a full validation accepted.
+    A missing sidecar always takes the full path.
+    """
+    path = Path(path)
+    if full or not (path.parent.parent / ".period-manifests" / path.name).exists():
+        report = load_finalized_period_report(path, manifest, period,
+            coverage_sha256=coverage["coverage_manifest_sha256"], code_revision=code_revision)
+        _period_sidecar(path, manifest, coverage, period, code_revision, report["report_sha256"])
+        return report["report_sha256"]
+    return _period_sidecar(path, manifest, coverage, period, code_revision)["report_sha256"]
 
 
 def _update_execution_index(output_dir, manifest, coverage, code_revision):

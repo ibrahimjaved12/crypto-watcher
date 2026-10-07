@@ -596,11 +596,15 @@ def _walk_strings(value):
             yield from _walk_strings(item)
 
 
-def verify_recovery_tree(base, campaign, manifest, coverage, identity, *, check=None, locks_held=False, validated=None):
+def verify_recovery_tree(base, campaign, manifest, coverage, identity, *, check=None, locks_held=False, validated=None,
+                         full_report_validation=True):
     """Validate committed units at stable paths or a verified staging mirror.
 
     Reference resolution is validation-only. Stored requests are never rewritten.
     Return the complete transitive file closure of committed units and diagnostics.
+    ``full_report_validation=False`` binds each finalized report to its verified
+    sidecar by file SHA instead of decoding it; only the execute-period snapshot
+    performs the one full validation.
     """
     from .historical_replay_runtime import ReplayCheckpointStore, _canonical_bytes, _sha
     from .historical_study_runtime import StudyPointStream, _stage_metadata, decode, encode
@@ -772,13 +776,12 @@ def verify_recovery_tree(base, campaign, manifest, coverage, identity, *, check=
             period = next((p for p in manifest.selected_periods if path.name == execution._period_filename(p)), None)
             if period is None or period.study_period_index not in identity['expected_membership'][period.phase]:
                 raise ValueError('unknown/undeclared finalized report')
-            report = execution.load_finalized_period_report(path, manifest, period,
-                        coverage_sha256=coverage['coverage_manifest_sha256'], code_revision=identity['producer_revision'])
-            execution._period_sidecar(path, manifest, coverage, period, identity['producer_revision'], report['report_sha256'])
+            report_sha = execution.period_report_sha_for_verification(
+                path, manifest, coverage, period, identity['producer_revision'], full=full_report_validation)
             add(path)
             add(output / '.period-manifests' / path.name)
-            work.append(report['report_sha256'])
-            reports[period.study_period_index] = (path.name, report['report_sha256'])
+            work.append(report_sha)
+            reports[period.study_period_index] = (path.name, report_sha)
         for directory in (campaign_root / 'operations',):
             if directory.exists():
                 for path in directory.rglob('*'):
