@@ -214,8 +214,18 @@ def max_admissible_leverage(side: int, entry, stop_distance, model: CostModel) -
     return leverage
 
 
-def liquidation_loss(side: int, entry, lp, model: CostModel) -> Fraction:
-    """Price loss per unit when liquidated (pessimistic: filled at ``lp``, plus the liquidation fee)."""
+def liquidation_loss(side: int, entry, lp, model: CostModel, leverage: int | None = None) -> Fraction:
+    """Price loss per unit when liquidated (pessimistic: filled at ``lp``, plus the liquidation fee).
+
+    With isolated margin the loss can never exceed the wallet balance ``entry / leverage``; pass
+    ``leverage`` to apply that cap.
+    """
     side = _side(side)
-    return side * (_price(entry, "entry") - _price(lp, "liquidation price")) \
+    entry = _price(entry, "entry")
+    loss = side * (entry - _price(lp, "liquidation price")) \
         + model.liquidation_fee_rate * Fraction(lp) * model.cost_multiplier
+    if leverage is None:
+        return loss
+    if type(leverage) is not int or leverage < 1:
+        raise ValueError(f"leverage must be an int >= 1, got {leverage!r}")
+    return min(loss, entry / leverage)

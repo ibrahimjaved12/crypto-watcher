@@ -9,7 +9,7 @@ import unittest
 
 from market_analysis import data_lake
 from market_analysis.benchmark.bars import (
-    COMPROMISED_FLAGS, MISSING, BarSeries, compromised_in, infer_tick, read_bars_csv,
+    COMPROMISED_FLAGS, MISSING, BarSeries, CompromisedIndex, compromised_in, infer_tick, read_bars_csv,
 )
 from market_analysis.benchmark.funding import (
     FundingSeries, interval_report, read_funding_csv, settlement_mark,
@@ -51,6 +51,21 @@ def series(start_ms, prices, marks=None, flags=None, symbol="BTCUSDT"):
     columns.update({name: array("q", marks) for name in ("mark_open", "mark_high", "mark_low", "mark_close")})
     columns.update({name: array("q", [0] * count) for name in ("volume", "taker_buy_volume", "trades")})
     return BarSeries(symbol, start_ms, count, flags=array("H", flags or [0] * count), **columns)
+
+
+class CompromisedIndexTests(unittest.TestCase):
+    def test_matches_the_scanning_helper_for_every_range(self):
+        flags = [0, 2, 0, 16, 0, 1, 0, 0]
+        bars = series(START, [1] * 8, flags=flags)
+        for mask in (COMPROMISED_FLAGS, 2, 16):
+            index = CompromisedIndex(bars, mask)
+            for start in range(8):
+                for end in range(start, 8):
+                    with self.subTest(mask=mask, start=start, end=end):
+                        self.assertEqual(index.any_in(start, end), compromised_in(bars, start, end, mask=mask))
+        for start, end in ((-1, 2), (3, 2), (0, 8)):
+            with self.subTest(start=start, end=end), self.assertRaises(ValueError):
+                CompromisedIndex(bars).any_in(start, end)
 
 
 class ReadBarsTests(unittest.TestCase):

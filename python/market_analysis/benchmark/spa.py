@@ -37,6 +37,7 @@ import numpy as np
 from .bootstrap import bootstrap_indices, bootstrap_mean_matrix, default_mean_block
 
 _INT64_LIMIT = 2 ** 63
+_OMEGA_BLOCK = 256
 MIN_DAYS = 16  # ln(ln(T)) > 0 for the consistent recentering
 
 
@@ -83,10 +84,13 @@ def _studentize(f, f0, B: int, mean_block, seed: int, stream_prefix: str) -> _St
     dstar = star_sums.astype(np.float64) / T
     # Exact bootstrap variance of the sums from Python-int moments, then one correctly
     # rounded division: omega_k = sqrt(var_b(sum) / T) = sqrt(T) * std_b(mean).
-    exact = star_sums.astype(object)
-    first, second = exact.sum(axis=0), (exact * exact).sum(axis=0)
-    omega = np.array([math.sqrt((B * int(second[k]) - int(first[k]) ** 2) / (B * B * T)) for k in range(K)],
-                     dtype=np.float64)
+    # Column blocks keep the Python-int arrays small (B x 256 objects) at thousands of trials.
+    omega = np.zeros(K, dtype=np.float64)
+    for begin in range(0, K, _OMEGA_BLOCK):
+        exact = star_sums[:, begin:begin + _OMEGA_BLOCK].astype(object)
+        first, second = exact.sum(axis=0), (exact * exact).sum(axis=0)
+        for offset in range(exact.shape[1]):
+            omega[begin + offset] = math.sqrt((B * int(second[offset]) - int(first[offset]) ** 2) / (B * B * T))
     valid = omega > 0
     root_t = math.sqrt(T)
     t = np.zeros(K, dtype=np.float64)

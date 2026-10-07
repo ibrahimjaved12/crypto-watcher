@@ -49,5 +49,14 @@ class DsrTests(unittest.TestCase):
             deflated_sharpe_ratio(2.0, 0.0, 100, 1.0, 1.0)  # 1 - 2 + 0 <= 0
 
 
+class SmallTrialCountTests(unittest.TestCase):
+    def test_expected_max_sharpe_never_negative_and_continuous_near_one(self):
+        for n in (1.0001, 1.05, 1.1, 1.2, 1.3):
+            with self.subTest(n=n):
+                self.assertGreaterEqual(expected_max_sharpe(n, 0.01), 0.0)
+        self.assertEqual(expected_max_sharpe(1.1, 0.01), 0.0)
+        self.assertLessEqual(expected_max_sharpe(1.3, 0.01), expected_max_sharpe(1.5, 0.01))
+
+
 if __name__ == "__main__":
     unittest.main()

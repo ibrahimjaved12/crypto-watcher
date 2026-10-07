@@ -8,7 +8,8 @@ All Sharpe ratios here are per-period (daily) ratios, never annualized.
   independent trials with Sharpe variance ``var_sharpe`` under the null,
   ``SR0 = sqrt(V) * ((1 - g) * Z(1 - 1/N) + g * Z(1 - 1/(N e)))`` with the
   Euler-Mascheroni constant ``g``. ``N`` may be fractional (an effective number
-  of trials); for ``N <= 1`` there is no selection and ``SR0 = 0``.
+  of trials); for ``N <= 1`` there is no selection and ``SR0 = 0``, and the result is
+  never negative (clamped at 0 for small fractional ``N``).
 - ``deflated_sharpe_ratio``: ``Phi((SR - SR0) * sqrt(n - 1) /
   sqrt(1 - skew * SR + (kurt - 1) / 4 * SR**2))``.
 """
@@ -54,7 +55,10 @@ def expected_max_sharpe(n_trials: float, var_sharpe: float) -> float:
     if not (0 < first < 1 and 0 < second < 1):
         raise ValueError(f"n_trials {n_trials!r} gives quantiles outside (0, 1)")
     g = EULER_MASCHERONI
-    return math.sqrt(var_sharpe) * ((1 - g) * _NORMAL.inv_cdf(first) + g * _NORMAL.inv_cdf(second))
+    value = math.sqrt(var_sharpe) * ((1 - g) * _NORMAL.inv_cdf(first) + g * _NORMAL.inv_cdf(second))
+    # The approximation turns negative for 1 < N < ~1.4 (an expected maximum below zero is
+    # meaningless and would make the test easier than no deflation), so clamp at 0.
+    return max(0.0, value)
 
 
 def deflated_sharpe_ratio(sr_hat: float, sr0: float, n_obs: int, skew: float, kurtosis_nonexcess: float) -> float:
