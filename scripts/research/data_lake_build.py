@@ -486,5 +486,29 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def annotate_failure(error: BaseException) -> None:
+    """Emit the failure as a GitHub Actions error annotation.
+
+    Job logs are not retrievable through the API without leaving GitHub, but
+    annotations are, so the failure reason is repeated there. Single line,
+    workflow-command encoded, token redacted, length bounded; no data values.
+    """
+    import traceback
+
+    frames = traceback.extract_tb(error.__traceback__)[-3:]
+    where = " <- ".join(f"{Path(f.filename).name}:{f.lineno} {f.name}" for f in reversed(frames))
+    message = f"{type(error).__name__}: {error} [{where}]"
+    token = os.environ.get("RESEARCH_DATA_TOKEN")
+    if token:
+        message = message.replace(token, "***")
+    message = message[:1500].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(f"::error title=data lake build failed::{message}", flush=True)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    except Exception as error:  # noqa: BLE001 - re-raised after annotating
+        annotate_failure(error)
+        raise
+    sys.exit(code)
