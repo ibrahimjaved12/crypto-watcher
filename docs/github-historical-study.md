@@ -395,6 +395,19 @@ precedes the new-work check, permitting final assembly on a later fresh slice.
 The hosted elapsed budget maps the recorded job start to one absolute compute deadline, converted to a monotonic deadline before restoration/preflight; budgets never enter scientific
 configs, input descriptors, algorithm identities or scientific hashes.
 
+Core candidate stages (`hmm`, `fixed-NN`, `atr-N`) run in **batch workers**: one
+worker process executes up to `STUDY_STAGE_BATCH_SIZE` consecutive unpublished
+stages (default 9; an integer >= 1, where 1 restores one process per stage). The
+worker validates the point spool and verifies the shared V1 branch once, then
+reuses them for the later stages of its batch. Each stage keeps its own
+request/job files, stage identity, input descriptor and immediate durable
+publication, so stage results, canonical bytes and hashes are identical to
+per-stage execution, and resume reuses every stage published before an
+interruption. The new-stage check runs once before each batch. The worker
+starts no further stage within 30 seconds of the compute deadline, and the
+parent re-enters the rest normally. Extension, event-context, outcome and V1
+stages keep per-stage workers.
+
 Between-stage budgets do not bound indexing, one large calculation, spool creation,
 scientific hashing or final serialization. The separate supervisor requests parent
 cancellation before the 15-minute reserve, reaps the scientific child, and kills

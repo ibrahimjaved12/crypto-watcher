@@ -37,6 +37,13 @@ from .movement_metrics import MarketMovementEvaluation, MarketMovementWindowResu
 SPOOL_VERSION = "historical-study-point-spool-v2"
 STAGE_VERSION = "historical-study-stage-v2"
 
+# Batch-worker process caches; disabled (and never consulted) in per-stage workers.
+_BATCH_WORKER = False
+# Spool validation key -> point count of a complete validated pass in this process.
+_VALIDATED_SPOOLS = {}
+# Spool validation key -> (compact points, experiment points).
+_COMPACT_POINTS = {}
+
 
 def current_runtime_implementation_revision() -> str:
     """Resolve HEAD only when the executable package source is clean there."""
@@ -141,10 +148,30 @@ class StudyPointStream:
     def __iter__(self):
         return self.consume()
 
+    def _validation_key(self):
+        status = (self.root / "points.jsonl").stat()
+        return (str(self.root.resolve()), _sha(_canonical_bytes(self.identity)),
+                self.metadata["stream_sha256"], status.st_size, status.st_mtime_ns)
+
+    def adopt_validated_completion(self):
+        """Complete this pass from an earlier full validated pass in this process.
+
+        Only the same unchanged spool file (path, identity, stream SHA, size and
+        mtime) that a complete pass validated in this worker qualifies.
+        """
+        if (not _BATCH_WORKER
+                or _VALIDATED_SPOOLS.get(self._validation_key()) != self.metadata["point_count"]):
+            raise ValueError("compact spool was not fully validated in this worker")
+        consumption = ValidatedPointConsumption(self)
+        consumption.close()  # Never started: no file was opened.
+        consumption.completed = True
+        self._consumption = consumption
+
     def _validated_points(self, consumption):
         digest = hashlib.sha256()
         count = 0
         first = last = None
+        validation_key = self._validation_key() if _BATCH_WORKER else None
         with (self.root / "points.jsonl").open("rb") as stream:
             for line in stream:
                 digest.update(line)
@@ -171,6 +198,8 @@ class StudyPointStream:
             raise ValueError("compact study spool digest/count/range mismatch")
 
         consumption.completed = True
+        if validation_key is not None and self._validation_key() == validation_key:
+            _VALIDATED_SPOOLS[validation_key] = count
 
     def validate(self):
         consumption = self.consume()
@@ -460,9 +489,10 @@ def input_descriptor(request):
     return result
 
 
-def _observation(started, *, reused, path=None, worker=None):
+def _observation(started, *, reused, path=None, worker=None, duration=None):
     return {"observed_at_utc": datetime.now(timezone.utc).isoformat(),
-            "monotonic_duration_seconds": time.perf_counter() - started,
+            "monotonic_duration_seconds": (time.perf_counter() - started
+                                           if duration is None else duration),
             "reused": reused, "parent_memory": memory_usage(),
             "worker_observations": worker,
             "stage_metadata_bytes": path.stat().st_size if path else None,
@@ -471,9 +501,51 @@ def _observation(started, *, reused, path=None, worker=None):
                 if not artifact.name.endswith((".request.json", ".job.json"))} if path else {})}
 
 
+def _stage_identity(stream, stage_id, descriptor):
+    identity = {**stream.identity, "compact_stream_sha256": stream.metadata["stream_sha256"],
+                "stage_id": stage_id, "input_descriptor": descriptor,
+                "descriptor_sha256": _sha(_canonical_bytes(descriptor))}
+    return _read_json_bytes(_canonical_bytes(identity))
+
+
+def _write_stage_job(root, stage_id, identity, request, descriptor):
+    if input_descriptor(request) != descriptor:
+        raise ValueError("stage payload does not match its input descriptor")
+    request_raw = _canonical_bytes(encode(request))
+    request_path = root / f"{stage_id}.request.json"
+    _atomic_write(request_path, request_raw)
+    job_path = root / f"{stage_id}.job.json"
+    _atomic_write(job_path, _canonical_bytes({"identity": identity,
+                  "request_sha256": _sha(request_raw),
+                  "request_path": str(request_path), "result_path": str(root / f"{stage_id}.json")}))
+    return job_path
+
+
+def _worker_environment():
+    environment = dict(os.environ)
+    package_root = str(Path(__file__).resolve().parents[1])
+    environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
+        package_root, environment.get("PYTHONPATH"))))
+    return environment
+
+
+def _worker_duration(path):
+    """Worker-measured stage seconds from its observations, if recorded."""
+    measurement_path = path.with_suffix(".observations.json")
+    if not measurement_path.exists():
+        return None
+    value = _read_json_bytes(measurement_path.read_bytes())
+    duration = value.get("monotonic_duration_seconds") if type(value) is dict else None
+    return float(duration) if type(duration) in (int, float) and duration >= 0 else None
+
+
 def run_stage(stream, stage_id, request=None, *, descriptor=None, prepare=None,
-              progress=None, local_result=None, worker_lease=None):
-    """Lookup by complete descriptor before preparing any large payload."""
+              progress=None, local_result=None, worker_lease=None, batch_completed=False):
+    """Lookup by complete descriptor before preparing any large payload.
+
+    ``batch_completed`` loads a stage that a batch worker just published and
+    reports it as newly completed with the worker-measured duration.
+    """
     started = time.perf_counter()
     root = stream.root.parent / "post-replay"
     if worker_lease is None:
@@ -482,11 +554,17 @@ def run_stage(stream, stage_id, request=None, *, descriptor=None, prepare=None,
     root.mkdir(exist_ok=True)
     if descriptor is None:
         descriptor = input_descriptor(request)
-    identity = {**stream.identity, "compact_stream_sha256": stream.metadata["stream_sha256"],
-                "stage_id": stage_id, "input_descriptor": descriptor,
-                "descriptor_sha256": _sha(_canonical_bytes(descriptor))}
-    identity = _read_json_bytes(_canonical_bytes(identity))
+    identity = _stage_identity(stream, stage_id, descriptor)
     path = root / f"{stage_id}.json"
+    if batch_completed:
+        result, sha, measurements = _load_stage(path, identity)
+        for suffix in ("request.json", "job.json"):
+            (root / f"{stage_id}.{suffix}").unlink(missing_ok=True)
+        if progress:
+            progress("POST_REPLAY_STAGE_COMPLETED", {"stage_id": stage_id,
+                     "stage_result_sha256": sha, **_observation(started, reused=False,
+                     path=path, worker=measurements, duration=_worker_duration(path))})
+        return result
     if path.exists():
         result, sha, measurements = _load_stage(path, identity)
         for suffix in ("request.json", "job.json"):
@@ -502,23 +580,11 @@ def run_stage(stream, stage_id, request=None, *, descriptor=None, prepare=None,
         _publish_stage(path, identity, local_result())
     else:
         request = prepare() if prepare is not None else request
-        if input_descriptor(request) != descriptor:
-            raise ValueError("stage payload does not match its input descriptor")
-        request_raw = _canonical_bytes(encode(request))
-        request_path = root / f"{stage_id}.request.json"
-        _atomic_write(request_path, request_raw)
-        job_path = root / f"{stage_id}.job.json"
-        _atomic_write(job_path, _canonical_bytes({"identity": identity,
-                      "request_sha256": _sha(request_raw),
-                      "request_path": str(request_path), "result_path": str(path)}))
+        job_path = _write_stage_job(root, stage_id, identity, request, descriptor)
         if progress:
             progress("POST_REPLAY_STAGE_STARTED", {"stage_id": stage_id,
                      **_observation(started, reused=False)})
-        environment = dict(os.environ)
-        package_root = str(Path(__file__).resolve().parents[1])
-        environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
-            package_root, environment.get("PYTHONPATH"))))
-        _run_owned_worker(job_path, environment, worker_lease, stage_id=stage_id)
+        _run_owned_worker(job_path, _worker_environment(), worker_lease, stage_id=stage_id)
     result, sha, measurements = _load_stage(path, identity)
     # Completion and record hashes have been verified after durable publication.
     for suffix in ("request.json", "job.json"):
@@ -530,11 +596,109 @@ def run_stage(stream, stage_id, request=None, *, descriptor=None, prepare=None,
     return result
 
 
-def _run_owned_worker(job_path, environment, lease, *, stage_id=None):
+def _batch_stop_after_epoch():
+    from . import historical_operational_events as events
+    remaining = events.remaining_compute_seconds()
+    if not math.isfinite(remaining):
+        remaining = 10 ** 9  # No configured deadline; canonical JSON needs a finite epoch.
+    return time.time() + remaining - 30
+
+
+def run_stage_batch(stream, stages, *, progress=None, worker_lease=None):
+    """Run consecutive unpublished stages in one worker that loads inputs once.
+
+    ``stages`` is an ordered sequence of ``(stage_id, descriptor, prepare)``.
+    Each stage keeps its own request/job files, identity and immediate durable
+    publication, exactly as with ``run_stage``. Returns ``(stage_id, result,
+    seconds)`` for the completed prefix, in order: leading published stages are
+    reused, then the following run of unpublished stages goes to one worker.
+    A shorter prefix means a published stage ended the run or the worker
+    stopped cleanly at its deadline; callers re-enter with the remainder.
+    """
+    if worker_lease is None:
+        raise ValueError("post-replay stage requires period directory ownership")
+    root = stream.root.parent / "post-replay"
+    worker_lease.validate(root.parent)
+    root.mkdir(exist_ok=True)
+    stages = tuple(stages)
+    completed = []
+    index = 0
+    while index < len(stages) and (root / f"{stages[index][0]}.json").exists():
+        stage_id, descriptor, prepare = stages[index]
+        started = time.perf_counter()
+        result = run_stage(stream, stage_id, descriptor=descriptor, prepare=prepare,
+                           progress=progress, worker_lease=worker_lease)
+        completed.append((stage_id, result, time.perf_counter() - started))
+        index += 1
+    batch = []
+    while index < len(stages) and not (root / f"{stages[index][0]}.json").exists():
+        batch.append(stages[index])
+        index += 1
+    if not batch:
+        return completed
+    first, last = batch[0][0], batch[-1][0]
+    if progress:
+        progress("BEFORE_NEW_STAGE", {"stage_id": first})
+    started = time.perf_counter()
+    identities, job_paths = [], []
+    for stage_id, descriptor, prepare in batch:
+        identity = _stage_identity(stream, stage_id, descriptor)
+        request = prepare() if prepare is not None else None
+        job_paths.append(_write_stage_job(root, stage_id, identity, request, descriptor))
+        identities.append(identity)
+    # Dot-prefixed operational files: never stage results, job diagnostics or
+    # recovery content.
+    batch_path = root / f".batch-{first}.json"
+    status_path = root / f".batch-{first}.status.json"
+    batch_path.unlink(missing_ok=True)
+    status_path.unlink(missing_ok=True)
+    _atomic_write(batch_path, _canonical_bytes({
+        "batch": [str(path) for path in job_paths],
+        "stop_after_epoch": float(_batch_stop_after_epoch())}))
+    if progress:
+        progress("POST_REPLAY_STAGE_STARTED", {"stage_id": first,
+                 **_observation(started, reused=False)})
+    failure = None
+    try:
+        _run_owned_worker(batch_path, _worker_environment(), worker_lease,
+                          stage_id=f"batch:{first}..{last}", batch=True)
+    except subprocess.CalledProcessError as exc:
+        failure = exc
+    stopped_before = None
+    if failure is None and status_path.exists():
+        status = _read_json_bytes(status_path.read_bytes())
+        if type(status) is dict and type(status.get("stopped_before_index")) is int:
+            stopped_before = status["stopped_before_index"]
+    published = 0
+    while published < len(batch) and (root / f"{batch[published][0]}.json").exists():
+        published += 1
+    clean_stop = failure is None and published < len(batch) and stopped_before == published
+    # A failed/unpublished stage keeps its job diagnostics as today; stages the
+    # worker never started leave none.
+    for stage_id, _, _ in batch[published + (0 if clean_stop else 1):]:
+        for suffix in ("request.json", "job.json"):
+            (root / f"{stage_id}.{suffix}").unlink(missing_ok=True)
+    batch_path.unlink(missing_ok=True)
+    status_path.unlink(missing_ok=True)
+    for stage_id, descriptor, _ in batch[:published]:
+        result = run_stage(stream, stage_id, descriptor=descriptor, progress=progress,
+                           worker_lease=worker_lease, batch_completed=True)
+        duration = _worker_duration(root / f"{stage_id}.json")
+        completed.append((stage_id, result, 0.0 if duration is None else duration))
+    if failure is not None:
+        raise failure
+    if published < len(batch) and not clean_stop:
+        # Same failure as run_stage loading a stage its worker did not publish.
+        _load_stage(root / f"{batch[published][0]}.json", identities[published])
+        raise ValueError("post-replay batch worker did not publish its stage")
+    return completed
+
+
+def _run_owned_worker(job_path, environment, lease, *, stage_id=None, batch=False):
     """Inherit only the lease, and reap an interrupted child before returning."""
     lease.validate(Path(job_path).parent.parent)
     arguments = [sys.executable, "-m", "market_analysis.historical_study_runtime",
-                 str(job_path), str(lease.descriptor)]
+                 *(("--batch",) if batch else ()), str(job_path), str(lease.descriptor)]
     # The descriptor is ephemeral argv, not create-only job/request identity.
     child = subprocess.Popen(arguments, env=environment, close_fds=True,
                              pass_fds=(lease.descriptor,))
@@ -664,6 +828,26 @@ def _verify_worker_runtime_revision(identity):
         raise ValueError("post-replay worker runtime implementation revision mismatch")
 
 
+def _compact_points(points):
+    """Fully consumed compact points and their experiment points.
+
+    A batch worker validates and decodes each spool once; later stages adopt
+    that validated completion for the same unchanged spool and reuse the
+    immutable decoded points.
+    """
+    key = (points._validation_key()
+           if _BATCH_WORKER and isinstance(points, StudyPointStream) else None)
+    cached = _COMPACT_POINTS.get(key) if key is not None else None
+    if cached is not None and _VALIDATED_SPOOLS.get(key) == points.metadata["point_count"]:
+        points.adopt_validated_completion()
+        return cached
+    compact = tuple(points)
+    entry = (compact, tuple(point.experiment_point() for point in compact))
+    if key is not None and points.validated_completion:
+        _COMPACT_POINTS[key] = entry
+    return entry
+
+
 def _execute_scientific_stage(request):
     from . import historical_market_state_study_execution as execution
     prepared = request.get("prepared")
@@ -677,12 +861,12 @@ def _execute_scientific_stage(request):
         return records, states, writer.publish()
     if action == "candidate":
         if request["selector"] in ("hmm",) or request["selector"].startswith(("fixed-", "atr-")):
-            compact = tuple(prepared.canonical_replay_result.points)
+            compact, experiment_points = _compact_points(prepared.canonical_replay_result.points)
             prepared.canonical_replay_result = CompactStudyReplay(
                 prepared.canonical_replay_result.manifest, compact,
                 prepared.canonical_replay_result.diagnostics,
                 prepared.canonical_replay_result.final_checkpoint)
-            prepared.experiment_points = tuple(point.experiment_point() for point in compact)
+            prepared.experiment_points = experiment_points
         reader = None
         if prepared.canonical_v1_branch_by_boundary is not None:
             reader = prepared.canonical_v1_branch_by_boundary.reader(request["prepared_stream"])
@@ -710,7 +894,43 @@ def _worker(job_path, lease_descriptor=None):
         _worker_owned(job_path, lease)
 
 
-def _worker_owned(job_path, lease):
+def _worker_batch(batch_path, lease_descriptor=None):
+    from .historical_run_directory import inherited_run_directory_lease
+    with inherited_run_directory_lease(lease_descriptor, Path(batch_path).parent.parent) as lease:
+        _worker_batch_owned(batch_path, lease)
+
+
+def _worker_batch_owned(batch_path, lease):
+    """Run each job exactly as a per-stage worker would, sharing loaded inputs.
+
+    Before every job after the first, a passed ``stop_after_epoch`` ends the
+    batch cleanly (exit 0) and records where it stopped for the parent.
+    """
+    global _BATCH_WORKER
+    batch_path = Path(batch_path)
+    batch = _read_json_bytes(batch_path.read_bytes())
+    if (type(batch) is not dict or set(batch) != {"batch", "stop_after_epoch"}
+            or type(batch["batch"]) is not list or not batch["batch"]
+            or any(type(item) is not str for item in batch["batch"])
+            or type(batch["stop_after_epoch"]) not in (int, float)):
+        raise ValueError("invalid post-replay batch job")
+    root = batch_path.parent.resolve()
+    if any(Path(item).parent.resolve() != root for item in batch["batch"]):
+        raise ValueError("post-replay batch job lies outside the leased stage directory")
+    _BATCH_WORKER = True
+    from .historical_shared_v1 import enable_process_cache
+    enable_process_cache()
+    size = len(batch["batch"])
+    for position, job_path in enumerate(batch["batch"]):
+        if position and time.time() >= batch["stop_after_epoch"]:
+            lease.validate(root.parent)
+            _atomic_write(batch_path.with_name(f"{batch_path.stem}.status.json"),
+                          _canonical_bytes({"stopped_before_index": position}))
+            return
+        _worker_owned(job_path, lease, batch_position=(position, size))
+
+
+def _worker_owned(job_path, lease, *, batch_position=None):
     started = time.perf_counter()
     job = _read_json_bytes(Path(job_path).read_bytes())
     if type(job) is not dict or type(job.get("identity")) is not dict:
@@ -747,7 +967,11 @@ def _worker_owned(job_path, lease):
                     for reference in (item.path, item.scientific_path) if reference is not None}
     # Sample after encoding, hashing, fsync and immutable stage publication.
     lease.validate(path.parent.parent)
+    batch_observation = ({} if batch_position is None else {"batch_worker": {
+        "position": batch_position[0], "size": batch_position[1],
+        "stage_scope": "duration covers this stage only, inputs loaded once per worker"}})
     _atomic_write(path.with_suffix(".observations.json"), _canonical_bytes({
+        **batch_observation,
         "observed_at_utc": datetime.now(timezone.utc).isoformat(),
         "monotonic_duration_seconds": time.perf_counter() - started,
         "sampling_boundary": "after durable stage publication; not process-exit peak",
@@ -760,5 +984,9 @@ def _worker_owned(job_path, lease):
 
 
 if __name__ == "__main__":
-    from market_analysis.historical_study_runtime import _worker as canonical_worker
-    canonical_worker(sys.argv[1], int(sys.argv[2]) if len(sys.argv) == 3 else None)
+    if len(sys.argv) >= 3 and sys.argv[1] == "--batch":
+        from market_analysis.historical_study_runtime import _worker_batch as canonical_batch_worker
+        canonical_batch_worker(sys.argv[2], int(sys.argv[3]) if len(sys.argv) == 4 else None)
+    else:
+        from market_analysis.historical_study_runtime import _worker as canonical_worker
+        canonical_worker(sys.argv[1], int(sys.argv[2]) if len(sys.argv) == 3 else None)
