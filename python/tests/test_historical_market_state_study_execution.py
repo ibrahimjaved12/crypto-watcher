@@ -94,6 +94,43 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                 freeze_study_hmm_model(
                     self.manifest, temporary, code_revision="fixture-revision")
 
+    def test_hmm_freeze_holds_one_development_report_at_a_time(self):
+        import weakref
+
+        class Report(dict):
+            """weakref-able stand-in for a decoded period report."""
+
+        alive, reads = [], []
+
+        def read_json(path):
+            # Every previously read report must be unreferenced before the next read.
+            self.assertTrue(all(ref() is None for ref in alive), "an earlier report is still referenced")
+            report = Report(report_sha256=str(len(reads)) * 64, extension_coverage_manifest_sha256="c" * 64)
+            alive.append(weakref.ref(report))
+            reads.append(path)
+            return report
+
+        class StopAfterLoop(Exception):
+            pass
+
+        def cohort(blocks, manifest):
+            self.assertTrue(all(ref() is None for ref in alive[:-1]))
+            raise StopAfterLoop
+
+        periods = tuple(item for item in self.manifest.selected_periods if item.phase == "development")
+        with TemporaryDirectory() as temporary:
+            period_dir = Path(temporary) / execution.PERIOD_DIRECTORY
+            period_dir.mkdir()
+            for period in periods:
+                (period_dir / execution._period_filename(period)).write_text("{}")
+            with patch.object(execution, "_read_json", read_json), \
+                 patch.object(execution, "_validate_period_report", lambda *args: None), \
+                 patch.object(execution, "_validated_period_hmm_block", lambda report, period: object()), \
+                 patch.object(execution, "validate_hmm_development_cohort", cohort), \
+                 self.assertRaises(StopAfterLoop):
+                freeze_study_hmm_model(self.manifest, temporary, code_revision="fixture-revision")
+        self.assertEqual(len(reads), len(periods))
+
     def test_period_preparation_loads_and_replays_once(self):
         period = self.manifest.selected_periods[0]
         content_sha = "a" * 64

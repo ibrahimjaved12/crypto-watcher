@@ -78,6 +78,7 @@ def _load_development_inputs(manifest, output_dir: Path, code_revision: str):
     reports = []
     coverage_sha = None
     for period in _development_periods(manifest):
+        report = None  # only one decoded report alive at a time
         path = period_dir / _period_filename(period)
         if not path.is_file():
             raise ValueError(
@@ -236,6 +237,7 @@ def validate_hmm_crossfit_index(path: Path | str,
     source_identities = {}
     period_dir = index_path.parent / PERIOD_DIRECTORY
     for period in periods:
+        report = None  # only one decoded report alive at a time
         report = _read_json(period_dir / _period_filename(period))
         report_sha = _validate_period_report(report, manifest, period, code_revision, coverage_sha256)
         block = _validated_period_hmm_block(report, period)

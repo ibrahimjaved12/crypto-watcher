@@ -84,9 +84,15 @@ def period_provenance(report, cross_fit_sha, final_model_sha):
         cross_fit_sha, final_model_sha, study_version=report['study_version'])
 
 
-def load_phase_reports(manifest, coverage, output_dir, phase, revision, cross_fit_sha, final_model_sha):
-    """Open exact filenames only. Caller must gate test before invoking this function."""
-    reports, sources = [], []
+def for_each_phase_report(manifest, coverage, output_dir, phase, revision, cross_fit_sha, final_model_sha, *, visit):
+    """Load, validate and ``visit(report, source)`` one phase report at a time.
+
+    Open exact filenames only. Caller must gate test before invoking this
+    function. Each report is released before the next is read, so only one
+    decoded report is alive at a time (a plain loop, not a generator: a
+    suspended generator frame would keep its report alive).
+    """
+    sources = []
     for period in manifest.selected_periods:
         if period.phase != phase:
             continue
@@ -96,10 +102,36 @@ def load_phase_reports(manifest, coverage, output_dir, phase, revision, cross_fi
         validate_candidate_registry(report)
         if phase != 'development' and report.get('hmm_model_sha256') != final_model_sha:
             raise ValueError('period was not generated with the frozen final HMM')
-        reports.append(report)
-        sources.append(period_provenance(report, cross_fit_sha, final_model_sha))
-    upstream = UpstreamInputProvenance(phase, tuple(sources), cross_fit_sha, final_model_sha)
+        source = period_provenance(report, cross_fit_sha, final_model_sha)
+        sources.append(source)
+        visit(report, source)
+        del report
+    return UpstreamInputProvenance(phase, tuple(sources), cross_fit_sha, final_model_sha)
+
+
+def load_phase_reports(manifest, coverage, output_dir, phase, revision, cross_fit_sha, final_model_sha):
+    """Every phase report in memory at once; prefer ``for_each_phase_report``."""
+    reports = []
+    upstream = for_each_phase_report(manifest, coverage, output_dir, phase, revision, cross_fit_sha,
+                                     final_model_sha, visit=lambda report, source: reports.append(report))
     return tuple(reports), upstream
+
+
+@dataclass(frozen=True)
+class ReportIndex:
+    by_identity: dict
+    v1_records: list
+
+
+def index_report(report):
+    """One scan of candidate_evidence: records per identity and V1 records, in original order."""
+    by_identity, v1_records = {}, []
+    for record in report['candidate_evidence']:
+        identity = _identity(record)
+        by_identity.setdefault(identity, []).append(record)
+        if record['experiment_id'] == 'V1':
+            v1_records.append(record)
+    return ReportIndex(by_identity, v1_records)
 
 
 class UnavailableObservation(ValueError):
@@ -302,17 +334,28 @@ class AdaptedDay:
     exclusions: tuple[tuple[str, int], ...]
 
 
-def adapt_period(report, source, identity, *, held_out_fold=None):
-    """All indexes use exact persisted identities; missing joins exclude rows."""
+def adapt_period(report, source, identity, *, held_out_fold=None, report_verified=False, index=None):
+    """All indexes use exact persisted identities; missing joins exclude rows.
+
+    ``report_verified=True`` skips only re-hashing the whole report: the caller
+    loaded it through load_finalized_period_report, which already verified
+    ``report_sha256``. ``index`` (from ``index_report``) replaces the
+    per-config scans of candidate_evidence; results are identical.
+    """
     if identity not in PREDICTIVE_CONFIGS:
         raise ValueError('unfrozen predictive config')
-    if source.period_report_sha256 != part_b._verify_hashed_payload(report, 'report_sha256', 'period report'):
+    report_sha = (report['report_sha256'] if report_verified
+                  else part_b._verify_hashed_payload(report, 'report_sha256', 'period report'))
+    if source.period_report_sha256 != report_sha:
         raise ValueError('adapter source report SHA mismatch')
     if period_provenance(report, source.hmm_cross_fit_sha256, source.hmm_final_model_sha256) != source:
         raise ValueError('adapter report period/scientific provenance mismatch')
     spec = predictive_family(identity.family_id)
     key = (identity.family_id, identity.algorithm_version, identity.config_version)
-    records = [r for r in report['candidate_evidence'] if _identity(r) == key and r['evidence_kind'] == spec.observation_mode]
+    if index is None:
+        records = [r for r in report['candidate_evidence'] if _identity(r) == key and r['evidence_kind'] == spec.observation_mode]
+    else:
+        records = [r for r in index.by_identity.get(key, ()) if r['evidence_kind'] == spec.observation_mode]
     model_sha = source.hmm_final_model_sha256
     if identity.family_id == 'EXP-75-09' and source.phase == 'development':
         if held_out_fold is None or held_out_fold['held_out_period']['period_report_sha256'] != source.period_report_sha256:
@@ -326,8 +369,9 @@ def adapt_period(report, source, identity, *, held_out_fold=None):
                    for block in held_out_fold['held_out_evidence'] for r in block]
     candidate = unique_index(records, lambda r: r['decision_time_ms'])
     if spec.observation_mode == 'CONTINUOUS':
-        v1 = unique_index((r for r in report['candidate_evidence'] if r['experiment_id'] == 'V1'
-                           and r['evidence_kind'] == 'CONTINUOUS'), lambda r: r['decision_time_ms'])
+        v1 = unique_index((r for r in (report['candidate_evidence'] if index is None else index.v1_records)
+                           if r['experiment_id'] == 'V1' and r['evidence_kind'] == 'CONTINUOUS'),
+                          lambda r: r['decision_time_ms'])
         outcomes = unique_index((r for h, rows in report['candidate_independent_continuous_outcomes']
                                  if h == spec.horizon_minutes for r in rows), lambda r: r['decision_time_ms'])
         paths = unique_index((r for r in report['secondary_v1_continuous_state_paths']
