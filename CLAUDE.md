@@ -83,6 +83,7 @@ Project is roughly 20% complete; things proceed incrementally and in parallel.
   costs included, ambiguity marked not optimistically resolved, report sample sizes and
   non-trades.
 - Test-data rule (owner decision 2026-10-07): the 12 untouched #123 test days may serve as the final exam for both the market-state study and predictor experiments, but each question has its own pre-registered hypotheses, is frozen before the test opens, and is reported in a separate output so we can see which is useful. Predictors are tuned only on development/validation days; each question opens the test days once. 12 days x 5 coins is thin for predictor claims, so treat it as a sanity check and use a separate, longer held-out period for the main predictor verdict.
+- Benchmark universe and horizons (owner decision 2026-10-07): six symbols BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT, frozen for all predictor work (a 7th only via the point-in-time liquidity check in #183). Primary horizons 15m, 1h, 4h; 1m/5m only as data granularity, features and diagnostics; daily and longer skipped for now. Always test both directions (long and short).
 - Prefer abundant retained data (ML needs it); retention constants were placeholders.
 
 ## 5. Stack (current, provisional)
