@@ -313,10 +313,12 @@ class ResearchDataRepo:
         with self.request("DELETE", f"{self.prefix}/releases/{int(release['id'])}"):
             pass
 
-    def create_draft(self, tag: str, body: str) -> dict:
+    def create_draft(self, tag: str, title: str, body: str) -> dict:
+        # Normal (non-pre-release) release that is never marked "Latest": "Latest" has no meaning
+        # for hundreds of data slices, and "pre-release" wrongly suggests unfinished data.
         return self.json("POST", f"{self.prefix}/releases", {
-            "tag_name": tag, "target_commitish": self.default_branch, "name": tag, "body": body,
-            "draft": True, "prerelease": True, "make_latest": "false"})
+            "tag_name": tag, "target_commitish": self.default_branch, "name": title, "body": body,
+            "draft": True, "prerelease": False, "make_latest": "false"})
 
     def assets(self, release_id: int) -> dict:
         found = {}
@@ -379,7 +381,7 @@ class ResearchDataRepo:
     def publish(self, release: dict, tag: str) -> dict:
         url = f"{self.prefix}/releases/{int(release['id'])}"
         try:
-            result = self.json("PATCH", url, {"draft": False})
+            result = self.json("PATCH", url, {"draft": False, "make_latest": "false"})
         except GitHubError as error:
             if not error.ambiguous:
                 raise
@@ -396,7 +398,9 @@ def publish_release(repo: ResearchDataRepo, tag: str, symbol: str, month: str, u
     body = (f"Research data lake {symbol} {month} ({lake.LAKE_SCHEMA_VERSION}). Built by GitHub Actions from the "
             "Binance public archive (data.binance.vision): raw monthly zips with checksums, exact 1-minute bars "
             "from aggTrades with flagged kline/mark/index/premium cross-checks, funding rows. See manifest.json.")
-    release = repo.create_draft(tag, body)
+    revision = tag.rsplit("-r", 1)[1]
+    title = f"{symbol} \u00b7 {month} \u00b7 1-minute bars + raw Binance archive (r{revision})"
+    release = repo.create_draft(tag, title, body)
     for upload in uploads:  # manifest.json is last
         repo.upload_verified(release, upload["path"], upload["name"], upload["sha256"], upload["bytes"])
         print(f"uploaded and verified {upload['name']}", flush=True)
