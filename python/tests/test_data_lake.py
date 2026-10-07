@@ -220,13 +220,29 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"funding\.zip line 3: invalid decimal"):
             lake.write_funding_csv_gz(io.BytesIO(), lake.read_zip_csv(zip_bytes(bad), 3, name="funding.zip"), MONTH)
 
-    def test_aggtrades_exponent_quantity_fails_with_field_and_line(self):
-        lines = [agg(1, "100", "1", START), agg(2, "100", "1E-7", START + 1)]
-        with self.assertRaisesRegex(ValueError, r"agg\.zip line 2: field quantity: .*no exponent.*'1E-7'"):
+    def test_aggtrades_exponent_values_are_exact_and_counted(self):
+        # DOGEUSDT 2025-01 publishes a quantity as "2.1845367E7" (= 21845367).
+        exponent = [agg(1, "0.3512", "2.1845367E7", START), agg(2, "1.5e-1", "1E-7", START + 1)]
+        plain = [agg(1, "0.3512", "21845367", START), agg(2, "0.15", "0.0000001", START + 1)]
+        bars, _, rows, raw = build(exponent)
+        plain_bars, _, plain_rows, plain_raw = build(plain)
+        self.assertEqual(raw, plain_raw)  # identical bars bytes
+        self.assertEqual(rows[0]["volume"], "21845367.0000001")
+        self.assertEqual(rows[0]["quote_volume"], "7672092.890400015")  # 0.3512*21845367 + 0.15*0.0000001
+        self.assertEqual((bars.stats()["non_plain_numeric_values"], plain_bars.stats()["non_plain_numeric_values"]),
+                         (3, 0))
+        self.assertEqual(lake.parse_published_scaled("2.1845367E7"), 21845367 * 10 ** lake.SCALE_DIGITS)
+        self.assertEqual(lake.parse_published_scaled("1E-8"), 1)
+
+    def test_aggtrades_values_finer_than_scale_fail_with_field_and_line(self):
+        lines = [agg(1, "100", "1", START), agg(2, "100", "1E-9", START + 1)]
+        with self.assertRaisesRegex(ValueError, r"agg\.zip line 2: field quantity: more than 8 fractional digits: '1E-9'"):
             lake.MinuteBars(MONTH).consume(lake.read_zip_csv(zip_bytes(lines), 7, name="agg.zip"))
         with self.assertRaisesRegex(ValueError, r"row 2: field price"):
             lake.MinuteBars(MONTH).consume([agg(1, "100", "1", START).split(","),
-                                            agg(2, "1e2", "1", START).split(",")])
+                                            agg(2, "1e", "1", START).split(",")])
+        with self.assertRaisesRegex(ValueError, r"row 1: field quantity"):
+            lake.MinuteBars(MONTH).consume([agg(1, "100", "NaN", START).split(",")])
         with self.assertRaisesRegex(ValueError, r"agg\.zip line 1: expected 7 columns"):
             lake.MinuteBars(MONTH).consume(lake.read_zip_csv(zip_bytes(["1,2,3"]), 7, name="agg.zip"))
 
