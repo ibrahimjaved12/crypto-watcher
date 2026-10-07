@@ -145,6 +145,16 @@ class LiquidationTests(unittest.TestCase):
         self.assertEqual(liquidation_loss(SHORT, 10_000, short_lp, MODEL), (short_lp - 10_000) + short_lp / 80)
         self.assertEqual(liquidation_loss(LONG, 10_000, lp, with_multiplier(MODEL, 0)), 10_000 - lp)
 
+    def test_liquidation_loss_is_capped_at_the_isolated_wallet_balance(self):
+        lp = liquidation_price(LONG, 10_000, 10, MODEL.mmr)
+        uncapped = liquidation_loss(LONG, 10_000, lp, MODEL)
+        wallet = Fraction(10_000, 10)
+        self.assertGreater(uncapped, wallet)  # 1.25% fee > 1% maintenance rate: the raw loss exceeds the margin
+        self.assertEqual(liquidation_loss(LONG, 10_000, lp, MODEL, leverage=10), wallet)
+        self.assertEqual(liquidation_loss(LONG, 10_000, lp, MODEL, leverage=1), uncapped)
+        with self.assertRaises(ValueError):
+            liquidation_loss(LONG, 10_000, lp, MODEL, leverage=0)
+
 
 class CrossCheckTests(unittest.TestCase):
     """Exact equality with the existing #37 futures_execution math."""

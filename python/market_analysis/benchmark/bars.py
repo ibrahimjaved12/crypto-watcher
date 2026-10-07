@@ -199,3 +199,25 @@ def compromised_in(series: BarSeries, start_index: int, end_index: int, mask: in
         raise ValueError(f"index range [{start_index}, {end_index}] outside 0..{series.minutes - 1}")
     flags = series.flags
     return any(flags[index] & mask for index in range(start_index, end_index + 1))
+
+
+class CompromisedIndex:
+    """Prefix counts of minutes whose flags intersect ``mask``: O(1) inclusive range queries.
+
+    ``compromised_in`` scans the range; build this once per series when many trades are labelled.
+    """
+
+    def __init__(self, series: BarSeries, mask: int = COMPROMISED_FLAGS) -> None:
+        counts = array("q", [0])
+        running = 0
+        for flag in series.flags:
+            if flag & mask:
+                running += 1
+            counts.append(running)
+        self.minutes = series.minutes
+        self._counts = counts
+
+    def any_in(self, start_index: int, end_index: int) -> bool:
+        if not 0 <= start_index <= end_index < self.minutes:
+            raise ValueError(f"index range [{start_index}, {end_index}] outside 0..{self.minutes - 1}")
+        return self._counts[end_index + 1] - self._counts[start_index] > 0
