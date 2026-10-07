@@ -412,6 +412,33 @@ def write_summary(path: str | None, lines: list[str]) -> None:
             stream.write("\n".join(lines) + "\n")
 
 
+def notice_stats(tag: str, status: str, manifest: dict | None) -> None:
+    """One-line aggregate stats as an Actions notice annotation (readable via the API).
+
+    Only names, sizes, counts and month totals: nothing secret, nothing per-trade.
+    """
+    if manifest is None:
+        print(f"::notice title=data lake {tag}::{status}", flush=True)
+        return
+    stats = manifest["stats"]
+    agg = stats["aggTrades"]
+    klines = stats["klines"]
+    fields = {
+        "status": status,
+        "bytes": {a["name"].split("__")[0]: a["bytes"] for a in manifest["assets"]},
+        "aggTrades": {k: agg[k] for k in ("rows", "id_gaps", "id_not_increasing", "rows_outside_month",
+                                          "minutes_without_trades", "total_volume", "total_trades")},
+        "klines": {name: {k: v[k] for k in ("rows", "missing_minutes", "duplicate_rows", "duplicate_conflicts")}
+                   for name, v in klines.items()},
+        "kline_total_volume": klines["klines"]["total_volume"],
+        "funding": {k: stats["fundingRate"][k] for k in ("rows", "raw_rows", "rows_outside_month", "interval_hours")},
+        "flags": stats["flag_counts"],
+    }
+    text = json.dumps(fields, sort_keys=True, separators=(",", ":"))[:3000]
+    print(f"::notice title=data lake {tag}::" + text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"),
+          flush=True)
+
+
 def summary_lines(tag: str, status: str, manifest: dict | None) -> list[str]:
     lines = [f"### Data lake `{tag}`: {status}", ""]
     if manifest is None:
@@ -453,6 +480,7 @@ def main(argv: list[str] | None = None) -> int:
         if repo.published_release(tag) is not None:
             print(f"{tag}: exists (published releases are immutable); nothing to do")
             write_summary(args.summary, summary_lines(tag, "exists", None))
+            notice_stats(tag, "exists", None)
             return 0
         for draft in repo.draft_releases(tag):
             repo.delete_draft(draft)
@@ -479,10 +507,12 @@ def main(argv: list[str] | None = None) -> int:
     if repo is None:
         print(lake.canonical_json(manifest), end="")
         write_summary(args.summary, summary_lines(tag, "dry run (not published)", manifest))
+        notice_stats(tag, "dry run", manifest)
         return 0
     published = publish_release(repo, tag, symbol, month, uploads)
     print(f"{tag}: published release {published['id']}")
     write_summary(args.summary, summary_lines(tag, "published", manifest))
+    notice_stats(tag, "published", manifest)
     return 0
 
 
