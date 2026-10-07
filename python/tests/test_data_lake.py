@@ -62,6 +62,24 @@ class DecimalTests(unittest.TestCase):
             total.add(text)
         self.assertEqual(total.text(), "3.120000001")
 
+    def test_plain_decimal_is_exact_for_exponent_forms(self):
+        for text, expected in (("9.8E-7", "0.00000098"), ("1E-8", "0.00000001"), ("1.5e3", "1500"),
+                               ("-2.50E-4", "-0.00025"), ("0.00010000", "0.0001"), ("0", "0"), ("-0.0", "0"),
+                               ("100", "100"), ("1.0E-4", "0.0001"), (" 2.5 ", "2.5")):
+            with self.subTest(text=text):
+                self.assertEqual(lake.plain_decimal(text), expected)
+                self.assertEqual(lake.canonical_decimal(text), expected)
+        for bad in ("NaN", "Infinity", "-Infinity", "sNaN", "", "1e999", "1E-41", "1 0", "0x10", "1,0", "e5"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                lake.plain_decimal(bad)
+
+    def test_exact_sum_mixes_plain_and_exponent_inputs(self):
+        total = lake.ExactSum()
+        for text in ("0.1", "9.8E-7", "1.5e3", "-2.50E-4", "0.00000002"):
+            total.add(text)
+        # 0.1 + 0.00000098 + 1500 - 0.00025 + 0.00000002
+        self.assertEqual(total.text(), "1500.099751")
+
     def test_more_than_eight_fractional_digits_and_malformed_values_raise(self):
         for text in ("0.123456789", "1e5", "1.", ".5", "1_0", "", "nan"):
             with self.subTest(text=text), self.assertRaises(ValueError):
@@ -146,6 +164,16 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(written["flag_counts"]["KLINE_ZERO_BUT_TRADES"], 1)
         self.assertEqual(written["flag_counts"]["KLINE_ROW_MISSING"], DAYS * 1440 - 2)
 
+    def test_kline_exponent_volume_compares_by_value(self):
+        _, written, rows, _ = build([agg(1, "10", "0.0001", START)],
+                                    kline_lines=[kline(START, volume="1.0E-4", taker="1E-4")])
+        flags = int(rows[0]["flags"])
+        self.assertFalse(flags & lake.FLAG_KLINE_VOLUME_DIFFERS)
+        self.assertFalse(flags & lake.FLAG_KLINE_TAKER_DIFFERS)
+        self.assertFalse(flags & lake.FLAG_KLINE_ZERO_BUT_TRADES)
+        self.assertEqual((rows[0]["volume"], rows[0]["k_volume"]), ("0.0001", "1.0E-4"))  # kline kept as published
+        self.assertEqual(written["flag_counts"]["KLINE_VOLUME_DIFFERS"], 0)
+
     def test_kline_duplicates_are_counted_not_failures(self):
         index = lake.index_klines([kline(START, "1").split(","), kline(START, "2").split(","),
                                    kline(START - 60_000).split(",")], MONTH)
@@ -174,9 +202,33 @@ class ArchiveTests(unittest.TestCase):
         output = io.BytesIO()
         stats = lake.write_funding_csv_gz(output, lake.read_zip_csv(zip_bytes(lines), 3), MONTH)
         text = gzip.decompress(output.getvalue()).decode("ascii")
-        self.assertEqual(text, "calc_time_ms,funding_interval_hours,last_funding_rate\n"
-                               f"{START},8,0.00010000\n{START + 4 * 3_600_000},4,-0.00002500\n")
+        self.assertEqual(text, "calc_time_ms,funding_interval_hours,last_funding_rate,last_funding_rate_published\n"
+                               f"{START},8,0.0001,0.00010000\n{START + 4 * 3_600_000},4,-0.000025,-0.00002500\n")
         self.assertEqual((stats["rows"], stats["rows_outside_month"], stats["interval_hours"]), (2, 1, ["4", "8"]))
+
+    def test_funding_exponent_rates_keep_exact_value_and_published_spelling(self):
+        lines = ["calc_time,funding_interval_hours,last_funding_rate",
+                 f"{START},8,9.8E-7", f"{START + 8 * 3_600_000},8,-2.50E-4"]
+        output = io.BytesIO()
+        stats = lake.write_funding_csv_gz(output, lake.read_zip_csv(zip_bytes(lines), 3, name="funding.zip"), MONTH)
+        text = gzip.decompress(output.getvalue()).decode("ascii").splitlines()
+        self.assertEqual(text[0], ",".join(lake.FUNDING_COLUMNS))
+        self.assertEqual(lake.FUNDING_COLUMNS[-2:], ("last_funding_rate", "last_funding_rate_published"))
+        self.assertEqual(text[1:], [f"{START},8,0.00000098,9.8E-7", f"{START + 8 * 3_600_000},8,-0.00025,-2.50E-4"])
+        self.assertEqual((stats["rows"], stats["interval_hours"]), (2, ["8"]))
+        bad = lines[:2] + [f"{START + 1},8,NaN"]
+        with self.assertRaisesRegex(ValueError, r"funding\.zip line 3: invalid decimal"):
+            lake.write_funding_csv_gz(io.BytesIO(), lake.read_zip_csv(zip_bytes(bad), 3, name="funding.zip"), MONTH)
+
+    def test_aggtrades_exponent_quantity_fails_with_field_and_line(self):
+        lines = [agg(1, "100", "1", START), agg(2, "100", "1E-7", START + 1)]
+        with self.assertRaisesRegex(ValueError, r"agg\.zip line 2: field quantity: .*no exponent.*'1E-7'"):
+            lake.MinuteBars(MONTH).consume(lake.read_zip_csv(zip_bytes(lines), 7, name="agg.zip"))
+        with self.assertRaisesRegex(ValueError, r"row 2: field price"):
+            lake.MinuteBars(MONTH).consume([agg(1, "100", "1", START).split(","),
+                                            agg(2, "1e2", "1", START).split(",")])
+        with self.assertRaisesRegex(ValueError, r"agg\.zip line 1: expected 7 columns"):
+            lake.MinuteBars(MONTH).consume(lake.read_zip_csv(zip_bytes(["1,2,3"]), 7, name="agg.zip"))
 
     def test_deterministic_bytes(self):
         lines = [agg(1, "97000.10", "0.003", START), agg(2, "97001", "0.5", START + 61_000, buyer_maker=True)]
