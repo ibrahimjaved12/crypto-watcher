@@ -12,6 +12,7 @@ from statistics import mean, median
 
 from . import historical_market_state_study_execution as part_b
 from . import historical_market_state_study_evaluation as core
+from . import historical_market_state_study_tables as tables
 from .historical_market_state_hmm_crossfit import validate_hmm_crossfit_index, HMM_CROSSFIT_DIRECTORY
 from .historical_market_state_study_adapter import (
     PREDICTIVE_CONFIGS, load_phase_reports, for_each_phase_report, index_report, adapt_period, period_provenance,
@@ -33,10 +34,10 @@ def verify_inputs(study_manifest, coverage_manifest, revision):
     return manifest, coverage
 
 
-def load_hmm_prerequisites(manifest, coverage, revision, index_path, model_path):
+def load_hmm_prerequisites(manifest, coverage, revision, index_path, model_path, table_dir=None):
     index_path = Path(index_path)
     index = validate_hmm_crossfit_index(index_path, manifest,
-        coverage_sha256=coverage['coverage_manifest_sha256'], code_revision=revision)
+        coverage_sha256=coverage['coverage_manifest_sha256'], code_revision=revision, table_dir=table_dir)
     model = part_b.load_frozen_hmm_model(model_path, manifest, coverage, revision)
     folds = {}
     for entry in index['ordered_folds']:
@@ -112,12 +113,29 @@ def adapt_phase(manifest, coverage, output_dir, phase, revision, cross_fit_sha, 
         track_a.append(TrackAReference(source.study_period_index, source.utc_date, source.phase,
             source.period_report_sha256, tuple(report['native_state_quality_summaries']),
             part_b._digest(report['native_state_quality_summaries'])))
+        part_b._log_peak_memory(f'part-c {phase} period {source.study_period_index}')
 
     upstream = for_each_phase_report(manifest, coverage, output_dir, phase, revision, cross_fit_sha,
                                      final_model_sha, visit=visit)
-    if len(track_a) != len(upstream.periods):
+    expected = sum(1 for period in manifest.selected_periods if period.phase == phase)
+    if len(track_a) != expected or len(upstream.periods) != expected:
         raise ValueError('artifact adapter requires the complete phase report roster')
     return {identity: tuple(items) for identity, items in days.items()}, tuple(track_a), upstream
+
+
+def _adapt(args, manifest, coverage, phase, cross_fit_sha, final_model_sha, identities, folds=None):
+    """Analysis tables when --analysis-table-dir is given, else the period reports; identical outputs."""
+    table_dir = getattr(args, 'analysis_table_dir', None)
+    if table_dir is not None:
+        return tables.adapt_phase_from_tables(manifest, coverage, table_dir, phase, args.part_b_revision,
+                                              cross_fit_sha, final_model_sha, identities, folds)
+    return adapt_phase(manifest, coverage, args.part_b_output_dir, phase, args.part_b_revision,
+                       cross_fit_sha, final_model_sha, identities, folds)
+
+
+def _require_report_source(args):
+    if getattr(args, 'analysis_table_dir', None) is None and getattr(args, 'part_b_output_dir', None) is None:
+        raise ValueError('--part-b-output-dir is required without --analysis-table-dir')
 
 
 def exclusion_records(adapted):
@@ -159,11 +177,12 @@ def layer_one_description(development, adapted, selected_days=None):
 
 
 def run_development(args):
+    _require_report_source(args)
     manifest, coverage = verify_inputs(args.study_manifest, args.coverage_manifest, args.part_b_revision)
     cross_sha, final_sha, folds = load_hmm_prerequisites(manifest, coverage, args.part_b_revision,
-                                                       args.hmm_crossfit_index, args.final_hmm_model)
-    adapted, track_a, upstream = adapt_phase(manifest, coverage, args.part_b_output_dir, 'development',
-                                             args.part_b_revision, cross_sha, final_sha, PREDICTIVE_CONFIGS, folds)
+        args.hmm_crossfit_index, args.final_hmm_model, table_dir=getattr(args, 'analysis_table_dir', None))
+    adapted, track_a, upstream = _adapt(args, manifest, coverage, 'development', cross_sha, final_sha,
+                                        PREDICTIVE_CONFIGS, folds)
     results, nominations, samples, pairs, evidence, bins = [], [], [], [], [], []
     selected_days = {}
     for family in PRIMARY_CONFIRMATORY_FAMILY:
@@ -199,13 +218,14 @@ def run_development(args):
 
 
 def run_validation(args):
+    _require_report_source(args)
     development, _ = read_artifact(args.development_freeze, 'development')
     manifest, coverage = verify_inputs(args.study_manifest, args.coverage_manifest, args.part_b_revision)
     cross_sha, final_sha, _ = load_hmm_prerequisites(manifest, coverage, args.part_b_revision,
-                                                   args.hmm_crossfit_index, args.final_hmm_model)
+        args.hmm_crossfit_index, args.final_hmm_model, table_dir=getattr(args, 'analysis_table_dir', None))
     require_prerequisites(development, manifest, coverage, args.part_b_revision, cross_sha, final_sha)
-    adapted, track_a, upstream = adapt_phase(manifest, coverage, args.part_b_output_dir, 'validation',
-        args.part_b_revision, cross_sha, final_sha, tuple(p.identity for p in development.predictive_pairs))
+    adapted, track_a, upstream = _adapt(args, manifest, coverage, 'validation', cross_sha, final_sha,
+                                        tuple(p.identity for p in development.predictive_pairs))
     decisions = tuple(core.evaluate_validation(pair, tuple(d.day for d in adapted[pair.identity]), upstream, development)
                       for pair in development.predictive_pairs)
     validation = core.freeze_validation(development, decisions, upstream)
@@ -217,6 +237,7 @@ def run_validation(args):
 
 
 def run_test(args):
+    _require_report_source(args)
     # Parent reconstruction and exact aggregate authorization precede ALL test report I/O.
     development, dev_metadata = read_artifact(args.development_freeze, 'development')
     validation, val_metadata = read_artifact(args.validation_freeze, 'validation')
@@ -228,8 +249,8 @@ def run_test(args):
     members = tuple(m for m in supplied.members if m.status == 'AUTHORIZED')
     upstream, results, test_track_a, descriptive, exclusions = None, (), (), (), ()
     if members:
-        adapted, test_track_a, upstream = adapt_phase(manifest, coverage, args.part_b_output_dir, 'test',
-            args.part_b_revision, development.hmm_cross_fit_sha256, development.hmm_final_model_sha256,
+        adapted, test_track_a, upstream = _adapt(args, manifest, coverage, 'test',
+            development.hmm_cross_fit_sha256, development.hmm_final_model_sha256,
             tuple(m.identity for m in members))
         results = tuple(core.evaluate_test(development, validation, supplied, member.family_id,
             tuple(d.day for d in adapted[member.identity]), upstream) for member in members)
@@ -247,13 +268,79 @@ def run_test(args):
     return report
 
 
+def _table_inputs(args):
+    """Gate and identities for one period's analysis table, before any report is opened.
+
+    Same rules as the phase runs: validation tables hold the nominated configs
+    only; test tables only authorized members, after exact authorization.
+    """
+    manifest, coverage = verify_inputs(args.study_manifest, args.coverage_manifest, args.part_b_revision)
+    period = next((p for p in manifest.selected_periods if p.study_period_index == args.period_index), None)
+    if period is None:
+        raise ValueError('--period-index is outside the frozen manifest')
+    if period.phase == 'development':
+        return manifest, coverage, period, None, None, PREDICTIVE_CONFIGS
+    required = ['development_freeze', 'hmm_crossfit_index', 'final_hmm_model']
+    if period.phase == 'test':
+        required += ['validation_freeze', 'test_authorization']
+    for name in required:
+        if getattr(args, name, None) is None:
+            raise ValueError(f"--{name.replace('_', '-')} is required for {period.phase} analysis tables")
+    development, _ = read_artifact(args.development_freeze, 'development')
+    if period.phase == 'test':
+        validation, _ = read_artifact(args.validation_freeze, 'validation')
+        supplied, _ = read_artifact(args.test_authorization, 'authorization')
+        if core.authorize_test(development, validation) != supplied:
+            raise ValueError('supplied authorization is not the exact current aggregate authorization')
+        members = tuple(m for m in supplied.members if m.status == 'AUTHORIZED')
+        if not members:
+            raise ValueError('no authorized test members; nothing to derive')
+        identities = tuple(m.identity for m in members)
+    else:
+        identities = tuple(p.identity for p in development.predictive_pairs)
+    cross_sha, final_sha, _ = load_hmm_prerequisites(manifest, coverage, args.part_b_revision,
+        args.hmm_crossfit_index, args.final_hmm_model, table_dir=args.analysis_table_dir)
+    require_prerequisites(development, manifest, coverage, args.part_b_revision, cross_sha, final_sha)
+    return manifest, coverage, period, cross_sha, final_sha, identities
+
+
+def run_table_command(args):
+    manifest, coverage, period, cross_sha, final_sha, identities = _table_inputs(args)
+    report_path = Path(args.part_b_output_dir) / part_b.PERIOD_DIRECTORY / part_b._period_filename(period)
+    table_file = tables.table_path(args.analysis_table_dir, period)
+    if args.phase == 'derive-table':
+        table = tables.derive_period_table(report_path, manifest, coverage, period, args.part_b_revision,
+            cross_fit_sha=cross_sha, final_model_sha=final_sha, identities=identities)
+        path = tables.write_period_table(table_file, table)
+        print(path)
+        return path
+    tables.verify_period_table(report_path, table_file, manifest, coverage, period, args.part_b_revision,
+        cross_fit_sha=cross_sha, final_model_sha=final_sha, identities=identities)
+    print('verified')
+    return table_file
+
+
 def build_cli_parser():
     parser = argparse.ArgumentParser(description='Artifact-only frozen historical study Part C')
     commands = parser.add_subparsers(dest='phase', required=True)
+    for name in ('derive-table', 'verify-table'):
+        command = commands.add_parser(name, help='derive (or audit) one period analysis table from its report')
+        for option in ('study-manifest', 'coverage-manifest', 'part-b-output-dir', 'analysis-table-dir'):
+            command.add_argument('--' + option, type=Path, required=True)
+        command.add_argument('--part-b-revision', required=True)
+        command.add_argument('--period-index', type=int, required=True)
+        # Non-development periods: the frozen parents and HMM prerequisites that gate the table.
+        for option in ('development-freeze', 'hmm-crossfit-index', 'final-hmm-model',
+                       'validation-freeze', 'test-authorization'):
+            command.add_argument('--' + option, type=Path)
     for phase in ('development', 'validation', 'test'):
         command = commands.add_parser(phase)
-        for name in ('study-manifest', 'coverage-manifest', 'part-b-output-dir', 'output'):
+        for name in ('study-manifest', 'coverage-manifest', 'output'):
             command.add_argument('--' + name, type=Path, required=True)
+        command.add_argument('--part-b-output-dir', type=Path,
+                             help='Part-B output directory; required without --analysis-table-dir')
+        command.add_argument('--analysis-table-dir', type=Path,
+                             help='read derived per-period analysis tables instead of the period reports')
         command.add_argument('--part-b-revision', required=True, help='Pinned artifact producer revision; independent of consumer HEAD')
         if phase != 'test':
             command.add_argument('--hmm-crossfit-index', type=Path, required=True)
@@ -272,10 +359,12 @@ def main(argv=None):
     parser = build_cli_parser()
     args = parser.parse_args(argv)
     try:
-        {'development': run_development, 'validation': run_validation, 'test': run_test}[args.phase](args)
+        {'development': run_development, 'validation': run_validation, 'test': run_test,
+         'derive-table': run_table_command, 'verify-table': run_table_command}[args.phase](args)
     except (ValueError, TypeError, KeyError, OSError) as exc:
         parser.exit(2, f'Part-C artifact error: {exc}\n')
-    print(f'Frozen {args.phase} artifact: {args.output}')
+    if args.phase in ('development', 'validation', 'test'):
+        print(f'Frozen {args.phase} artifact: {args.output}')
     return 0
 
 

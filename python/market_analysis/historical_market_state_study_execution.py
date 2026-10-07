@@ -18,6 +18,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import subprocess
+import sys
 import tempfile
 import time
 from types import MappingProxyType, SimpleNamespace
@@ -335,6 +336,18 @@ def _canonical(value) -> str:
 def _digest(value) -> str:
     from .historical_market_state_study_json import canonical_study_sha256
     return canonical_study_sha256(value)
+
+
+def _log_peak_memory(label) -> None:
+    """Operational peak-RSS line on stderr only; never part of any artifact."""
+    try:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # ru_maxrss is KiB on Linux and bytes on macOS.
+        gb = peak / 1024 ** 3 if sys.platform == "darwin" else peak / 1024 ** 2
+        print(f"peak_rss_gb[{label}]={gb:.2f}", file=sys.stderr)
+    except (ImportError, OSError, ValueError):
+        pass
 
 
 def _artifact_json(payload: Mapping[str, Any], hash_field: str) -> str:
@@ -2594,8 +2607,13 @@ def freeze_study_hmm_model(
     output_dir: Path | str,
     *, code_revision: str,
     output_json: Path | str | None = None,
+    table_dir: Path | str | None = None,
 ) -> Path:
-    """Freeze the study HMM only after all ten development period artifacts exist."""
+    """Freeze the study HMM only after all ten development period artifacts exist.
+
+    With ``table_dir`` each period's HMM view is read from its analysis table
+    (derived from the fully validated report) instead of the report itself.
+    """
     if not isinstance(code_revision, str) or not code_revision:
         raise ValueError("HMM model freeze requires code revision")
     output = Path(output_dir).expanduser().resolve()
@@ -2605,13 +2623,22 @@ def freeze_study_hmm_model(
     blocks, identities = [], []
     coverage_sha = None
     for period in development_periods:
-        path = period_dir / _period_filename(period)
-        if not path.is_file():
-            raise ValueError(
-                f"cannot freeze study HMM before development period {period.study_period_index} completes")
         report = None  # free the previous report before reading the next one
-        report = _read_json(path)
-        _validate_period_report(report, manifest, period, code_revision, coverage_sha)
+        if table_dir is not None:
+            from . import historical_market_state_study_tables as tables
+            path = tables.table_path(table_dir, period)
+            if not path.is_file():
+                raise ValueError(
+                    f"cannot freeze study HMM before development table {period.study_period_index} is derived")
+            report = tables.load_hmm_view(path, manifest, period, code_revision=code_revision,
+                                          coverage_sha256=coverage_sha)
+        else:
+            path = period_dir / _period_filename(period)
+            if not path.is_file():
+                raise ValueError(
+                    f"cannot freeze study HMM before development period {period.study_period_index} completes")
+            report = _read_json(path)
+            _validate_period_report(report, manifest, period, code_revision, coverage_sha)
         current_coverage = report["extension_coverage_manifest_sha256"]
         if coverage_sha is None:
             coverage_sha = current_coverage
@@ -2621,6 +2648,8 @@ def freeze_study_hmm_model(
                            "utc_date": period.utc_date.isoformat(),
                            "phase": period.phase,
                            "period_report_sha256": report["report_sha256"]})
+        _log_peak_memory(f"freeze-hmm period {period.study_period_index}")
+    report = None
     ordered_blocks = validate_hmm_development_cohort(blocks, manifest)
     diagnostics, model = train_hmm_regime_model_from_blocks(ordered_blocks, HMM_CONFIG_V1)
     if model is None or diagnostics.status != "HMM_TRAINING_READY":
@@ -2704,6 +2733,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     freeze.add_argument("--output-dir", type=Path, required=True)
     freeze.add_argument("--output-json", type=Path)
     freeze.add_argument("--code-revision")
+    freeze.add_argument("--analysis-table-dir", type=Path,
+                        help="read development HMM views from derived analysis tables")
     return parser
 
 
@@ -2755,7 +2786,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "freeze-hmm":
             path = freeze_study_hmm_model(
                 manifest, args.output_dir, code_revision=revision,
-                output_json=args.output_json)
+                output_json=args.output_json, table_dir=args.analysis_table_dir)
             print(f"Frozen study HMM model: {path}")
             return 0
         parser.error("unknown command")

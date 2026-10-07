@@ -131,6 +131,51 @@ class StudyExecutionGovernanceTests(unittest.TestCase):
                 freeze_study_hmm_model(self.manifest, temporary, code_revision="fixture-revision")
         self.assertEqual(len(reads), len(periods))
 
+    def test_hmm_freeze_from_tables_is_byte_identical(self):
+        from market_analysis.experiments.market_state_hmm_regimes import (
+            HMMTrainingDiagnostics, _training_fingerprint, HMM_CONFIG_V1)
+        from test_historical_market_state_hmm_crossfit import (
+            FixtureModel, derive_development_tables, write_development_reports)
+        revision = "crossfit-fixture"
+
+        def train(blocks, config):
+            blocks = tuple(blocks)
+            feature_blocks = tuple(item for block in blocks for item in block.feature_blocks)
+            sha = _training_fingerprint(feature_blocks, blocks[0].movement_scope, HMM_CONFIG_V1)
+            first, last = blocks[0].start_boundary_time_ms, blocks[-1].start_boundary_time_ms
+            return (HMMTrainingDiagnostics("HMM_TRAINING_READY", None, len(feature_blocks), 10 * 1439,
+                                           len(feature_blocks), 0, first, last, sha),
+                    FixtureModel("f" * 64, sha, len(feature_blocks), len(feature_blocks), 10 * 1439, 0, first, last))
+
+        with TemporaryDirectory() as temporary:
+            reports_root, tables_root = Path(temporary) / "reports", Path(temporary) / "tables-run"
+            table_dir = Path(temporary) / "tables"
+            write_development_reports(self.manifest, reports_root, revision)
+            derive_development_tables(self.manifest, reports_root, table_dir)
+            tables_root.mkdir()  # table mode reads no period report
+            with patch.object(execution, "train_hmm_regime_model_from_blocks", side_effect=train):
+                from_reports = freeze_study_hmm_model(self.manifest, reports_root, code_revision=revision)
+                from_tables = freeze_study_hmm_model(self.manifest, tables_root, code_revision=revision,
+                                                     table_dir=table_dir)
+                self.assertEqual(from_reports.read_bytes(), from_tables.read_bytes())
+                missing = Path(temporary) / "missing"
+                with self.assertRaisesRegex(ValueError, "development table 0 is derived"):
+                    freeze_study_hmm_model(self.manifest, tables_root, code_revision=revision, table_dir=missing)
+
+    def test_peak_memory_line_goes_to_stderr_only(self):
+        import io
+        import sys
+        stream = io.StringIO()
+        with patch.object(sys, "stderr", stream):
+            execution._log_peak_memory("x")
+        lines = stream.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("peak_rss_gb[x]="))
+        stream = io.StringIO()
+        with patch.object(sys, "stderr", stream), patch.dict(sys.modules, {"resource": None}):
+            execution._log_peak_memory("x")  # ImportError is swallowed
+        self.assertEqual(stream.getvalue(), "")
+
     def test_period_preparation_loads_and_replays_once(self):
         period = self.manifest.selected_periods[0]
         content_sha = "a" * 64

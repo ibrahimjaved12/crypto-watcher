@@ -29,6 +29,7 @@ from .historical_market_state_study_execution import (
     StudyArtifactConflictError,
     _artifact_json,
     _canonical,
+    _log_peak_memory,
     _validate_period_report,
     _validated_period_hmm_block,
     _period_filename,
@@ -72,20 +73,32 @@ def _v1_continuous_times(report, period):
     return frozenset(times)
 
 
-def _load_development_inputs(manifest, output_dir: Path, code_revision: str):
+def _load_development_inputs(manifest, output_dir: Path, code_revision: str, table_dir=None):
+    """Development HMM inputs from the reports, or from analysis-table HMM views."""
     period_dir = output_dir / PERIOD_DIRECTORY
     blocks = []
     reports = []
     coverage_sha = None
     for period in _development_periods(manifest):
         report = None  # only one decoded report alive at a time
-        path = period_dir / _period_filename(period)
-        if not path.is_file():
-            raise ValueError(
-                f"cannot build HMM cross-fit before development period "
-                f"{period.study_period_index} completes")
-        report = _read_json(path)
-        report_sha = _validate_period_report(report, manifest, period, code_revision, coverage_sha)
+        if table_dir is not None:
+            from . import historical_market_state_study_tables as tables
+            path = tables.table_path(table_dir, period)
+            if not path.is_file():
+                raise ValueError(
+                    f"cannot build HMM cross-fit before development table "
+                    f"{period.study_period_index} is derived")
+            report = tables.load_hmm_view(path, manifest, period, code_revision=code_revision,
+                                          coverage_sha256=coverage_sha)
+            report_sha = report["report_sha256"]
+        else:
+            path = period_dir / _period_filename(period)
+            if not path.is_file():
+                raise ValueError(
+                    f"cannot build HMM cross-fit before development period "
+                    f"{period.study_period_index} completes")
+            report = _read_json(path)
+            report_sha = _validate_period_report(report, manifest, period, code_revision, coverage_sha)
         current_coverage = report["extension_coverage_manifest_sha256"]
         if coverage_sha is None:
             coverage_sha = current_coverage
@@ -102,6 +115,8 @@ def _load_development_inputs(manifest, output_dir: Path, code_revision: str):
             "training_block_sha256": block.block_sha256,
             "v1_continuous_times": v1_times,
         })
+        _log_peak_memory(f"crossfit inputs period {period.study_period_index}")
+    report = None
     return tuple(blocks), tuple(reports), coverage_sha
 
 
@@ -145,13 +160,14 @@ def freeze_development_hmm_crossfit(
     output_dir: Path | str,
     *,
     code_revision: str,
+    table_dir: Path | str | None = None,
 ) -> tuple[Path, ...]:
     """Write ten immutable leave-one-development-day-out HMM fold artifacts."""
     if not isinstance(code_revision, str) or not code_revision:
         raise ValueError("HMM cross-fit requires code revision")
     output = Path(output_dir).expanduser().resolve()
     blocks, reports, coverage_sha = _load_development_inputs(
-        manifest, output, code_revision)
+        manifest, output, code_revision, table_dir=table_dir)
     destination = output / HMM_CROSSFIT_DIRECTORY
     written = []
     index_entries = []
@@ -216,8 +232,12 @@ def freeze_development_hmm_crossfit(
 
 def validate_hmm_crossfit_index(path: Path | str,
                                 manifest: HistoricalMarketStateStudyManifest,
-                                *, coverage_sha256: str, code_revision: str):
-    """Validate all ten folds and their source-report/model identities for Part C."""
+                                *, coverage_sha256: str, code_revision: str, table_dir=None):
+    """Validate all ten folds and their source-report/model identities for Part C.
+
+    With ``table_dir`` the development HMM views come from analysis tables
+    instead of the reports beside the index; every other check is unchanged.
+    """
     index_path = Path(path).expanduser().resolve()
     index = _read_json(index_path)
     _verify_hashed_payload(index, "index_sha256", "HMM cross-fit index")
@@ -238,8 +258,14 @@ def validate_hmm_crossfit_index(path: Path | str,
     period_dir = index_path.parent / PERIOD_DIRECTORY
     for period in periods:
         report = None  # only one decoded report alive at a time
-        report = _read_json(period_dir / _period_filename(period))
-        report_sha = _validate_period_report(report, manifest, period, code_revision, coverage_sha256)
+        if table_dir is not None:
+            from . import historical_market_state_study_tables as tables
+            report = tables.load_hmm_view(tables.table_path(table_dir, period), manifest, period,
+                                          code_revision=code_revision, coverage_sha256=coverage_sha256)
+            report_sha = report["report_sha256"]
+        else:
+            report = _read_json(period_dir / _period_filename(period))
+            report_sha = _validate_period_report(report, manifest, period, code_revision, coverage_sha256)
         block = _validated_period_hmm_block(report, period)
         v1_times = _v1_continuous_times(report, period)
         if any(row.evaluation_boundary_time_ms not in v1_times
@@ -247,6 +273,8 @@ def validate_hmm_crossfit_index(path: Path | str,
             raise ValueError("development HMM feature row lacks exact V1 continuous evidence")
         source_identities[period.study_period_index] = (
             report_sha, block.block_sha256, block, v1_times)
+        _log_peak_memory(f"crossfit validate period {period.study_period_index}")
+    report = None
     for offset, (entry, period) in enumerate(zip(entries, periods)):
         if (not isinstance(entry, dict)
                 or entry.get("study_period_index") != offset
@@ -376,6 +404,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--study-manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--code-revision")
+    parser.add_argument("--analysis-table-dir", type=Path,
+                        help="read development HMM views from derived analysis tables")
     return parser
 
 
@@ -388,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
         if not revision:
             raise ValueError("--code-revision is required for cross-fit freeze")
         paths = freeze_development_hmm_crossfit(
-            manifest, args.output_dir, code_revision=revision)
+            manifest, args.output_dir, code_revision=revision, table_dir=args.analysis_table_dir)
         for path in paths:
             print(path)
         return 0

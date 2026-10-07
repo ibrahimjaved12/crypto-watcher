@@ -41,6 +41,124 @@ class FixtureModel:
     training_last_usable_boundary_time_ms: int
 
 
+def write_development_reports(manifest, root, revision="crossfit-fixture"):
+    """Ten synthetic development reports carrying exactly the HMM inputs."""
+    period_dir = root / execution.PERIOD_DIRECTORY
+    period_dir.mkdir(parents=True)
+    coverage_sha = "a" * 64
+    blocks = []
+    for period in manifest.selected_periods[:10]:
+        row = HMMFeatureRow(
+            period.start_boundary_time_ms,
+            (float(period.study_period_index + 1), 0.1, 0.2, 1.0))
+        block = HMMDevelopmentTrainingBlock(
+            period.study_period_index, period.utc_date.isoformat(),
+            period.start_boundary_time_ms, period.end_boundary_time_ms,
+            ("movement-v1", "config-v1", "universe-v1", "1",
+             ("BTCUSDT", "ETHUSDT"), "provider", "exchange", "trade"),
+            ((row,),), 1439)
+        blocks.append(block)
+        candidate_records = [report_json_safe(execution.HistoricalStudyCandidateEvidence(
+            period.study_period_index, period.utc_date.isoformat(), period.phase,
+            "V1", "v1-algorithm-fixture", "v1-config-fixture",
+            row.evaluation_boundary_time_ms, "CONTINUOUS", "READY", {}))]
+        replay_identity = {"movement_algorithm_version": "movement-v1",
+                           "movement_config_version": "config-v1", "universe_id": "universe-v1",
+                           "universe_version": "1", "configured_universe": ["BTCUSDT", "ETHUSDT"],
+                           "provider": "provider", "exchange": "exchange", "price_type": "trade"}
+        context = []
+        body = {
+            "period_report_schema_version": execution.PERIOD_REPORT_SCHEMA_VERSION,
+            "execution_version": execution.EXECUTION_VERSION,
+            "study_version": manifest.study_version,
+            "candidate_evidence_version": CANDIDATE_EVIDENCE_VERSION,
+            "forward_outcomes_version": execution.FORWARD_OUTCOMES_VERSION,
+            "tool_config_version": execution.TOOL_CONFIG_VERSION,
+            "study_manifest_sha256": manifest.manifest_sha256,
+            "extension_coverage_manifest_sha256": coverage_sha,
+            "code_revision": revision,
+            "period": report_json_safe(period),
+            "canonical_replay_manifest": replay_identity,
+            "taker_flow_evidence_identity": {
+                "algorithm_version": "taker-buy-sell-imbalance-v2-exact-sign"},
+            "candidate_evidence": candidate_records,
+            "candidate_evidence_sha256": execution._digest(candidate_records),
+            "v1_evidence_sha256": execution._digest(candidate_records),
+            "event_time_v1_context_version": execution.EVENT_TIME_V1_CONTEXT_VERSION,
+            "event_time_v1_context": context,
+            "event_time_v1_context_sha256": execution._digest({
+                "version": execution.EVENT_TIME_V1_CONTEXT_VERSION, "records": context}),
+            "bocpd_onset_evidence_version": execution.BOCPD_ONSET_EVIDENCE_VERSION,
+            "bocpd_onset_evidence": [],
+            "bocpd_onset_evidence_sha256": execution._digest({
+                "version": execution.BOCPD_ONSET_EVIDENCE_VERSION, "records": []}),
+            "hmm_development_training_block": report_json_safe(block),
+            "hmm_development_training_block_sha256": block.block_sha256,
+        }
+        payload = execution._artifact_json(body, "report_sha256")
+        (period_dir / execution._period_filename(period)).write_text(
+            payload, encoding="utf-8")
+    return tuple(blocks), coverage_sha
+
+
+def derive_development_tables(manifest, root, table_dir):
+    """Analysis tables for the fixture reports.
+
+    The fixture reports lack sections a table derive reads, so this test adds
+    empty ones to the reports in place and re-seals them; both modes then
+    read the same (re-sealed) reports.
+    """
+    from market_analysis import historical_market_state_study_tables as tables
+    for period in manifest.selected_periods[:10]:
+        path = root / execution.PERIOD_DIRECTORY / execution._period_filename(period)
+        report = json.loads(path.read_text(encoding="utf-8"))
+        report.update(native_state_quality_summaries=[], candidate_independent_continuous_outcomes=[],
+                      secondary_v1_continuous_state_paths=[])
+        report = json.loads(execution._artifact_json(report, "report_sha256"))
+        path.write_text(execution._canonical(report), encoding="utf-8")
+        table = tables.build_period_table(report, manifest, period, report_file_sha256="0" * 64,
+                                          cross_fit_sha=None, final_model_sha=None, identities=())
+        tables.write_period_table(tables.table_path(table_dir, period), table)
+
+
+def fixture_hmm(blocks):
+    """Deterministic train/filter/parse fakes over the fixture blocks."""
+    def train(training_blocks, config):
+        held_out = next(index for index in range(10)
+                        if index not in tuple(item.study_period_index for item in training_blocks))
+        training_blocks = tuple(block for block in blocks if block.study_period_index != held_out)
+        feature_blocks = tuple(feature_block for block in training_blocks
+                               for feature_block in block.feature_blocks)
+        training_sha = _training_fingerprint(feature_blocks, training_blocks[0].movement_scope, HMM_CONFIG_V1)
+        diagnostics = HMMTrainingDiagnostics(
+            "HMM_TRAINING_READY", None, len(feature_blocks), 9 * 1439,
+            len(feature_blocks), 0, training_blocks[0].start_boundary_time_ms,
+            training_blocks[-1].start_boundary_time_ms, training_sha)
+        return diagnostics, FixtureModel(
+            (f"{held_out:02d}" * 32)[:64], training_sha, len(feature_blocks),
+            len(feature_blocks), 9 * 1439, 0,
+            training_blocks[0].start_boundary_time_ms, training_blocks[-1].start_boundary_time_ms)
+
+    def filter_blocks(feature_blocks, model, config):
+        return tuple(tuple({
+            "evaluation_boundary_time_ms": row.evaluation_boundary_time_ms, "status": "HMM_READY",
+            "status_reason": None, "raw_feature_vector": list(row.values),
+            "standardized_feature_vector": [0.0, 0.0, 0.0, 0.0], "filter_reset_before_observation": True,
+            "predicted_state_probabilities": [1 / 3, 1 / 3, 1 / 3], "posterior_probabilities": [0.2, 0.6, 0.2],
+            "hard_state": "MID_MOVEMENT", "posterior_confidence": 0.6, "posterior_entropy": 0.0,
+            "predictive_log_likelihood": 0.0, "algorithm_version": crossfit.HMM_ALGORITHM_VERSION,
+            "config_version": config.version, "model_sha256": model.model_sha256,
+        } for row in block) for block in feature_blocks)
+
+    def parse(item):
+        return FixtureModel(*(item[name] for name in (
+            "model_sha256", "training_data_sha256", "training_block_count", "training_usable_row_count",
+            "training_unavailable_row_count", "training_transition_count",
+            "training_first_usable_boundary_time_ms", "training_last_usable_boundary_time_ms")))
+
+    return train, filter_blocks, parse
+
+
 class HistoricalMarketStateHMMCrossFitTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -48,62 +166,7 @@ class HistoricalMarketStateHMMCrossFitTests(unittest.TestCase):
             MANIFEST_PATH.read_text(encoding="utf-8"))
 
     def _write_development_reports(self, root, revision="crossfit-fixture"):
-        period_dir = root / execution.PERIOD_DIRECTORY
-        period_dir.mkdir(parents=True)
-        coverage_sha = "a" * 64
-        blocks = []
-        for period in self.manifest.selected_periods[:10]:
-            row = HMMFeatureRow(
-                period.start_boundary_time_ms,
-                (float(period.study_period_index + 1), 0.1, 0.2, 1.0))
-            block = HMMDevelopmentTrainingBlock(
-                period.study_period_index, period.utc_date.isoformat(),
-                period.start_boundary_time_ms, period.end_boundary_time_ms,
-                ("movement-v1", "config-v1", "universe-v1", "1",
-                 ("BTCUSDT", "ETHUSDT"), "provider", "exchange", "trade"),
-                ((row,),), 1439)
-            blocks.append(block)
-            candidate_records = [report_json_safe(execution.HistoricalStudyCandidateEvidence(
-                period.study_period_index, period.utc_date.isoformat(), period.phase,
-                "V1", "v1-algorithm-fixture", "v1-config-fixture",
-                row.evaluation_boundary_time_ms, "CONTINUOUS", "READY", {}))]
-            replay_identity = {"movement_algorithm_version": "movement-v1",
-                               "movement_config_version": "config-v1", "universe_id": "universe-v1",
-                               "universe_version": "1", "configured_universe": ["BTCUSDT", "ETHUSDT"],
-                               "provider": "provider", "exchange": "exchange", "price_type": "trade"}
-            context = []
-            body = {
-                "period_report_schema_version": execution.PERIOD_REPORT_SCHEMA_VERSION,
-                "execution_version": execution.EXECUTION_VERSION,
-                "study_version": self.manifest.study_version,
-                "candidate_evidence_version": CANDIDATE_EVIDENCE_VERSION,
-                "forward_outcomes_version": execution.FORWARD_OUTCOMES_VERSION,
-                "tool_config_version": execution.TOOL_CONFIG_VERSION,
-                "study_manifest_sha256": self.manifest.manifest_sha256,
-                "extension_coverage_manifest_sha256": coverage_sha,
-                "code_revision": revision,
-                "period": report_json_safe(period),
-                "canonical_replay_manifest": replay_identity,
-                "taker_flow_evidence_identity": {
-                    "algorithm_version": "taker-buy-sell-imbalance-v2-exact-sign"},
-                "candidate_evidence": candidate_records,
-                "candidate_evidence_sha256": execution._digest(candidate_records),
-                "v1_evidence_sha256": execution._digest(candidate_records),
-                "event_time_v1_context_version": execution.EVENT_TIME_V1_CONTEXT_VERSION,
-                "event_time_v1_context": context,
-                "event_time_v1_context_sha256": execution._digest({
-                    "version": execution.EVENT_TIME_V1_CONTEXT_VERSION, "records": context}),
-                "bocpd_onset_evidence_version": execution.BOCPD_ONSET_EVIDENCE_VERSION,
-                "bocpd_onset_evidence": [],
-                "bocpd_onset_evidence_sha256": execution._digest({
-                    "version": execution.BOCPD_ONSET_EVIDENCE_VERSION, "records": []}),
-                "hmm_development_training_block": report_json_safe(block),
-                "hmm_development_training_block_sha256": block.block_sha256,
-            }
-            payload = execution._artifact_json(body, "report_sha256")
-            (period_dir / execution._period_filename(period)).write_text(
-                payload, encoding="utf-8")
-        return tuple(blocks), coverage_sha
+        return write_development_reports(self.manifest, root, revision)
 
     def test_crossfit_uses_nine_blocks_and_writes_ten_fold_artifacts(self):
         with TemporaryDirectory() as temporary:
@@ -266,6 +329,47 @@ class HistoricalMarketStateHMMCrossFitTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     crossfit.freeze_development_hmm_crossfit(
                         self.manifest, root, code_revision="crossfit-fixture")
+
+    def test_table_mode_matches_report_mode_and_fails_closed(self):
+        from market_analysis import historical_market_state_study_tables as tables
+        revision = "crossfit-fixture"
+        with TemporaryDirectory() as temporary:
+            reports_root, tables_root = Path(temporary) / "reports", Path(temporary) / "tables-run"
+            table_dir = Path(temporary) / "tables"
+            blocks, coverage_sha = write_development_reports(self.manifest, reports_root, revision)
+            derive_development_tables(self.manifest, reports_root, table_dir)
+            tables_root.mkdir()  # no period reports at all in table mode
+            train, filter_blocks, parse = fixture_hmm(blocks)
+
+            self.assertEqual(
+                crossfit._load_development_inputs(self.manifest, reports_root.resolve(), revision),
+                crossfit._load_development_inputs(self.manifest, tables_root.resolve(), revision,
+                                                  table_dir=table_dir))
+            with patch.object(crossfit, "train_hmm_regime_model_from_blocks", side_effect=train), \
+                    patch.object(crossfit, "filter_hmm_regime_feature_blocks", side_effect=filter_blocks):
+                from_reports = crossfit.freeze_development_hmm_crossfit(self.manifest, reports_root,
+                                                                        code_revision=revision)
+                from_tables = crossfit.freeze_development_hmm_crossfit(self.manifest, tables_root,
+                                                                       code_revision=revision, table_dir=table_dir)
+            self.assertEqual([path.name for path in from_reports], [path.name for path in from_tables])
+            for left, right in zip(from_reports, from_tables):
+                self.assertEqual(left.read_bytes(), right.read_bytes())
+            index_name = crossfit.HMM_CROSSFIT_INDEX_FILENAME
+            self.assertEqual((reports_root / index_name).read_bytes(), (tables_root / index_name).read_bytes())
+            with patch.object(crossfit, "_parse_hmm_model", side_effect=parse):
+                self.assertEqual(
+                    crossfit.validate_hmm_crossfit_index(reports_root / index_name, self.manifest,
+                        coverage_sha256=coverage_sha, code_revision=revision),
+                    crossfit.validate_hmm_crossfit_index(tables_root / index_name, self.manifest,
+                        coverage_sha256=coverage_sha, code_revision=revision, table_dir=table_dir))
+
+            tables.table_path(table_dir, self.manifest.selected_periods[4]).unlink()
+            with self.assertRaisesRegex(ValueError, "development table 4"):
+                crossfit._load_development_inputs(self.manifest, tables_root.resolve(), revision,
+                                                  table_dir=table_dir)
+            with patch.object(crossfit, "_parse_hmm_model", side_effect=parse), self.assertRaises(ValueError):
+                crossfit.validate_hmm_crossfit_index(tables_root / index_name, self.manifest,
+                    coverage_sha256=coverage_sha, code_revision=revision, table_dir=table_dir)
 
     def test_crossfit_fails_closed_before_all_ten_reports_exist(self):
         with TemporaryDirectory() as temporary:
