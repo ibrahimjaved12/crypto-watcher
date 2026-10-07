@@ -143,7 +143,7 @@ def analyse_klines(path: Path, month: str) -> dict:
 
 def analyse_aggtrades(path: Path, month: str) -> dict:
     start_ms, end_ms, _ = month_bounds_ms(month)
-    buckets: dict[int, list[float]] = {}  # minute -> [qty, taker_buy_qty, trades]
+    buckets: dict[int, list[float]] = {}  # minute -> [qty, taker_buy_qty, agg rows, underlying trades]
     rows = 0
     last_id = -1
     id_gaps = 0
@@ -164,11 +164,12 @@ def analyse_aggtrades(path: Path, month: str) -> dict:
             continue
         quantity = float(row[2])
         buyer_is_maker = row[6].strip().lower() == "true"
-        bucket = buckets.setdefault(transact - transact % MINUTE_MS, [0.0, 0.0, 0.0])
+        bucket = buckets.setdefault(transact - transact % MINUTE_MS, [0.0, 0.0, 0.0, 0.0])
         bucket[0] += quantity
         if not buyer_is_maker:  # taker was the buyer
             bucket[1] += quantity
         bucket[2] += 1
+        bucket[3] += int(row[4]) - int(row[3]) + 1
     return {
         "rows": rows,
         "id_gaps": id_gaps,
@@ -181,44 +182,71 @@ def analyse_aggtrades(path: Path, month: str) -> dict:
 
 
 def reconcile(klines: dict, agg: dict) -> dict:
+    """Compare 1m kline volumes with aggTrades summed per minute.
+
+    Uses absolute differences and categories so a zero kline value cannot
+    produce meaningless ratios.
+    """
     by_minute = klines["_by_minute"]
     buckets = agg["_buckets"]
-    worst_volume = 0.0
-    worst_taker = 0.0
-    volume_mismatch = 0
-    taker_mismatch = 0
-    only_in_klines_with_volume = 0
-    only_in_aggtrades = 0
+    tol = 1e-9
+    rows = []
     for minute, row in by_minute.items():
-        kline_volume = float(row[5])
-        kline_taker = float(row[9])
-        bucket = buckets.get(minute)
-        if bucket is None:
-            if kline_volume > 0:
-                only_in_klines_with_volume += 1
-            continue
-        for kline_value, agg_value, which in (
-            (kline_volume, bucket[0], "volume"),
-            (kline_taker, bucket[1], "taker"),
-        ):
-            scale = max(abs(kline_value), 1e-12)
-            relative = abs(kline_value - agg_value) / scale
-            if which == "volume":
-                worst_volume = max(worst_volume, relative)
-                volume_mismatch += relative > 1e-6
-            else:
-                worst_taker = max(worst_taker, relative)
-                taker_mismatch += relative > 1e-6
-    for minute in buckets:
-        if minute not in by_minute:
-            only_in_aggtrades += 1
+        bucket = buckets.get(minute, [0.0, 0.0, 0.0, 0.0])
+        rows.append(
+            (
+                minute,
+                float(row[5]),
+                bucket[0],
+                float(row[9]),
+                bucket[1],
+                int(row[8]),
+                int(bucket[3]),
+            )
+        )
+    total_k = sum(r[1] for r in rows)
+    total_a = sum(r[2] for r in rows)
+    total_kt = sum(r[3] for r in rows)
+    total_at = sum(r[4] for r in rows)
+    vol_diff = [r for r in rows if abs(r[1] - r[2]) > max(tol, 1e-9 * abs(r[1]))]
+    taker_diff = [r for r in rows if abs(r[3] - r[4]) > max(tol, 1e-9 * abs(r[3]))]
+    count_diff = [r for r in rows if r[5] != r[6]]
+    kline_zero_agg_positive = [r for r in rows if r[1] == 0 and r[2] > 0]
+    kline_larger = [r for r in vol_diff if r[1] > r[2]]
+    agg_larger = [r for r in vol_diff if r[2] > r[1]]
+    worst = sorted(vol_diff, key=lambda r: abs(r[1] - r[2]), reverse=True)[:10]
+    diffs = sorted(abs(r[1] - r[2]) for r in vol_diff)
+
+    def pct(q: float):
+        return diffs[int(q * (len(diffs) - 1))] if diffs else 0.0
+
     return {
-        "volume_minutes_mismatching_1e-6": int(volume_mismatch),
-        "taker_buy_minutes_mismatching_1e-6": int(taker_mismatch),
-        "worst_relative_volume_diff": worst_volume,
-        "worst_relative_taker_diff": worst_taker,
-        "minutes_with_kline_volume_but_no_aggtrades": only_in_klines_with_volume,
-        "minutes_with_aggtrades_but_no_kline": only_in_aggtrades,
+        "minutes_compared": len(rows),
+        "month_total_volume_klines": total_k,
+        "month_total_volume_aggtrades": total_a,
+        "month_total_taker_buy_klines": total_kt,
+        "month_total_taker_buy_aggtrades": total_at,
+        "volume_minutes_differing": len(vol_diff),
+        "taker_buy_minutes_differing": len(taker_diff),
+        "trade_count_minutes_differing": len(count_diff),
+        "minutes_kline_volume_zero_but_aggtrades_positive": len(kline_zero_agg_positive),
+        "differing_minutes_where_kline_larger": len(kline_larger),
+        "differing_minutes_where_aggtrades_larger": len(agg_larger),
+        "abs_volume_diff_percentiles": {"p50": pct(0.5), "p90": pct(0.9), "p99": pct(0.99), "max": pct(1.0)},
+        "worst_minutes": [
+            {
+                "open_time_ms": r[0],
+                "kline_volume": r[1],
+                "aggtrades_volume": r[2],
+                "kline_trade_count": r[5],
+                "aggtrades_underlying_trades": r[6],
+            }
+            for r in worst
+        ],
+        "first_count_mismatch_examples": [
+            {"open_time_ms": r[0], "kline_trade_count": r[5], "aggtrades_underlying_trades": r[6]}
+            for r in count_diff[:5]
+        ],
     }
 
 
@@ -277,6 +305,10 @@ def main() -> int:
     output = workdir / "report.json"
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
+    missing = [name for name, item in report["downloads"].items() if "error" in item]
+    if missing:
+        print(f"FAILED: missing archive files: {missing}", file=sys.stderr)
+        return 1
     return 0
 
 
