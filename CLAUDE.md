@@ -74,7 +74,7 @@ Project is roughly 20% complete; things proceed incrementally and in parallel.
 
 - **Functionality and business logic come first**, architecture and speed second. Never trade
   away the web app's required behavior for cleanliness or speed.
-- Free tiers until proven useful. Heavy historical computation runs on GitHub Actions (local
+- Free hosting tiers until the product is proven useful (this does not apply to research data; see Data rule). Heavy historical computation runs on GitHub Actions (local
   is too slow).
 - Python is the long-term home of trading/strategy logic; the frontend/orchestration stack may
   change. FastAPI is the current default; Django is _not_ adopted.
@@ -84,6 +84,7 @@ Project is roughly 20% complete; things proceed incrementally and in parallel.
   non-trades.
 - Test-data rule (owner decision 2026-10-07): the 12 untouched #123 test days may serve as the final exam for both the market-state study and predictor experiments, but each question has its own pre-registered hypotheses, is frozen before the test opens, and is reported in a separate output so we can see which is useful. Predictors are tuned only on development/validation days; each question opens the test days once. 12 days x 5 coins is thin for predictor claims, so treat it as a sanity check and use a separate, longer held-out period for the main predictor verdict.
 - Benchmark universe and horizons (owner decision 2026-10-07): six symbols BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT, frozen for all predictor work (a 7th only via the point-in-time liquidity check in #183). Primary horizons 15m, 1h, 4h; 1m/5m only as data granularity, features and diagnostics; daily and longer skipped for now. Always test both directions (long and short).
+- Data rule (owner decision 2026-10-07): research quality is never limited by data size or by what is already downloaded. If research needs data we do not have, acquire it (contiguous history, aggTrades, klines, funding, mark/index, and other sources). Any purchase of paid data still needs the owner's explicit OK for that purchase. Currently held locally by the owner: Binance USD-M daily aggTrades and klines (zip + checksum) for BTC, ETH, BNB, SOL, DOGE on the sampled study days only (~5.4 GB, clusters of consecutive days from 2023-12-31); not contiguous, and no XRP.
 - Prefer abundant retained data (ML needs it); retention constants were placeholders.
 
 ## 5. Stack (current, provisional)
