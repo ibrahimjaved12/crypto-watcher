@@ -8,9 +8,12 @@ in the geometries into a variant, so the geometries never mix horizons.
 Families (``FAMILIES``) fix the strategy version, the allowed strategies and
 horizons, the geometry, the data a strategy needs and how specs are built:
 ``ta-baselines`` (ta-v1 on closed candles, k in {1, 2} x rr_index 0..3, K = strategies
-x 8) and ``order-flow`` (of-v1 on minute bars + funding, 240 minutes, k 2 x rr_index 1).
-Inputs are loaded one symbol at a time and released once that symbol's signals are
-built.
+x 8), ``order-flow`` (of-v1 on minute bars + funding, 240 minutes, k 2 x rr_index 1) and
+``funding-basis`` (fb-v1 on the 1-minute premium index; 240 minutes with k 2 x rr_index 1,
+60 minutes with k 2 x rr_index 0; each strategy belongs to one horizon, so K = the
+question's strategies). Inputs are loaded one symbol at a time and released once that
+symbol's part is built; a family's ``combine`` then joins the parts (the cross-sectional
+fb_xs_4h ranks per-symbol z values there).
 
 Indicator history always starts at ``data_lake.FIRST_MONTH`` and ends with the last
 month of the evaluated segment, so a development/validation run never touches
@@ -32,13 +35,13 @@ import re
 from typing import Callable
 
 from .. import data_lake
-from . import order_flow, ta_strategies
+from . import funding_basis, order_flow, ta_strategies
 from .canonical import canonical_bytes, content_hash, exact_from_str
 from .evaluate import decimal_text
 from .hidden_guard import HiddenGate, HiddenGuardError, HiddenStretchLocked, Plan
 from .label_store import Geometry
 from .labels import LabelParams
-from .market_data import load_symbol_bars, load_symbol_candles, load_symbol_funding
+from .market_data import load_symbol_bars, load_symbol_candles, load_symbol_funding, load_symbol_premium
 from .runner import StrategySpec, run_experiment
 from .segments import segment_bounds_ms, segment_months
 
@@ -62,22 +65,35 @@ class QuestionError(ValueError):
 class Family:
     """A signal family: what a question of this family may contain and how its specs are built.
 
+    ``geometry`` maps each allowed horizon to its fixed (k_values, rr_indices);
+    ``strategy_horizons`` (None = every horizon) limits a strategy to its horizons.
     ``load(bars_dir, symbol, last_month, horizon, token, gate)`` returns one symbol's
     inputs (guarded loads from ``data_lake.FIRST_MONTH``); ``signals(inputs, symbol,
-    name, horizon, first_ms, end_ms, params)`` returns that symbol's signal rows;
-    ``config(name, horizon)`` is the StrategySpec config.
+    name, horizon, first_ms, end_ms, params)`` returns that symbol's part (signal rows
+    unless ``combine`` says otherwise); ``combine(name, horizon, {symbol: part})``
+    (None = concatenate in symbol order) returns all rows; ``config(name, horizon)`` is
+    the StrategySpec config.
     """
 
     family_id: str
     strategy_version: str
     strategies: tuple
-    horizons: tuple
-    k_values: tuple
-    rr_indices: tuple
+    geometry: dict
     data: str
     load: Callable
     signals: Callable
     config: Callable
+    strategy_horizons: dict | None = None
+    combine: Callable | None = None
+
+    @property
+    def horizons(self) -> tuple:
+        return tuple(sorted(self.geometry))
+
+    def strategies_for(self, horizon: int) -> tuple:
+        if self.strategy_horizons is None:
+            return self.strategies
+        return tuple(name for name in self.strategies if horizon in self.strategy_horizons[name])
 
 
 def _load_candles(bars_dir, symbol, last_month, horizon, token, gate):
@@ -100,12 +116,25 @@ def _order_flow_signals(inputs, symbol, name, horizon, first_ms, end_ms, params)
                                      label_step_min=params.step(horizon))
 
 
+def _load_premium(bars_dir, symbol, last_month, horizon, token, gate):
+    return load_symbol_premium(bars_dir, symbol, data_lake.FIRST_MONTH, last_month, token=token, gate=gate)
+
+
+def _funding_basis_signals(series, symbol, name, horizon, first_ms, end_ms, params):
+    return funding_basis.symbol_signals(name, series, horizon, first_ms=first_ms, end_ms=end_ms,
+                                        label_step_min=params.step(horizon))
+
+
 FAMILIES = {family.family_id: family for family in (
-    Family("ta-baselines", ta_strategies.VERSION, tuple(ta_strategies.STRATEGIES), ta_strategies.TIMEFRAMES,
-           ("1", "2"), (0, 1, 2, 3), "candles", _load_candles, _ta_signals, ta_strategies.strategy_config),
-    Family("order-flow", order_flow.VERSION, tuple(order_flow.STRATEGIES), (order_flow.HORIZON,),
-           tuple(order_flow.K_VALUES), tuple(order_flow.RR_INDICES), "bars+funding", _load_bars_funding,
-           _order_flow_signals, order_flow.strategy_config),
+    Family("ta-baselines", ta_strategies.VERSION, tuple(ta_strategies.STRATEGIES),
+           {minutes: (("1", "2"), (0, 1, 2, 3)) for minutes in ta_strategies.TIMEFRAMES}, "candles", _load_candles,
+           _ta_signals, ta_strategies.strategy_config),
+    Family("order-flow", order_flow.VERSION, tuple(order_flow.STRATEGIES),
+           {order_flow.HORIZON: (tuple(order_flow.K_VALUES), tuple(order_flow.RR_INDICES))}, "bars+funding",
+           _load_bars_funding, _order_flow_signals, order_flow.strategy_config),
+    Family("funding-basis", funding_basis.VERSION, tuple(funding_basis.STRATEGIES), dict(funding_basis.GEOMETRY),
+           "premium", _load_premium, _funding_basis_signals, funding_basis.strategy_config,
+           strategy_horizons=dict(funding_basis.STRATEGY_HORIZONS), combine=funding_basis.combine),
 )}
 
 
@@ -179,14 +208,16 @@ def validate_question(question: dict) -> dict:
         raise QuestionError("question_id must be lowercase [a-z0-9._-], at most 100 characters")
     if type(question["hypothesis"]) is not str or not question["hypothesis"].strip():
         raise QuestionError("hypothesis must be non-empty text")
-    strategies = question["strategies"]
-    if (type(strategies) is not list or not strategies or len(set(strategies)) != len(strategies)
-            or any(name not in family.strategies for name in strategies)):
-        raise QuestionError(f"strategies must be distinct names from {sorted(family.strategies)}")
-    if question["horizon_min"] not in family.horizons or type(question["horizon_min"]) is not int:
+    horizon = question["horizon_min"]
+    if type(horizon) is not int or horizon not in family.geometry:
         raise QuestionError(f"horizon_min must be one of {family.horizons}")
-    if question["k_values"] != list(family.k_values) or question["rr_indices"] != list(family.rr_indices):
-        raise QuestionError(f"k_values must be {list(family.k_values)} and rr_indices {list(family.rr_indices)}")
+    strategies, allowed = question["strategies"], family.strategies_for(horizon)
+    if (type(strategies) is not list or not strategies or len(set(strategies)) != len(strategies)
+            or any(name not in allowed for name in strategies)):
+        raise QuestionError(f"strategies must be distinct names from {sorted(allowed)}")
+    k_values, rr_indices = (list(values) for values in family.geometry[horizon])
+    if question["k_values"] != k_values or question["rr_indices"] != rr_indices:
+        raise QuestionError(f"k_values must be {k_values} and rr_indices {rr_indices}")
     _int(question["seed"], "seed", 0, 2 ** 64 - 1)
     _int(question["B_stats"], "B_stats", MIN_B_STATS)
     _int(question["B_placebo"], "B_placebo", MIN_B_PLACEBO)
@@ -201,9 +232,10 @@ def make_question(question_id: str, hypothesis: str, horizon_min: int, strategie
                   label_revision: int, data_revision: int, created_utc: str, B_stats: int = MIN_B_STATS,
                   B_placebo: int = MIN_B_PLACEBO, family: str = "ta-baselines") -> dict:
     entry = family_of({"family": family})
+    k_values, rr_indices = entry.geometry.get(horizon_min, ((), ())) if type(horizon_min) is int else ((), ())
     question = {"schema": SCHEMA, "question_id": question_id, "hypothesis": hypothesis, "family": family,
                 "strategy_version": entry.strategy_version, "strategies": list(strategies), "horizon_min": horizon_min,
-                "k_values": list(entry.k_values), "rr_indices": list(entry.rr_indices), "seed": seed,
+                "k_values": list(k_values), "rr_indices": list(rr_indices), "seed": seed,
                 "B_stats": B_stats,
                 "B_placebo": B_placebo, "label_revision": label_revision, "data_revision": data_revision,
                 "created_utc": created_utc}
@@ -258,14 +290,18 @@ def build_specs(question: dict, segment: str, load_inputs, strategies=None, para
     first_ms, end_ms = segment_bounds_ms(segment)
     horizon = question["horizon_min"]
     names = question["strategies"] if strategies is None else list(strategies)
-    signals = {name: [] for name in names}
+    parts = {name: {} for name in names}
     for symbol in data_lake.SYMBOLS:
         inputs = load_inputs(symbol)
         for name in names:
-            signals[name].extend(family.signals(inputs, symbol, name, horizon, first_ms, end_ms, params))
+            parts[name][symbol] = family.signals(inputs, symbol, name, horizon, first_ms, end_ms, params)
         del inputs  # this symbol's bars/candles are released here
-    return [StrategySpec(name, family.strategy_version, family.config(name, horizon), signals[name])
-            for name in names]
+    specs = []
+    for name in names:
+        rows = (family.combine(name, horizon, parts[name]) if family.combine is not None
+                else [row for symbol in data_lake.SYMBOLS for row in parts[name][symbol]])
+        specs.append(StrategySpec(name, family.strategy_version, family.config(name, horizon), rows))
+    return specs
 
 
 def label_manifest_name(symbol: str) -> str:

@@ -114,7 +114,7 @@ def robust_z(sorted_values: list, x: Fraction, min_history: int) -> Fraction | N
     return (x - middle) / (MAD_SCALE * mad)
 
 
-class _History:
+class TrailingHistory:
     """Valid values at earlier decision times inside a trailing [t - span, t) window."""
 
     def __init__(self, span_ms: int):
@@ -131,8 +131,31 @@ class _History:
         insort(self.sorted, value)
 
 
-def _sign(value: Fraction) -> int:
+def sign(value: Fraction) -> int:
     return 1 if value > 0 else -1
+
+
+def crossing_signals(zs, *, theta: Fraction, rearm_below: Fraction, cooldown_ms: int) -> list:
+    """[(signal_ms, z)] where |z| crosses theta from below while armed, outside the cooldown.
+
+    ``zs`` yields (signal_ms, z or None) in time order. An undefined z restarts the
+    crossing (the previous value becomes undefined). A signal disarms until
+    ``|z| < rearm_below``; the armed flag is never reset by a gap. A crossing inside
+    the cooldown changes no state.
+    """
+    signals, last, armed, z_previous = [], None, True, None
+    for signal_ms, z in zs:
+        if z is None:
+            z_previous = None
+            continue
+        if not armed and abs(z) < rearm_below:
+            armed = True
+        crossing = z_previous is not None and abs(z_previous) < theta <= abs(z)
+        if armed and crossing and (last is None or signal_ms - last >= cooldown_ms):
+            signals.append((signal_ms, z))
+            armed, last = False, signal_ms
+        z_previous = z
+    return signals
 
 
 def _first_hour_index(bars: BarSeries) -> int:
@@ -147,7 +170,7 @@ def _funding_near(calc_times: tuple, ms: int, guard_ms: int) -> bool:
 def toh1m(bars: BarSeries, funding: FundingSeries, *, theta: Fraction, decision_offset_min: int,
           history_days: int, min_history: int, cooldown_min: int, funding_guard_min: int) -> list:
     """[(signal_ms, side)] for the top-of-hour 1-minute imbalance; signal at HH:00 + offset."""
-    history, signals, last = _History(history_days * _DAY), [], None
+    history, signals, last = TrailingHistory(history_days * _DAY), [], None
     calc_times = funding.calc_time_ms
     for i in range(_first_hour_index(bars), bars.minutes, 60):
         hour_ms = bars.open_time(i)
@@ -162,7 +185,7 @@ def toh1m(bars: BarSeries, funding: FundingSeries, *, theta: Fraction, decision_
         z = robust_z(history.at(hour_ms), x, min_history)
         history.add(hour_ms, x)
         if z is not None and abs(z) >= theta and (last is None or signal_ms - last >= cooldown_min * _MINUTE):
-            signals.append((signal_ms, _sign(z)))
+            signals.append((signal_ms, sign(z)))
             last = signal_ms
     return signals
 
@@ -172,8 +195,7 @@ def cum240(bars: BarSeries, funding: FundingSeries, *, theta: Fraction, rearm_be
     """[(signal_ms, side)] for crossings of the rolling-window imbalance z (re-armed below rearm_below)."""
     del funding  # same builder signature as toh1m; the cumulative window ignores funding hours
     compromised = CompromisedIndex(bars)
-    history, signals, last = _History(history_days * _DAY), [], None
-    armed, z_previous = True, None
+    history, zs = TrailingHistory(history_days * _DAY), []
     step = decision_step_min * _MINUTE
     first = -bars.start_ms % step // _MINUTE  # index of the first decision-time minute
     for e in range(first, bars.minutes + 1, decision_step_min):  # e = d + 1: signal_ms is bars.open_time(e)
@@ -186,17 +208,9 @@ def cum240(bars: BarSeries, funding: FundingSeries, *, theta: Fraction, rearm_be
         z = None if value is None else robust_z(history.at(signal_ms), value, min_history)
         if value is not None:
             history.add(signal_ms, value)
-        if z is None:
-            z_previous = None  # restart the crossing, as indicators do after an invalid candle
-            continue
-        if not armed and abs(z) < rearm_below:
-            armed = True
-        crossing = z_previous is not None and abs(z_previous) < theta <= abs(z)
-        if armed and crossing and (last is None or signal_ms - last >= cooldown_min * _MINUTE):
-            signals.append((signal_ms, _sign(z)))
-            armed, last = False, signal_ms
-        z_previous = z
-    return signals
+        zs.append((signal_ms, z))  # None restarts the crossing, as indicators do after an invalid candle
+    return [(signal_ms, sign(z)) for signal_ms, z in crossing_signals(
+        zs, theta=theta, rearm_below=rearm_below, cooldown_ms=cooldown_min * _MINUTE)]
 
 
 _COMMON = {"history_days": 30, "min_history": 500, "cooldown_min": 240}

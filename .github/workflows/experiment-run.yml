@@ -26,10 +26,10 @@ on:
       family:
         description: "register: signal family"
         type: choice
-        options: [ta-baselines, order-flow]
+        options: [ta-baselines, order-flow, funding-basis]
         default: ta-baselines
       horizon:
-        description: "register: horizon in minutes (15, 60 or 240; order-flow: 240)"
+        description: "register: horizon in minutes (15, 60 or 240; order-flow: 240; funding-basis: 240 or 60)"
         type: string
         default: "60"
       strategies:
