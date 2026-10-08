@@ -80,7 +80,7 @@ def _fractions(value, name: str) -> tuple:
 class LabelParams:
     horizons: tuple = (15, 60, 240)
     half_life_days: tuple = ((15, 1), (60, 3), (240, 7))
-    step_minutes: tuple = ((15, 5), (60, 15), (240, 60))
+    step_minutes: tuple = ((15, 5), (60, 15), (240, 15))
     k_grid: tuple = (Fraction(1), Fraction(2))
     rr_grid: tuple = (Fraction(1), Fraction(3, 2), Fraction(2), Fraction(3))
     time_limit_multiple: int = 4

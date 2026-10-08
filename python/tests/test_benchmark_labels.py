@@ -99,6 +99,25 @@ class LabelTableTests(unittest.TestCase):
         (_, unleveraged), = build(params=replace(PARAMS, cost_model=strict))
         self.assertEqual({row.status for row in unleveraged}, {"V", "N", "I"})
 
+    def test_4h_grid_is_15_minutes_and_hourly_rows_unchanged(self):
+        # Slice H1: 240-minute decision times every 15 minutes; HH:00 rows equal the old 60-minute grid's.
+        hourly = LabelParams(horizons=(15, 240), half_life_days=((15, 1), (240, 1)), step_minutes=((15, 5), (240, 60)))
+        quarter = replace(hourly, step_minutes=((15, 5), (240, 15)))
+        self.assertEqual(LabelParams().step(240), 15)
+        (_, old), = build(params=hourly)
+        (_, new), = build(params=quarter)
+        four_h = [row for row in new if row.horizon_min == 240]
+        minutes = {(row.signal_ms - START) // 60_000 % 60 for row in four_h}
+        self.assertEqual(minutes, {0, 15, 30, 45})  # START is a UTC month start, hence HH:00
+        self.assertFalse(any((row.signal_ms - START) // 60_000 % 60 == 7 for row in four_h))
+        self.assertIn("T", {row.status for row in four_h if (row.signal_ms - START) // 60_000 % 60 in (15, 45)})
+        on_hour = [row for row in four_h if row.signal_ms % 3_600_000 == 0]
+        old_4h = [row for row in old if row.horizon_min == 240]
+        self.assertEqual(on_hour, old_4h)
+        self.assertIn("T", {row.status for row in old_4h})
+        self.assertEqual(csv_bytes(on_hour, quarter), csv_bytes(old_4h, hourly))
+        self.assertEqual([row for row in new if row.horizon_min == 15], [row for row in old if row.horizon_min == 15])
+
     def test_off_tick_entry_open_is_p_not_an_error(self):
         # tick-v2 tolerates rare off-grid prints (SOLUSDT 2025-07); one at an entry open is a non-trade.
         rows = walk_rows()
@@ -155,14 +174,14 @@ class LabelParamsTests(unittest.TestCase):
         record = params.to_record()
         self.assertEqual(record["horizons"], [15, 60, 240])
         self.assertEqual(record["half_life_days"], {"15": 1, "60": 3, "240": 7})
-        self.assertEqual(record["step_minutes"], {"15": 5, "60": 15, "240": 60})
+        self.assertEqual(record["step_minutes"], {"15": 5, "60": 15, "240": 15})
         self.assertEqual(record["rr_grid"], ["1", "3/2", "2", "3"])
         self.assertEqual(record["cost_model_identity"], COST_MODEL_V1.identity())
         self.assertEqual(params.identity(), LabelParams().identity())
         self.assertEqual(params.window(240), 960)
         for changes in ({"cost_model": with_multiplier(COST_MODEL_V1, 2)}, {"horizons": (15, 7)},
                         {"half_life_days": ((15, 2), (60, 3), (240, 7))}, {"rr_grid": (Fraction(2), Fraction(1))},
-                        {"step_minutes": ((15, 3), (60, 15), (240, 60))}, {"schema": "labels-v0"}):
+                        {"step_minutes": ((15, 3), (60, 15), (240, 15))}, {"schema": "labels-v0"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 LabelParams(**changes)
 

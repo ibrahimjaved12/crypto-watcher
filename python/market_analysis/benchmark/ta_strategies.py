@@ -20,7 +20,10 @@ from .indicators import (SHIFT, atr, bollinger, ema, ema_warmup, macd, rsi, rsi_
 from .runner import StrategySpec
 
 VERSION = "ta-v1"
-GRID_STEP = {15: 5, 60: 15, 240: 60}  # label decision-time grid (minutes) per horizon
+# TA signal grid (minutes) per timeframe: candle closes. Each step is a multiple of the label
+# decision step (labels.LabelParams().step, 240 -> 15 since slice H1), so every TA signal is also
+# a label row.
+GRID_STEP = {15: 5, 60: 15, 240: 60}
 
 
 def _level_cross(values, level=0) -> list:

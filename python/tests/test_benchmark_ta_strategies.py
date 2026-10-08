@@ -7,9 +7,10 @@ from market_analysis import data_lake
 from market_analysis.benchmark.bars import MISSING
 from market_analysis.benchmark.candles import CandleSeries
 from market_analysis.benchmark.hidden_guard import HiddenStretchLocked
+from market_analysis.benchmark.labels import LabelParams
 from market_analysis.benchmark.market_data import load_symbol_bars
 from market_analysis.benchmark.ta_strategies import (
-    STRATEGIES, VERSION, all_specs, first_signal_index, make_specs, strategy_sides,
+    GRID_STEP, STRATEGIES, VERSION, all_specs, first_signal_index, make_specs, strategy_sides,
 )
 
 START = data_lake.month_bounds_ms("2024-01")[0]
@@ -75,6 +76,12 @@ class StrategyTests(unittest.TestCase):
                     self.assertEqual(strategy_sides(name, series(changed))[:t + 1], full[:t + 1])
                     self.assertEqual(strategy_sides(name, series(closes[:t + 1])), full[:t + 1])
 
+    def test_ta_grid_is_on_the_label_grid(self):
+        # TA 4h signals stay on the hour (60) while the 4h label grid is 15 minutes (slice H1).
+        self.assertEqual(GRID_STEP, {15: 5, 60: 15, 240: 60})
+        for minutes, step in GRID_STEP.items():
+            self.assertEqual(step % LabelParams().step(minutes), 0)
+
     def test_specs_window_grid_and_config(self):
         data = {}
         for offset, symbol in enumerate(("BTCUSDT", "ETHUSDT")):
@@ -92,6 +99,7 @@ class StrategyTests(unittest.TestCase):
                 self.assertEqual(horizon, minutes)
                 self.assertTrue(first_ms <= ms < end_ms)
                 self.assertEqual(ms % ({15: 5, 60: 15, 240: 60}[minutes] * 60_000), 0)
+                self.assertEqual(ms % (LabelParams().step(minutes) * 60_000), 0)  # also a label row
                 self.assertIn(side, (-1, 1))
         self.assertTrue(any(spec.signals for spec in specs))
         spec = make_specs(data, "rsi_14_reversion", 60, first_ms=START, end_ms=START + 10 ** 12)
