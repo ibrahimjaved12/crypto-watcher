@@ -417,7 +417,7 @@ class SignalCountTests(unittest.TestCase):
             loads.append((args[1], args[2], args[3], token, gate))
             return args[1]
 
-        def build(q, segment, load_inputs, strategies, params):
+        def build(q, segment, load_inputs, strategies, params, progress=None):
             self.assertEqual((segment, strategies), ("validation", None))
             load_inputs("BTCUSDT")
             return self.specs_for_validation()
@@ -446,7 +446,7 @@ class SignalCountTests(unittest.TestCase):
             def no_labels(*args, **kwargs):
                 raise AssertionError("count must not download labels")
 
-            def bars(repo, question_, segment, bars_dir, label_dir):
+            def bars(repo, question_, segment, bars_dir, label_dir, progress=None):
                 calls.append((segment, label_dir))
 
             counts = {"question_id": q["question_id"], "family": "order-flow",

@@ -42,7 +42,7 @@ from .hidden_guard import HiddenGate, HiddenGuardError, HiddenStretchLocked, Pla
 from .label_store import Geometry
 from .labels import LabelParams
 from .market_data import load_symbol_bars, load_symbol_candles, load_symbol_funding, load_symbol_premium
-from .runner import StrategySpec, run_experiment
+from .runner import NO_PROGRESS, StrategySpec, run_experiment
 from .segments import segment_bounds_ms, segment_months
 
 SCHEMA = "question-v1"
@@ -279,7 +279,8 @@ def build_geometries(question: dict, params: LabelParams | None = None) -> list[
     return geometries
 
 
-def build_specs(question: dict, segment: str, load_inputs, strategies=None, params: LabelParams | None = None) -> list:
+def build_specs(question: dict, segment: str, load_inputs, strategies=None, params: LabelParams | None = None,
+                progress=NO_PROGRESS) -> list:
     """StrategySpecs for the segment window; indicators use all loaded history.
 
     ``load_inputs(symbol)`` returns one symbol's family inputs; they are released as
@@ -291,11 +292,14 @@ def build_specs(question: dict, segment: str, load_inputs, strategies=None, para
     horizon = question["horizon_min"]
     names = question["strategies"] if strategies is None else list(strategies)
     parts = {name: {} for name in names}
-    for symbol in data_lake.SYMBOLS:
-        inputs = load_inputs(symbol)
-        for name in names:
-            parts[name][symbol] = family.signals(inputs, symbol, name, horizon, first_ms, end_ms, params)
-        del inputs  # this symbol's bars/candles are released here
+    with progress.stage("spec build", total=len(data_lake.SYMBOLS)) as set_symbol:
+        for symbol_index, symbol in enumerate(data_lake.SYMBOLS, 1):
+            set_symbol(symbol_index)
+            inputs = load_inputs(symbol)
+            for name in names:
+                parts[name][symbol] = family.signals(inputs, symbol, name, horizon, first_ms, end_ms, params)
+            del inputs  # this symbol's bars/candles are released here
+            progress.phase("spec build", symbol_index=symbol_index, symbols=len(data_lake.SYMBOLS))
     specs = []
     for name in names:
         rows = (family.combine(name, horizon, parts[name]) if family.combine is not None
@@ -380,8 +384,11 @@ def open_hidden_stretch(question: dict, plan_id: str, confirm, gate: HiddenGate,
 
 
 def run_question(question: dict, segment: str, bars_dir, label_dir, log, *, token=None, gate=None, now_utc: str,
-                 code_commit: str, data_snapshot_id: str) -> dict:
-    """Load the family's inputs one symbol at a time (released after its signals), then run_experiment once."""
+                 code_commit: str, data_snapshot_id: str, progress=NO_PROGRESS) -> dict:
+    """Load the family's inputs one symbol at a time (released after its signals), then run_experiment once.
+
+    ``progress`` (runner.NoProgress interface) receives phase names and counts only.
+    """
     validate_question(question)
     if segment not in SEGMENTS:
         raise ValueError(f"segment must be one of {SEGMENTS}")
@@ -400,10 +407,11 @@ def run_question(question: dict, segment: str, bars_dir, label_dir, log, *, toke
     family = family_of(question)
     specs = build_specs(question, segment, lambda symbol: family.load(bars_dir, symbol, last_month,
                                                                       question["horizon_min"], token, gate),
-                        strategies, params)
+                        strategies, params, progress=progress)
     return run_experiment(question_id, specs, geometries, segment, label_dir, params, log, token=token, gate=gate,
                           B_stats=question["B_stats"], B_placebo=question["B_placebo"], seed=question["seed"],
-                          code_commit=code_commit, data_snapshot_id=data_snapshot_id, now_utc=now_utc)
+                          code_commit=code_commit, data_snapshot_id=data_snapshot_id, now_utc=now_utc,
+                          progress=progress)
 
 
 COUNT_SEGMENTS = ("development", "validation")
@@ -436,7 +444,8 @@ def _utc_date(ms: int) -> str:
     return datetime.fromtimestamp(ms // 1000, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
-def signal_counts(question: dict, segment: str, bars_dir, params: LabelParams | None = None) -> dict:
+def signal_counts(question: dict, segment: str, bars_dir, params: LabelParams | None = None,
+                  progress=NO_PROGRESS) -> dict:
     """Build the question's signals for a development/validation segment exactly as run_question does.
 
     Reads only the family's guarded inputs (no token: hidden months stay locked);
@@ -448,7 +457,7 @@ def signal_counts(question: dict, segment: str, bars_dir, params: LabelParams | 
     family, last_month = family_of(question), segment_months(segment)[-1]
     specs = build_specs(question, segment, lambda symbol: family.load(bars_dir, symbol, last_month,
                                                                       question["horizon_min"], None, None),
-                        None, params or LabelParams())
+                        None, params or LabelParams(), progress=progress)
     return {"question_id": question["question_id"], "family": family.family_id, **count_signals(specs, segment)}
 
 

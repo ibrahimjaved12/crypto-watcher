@@ -16,6 +16,7 @@ the matched placebo uses B_placebo.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from fractions import Fraction
 import json
@@ -39,6 +40,21 @@ from .segments import eligible, segment_bounds_ms, segment_months, worst_case_wi
 from .spa import spa_test
 from .stepm import stepm, stepm_p_values
 
+class NoProgress:
+    """Default progress sink: phases and stages are no-ops (see scripts/research/experiment_run.Progress).
+
+    Callers pass only phase names and integer counts; nothing outcome-related.
+    """
+
+    def phase(self, name: str, **counts) -> None:
+        return None
+
+    @contextmanager
+    def stage(self, name: str, total: int | None = None):
+        yield lambda step: None
+
+
+NO_PROGRESS = NoProgress()
 ALPHA = Fraction(1, 20)
 MIN_B_STATS_HIDDEN = 1000
 MIN_B_PLACEBO = 99
@@ -116,8 +132,11 @@ def verdict(selection, power, ci, rejected: bool, *, p_placebo, required_t) -> s
 
 def run_experiment(question_id, specs, geometries, segment, label_dir, params, log, *, token=None, gate=None,
                    B_stats: int = 2000, B_placebo: int = 200, seed, code_commit, data_snapshot_id,
-                   now_utc) -> dict:
+                   now_utc, progress=NO_PROGRESS) -> dict:
     """Run all variants and return a hashed report-v1 record; no wall-clock reads.
+
+    ``progress`` receives phase names and counts only (never outcomes) and does not
+    affect the report.
 
     Existing successful identities append REPLAY lines via ExperimentLog and do
     not increase counted N. Thus identical inputs/history counts yield identical
@@ -194,69 +213,86 @@ def run_experiment(question_id, specs, geometries, segment, label_dir, params, l
     # Add both directions solely for baselines, without adding statistical trials.
     expanded = sorted({g._replace(side=side) for g in geometries for side in (-1, 1)})
     columns, volatility = {}, {}
-    for symbol in sorted({g.symbol for g in expanded}):
-        requested = [g for g in expanded if g.symbol == symbol]
-        ticks = manifest_ticks(label_dir, symbol, months, params)  # cheap check before parsing labels
-        loaded = load_geometry_columns(label_dir, symbol, months, requested, params,
-                                       token=token, gate=gate, segment=segment, metadata=True)
-        columns.update(loaded)
-        volatility.update(volatility_from_columns(loaded, ticks))
+    label_symbols = sorted({g.symbol for g in expanded})
+    with progress.stage("label load", total=len(label_symbols)) as set_symbol:
+        for symbol_index, symbol in enumerate(label_symbols, 1):
+            set_symbol(symbol_index)
+            requested = [g for g in expanded if g.symbol == symbol]
+            ticks = manifest_ticks(label_dir, symbol, months, params)  # cheap check before parsing labels
+            loaded = load_geometry_columns(label_dir, symbol, months, requested, params,
+                                           token=token, gate=gate, segment=segment, metadata=True)
+            columns.update(loaded)
+            volatility.update(volatility_from_columns(loaded, ticks))
+            progress.phase("label load", symbol_index=symbol_index, symbols=len(label_symbols), months=len(months),
+                           rows=sum(len(column) + len(column.non_trades["signal_ms"]) for column in loaded.values()))
     first, end = segment_bounds_ms(segment)
     entries, selections, daily_columns = [], [], []
     baseline_cache = {}
-    for trial, variant, group in templates:
-        selected_columns = {g: columns[g] for g in group}
-        signals, purged = [], 0
-        membership = {(g.symbol, g.side) for g in group}
-        for symbol, ms, side, horizon in variant.strategy.signals:
-            if horizon != variant.horizon_min or (symbol, side) not in membership or not first <= ms < end:
-                continue
-            # Also purge off-grid boundary signals: never offer those for on-demand labelling.
-            if eligible(segment, ms, worst_case_window_end_ms(ms, horizon, params.time_limit_multiple)):
-                signals.append((symbol, ms, side, horizon))
-            else:
-                purged += 1
-        selected = select(selected_columns, signals)
-        selected.purged += purged
-        selected.signals += purged
-        daily = daily_series(selected, segment)
-        prefix = f"benchmark/{trial.trial_id}"
-        ci = bootstrap_ci(daily, B=B_stats, seed=seed, stream_prefix=prefix + "/ci")
-        power = power_gate(daily, Fraction(len(selected), len(daily)))
-        cache_key = variant.horizon_min, variant.k, variant.rr_index
-        if cache_key not in baseline_cache:
-            symbols = {g.symbol for g in group}
-            baseline_columns = {g: column for g, column in columns.items() if g.symbol in symbols
-                                and (g.horizon_min, g.k, g.rr_index) == cache_key}
-            longs, shorts = always_side(baseline_columns, 1), always_side(baseline_columns, -1)
-            pool = [PoolRow(row, volatility[trade_key(row)]) for row in (*longs, *shorts)]
-            baseline_cache[cache_key] = (pool, metrics(longs, daily_series(longs, segment)),
-                                       metrics(shorts, daily_series(shorts, segment)))
-        pool, long_metrics, short_metrics = baseline_cache[cache_key]
-        rows = [PoolRow(row, volatility[trade_key(row)]) for row in selected]
-        details = variant_details(selected, daily, rows, pool, segment)
-        details.update({"variant_id": trial.trial_id, "strategy_id": trial.strategy_id,
-                        "strategy_version": trial.strategy_version, "config": trial.config,
-                        "geometry": {"k": decimal_text(variant.k), "rr_index": variant.rr_index,
-                                     "rr": decimal_text(params.rr_grid[variant.rr_index]), "horizon_min": variant.horizon_min},
-                        "power": power, "bootstrap_ci": ci, "n_independent_greedy": n_independent_greedy(selected),
-                        "required_t": repr(threshold),
-                        "baselines": {"random_walk": random_walk_comparison(selected, params.rr_grid[variant.rr_index]),
-                                      "always_long": long_metrics, "always_short": short_metrics,
-                                      "placebo": matched_placebo(rows, pool, B=B_placebo, seed=seed,
-                                                                 stream_prefix=prefix + "/placebo")}})
-        if segment != "hidden":
-            # Power projection of this variant's trade rate and daily sigma onto the hidden stretch.
-            details["projection"] = project_selection(selected, daily)
-        entries.append(details)
-        selections.append(selected)
-        daily_columns.append(daily)
+    with progress.stage("evaluate", total=K) as set_variant:
+        for variant_index, (trial, variant, group) in enumerate(templates, 1):
+            set_variant(variant_index)
+            progress.phase("evaluate", variant=variant_index, of=K)
+            selected_columns = {g: columns[g] for g in group}
+            signals, purged = [], 0
+            membership = {(g.symbol, g.side) for g in group}
+            for symbol, ms, side, horizon in variant.strategy.signals:
+                if horizon != variant.horizon_min or (symbol, side) not in membership or not first <= ms < end:
+                    continue
+                # Also purge off-grid boundary signals: never offer those for on-demand labelling.
+                if eligible(segment, ms, worst_case_window_end_ms(ms, horizon, params.time_limit_multiple)):
+                    signals.append((symbol, ms, side, horizon))
+                else:
+                    purged += 1
+            selected = select(selected_columns, signals)
+            selected.purged += purged
+            selected.signals += purged
+            daily = daily_series(selected, segment)
+            prefix = f"benchmark/{trial.trial_id}"
+            progress.phase("bootstrap ci", variant=variant_index, of=K)
+            ci = bootstrap_ci(daily, B=B_stats, seed=seed, stream_prefix=prefix + "/ci")
+            power = power_gate(daily, Fraction(len(selected), len(daily)))
+            cache_key = variant.horizon_min, variant.k, variant.rr_index
+            if cache_key not in baseline_cache:
+                symbols = {g.symbol for g in group}
+                baseline_columns = {g: column for g, column in columns.items() if g.symbol in symbols
+                                    and (g.horizon_min, g.k, g.rr_index) == cache_key}
+                longs, shorts = always_side(baseline_columns, 1), always_side(baseline_columns, -1)
+                pool = [PoolRow(row, volatility[trade_key(row)]) for row in (*longs, *shorts)]
+                baseline_cache[cache_key] = (pool, metrics(longs, daily_series(longs, segment)),
+                                           metrics(shorts, daily_series(shorts, segment)))
+            pool, long_metrics, short_metrics = baseline_cache[cache_key]
+            rows = [PoolRow(row, volatility[trade_key(row)]) for row in selected]
+            progress.phase("placebo", variant=variant_index, of=K)
+            placebo = matched_placebo(rows, pool, B=B_placebo, seed=seed, stream_prefix=prefix + "/placebo")
+            details = variant_details(selected, daily, rows, pool, segment)
+            details.update({"variant_id": trial.trial_id, "strategy_id": trial.strategy_id,
+                            "strategy_version": trial.strategy_version, "config": trial.config,
+                            "geometry": {"k": decimal_text(variant.k), "rr_index": variant.rr_index,
+                                         "rr": decimal_text(params.rr_grid[variant.rr_index]),
+                                         "horizon_min": variant.horizon_min},
+                            "power": power, "bootstrap_ci": ci, "n_independent_greedy": n_independent_greedy(selected),
+                            "required_t": repr(threshold),
+                            "baselines": {"random_walk": random_walk_comparison(selected,
+                                                                                params.rr_grid[variant.rr_index]),
+                                          "always_long": long_metrics, "always_short": short_metrics,
+                                          "placebo": placebo}})
+            if segment != "hidden":
+                # Power projection of this variant's trade rate and daily sigma onto the hidden stretch.
+                details["projection"] = project_selection(selected, daily)
+            entries.append(details)
+            selections.append(selected)
+            daily_columns.append(daily)
     matrix = np.column_stack([np.asarray(daily, dtype=np.int64) for daily in daily_columns])
     joint_stream = "benchmark/" + content_hash([question_id, [item["variant_id"] for item in entries]]) + "/joint"
-    spa = spa_test(matrix, B=B_stats, seed=seed, stream_prefix=joint_stream)
-    step = stepm(matrix, B=B_stats, seed=seed, stream_prefix=joint_stream)
-    adjusted = [decimal_text(value) for value in
-                stepm_p_values(matrix, B=B_stats, seed=seed, stream_prefix=joint_stream)]
+    with progress.stage("spa bootstrap", total=3) as set_step:
+        set_step(1)
+        spa = spa_test(matrix, B=B_stats, seed=seed, stream_prefix=joint_stream)
+    with progress.stage("step-down", total=3) as set_step:
+        set_step(2)
+        step = stepm(matrix, B=B_stats, seed=seed, stream_prefix=joint_stream)
+        set_step(3)
+        adjusted = [decimal_text(value) for value in
+                    stepm_p_values(matrix, B=B_stats, seed=seed, stream_prefix=joint_stream)]
     records = []
     for index, (entry, selected, (trial, _, _)) in enumerate(zip(entries, selections, templates)):
         p_placebo = entry["baselines"]["placebo"]["p_placebo"]
