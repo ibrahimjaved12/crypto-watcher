@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   calibration:
-    name: Slow calibration tests
+    name: Slow tests · multiple-testing calibration
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:

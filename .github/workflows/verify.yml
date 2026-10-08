@@ -16,7 +16,7 @@ jobs:
   # Python tests run in three parallel shards (python/tests/shards.json; "rest" is every
   # module no other shard lists). Budget: the Python tests finish in under 3 minutes.
   python-heavy-a:
-    name: python-heavy-a
+    name: Python tests · study part C
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -36,11 +36,11 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install -r requirements.txt
           .venv/bin/python -m pip install -r requirements-research.txt
-      - name: Run Python unit tests (heavy-a)
-        run: .venv/bin/python tests/run_shard.py heavy-a
+      - name: Run Python unit tests (study-c)
+        run: .venv/bin/python tests/run_shard.py study-c
 
   python-heavy-b:
-    name: python-heavy-b
+    name: Python tests · study core
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -60,11 +60,11 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install -r requirements.txt
           .venv/bin/python -m pip install -r requirements-research.txt
-      - name: Run Python unit tests (heavy-b)
-        run: .venv/bin/python tests/run_shard.py heavy-b
+      - name: Run Python unit tests (study-core)
+        run: .venv/bin/python tests/run_shard.py study-core
 
   python-rest:
-    name: python-rest
+    name: Python tests · benchmark and everything else
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -101,7 +101,7 @@ jobs:
           HEAVY_B: ${{ needs.python-heavy-b.result }}
           REST: ${{ needs.python-rest.result }}
         run: |
-          echo "heavy-a=$HEAVY_A heavy-b=$HEAVY_B rest=$REST"
+          echo "study-c=$HEAVY_A study-core=$HEAVY_B rest=$REST"
           test "$HEAVY_A" = success && test "$HEAVY_B" = success && test "$REST" = success
 
   node:

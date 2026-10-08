@@ -18,9 +18,9 @@ class ShardConfigTests(unittest.TestCase):
     def test_unknown_names_fail_loudly(self):
         modules = all_modules()
         with self.assertRaises(SystemExit):
-            modules_for(REST, {"heavy-x": ["test_no_such_module"]}, modules)
+            modules_for(REST, {"study-x": ["test_no_such_module"]}, modules)
         with self.assertRaises(SystemExit):
-            modules_for("heavy-x", {}, modules)
+            modules_for("study-x", {}, modules)
 
 
 if __name__ == "__main__":
