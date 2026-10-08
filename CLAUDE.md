@@ -82,11 +82,13 @@ Project is roughly 20% complete; things proceed incrementally and in parallel.
   point-in-time inputs, versioned immutable records, chronological splits, untouched test set,
   costs included, ambiguity marked not optimistically resolved, report sample sizes and
   non-trades.
-- Test-data rule (owner decision 2026-10-07): the 12 untouched #123 test days may serve as the final exam for both the market-state study and predictor experiments, but each question has its own pre-registered hypotheses, is frozen before the test opens, and is reported in a separate output so we can see which is useful. Predictors are tuned only on development/validation days; each question opens the test days once. 12 days x 5 coins is thin for predictor claims, so treat it as a sanity check and use a separate, longer held-out period for the main predictor verdict.
+- Splits (owner decision 2026-10-08): development 2024-01..2025-06, validation 2025-07..2025-12, hidden test 2026-01..2026-09, forward live from 2026-10. Tuning uses development and validation only. The hidden stretch is opened once per question, after a plan file is committed to the private research-data repo; the loader refuses hidden months without a plan id and every opening is logged. The old 12 #123 test days no longer have a special status.
 - Benchmark universe and horizons (owner decision 2026-10-07): six symbols BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT, frozen for all predictor work (a 7th only via the point-in-time liquidity check in #183). Primary horizons 15m, 1h, 4h; 1m/5m only as data granularity, features and diagnostics; daily and longer skipped for now. Always test both directions (long and short).
-- Data rule (owner decision 2026-10-07): research quality is never limited by data size or by what is already downloaded. If research needs data we do not have, acquire it (contiguous history, aggTrades, klines, funding, mark/index, and other sources). Any purchase of paid data still needs the owner's explicit OK for that purchase. Currently held locally by the owner: Binance USD-M daily aggTrades and klines (zip + checksum) for BTC, ETH, BNB, SOL, DOGE on the sampled study days only (~5.4 GB, clusters of consecutive days from 2023-12-31); not contiguous, and no XRP.
+- Data rule (owner decision 2026-10-07): research quality is never limited by data size or by what is already downloaded. If research needs data we do not have, acquire it (contiguous history, aggTrades, klines, funding, mark/index, and other sources). Any purchase of paid data still needs the owner's explicit OK for that purchase. The contiguous research dataset is being rebuilt in the private research-data repo (see Data lake plan); the owner's local files (sampled study days only) are just a convenience copy.
 - Data lake plan (owner decision 2026-10-08, details in #183): do not rely only on the owner's local files. Rebuild a contiguous research dataset in the private `crypto-watcher-research-data` repo under new `rd-` release tags, produced by GitHub Actions straight from the Binance public archive (`data.binance.vision`), using the published **monthly** zips for finished months. Assets may go up to just under GitHub's 2 GiB limit (the old study tooling's 1 GiB part cap does not apply to the lake). Raw zips are mirrored with their checksums; derived 1m bars are separate releases. Core window 2024-01..2026-09 for six symbols; klines, mark/index/premium, funding and 5m metrics may extend back to 2020; aggTrades stay in the core window. Liquidations are deferred (no free contiguous source; a paid purchase needs the owner's OK). The builder is `.github/workflows/data-lake-build.yml` (dry run with `publish=false` first; the E4 probe proved the pipeline and has been removed). The existing 18 releases are not deleted until the first real symbol-month is published and verified. Measured: BTCUSDT monthly aggTrades 2024-01..2026-08 = 18.3 GB; all six symbols are roughly 76 GB raw (estimate, range 65-90 GB).
 - Prefer abundant retained data (ML needs it); retention constants were placeholders.
+- Experiment log (owner decision 2026-10-08): the research notebook of every evaluated variant lives in the PRIVATE research-data repo as experiments/<question>.jsonl, appended by the merge step of a run; the public repo holds only the harness code. It counts variants for the multiple-testing correction and is not the app's signal/outcome/paper-trading logs.
+- Release naming: rd-SYMBOL-YYYY-MM-rN (raw + 1m bars), lb1-SYMBOL-FIRST_LAST-rN (trade labels), rk- reserved for the 2020-2023 extension; releases are published normally, never marked Latest, with readable titles.
 
 ## 5. Stack (current, provisional)
 
@@ -101,7 +103,7 @@ Keep price types and contract identity explicit when a fallback is used.
 - Implement; do not research. Research and decisions happen in chat.
 - Do not run tests, local servers or other token-heavy extras on your own (GitHub checks cover
   them). If something matters, ask at the end.
-- Do not spawn agents. Do not create branches or PRs; the owner does that.
+- Do not spawn agents. You may create a branch, push and open a PR (body 'Refs #N'; 'Closes #N' only when the ticket is fully done). Never rewrite pushed history.
 - Be specific: correct architecture, correct math and trading-algorithm technicality.
 - Include good improvements you notice rather than leaving them as optional notes.
 - Lovable sync: never rewrite pushed git history; keep the connected branch working.
@@ -113,8 +115,8 @@ Keep price types and contract identity explicit when a fallback is used.
   methods (EWMA, CUSUM, Kalman, PELT, BOCPD, ATR, PCA, correlation, HMM, mark/trade, OI/funding,
   taker flow) are market-state descriptors. They may still be useful as features/filters.
 - #123 (historical-market-state-study-v1) measures state quality and incremental information vs
-  V1, not trade profitability. Recommended: pause (see discussion), keep its test partition
-  untouched.
+  V1, not trade profitability. Recommended: pause (see discussion), its test days
+  have no special status under the new splits.
 - #31 contains an illustrative support-bounce example only; no real strategies are chosen.
 - Roadmap order numbers differ between issue bodies and `docs/roadmap.md`.
 - Roughly 30 closed tickets are replay/state-classifier/study machinery; setups, outcomes,
