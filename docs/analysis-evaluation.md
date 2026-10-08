@@ -61,7 +61,8 @@ selection and execution policy could grow or deplete a constrained account.
 ## Conditional trade prediction
 
 A prediction is a **time-bounded, conditional trade plan** derived from a specific
-technical, movement, news, fundamental/event, or mixed assessment. Its entry,
+technical, movement or mixed assessment (news/event inputs are parked until
+news ingestion, #29, is unparked). Its entry,
 take-profit, stop-loss, and invalidation levels are valid only within the evidence
 and pattern conditions under which the strategy calculated them.
 
@@ -85,27 +86,46 @@ position are different states. A movement alert can contribute evidence without
 becoming a trade. Activation records that all required conditions occurred; a
 position exists only after an executable fill.
 
-## Concrete conditional-setup example
+## Setup definition: the benchmark barrier event
 
-These illustrative rules are requirements examples, not trading advice:
+> The owner's intent in [`CLAUDE.md`](../CLAUDE.md) section 2 is the source of truth.
+> This section follows the stop-aware benchmark ([#182](https://github.com/ibrahimjaved12/crypto-watcher/issues/182))
+> and the reset tickets #31, #32, #38 and #43 ([#189](https://github.com/ibrahimjaved12/crypto-watcher/issues/189)).
 
-| Stage               | Explicit rule                                                                                                                              |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Premise/evidence    | A named, versioned four-hour support-bounce assessment is developing from its saved technical, movement, volume, and other required inputs |
-| Eligibility         | BTCUSDT perpetual, long direction, setup score at least 80 under a named score version                                                     |
-| Developing setup    | Last price enters the predefined support zone around 74,120 before setup expiry                                                            |
-| Confirmation        | A completed one-minute candle closes above 74,200 while the originating premise and required evidence remain valid                         |
-| Activation          | Record the confirmation event and make the setup eligible for its configured entry rule                                                    |
-| Entry               | Use the next executable market event under the configured order/fill model                                                                 |
-| Initial protection  | Stop at 73,950 using the configured trigger price type                                                                                     |
-| Partial exit        | Close 50% of filled quantity at 75,000, subject to the fill model                                                                          |
-| Extension branch    | If a completed candle closes above 75,500 before the branch deadline, target 76,000 for the remainder                                      |
-| Fallback branch     | If extension confirmation does not arrive by its deadline, manage or close the remainder under the predefined executable fallback rule     |
-| Expiry/invalidation | Cancel an untriggered setup at expiry or as soon as its premise or stated invalidation rule fails                                          |
+A **setup** is the same stop-aware barrier event the benchmark tests, so that a
+strategy's benchmark result describes the setups it produces:
 
-“Otherwise exit at 75,000” requires a defined time/event and executable-price rule.
-Rules must be structured and versioned before evaluation. Short strategies require
-equivalent direction-correct conditions.
+| Element      | Rule                                                                                                                                        |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Scope        | BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT; horizons 15m, 1h, 4h; long and short always (1m/5m are inputs and diagnostics only) |
+| Decision     | A registered strategy version decides at `signal_ms`, the end of minute d, from point-in-time inputs only                                   |
+| Entry        | At the open of the next minute; intended price, fill price, spread and slippage are recorded                                                |
+| Stop         | k x horizon volatility (sigma), same estimator as the benchmark labels; trigger price type recorded                                         |
+| Target       | A reward-to-risk multiple of the risk distance (or a named level), fixed at creation                                                        |
+| Time limit   | 4 x horizon after entry, then exit at the next executable price                                                                             |
+| Costs        | Fees, funding, slippage and liquidation per [the simulator specification](futures-simulation.md), at 1x and 2x cost                         |
+| Invalidation | An untriggered setup is cancelled at expiry, or as soon as its premise or a stated invalidation rule fails                                  |
+
+Partial exits, stop adjustments and branching are allowed only when fixed at creation
+and modelled by the same label code; they are not part of the benchmark-equivalent core.
+Short setups use direction-correct mirrored rules. A price level is one part of a setup,
+not a reusable order instruction: a level cannot activate a trade whose premise never
+confirmed or has become invalid, and "otherwise exit at X" needs a defined time/event
+and executable-price rule.
+
+### Validation status
+
+Every setup carries a status shown next to its score:
+
+- `validated`: the strategy version passed the benchmark gate. The setup stores the
+  benchmark question id and the report hash.
+- `unvalidated`: a rule we run without proven edge. A setup with no benchmark link is
+  unvalidated.
+
+Only a strategy version registered in the experiment log can create a setup, and a
+live setup must be reproducible by the benchmark labels from the same inputs.
+Portfolio and paper-trading results are never presented as evidence of edge for an
+unvalidated strategy.
 
 ## Evidence roles and strategy families
 
@@ -133,32 +153,53 @@ events. AI is not required to create or manage these setups.
 
 ## Outcome evaluation
 
-Each strategy family defines success using the assessment and trade path it was
-designed for. Evaluation checks whether required evidence remained valid, the full
-activation condition occurred before expiry, an executable entry existed, and the
-configured management rules completed. Partial exits contribute their actual
-quantities, fills, and costs when execution data is available.
+Success is a **profitable trade after costs on the stop-aware path**. Price eventually
+touching a target is not a success when the stop (or liquidation) came first, and any
+metric that ignores the stop is misleading. Outcomes use the benchmark label rules, so
+the app and the benchmark cannot disagree:
 
-Preserve pending, expired, invalidated, never-triggered, rejected/unexecutable,
-liquidated, ambiguous, and insufficient-data states instead of forcing every setup
-into win/loss. Movement alerts may retain fixed-horizon observations for research,
-but these remain separate from conditional trade outcomes. Aggregate success rates
-only across compatible strategy and evaluation versions, always showing the
-denominator and excluded statuses.
+| Code | Meaning                                                      |
+| ---- | ------------------------------------------------------------ |
+| T    | Target reached first                                         |
+| S    | Stop reached first                                           |
+| E    | Time-limit exit (4 x horizon)                                |
+| L    | Liquidation                                                  |
+| X    | Ambiguous: intrabar order of stop and target cannot be known |
+
+- Results are in **R units** (multiples of the risk at the stop), gross and net of
+  costs, at 1x and 2x cost.
+- Ambiguity is never resolved optimistically. X is resolved pessimistically for
+  headline numbers and always reported as its own share. Prefer finer trade or
+  aggregate-trade data when ordering matters, and record the data resolution.
+- Non-trade statuses (volatility not ready, compromised data, incomplete window,
+  off-tick entry price, never triggered, expired, invalidated, rejected/unexecutable,
+  insufficient data) stay separate and are never counted as wins or losses.
+- Hit rate is always shown next to the **barrier base rate**: ranging coins revisit
+  prices, so a benchmark any naive strategy passes proves nothing. Always show sample
+  sizes and non-trade counts, per direction and per horizon.
+- Fixed-horizon returns, MFE and MAE stay auxiliary research numbers and never replace
+  the trade-path outcome.
+- Aggregate only across compatible strategy and evaluation versions, with the
+  denominator and excluded statuses visible.
+
+Partial exits contribute their actual quantities, fills and costs when execution data
+exists. Late data appends a correction under a new outcome version; earlier results
+are preserved.
 
 ## Scores and effectiveness reports
 
 The general trade/setup score combines the factors declared by its scoring version.
 Save the total score and each factor's raw value, normalization, weight,
 contribution, reason, and disqualifiers with the original assessment. A score such
-as 90/100 is a ranking until separately calibrated and validated as a probability.
+as 90/100 is a ranking, never a win probability, until separately calibrated and
+validated out of sample.
 
 Reports support date range, contract, direction, strategy/version, timeframe,
 outcome status, and score range. Default comparison bands are 60–69, 70–79, 80–89,
 and 90–100. For each band, show:
 
 - signal/setup, activation, and completed-trade counts;
-- setup success rate under the named outcome contract;
+- setup success rate under the named outcome contract, next to the barrier base rate;
 - average net P&L per completed trade when costed execution exists;
 - average win and average loss;
 - cumulative net return and maximum drawdown for coherent wallet runs;
@@ -185,7 +226,8 @@ archive adapter that supplies Part 1's explicit input records. Part 3 runs the
 fixed Issue #75 historical experiment suite over one replay and emits a compact,
 reproducible research report. Part 4 acquires the required official Binance
 daily archives into a verified local cache. This is comparative market-state evidence; it does not promote an algorithm or
-measure portfolio P&L. Issue #123 extends that work across multiple historical
+measure portfolio P&L. Issue #123 (recommended to pause; its test days have no special status under the
+CLAUDE.md splits) extends that work across multiple historical
 periods and adds forward-information screening: it asks whether causally available
 candidate evidence provides method-appropriate information about subsequent market
 behavior beyond the unchanged V1 state. That screening is upstream of strategy
@@ -197,6 +239,11 @@ open-interest, funding, and liquidation evidence may instead improve the state
 representation consumed by later predictive rules. Promotion requires explicit
 review of versioned untouched-period evidence; no candidate is adopted merely
 because it was implemented or resembled V1 on a pilot.
+
+Strategy and predictor evaluation uses the benchmark under the splits fixed in
+CLAUDE.md (development 2024-01..2025-06, validation 2025-07..2025-12, hidden test
+2026-01..2026-09 opened once per question with a committed plan, forward live from
+2026-10); every variant tried counts in the private experiment log.
 
 Technical-assessment composition, strategy/setup replay, funding/news/event adapters,
 execution/outcome resolution, and portfolio simulation (#38) remain deferred.
