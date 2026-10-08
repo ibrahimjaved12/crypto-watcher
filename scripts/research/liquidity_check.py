@@ -21,13 +21,13 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import csv
-from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 import io
 from pathlib import Path
 import shutil
 import sys
+from typing import NamedTuple
 import urllib.error
 import urllib.request
 import zipfile
@@ -45,8 +45,8 @@ QUOTE_VOLUME, TRADES = 7, 8  # Binance kline CSV columns
 OPEN_TIME = 0
 
 
-@dataclass(frozen=True)
-class MonthTotals:
+class MonthTotals(NamedTuple):
+    # NamedTuple, not a dataclass: the module also loads via importlib without sys.modules registration.
     quote_volume: Decimal
     trades: int
     rows: int
