@@ -1,0 +1,132 @@
+name: Label build
+run-name: "Label build ${{ inputs.symbols }} ${{ inputs.first_month }}..${{ inputs.last_month }} publish=${{ inputs.publish }}"
+
+# Public logs: names, sizes, hashes and aggregate counts only. Private rd inputs
+# are read in BOTH modes; publish=false disables all release mutations.
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: Comma-separated subset of BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        type: string
+        default: BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        required: true
+      first_month:
+        description: First month (YYYY-MM, not before 2024-01)
+        type: string
+        default: "2024-01"
+        required: true
+      last_month:
+        description: Last month (YYYY-MM, must be fully finished in UTC)
+        type: string
+        default: "2026-09"
+        required: true
+      data_revision:
+        description: Data release revision (1..999)
+        type: string
+        default: "1"
+        required: true
+      label_revision:
+        description: Label release revision (1..999)
+        type: string
+        default: "1"
+        required: true
+      publish:
+        description: Publish releases (false = read private inputs and build only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Validate inputs and plan the matrix
+        id: plan
+        env:
+          LABEL_SYMBOLS: ${{ inputs.symbols }}
+          LABEL_FIRST: ${{ inputs.first_month }}
+          LABEL_LAST: ${{ inputs.last_month }}
+          LABEL_DATA_REVISION: ${{ inputs.data_revision }}
+          LABEL_REVISION: ${{ inputs.label_revision }}
+        shell: python
+        run: |
+          import json, os, sys, time
+          sys.path.insert(0, "scripts/research")
+          from label_build import plan_months, revision, validate_symbols
+
+          try:
+              symbols = validate_symbols(os.environ["LABEL_SYMBOLS"])
+              months = plan_months(os.environ["LABEL_FIRST"], os.environ["LABEL_LAST"],
+                                   now_ms=time.time_ns() // 1_000_000)
+              revision(os.environ["LABEL_DATA_REVISION"])
+              revision(os.environ["LABEL_REVISION"])
+          except ValueError as error:
+              sys.exit(str(error))
+          include = [{"symbol": symbol} for symbol in symbols]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("matrix=" + json.dumps({"include": include}, separators=(",", ":")) + "\n")
+          print(f"planned {len(include)} symbols, {len(months)} months per symbol")
+
+  build:
+    needs: plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    concurrency:
+      group: label-build-${{ matrix.symbol }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Build ${{ matrix.symbol }} labels
+        env:
+          LABEL_SYMBOL: ${{ matrix.symbol }}
+          LABEL_FIRST: ${{ inputs.first_month }}
+          LABEL_LAST: ${{ inputs.last_month }}
+          LABEL_DATA_REVISION: ${{ inputs.data_revision }}
+          LABEL_REVISION: ${{ inputs.label_revision }}
+          LABEL_PUBLISH: ${{ inputs.publish }}
+          LABEL_SUMMARY: ${{ runner.temp }}/label-build-summary.md
+          # Unlike data-lake-build, dry runs also need authenticated private reads.
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: |
+          args=(--symbol "$LABEL_SYMBOL" --first-month "$LABEL_FIRST" --last-month "$LABEL_LAST"
+                --data-revision "$LABEL_DATA_REVISION" --label-revision "$LABEL_REVISION"
+                --workdir label-build-work --summary "$LABEL_SUMMARY")
+          if [ "$LABEL_PUBLISH" = "true" ]; then
+            args+=(--publish)
+          fi
+          python scripts/research/label_build.py "${args[@]}"
+      - name: Delete working files
+        if: always()
+        run: rm -rf label-build-work
+      - name: Summary
+        if: always()
+        env:
+          LABEL_SUMMARY: ${{ runner.temp }}/label-build-summary.md
+        run: |
+          if [ -f "$LABEL_SUMMARY" ]; then
+            cat "$LABEL_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
