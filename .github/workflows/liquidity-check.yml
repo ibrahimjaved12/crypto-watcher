@@ -1,0 +1,56 @@
+name: Liquidity check
+run-name: "Liquidity check ${{ inputs.first_month }}..${{ inputs.last_month }}"
+
+# #183: candidate USDT perpetuals vs the frozen six, from the public Binance archive
+# (data.binance.vision monthly 1m klines, .CHECKSUM verified). The log and the job
+# summary carry only the aggregate table (months, quote-volume ratios, best rank).
+on:
+  workflow_dispatch:
+    inputs:
+      first_month:
+        description: First month (YYYY-MM)
+        type: string
+        default: "2024-01"
+      last_month:
+        description: Last month (YYYY-MM, published monthly archive)
+        type: string
+        default: "2026-09"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: liquidity-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Download, verify and aggregate monthly klines
+        env:
+          FIRST_MONTH: ${{ inputs.first_month }}
+          LAST_MONTH: ${{ inputs.last_month }}
+          LIQUIDITY_SUMMARY: ${{ runner.temp }}/liquidity-summary.md
+        run: |
+          python scripts/research/liquidity_check.py --first-month "$FIRST_MONTH" --last-month "$LAST_MONTH" \
+            --workdir liquidity-check-work --summary "$LIQUIDITY_SUMMARY"
+      - name: Delete working files
+        if: always()
+        run: rm -rf liquidity-check-work
+      - name: Summary
+        if: always()
+        env:
+          LIQUIDITY_SUMMARY: ${{ runner.temp }}/liquidity-summary.md
+        run: |
+          if [ -f "$LIQUIDITY_SUMMARY" ]; then
+            cat "$LIQUIDITY_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
