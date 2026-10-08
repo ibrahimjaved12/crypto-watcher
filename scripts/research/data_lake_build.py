@@ -356,15 +356,20 @@ class ResearchDataRepo:
     def upload_verified(self, release: dict, path: Path, name: str, sha256: str, size: int) -> None:
         url = release["upload_url"].split("{", 1)[0] + "?name=" + urllib.parse.quote(name, safe="")
         content_type = CONTENT_TYPES.get(path.suffix, "application/octet-stream")
-        for attempt in range(2):
+        attempts = 4
+        for attempt in range(attempts):
             try:
                 with path.open("rb") as stream, self.request("POST", url, data=stream, size=size,
                                                              content_type=content_type, timeout=600) as response:
                     asset = json.loads(response.read(16 * BLOCK))
             except GitHubError as error:
-                if not error.ambiguous or attempt:
+                # A transport failure or a 5xx/429 from the upload host is transient and may still
+                # have stored the asset (a 502 can arrive after the body was accepted): reconcile,
+                # then retry with backoff. Other HTTP errors are definite and raised at once.
+                transient = error.ambiguous or error.status in (429, 500, 502, 503, 504)
+                if not transient or attempt == attempts - 1:
                     raise
-                # The upload may have been stored before the connection failed: reconcile once.
+                time.sleep(5 * 2 ** attempt)
                 existing = self.assets(release["id"]).get(name)
                 if existing is not None:
                     try:
