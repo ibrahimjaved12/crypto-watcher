@@ -108,6 +108,30 @@ def _escape(value) -> str:
         ">", "&gt;").replace("|", "&#124;").replace("\n", " ").replace("\r", " ").replace("`", "&#96;")
 
 
+def projection_table(report: dict) -> list[str]:
+    """Strategy x timeframe: variants detectable on the hidden stretch and the smallest projected MDE."""
+    groups = {}
+    for variant in report["variants"]:
+        if "projection" not in variant:
+            continue
+        key = variant["strategy_id"], variant["geometry"]["horizon_min"]
+        detectable, smallest = groups.get(key, (0, None))
+        projection = variant["projection"]
+        mde = projection["mde_per_trade_r"]
+        if mde is not None and (smallest is None or Fraction(mde) < Fraction(smallest)):
+            smallest = mde
+        groups[key] = (detectable + bool(projection["detectable"]), smallest)
+    if not groups:
+        return []
+    days = next(v["projection"]["target_days"] for v in report["variants"] if "projection" in v)
+    lines = ["", f"### Power projection onto the {days}-day hidden stretch", "",
+             "| Strategy | Timeframe (min) | Detectable variants | Smallest MDE per trade (R) |",
+             "| --- | ---: | ---: | ---: |"]
+    for (strategy, minutes), (detectable, smallest) in sorted(groups.items()):
+        lines.append(f"| {_escape(strategy)} | {minutes} | {detectable} | {_escape(smallest)} |")
+    return lines
+
+
 def markdown(report: dict) -> str:
     """Readable variant/baseline tables plus full deterministic evidence details."""
     canonical_json(report)
@@ -126,6 +150,7 @@ def markdown(report: dict) -> str:
             row["variant_id"], row["trades"], row["mean_net_r_1x"], row["mean_net_r_2x"], row["t_statistic"],
             row["required_t"], row["p_placebo"], row["x_share"], row["ambiguity_share"], row["stepm_p_value"],
             "pass" if row["power_passes"] else "fail", row["verdict"])) + " |")
+    lines += projection_table(report)
     for variant in report["variants"]:
         lines += ["", f"## {_escape(variant['strategy_id'])} / {_escape(variant['variant_id'])}", "",
                   "| Baseline | Mean net R / rate | Detail |", "| --- | ---: | --- |"]

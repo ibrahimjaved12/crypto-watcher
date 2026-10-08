@@ -65,6 +65,20 @@ class ReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_report({**self.body(), "headline": {}})
 
+    def test_projection_table(self):
+        body = self.body()
+        variant = body["variants"][0]
+        variant["geometry"] = {"horizon_min": 60}
+        variant["projection"] = {"detectable": True, "mde_per_trade_r": "0.08", "target_days": 273}
+        second = dict(variant, variant_id="v2", projection={"detectable": False, "mde_per_trade_r": "0.05",
+                                                             "target_days": 273})
+        body["variants"].append(second)
+        body["stepm"] = {"adjusted_p_values": ["0.5", "0.5"]}
+        text = markdown(make_report(body))
+        self.assertIn("Power projection onto the 273-day hidden stretch", text)
+        self.assertIn("| example | 60 | 1 | 0.05 |", text)
+        self.assertNotIn("Power projection", markdown(make_report(self.body())))
+
     def test_float_rejected(self):
         body = self.body()
         body["spa"]["p_consistent"] = 0.5

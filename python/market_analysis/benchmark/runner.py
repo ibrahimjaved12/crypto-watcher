@@ -32,6 +32,7 @@ from .experiment_log import TrialRecord, TrialStatus
 from .hidden_guard import HiddenGuardError, HiddenStretchLocked, require_months
 from .label_store import Geometry, load_geometry_columns
 from .power import n_independent_greedy, power_gate
+from .projection import project_selection
 from .report import make_report, variant_details
 from .rng import u64_words
 from .segments import eligible, segment_bounds_ms, segment_months, worst_case_window_end_ms
@@ -244,6 +245,9 @@ def run_experiment(question_id, specs, geometries, segment, label_dir, params, l
                                       "always_long": long_metrics, "always_short": short_metrics,
                                       "placebo": matched_placebo(rows, pool, B=B_placebo, seed=seed,
                                                                  stream_prefix=prefix + "/placebo")}})
+        if segment != "hidden":
+            # Power projection of this variant's trade rate and daily sigma onto the hidden stretch.
+            details["projection"] = project_selection(selected, daily)
         entries.append(details)
         selections.append(selected)
         daily_columns.append(daily)
