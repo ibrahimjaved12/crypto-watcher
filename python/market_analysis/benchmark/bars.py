@@ -13,6 +13,7 @@ no duplicate. Any violation raises ValueError naming the data line and column.
 from __future__ import annotations
 
 from array import array
+from collections import Counter
 import csv
 from dataclasses import dataclass
 from functools import reduce
@@ -179,18 +180,51 @@ def _positive_scaled(text: str) -> int:
     return value
 
 
+TICK_RULE = "tick-v2"
+OFF_TICK_TOLERANCE = 10_000  # at most n // 10_000 (0.01%) prices may be off the inferred tick
+
+
+def _price_counts(series: BarSeries) -> Counter:
+    return Counter(value for column in (series.open, series.high, series.low, series.close)
+                   for value in column if value != MISSING)
+
+
 def infer_tick(series: BarSeries) -> int:
-    """Point-in-time tick size (scaled): gcd of every present trade open/high/low/close.
+    """Point-in-time tick size (scaled), tolerant of a few off-tick prints (rule ``tick-v2``).
 
     The Binance exchange-info endpoint is not available to us, so the tick is
-    inferred from the prices actually traded in the series.
+    inferred from the prices actually traded in the series. ``g`` is the gcd of
+    every present trade open/high/low/close. One off-grid print collapses ``g``
+    (BTCUSDT 2024-02: one 51735.62 among 167,040 prices on the 0.1 grid gave 0.02),
+    so candidates ``m * 10**e`` (m in 1, 2, 5; scaled units; at most the largest
+    price) are also tried: a candidate is valid when at most ``n // 10_000`` of the
+    ``n`` prices are not multiples of it, and ``best`` is the largest valid one.
+    The result is ``max(g, best)``. Without off-tick prints every valid candidate
+    divides ``g``, so the result is exactly the gcd (also for non-1-2-5 ticks).
     """
-    prices = (value for column in (series.open, series.high, series.low, series.close)
-              for value in column if value != MISSING)
-    tick = reduce(gcd, prices, 0)
-    if tick <= 0:
+    counts = _price_counts(series)
+    if not counts:
         raise ValueError(f"{series.symbol}: no trade prices to infer a tick size from")
-    return tick
+    g = reduce(gcd, counts, 0)
+    allowed = sum(counts.values()) // OFF_TICK_TOLERANCE
+    top, best, power = max(counts), 0, 1
+    while power <= top:
+        for multiple in (1, 2, 5):
+            candidate = multiple * power
+            if candidate > top:
+                break
+            off = sum(count for value, count in counts.items() if value % candidate)
+            if off <= allowed:
+                best = candidate
+        power *= 10
+    return max(g, best)
+
+
+def off_tick_count(series: BarSeries, tick: int) -> int:
+    """Present open/high/low/close prices that are not multiples of ``tick``."""
+    if type(tick) is not int or tick <= 0:
+        raise ValueError("tick must be a positive integer")
+    return sum(count for value, count in _price_counts(series).items() if value % tick)
 
 
 def compromised_in(series: BarSeries, start_index: int, end_index: int, mask: int = COMPROMISED_FLAGS) -> bool:

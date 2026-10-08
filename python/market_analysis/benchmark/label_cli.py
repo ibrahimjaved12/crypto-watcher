@@ -5,7 +5,9 @@ Reads the data-lake ``bars1m`` and ``funding`` files of every month from
 one bar/funding series over the whole window (volatility needs the history),
 and writes ``labels__SYMBOL__YYYY-MM.csv.gz`` per month plus
 ``labels__SYMBOL.manifest.json``. Logs and the optional markdown summary carry
-aggregate counts only (the repository is public).
+aggregate counts only (the repository is public): never tick values. The
+private manifest records per month the inferred tick, the number of off-tick
+prints, and the tick rule (``tick-v2``).
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from pathlib import Path
 import sys
 
 from .. import data_lake
-from .bars import BarSeries, infer_tick, read_bars_csv
+from .bars import TICK_RULE, BarSeries, infer_tick, off_tick_count, read_bars_csv
 from .funding import FundingSeries, read_funding_csv
 from .labels import SCHEMA, LabelParams, build_labels, write_label_csv
 
@@ -39,6 +41,14 @@ def manifest_name(symbol: str) -> str:
     return f"labels__{symbol}.manifest.json"
 
 
+def tick_summary(manifest: dict) -> dict:
+    """Public aggregates: months with any off-tick print and months whose tick differs from the previous month."""
+    ticks = [manifest["ticks"][month] for month in sorted(manifest["ticks"])]
+    off = manifest.get("off_tick_prints", {})
+    return {"months_with_off_tick_prints": sum(1 for count in off.values() if count),
+            "tick_changes": sum(1 for previous, current in zip(ticks, ticks[1:]) if current != previous)}
+
+
 def run(symbol: str, bars_dir: Path, first_month: str, last_month: str, out_dir: Path,
         params: LabelParams | None = None) -> dict:
     params = params or LabelParams()
@@ -49,18 +59,19 @@ def run(symbol: str, bars_dir: Path, first_month: str, last_month: str, out_dir:
     missing = [str(path) for pair in paths.values() for path in pair if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"missing input files: {missing}")
-    bar_parts, funding_parts, ticks, inputs = [], [], {}, {}
+    bar_parts, funding_parts, ticks, off_ticks, inputs = [], [], {}, {}, {}
     for month in months:
         bars_path, funding_path = paths[month]
         with bars_path.open("rb") as stream:
             part = read_bars_csv(stream, symbol, month)
         ticks[month] = infer_tick(part)  # point-in-time tick of this month, before concatenation
+        off_ticks[month] = off_tick_count(part, ticks[month])
         bar_parts.append(part)
         with funding_path.open("rb") as stream:
             funding_parts.append(read_funding_csv(stream, month))
         inputs[month] = {"bars": {"name": bars_path.name, "sha256": file_sha256(bars_path)},
                          "funding": {"name": funding_path.name, "sha256": file_sha256(funding_path)}}
-        print(f"loaded {symbol} {month}: {part.minutes} minutes, tick {ticks[month]}", flush=True)
+        print(f"loaded {symbol} {month}: {part.minutes} minutes", flush=True)
     bars = BarSeries.concat(bar_parts)
     funding = FundingSeries.concat(funding_parts)
     del bar_parts, funding_parts
@@ -97,8 +108,13 @@ def run(symbol: str, bars_dir: Path, first_month: str, last_month: str, out_dir:
         "cost_model_identity": params.cost_model.identity(),
         "inputs": inputs,
         "ticks": ticks,
+        "tick_rule": TICK_RULE,
+        "off_tick_prints": off_ticks,
         "outputs": outputs,
     }
+    summary = tick_summary(manifest)
+    print(f"tick check: {summary['months_with_off_tick_prints']} months with off-tick prints, "
+          f"{summary['tick_changes']} month-to-month tick changes", flush=True)
     (out_dir / manifest_name(symbol)).write_text(data_lake.canonical_json(manifest), encoding="ascii")
     return manifest
 

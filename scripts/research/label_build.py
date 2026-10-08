@@ -192,8 +192,8 @@ def download_inputs(repo: ResearchDataRepo, symbol: str, releases: dict, workdir
 
 def build(symbol: str, first: str, last: str, workdir: Path, provenance: dict) -> dict:
     out_dir = workdir / "labels"
-    # label_cli prints inferred ticks; neither those nor parser exceptions with
-    # individual input values may reach the public workflow log.
+    # label_cli logs no tick values, but parser exceptions can carry individual input values;
+    # keep all of its output out of the public workflow log.
     with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
         manifest = label_cli.run(symbol, workdir, first, last, out_dir)
     for month, inputs in manifest["inputs"].items():
@@ -228,8 +228,10 @@ def aggregate_counts(manifest: dict, seconds: int) -> dict:
         total = sum(counts.values())
         shares.append({name: exact_to_str(Fraction(count, total)) for name, count in sorted(counts.items())}
                       if total else {})
+    # Aggregate tick checks only: tick values themselves stay in the private manifest.
     return {"rows": rows, "status_counts": dict(sorted(statuses.items())),
-            "outcome_shares_pessimistic_by_target": shares, "seconds": seconds}
+            "outcome_shares_pessimistic_by_target": shares, "seconds": seconds,
+            "tick_rule": manifest.get("tick_rule", "tick-v1"), **label_cli.tick_summary(manifest)}
 
 
 def report(tag: str, status: str, summary: Path | None, counts: dict) -> None:
@@ -240,6 +242,16 @@ def report(tag: str, status: str, summary: Path | None, counts: dict) -> None:
     if summary:
         with summary.open("a", encoding="utf-8") as stream:
             stream.write("\n".join(lines))
+
+
+def release_body(manifest: dict) -> str:
+    body = (f"Trade labels schema: {manifest['schema']}.\n\n"
+            f"Params identity: `{manifest['params_identity']}`.\n\n"
+            f"Cost model identity: `{manifest['cost_model_identity']}`.\n\n")
+    if manifest.get("tick_rule") == "tick-v2":
+        body += "Tick rule: tick-v2 (outlier-tolerant)\n\n"
+    return (body + "Input data releases:\n" + "\n".join(f"- `{tag}`" for tag in manifest["rd_tags"]) +
+            f"\n\nSee {label_cli.manifest_name(manifest['symbol'])} for input sha256 hashes and aggregate counts.")
 
 
 def publish_release(repo: ResearchDataRepo, tag: str, manifest: dict, out_dir: Path) -> str:
@@ -258,11 +270,7 @@ def publish_release(repo: ResearchDataRepo, tag: str, manifest: dict, out_dir: P
     revision_text = tag.rsplit("-r", 1)[1]
     title = (f"{manifest['symbol']} · {manifest['first_month']} → {manifest['last_month']} · "
              f"trade labels ({manifest['schema']}, r{revision_text})")
-    body = (f"Trade labels schema: {manifest['schema']}.\n\n"
-            f"Params identity: `{manifest['params_identity']}`.\n\n"
-            f"Cost model identity: `{manifest['cost_model_identity']}`.\n\n"
-            "Input data releases:\n" + "\n".join(f"- `{tag}`" for tag in manifest["rd_tags"]) +
-            f"\n\nSee {label_cli.manifest_name(manifest['symbol'])} for input sha256 hashes and aggregate counts.")
+    body = release_body(manifest)
     release = repo.create_draft(tag, title, body)
     for path, name, sha, size in uploads:  # manifest last
         repo.upload_verified(release, path, name, sha, size)

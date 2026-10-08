@@ -10,7 +10,8 @@ import unittest
 
 from market_analysis import data_lake
 from market_analysis.benchmark.bars import (
-    COMPROMISED_FLAGS, MISSING, BarSeries, CompromisedIndex, compromised_in, infer_tick, read_bars_csv,
+    COMPROMISED_FLAGS, MISSING, BarSeries, CompromisedIndex, compromised_in, infer_tick, off_tick_count,
+    read_bars_csv,
 )
 from market_analysis.benchmark.funding import (
     FundingSeries, interval_report, read_funding_csv, settlement_mark,
@@ -152,6 +153,30 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(infer_tick(series(START, odd)), 5 * 10 ** 6)
         with self.assertRaises(ValueError):
             infer_tick(series(START, [MISSING, MISSING]))
+
+    def test_infer_tick_tolerates_rare_off_tick_prints(self):
+        grid = [(517_350 + i % 1000) * 10 ** 7 for i in range(3000)]  # 0.1 grid; n = 12,000 prices, 1 allowed off
+        clean = series(START, grid)
+        self.assertEqual(infer_tick(clean), 10 ** 7)
+        self.assertEqual(off_tick_count(clean, 10 ** 7), 0)
+        one = series(START, grid)
+        one.high[5] = 5_173_562 * 10 ** 6  # 51735.62: the gcd alone would collapse to 0.02
+        self.assertEqual(infer_tick(one), 10 ** 7)
+        self.assertEqual(off_tick_count(one, 10 ** 7), 1)
+        self.assertEqual(off_tick_count(one, 2 * 10 ** 6), 0)
+        with self.assertRaises(ValueError):
+            off_tick_count(one, 0)
+
+    def test_infer_tick_keeps_exact_gcd_and_falls_back_when_too_many_off(self):
+        legit = series(START, [25 * (4000 + i) for i in range(3000)])  # a non-1-2-5 tick, no outliers
+        self.assertEqual(infer_tick(legit), 25)
+        many = series(START, [(517_350 + i % 1000) * 10 ** 7 for i in range(3000)])
+        many.high[5] = 5_173_562 * 10 ** 6  # .62: a multiple of 0.02, not of 0.05
+        many.high[6] = 5_173_565 * 10 ** 6  # .65: a multiple of 0.05, not of 0.02
+        many.high[7] = 5_173_555 * 10 ** 6  # .55
+        # 3 off the 0.1 grid > 12,000 // 10,000: 0.1 is invalid; 0.05 has 1 off (valid), 0.02 has 2 off.
+        self.assertEqual(infer_tick(many), 5 * 10 ** 6)  # above the collapsed gcd 0.01
+        self.assertEqual(off_tick_count(many, 10 ** 7), 3)
 
     def test_compromised_in(self):
         flags = [0, data_lake.FLAG_KLINE_ROW_MISSING, 0, data_lake.FLAG_MARK_MISSING, 0]
