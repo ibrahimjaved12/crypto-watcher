@@ -50,7 +50,7 @@ def make_labels(root, drift=False, segment="validation"):
             rows = [(0, 0, "planted", 500_000 + noise[day]),
                     (0, 15, None, 500_000 + noise[day] if drift else noise[day]),
                     (0, 30, None, 500_000 - noise[day] if drift else -noise[day]),
-                    (0, 45, None, 500_000 + noise[days - 1 - day] if drift else noise[days - 1 - day]),
+                    (0, 45, None, 500_000 + noise[(day + 1) % days] if drift else noise[(day + 1) % days]),
                     (1, 0, "noise", noise[day])]
             for hour, minute, name, net in rows:
                 ms = day_ms + hour * 3_600_000 + minute * 60_000
