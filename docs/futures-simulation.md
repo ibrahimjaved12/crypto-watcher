@@ -4,7 +4,8 @@ This document specifies the separate automated paper-trading tool. The simulator
 receives versioned conditional opportunities from the
 [analysis and evaluation system](analysis-evaluation.md), is assigned a virtual
 USDT balance and run configuration, and executes those opportunities using fake
-money. It never places real-money orders.
+money. It never places real-money orders; real-money execution stays manual for
+now (not permanently excluded, and any change is an owner decision).
 
 The initial scope is Binance USDⓈ-M, USDT-margined perpetual futures, long and
 short. The simulator tests whether a selection, sizing, execution, and management
@@ -352,6 +353,18 @@ Wallet balance, margin reservation, position/order persistence and the ledger
 remain #36 responsibilities. These fill policies do not reconstruct Binance
 order books, bid/ask history, hidden queue depth or matching-engine queue state.
 
+## Outcome vocabulary and stop definition
+
+For benchmark-equivalent setups ([analysis and evaluation](analysis-evaluation.md#setup-definition-the-benchmark-barrier-event)),
+the simulator reports the same outcomes: T (target first), S (stop first), E
+(time-limit exit at 4 x horizon), L (liquidation) and X (ambiguous intrabar order),
+in R units gross and net of costs. The stop is k x horizon sigma, entry is the next
+minute's open, and X is resolved pessimistically for headline numbers and always
+reported as its own share. Success is a profitable trade after costs on the stop-aware
+path. Wallet-level results (sizing, leverage, capital conflicts) are a portfolio layer
+over strategies that passed the benchmark; they are not evidence of edge by themselves.
+The 2% stop in the sizing example above is arithmetic illustration only.
+
 ## Event resolution and ambiguity
 
 Analysis cadence and simulation event resolution are separate. A five-minute
@@ -404,4 +417,5 @@ capital availability, overlapping positions, rejected trades, and compounding.
 - Store no exchange trading credential.
 - Provide no hidden real-order adapter or production flag.
 - Label all positions, notifications, balances, and P&L as simulated.
-- Make real-money decisions and order placement remain manual.
+- Keep real-money decisions and order placement manual for now (an owner decision,
+  not a permanent exclusion).

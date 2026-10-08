@@ -106,6 +106,11 @@ seven-day movement normalization coverage; see [candle retention](./operational-
 
 ## Persistence and outcomes
 
+> The forward outcomes below are auxiliary fixed-horizon research observations. They
+> are not trade outcomes: success is a profitable trade after costs on the stop-aware
+> path (T/S/E/L/X, k x horizon sigma stop), defined in
+> [analysis and evaluation](analysis-evaluation.md#outcome-evaluation).
+
 Each saved snapshot includes canonical and source contract identities, provider
 and endpoint, price type, candle open/close event time, evaluation and detection
 times, calculation and strategy versions, score, factor breakdown, reasons,

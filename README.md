@@ -10,8 +10,8 @@ Crypto Watch identifies and evaluates **conditional futures-trade opportunities
 and profitability after costs**. The initial target is **Binance USDⓈ-M,
 USDT-margined perpetual futures, long and short**. The intended lifecycle separates
 current assessment, developing setups, activation, trade management, evaluation,
-historical backtesting, and virtual-wallet paper trading. Real-money trading stays
-manual; no automatic real-money order placement is included in the roadmap.
+historical backtesting, and virtual-wallet paper trading. Real-money execution stays
+manual for now (not permanently excluded); the automated simulation uses fake money only.
 
 Read the [product direction and architecture](docs/product-direction.md) for the
 current and proposed data flows, futures evidence rules, news-context limits, and

@@ -1,5 +1,12 @@
 # Start, Stop and Resume a frozen historical campaign
 
+> **Status (2026-10-09):** this describes the #163 study-campaign tooling for the
+> state-classifier work (#123, recommended to pause). It does not define setups or
+> outcomes: those follow the stop-aware benchmark in
+> [analysis and evaluation](analysis-evaluation.md). Its 1 GiB part cap, sampled study
+> days and period layout belong to this tooling only. The data lake and splits fixed in
+> CLAUDE.md (section 4) supersede them for predictor work.
+
 This extends the existing #163 platform. Earlier pilot evidence does not verify
 this repaired implementation. Source review cannot establish scientific parity, full-day memory requirements,
 longest-stage fit, or three-period acceptance (#152). No visibility changes, input

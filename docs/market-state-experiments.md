@@ -1,5 +1,12 @@
 # Market-state experiment registry
 
+> **Provisional (2026-10-09).** The #123 state-study framing and the five-symbol pilot
+> universe are superseded for predictor work by the stop-aware benchmark (#182) and the
+> frozen six symbols (BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT). #123 is
+> recommended to pause and its test days have no special status under the splits in
+> CLAUDE.md. These methods are market-state descriptors that may still serve as
+> features or filters; they are not trade predictors and make no profitability claim.
+
 This registry preregisters the deferred Issue #75 candidates. Each candidate is
 evaluated independently against the unchanged canonical #28 V1 event stream.
 The current experiments implement **EXP-75-01 EWMA**, **EXP-75-02 CUSUM**,
