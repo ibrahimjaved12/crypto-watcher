@@ -37,6 +37,8 @@ class GeometryColumns:
     data: dict[str, array] = field(default_factory=lambda: {name: array("q") for name in COLUMN_NAMES})
     non_trades: dict[str, array] = field(default_factory=lambda: {name: array("q") for name in ("signal_ms", "reason")})
     purged_signal_ms: array = field(default_factory=lambda: array("q"))
+    # Optional, parallel to data: d_ticks and p0 of every trade row (volatility inputs).
+    metadata: dict[str, array] | None = None
 
     def __getitem__(self, name: str) -> array:
         return self.data[name]
@@ -46,13 +48,16 @@ class GeometryColumns:
 
 
 def load_geometry_columns(label_dir, symbol: str, months, geometries, params: LabelParams,
-                          *, token=None, gate=None, segment: str | None = None) -> dict[Geometry, GeometryColumns]:
+                          *, token=None, gate=None, segment: str | None = None,
+                          metadata: bool = False) -> dict[Geometry, GeometryColumns]:
     """Guard all requested months before opening any file, then stream once.
 
     Input months may be unordered but must be distinct. Files must have the
     labels-v1 ordering, unique row keys, and signal times inside their month.
     Eligibility always uses the configured worst-case window, including for X
     and non-trade rows; a short realized exit never rescues a purged signal.
+    With metadata=True each column also carries d_ticks and p0 for its trade
+    rows, so volatility needs no second pass over the files.
     """
     months = list(months)
     hidden_guard.require_months(months, token, gate)
@@ -73,6 +78,8 @@ def load_geometry_columns(label_dir, symbol: str, months, geometries, params: La
         if geometry in columns:
             raise ValueError("duplicate geometry")
         columns[geometry] = GeometryColumns(geometry)
+        if metadata:
+            columns[geometry].metadata = {"d_ticks": array("q"), "p0": array("q")}
         lookup.setdefault((geometry.horizon_min, geometry.side, geometry.k), []).append(columns[geometry])
     for month in sorted(months):
         first, end, _ = month_bounds_ms(month)
@@ -105,4 +112,7 @@ def load_geometry_columns(label_dir, symbol: str, months, geometries, params: La
                                   int(pair.opt is not None), opt.net_ur or 0, opt.cost_ur or 0, opt.fund_ur or 0)
                         for name, value in zip(COLUMN_NAMES, values):
                             column[name].append(value)
+                        if column.metadata is not None:
+                            column.metadata["d_ticks"].append(row.d_ticks)
+                            column.metadata["p0"].append(row.p0)
     return columns
