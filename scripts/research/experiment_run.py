@@ -8,7 +8,9 @@ shallow clone of RESEARCH_DATA_REPOSITORY; labels and bars come from its release
 sha256 verification. The token reaches git only through an http extraheader passed in
 the environment (never a URL or an argument) and the release API through
 ResearchDataRepo. Public output: the lines of experiment_run.public_summary and plan
-ids only; library errors print their type name, never their text.
+ids only; library errors print their type name, never their text. Hypotheses and
+finalists live in private drafts/ files of the research-data repo (committed by the
+owner, never by this script), never in dispatch inputs; nothing from them is printed.
 
 The wall clock is read ONCE at process start (now_utc) and passed down.
 """
@@ -152,7 +154,8 @@ def download_bars(repo: ResearchDataRepo, question: dict, segment: str, bars_dir
 def register(args, checkout: Checkout) -> list[str]:
     strategies = list(STRATEGIES) if args.strategies == "all" else args.strategies.split(",")
     try:
-        question = er.make_question(args.question_id, args.hypothesis, args.horizon, strategies, seed=args.seed,
+        hypothesis = er.read_hypothesis(checkout.path / "drafts", args.question_id)
+        question = er.make_question(args.question_id, hypothesis, args.horizon, strategies, seed=args.seed,
                                     label_revision=args.label_revision, data_revision=args.data_revision,
                                     created_utc=NOW_UTC, B_stats=args.b_stats, B_placebo=args.b_placebo)
     except er.QuestionError as error:
@@ -175,7 +178,8 @@ def plan(args, checkout: Checkout) -> list[str]:
     question = er.load_question(checkout.path / "questions" / f"{args.question_id}.json")
     try:
         snapshot = er.snapshot_from_reports(checkout.path / "reports", args.question_id)
-        record = er.build_plan(question, args.finalists.split(","), NOW_UTC, snapshot)
+        record = er.build_plan(question, er.read_finalists(checkout.path / "drafts", args.question_id),
+                               NOW_UTC, snapshot)
     except er.QuestionError as error:
         raise PublicError(str(error)) from None
     plans = checkout.path / "plans"
@@ -233,7 +237,6 @@ def parse_args(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     reg = commands.add_parser("register")
     reg.add_argument("--question-id", required=True)
-    reg.add_argument("--hypothesis", required=True)
     reg.add_argument("--horizon", type=int, required=True)
     reg.add_argument("--strategies", default="all")
     reg.add_argument("--label-revision", type=int, required=True)
@@ -243,7 +246,6 @@ def parse_args(argv=None):
     reg.add_argument("--b-placebo", type=int, default=er.MIN_B_PLACEBO)
     pln = commands.add_parser("plan")
     pln.add_argument("--question-id", required=True)
-    pln.add_argument("--finalists", required=True)
     rn = commands.add_parser("run")
     rn.add_argument("--question-id", required=True)
     rn.add_argument("--segment", choices=er.SEGMENTS, required=True)

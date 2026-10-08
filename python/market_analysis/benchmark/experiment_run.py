@@ -10,6 +10,8 @@ month of the evaluated segment, so a development/validation run never touches
 hidden months. A hidden run needs a verified OpenToken for this question; its
 specs are the plan's finalists only. The scripts layer (scripts/research/
 experiment_run.py) does downloads, git and the hidden-opening commit.
+Hypotheses and finalists live in private drafts/ files of the research-data repo,
+never in (public) workflow dispatch inputs.
 """
 from __future__ import annotations
 
@@ -45,6 +47,44 @@ _UTC = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 
 class QuestionError(ValueError):
     """An invalid question-v1 record."""
+
+
+MAX_HYPOTHESIS = 2000
+
+
+def _draft_text(path) -> str:
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        text = ""
+    if not text:
+        raise QuestionError(f"write drafts/{path.name} in the research-data repo first")
+    return text
+
+
+def read_hypothesis(drafts_dir, question_id: str) -> str:
+    """drafts/<id>.hypothesis.txt: UTF-8, stripped, non-empty, at most 2000 characters."""
+    text = _draft_text(Path(drafts_dir) / f"{question_id}.hypothesis.txt")
+    if len(text) > MAX_HYPOTHESIS:
+        raise QuestionError(f"hypothesis draft exceeds {MAX_HYPOTHESIS} characters")
+    return text
+
+
+def read_finalists(drafts_dir, question_id: str) -> list[str]:
+    """drafts/<id>.finalists.txt: one strategy name per line; blank lines and # comments ignored."""
+    names = []
+    for line in _draft_text(Path(drafts_dir) / f"{question_id}.finalists.txt").splitlines():
+        name = line.split("#", 1)[0].strip()
+        if name:
+            names.append(name)
+    if not names:
+        raise QuestionError(f"write drafts/{question_id}.finalists.txt in the research-data repo first")
+    if len(set(names)) != len(names):
+        raise QuestionError("finalists draft lists a strategy more than once")
+    if any(name not in STRATEGIES for name in names):
+        raise QuestionError("finalists draft names an unknown strategy")
+    return names
 
 
 def _int(value, name: str, minimum: int, maximum: int | None = None) -> None:

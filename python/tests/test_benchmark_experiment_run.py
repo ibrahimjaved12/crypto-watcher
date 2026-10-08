@@ -185,17 +185,92 @@ class PublicOutputTests(unittest.TestCase):
                 er.snapshot_from_reports(root, "q")
 
 
+def load_script():
+    scripts = Path(__file__).resolve().parents[2] / "scripts" / "research"
+    definition = importlib.util.spec_from_file_location("test_experiment_run_script", scripts / "experiment_run.py")
+    module = importlib.util.module_from_spec(definition)
+    previous = sys.path[:]
+    try:
+        sys.path.insert(0, str(scripts))
+        definition.loader.exec_module(module)
+    finally:
+        sys.path[:] = previous
+    return module
+
+
+SECRET_HYPOTHESIS = "Private idea: momentum after funding spikes"
+
+
+class DraftTests(unittest.TestCase):
+    def test_finalists_parsing(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "q.finalists.txt"
+            path.write_text("# finalists\n\nrsi_14_reversion  # strongest\n  macd_12_26_9\n\n", encoding="utf-8")
+            self.assertEqual(er.read_finalists(root, "q"), ["rsi_14_reversion", "macd_12_26_9"])
+            for text in ("rsi_14_reversion\nrsi_14_reversion\n", "sma_magic\n", "# only a comment\n"):
+                path.write_text(text, encoding="utf-8")
+                with self.subTest(text=text), self.assertRaises(er.QuestionError):
+                    er.read_finalists(root, "q")
+
+    def test_hypothesis_and_missing_files(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for reader, name in ((er.read_hypothesis, "q.hypothesis.txt"), (er.read_finalists, "q.finalists.txt")):
+                with self.assertRaisesRegex(er.QuestionError,
+                                            f"write drafts/{name} in the research-data repo first"):
+                    reader(root, "q")
+            (root / "q.hypothesis.txt").write_text("  \n", encoding="utf-8")
+            with self.assertRaisesRegex(er.QuestionError, "write drafts/q.hypothesis.txt"):
+                er.read_hypothesis(root, "q")
+            (root / "q.hypothesis.txt").write_text(f"\n {SECRET_HYPOTHESIS} \n", encoding="utf-8")
+            self.assertEqual(er.read_hypothesis(root, "q"), SECRET_HYPOTHESIS)
+            (root / "q.hypothesis.txt").write_text("x" * 2001, encoding="utf-8")
+            with self.assertRaises(er.QuestionError):
+                er.read_hypothesis(root, "q")
+
+
+class FakeCheckout:
+    def __init__(self, path):
+        self.path, self.commits = path, []
+
+    def commit_and_push(self, paths, message):
+        self.commits.append((list(paths), message))
+
+
+class ScriptDraftTests(unittest.TestCase):
+    def test_register_and_plan_lines_and_commits_carry_no_draft_content(self):
+        module = load_script()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = FakeCheckout(root)
+            qid = "ta-baselines-v1-60m"
+            args = module.parse_args(["register", "--question-id", qid, "--horizon", "60", "--label-revision", "2",
+                                      "--data-revision", "1", "--seed", "7"])
+            with self.assertRaises(module.PublicError) as caught:
+                module.register(args, checkout)
+            self.assertIn(f"write drafts/{qid}.hypothesis.txt", str(caught.exception))
+            (root / "drafts").mkdir()
+            (root / "drafts" / f"{qid}.hypothesis.txt").write_text(SECRET_HYPOTHESIS, encoding="utf-8")
+            (root / "drafts" / f"{qid}.finalists.txt").write_text("rsi_14_reversion\nmacd_12_26_9\n", encoding="utf-8")
+            lines = module.register(args, checkout)
+            (root / "reports").mkdir()
+            for segment in ("development", "validation"):
+                (root / "reports" / f"{qid}__{segment}__0.json").write_text(json.dumps({"data_snapshot_id": "s"}))
+            lines += module.plan(module.parse_args(["plan", "--question-id", qid]), checkout)
+            public = "\n".join(lines + [message for _, message in checkout.commits])
+            for secret in (SECRET_HYPOTHESIS, "momentum", *STRATEGIES):
+                self.assertNotIn(secret, public)
+            committed = [path for paths, _ in checkout.commits for path in paths]
+            self.assertEqual(len(committed), 2)
+            self.assertFalse(any(path.startswith("drafts") for path in committed))
+            stored = json.loads((root / "questions" / f"{qid}.json").read_bytes())
+            self.assertEqual(stored["hypothesis"], SECRET_HYPOTHESIS)
+
+
 class ScriptArgumentTests(unittest.TestCase):
     def test_hidden_run_refused_by_arguments(self):
-        scripts = Path(__file__).resolve().parents[2] / "scripts" / "research"
-        definition = importlib.util.spec_from_file_location("test_experiment_run_script", scripts / "experiment_run.py")
-        module = importlib.util.module_from_spec(definition)
-        previous = sys.path[:]
-        try:
-            sys.path.insert(0, str(scripts))
-            definition.loader.exec_module(module)
-        finally:
-            sys.path[:] = previous
+        module = load_script()
         for argv in (["run", "--question-id", "q", "--segment", "hidden"],
                      ["run", "--question-id", "q", "--segment", "hidden", "--plan-id", "a" * 64,
                       "--confirm-hidden", "other"]):

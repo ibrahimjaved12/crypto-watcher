@@ -4,6 +4,8 @@ run-name: "Experiment ${{ inputs.mode }} ${{ inputs.question_id }} ${{ inputs.se
 # One benchmark question per run (scripts/research/experiment_run.py). Questions, plans,
 # hidden openings, the experiment ledger and reports live in the private research-data
 # repository; this public log and the job summary carry only the script's public lines.
+# Dispatch inputs are public: hypotheses and finalists live in private drafts/ files of
+# the research-data repo, never in these inputs.
 on:
   workflow_dispatch:
     inputs:
@@ -21,10 +23,6 @@ on:
         type: choice
         options: [development, validation, hidden]
         default: development
-      hypothesis:
-        description: "register: hypothesis text"
-        type: string
-        default: ""
       horizon:
         description: "register: horizon in minutes (15, 60 or 240)"
         type: string
@@ -33,10 +31,6 @@ on:
         description: "register: comma-separated ta-v1 strategy names or all"
         type: string
         default: all
-      finalists:
-        description: "plan: comma-separated finalist strategy names"
-        type: string
-        default: ""
       plan_id:
         description: "run hidden: plan id"
         type: string
@@ -93,10 +87,8 @@ jobs:
           MODE: ${{ inputs.mode }}
           QUESTION_ID: ${{ inputs.question_id }}
           SEGMENT: ${{ inputs.segment }}
-          HYPOTHESIS: ${{ inputs.hypothesis }}
           HORIZON: ${{ inputs.horizon }}
           STRATEGIES: ${{ inputs.strategies }}
-          FINALISTS: ${{ inputs.finalists }}
           PLAN_ID: ${{ inputs.plan_id }}
           CONFIRM_HIDDEN: ${{ inputs.confirm_hidden }}
           LABEL_REVISION: ${{ inputs.label_revision }}
@@ -109,10 +101,9 @@ jobs:
           args=(--workdir experiment-run-work --summary "$EXPERIMENT_SUMMARY" "$MODE" --question-id "$QUESTION_ID")
           case "$MODE" in
             register)
-              args+=(--hypothesis "$HYPOTHESIS" --horizon "$HORIZON" --strategies "$STRATEGIES"
+              args+=(--horizon "$HORIZON" --strategies "$STRATEGIES"
                      --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION" --seed "$SEED") ;;
-            plan)
-              args+=(--finalists "$FINALISTS") ;;
+            plan) ;;
             run)
               args+=(--segment "$SEGMENT")
               if [ "$SEGMENT" = "hidden" ]; then
