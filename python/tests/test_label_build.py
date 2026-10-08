@@ -1,10 +1,20 @@
 """Pure planning helpers; no private API calls or label builds."""
 from contextlib import redirect_stderr
 import importlib.util
+from array import array
+from contextlib import redirect_stdout
 import io
+import json
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+
+from market_analysis import data_lake
+from market_analysis.benchmark import label_cli
+from market_analysis.benchmark.bars import BarSeries
+from market_analysis.benchmark.funding import read_funding_csv
 
 from market_analysis.data_lake import month_bounds_ms
 
@@ -74,6 +84,57 @@ class LabelBuildHelperTests(unittest.TestCase):
                         ["--first-month", "2023-01"], ["--last-month", "2026-10"]):
             with self.subTest(options=options), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.builder.parse_args(["--symbol", "BTCUSDT", *options], now_ms=self.now_ms)
+
+
+def tick_series(month, off_prints):
+    start = month_bounds_ms(month)[0]
+    prices = array("q", ((517_350 + i % 1000) * 10 ** 7 for i in range(3000)))
+    columns = {name: array("q", prices) for name in ("open", "high", "low", "close", "mark_open", "mark_high",
+                                                     "mark_low", "mark_close")}
+    columns.update({name: array("q", [0] * 3000) for name in ("volume", "taker_buy_volume", "trades")})
+    for index in range(off_prints):
+        columns["high"][index] = 5_173_562 * 10 ** 6
+    return BarSeries("BTCUSDT", start, 3000, flags=array("H", [0] * 3000), **columns)
+
+
+class TickManifestTests(unittest.TestCase):
+    def test_manifest_records_off_tick_prints_and_rule_without_logging_ticks(self):
+        month = "2025-02"
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in (data_lake.bars_asset_name("BTCUSDT", month), data_lake.funding_asset_name("BTCUSDT", month)):
+                (root / name).write_bytes(b"synthetic")
+            empty_funding = ",".join(data_lake.FUNDING_COLUMNS) + "\n"
+            log = io.StringIO()
+            with patch.object(label_cli, "read_bars_csv", lambda stream, symbol, m: tick_series(m, 1)), \
+                    patch.object(label_cli, "read_funding_csv",
+                                 lambda stream, m: read_funding_csv(io.StringIO(empty_funding), m)), \
+                    patch.object(label_cli, "build_labels", lambda *args: []), redirect_stdout(log):
+                manifest = label_cli.run("BTCUSDT", root, month, month, root / "out")
+            written = json.loads((root / "out" / label_cli.manifest_name("BTCUSDT")).read_text())
+        for record in (manifest, written):
+            self.assertEqual(record["tick_rule"], "tick-v2")
+            self.assertEqual(record["off_tick_prints"], {month: 1})
+            self.assertEqual(record["ticks"], {month: 10 ** 7})
+        self.assertNotIn(str(10 ** 7), log.getvalue())
+        self.assertIn("1 months with off-tick prints, 0 month-to-month tick changes", log.getvalue())
+
+    def test_public_tick_aggregates_and_release_line(self):
+        builder = load_script()
+        manifest = {"ticks": {"2024-01": 10 ** 7, "2024-02": 10 ** 7, "2024-03": 2 * 10 ** 6, "2024-04": 10 ** 7},
+                    "off_tick_prints": {"2024-01": 0, "2024-02": 1, "2024-03": 0, "2024-04": 4},
+                    "tick_rule": "tick-v2", "params": {"rr_grid": ["1"]}, "outputs": [],
+                    "schema": "labels-v1", "params_identity": "p", "cost_model_identity": "c",
+                    "symbol": "BTCUSDT", "rd_tags": ["rd-BTCUSDT-2024-01-r1"]}
+        self.assertEqual(label_cli.tick_summary(manifest), {"months_with_off_tick_prints": 2, "tick_changes": 2})
+        counts = builder.aggregate_counts(manifest, 3)
+        self.assertEqual((counts["months_with_off_tick_prints"], counts["tick_changes"], counts["tick_rule"]),
+                         (2, 2, "tick-v2"))
+        self.assertNotIn(str(10 ** 7), json.dumps(counts))
+        self.assertIn("Tick rule: tick-v2 (outlier-tolerant)", builder.release_body(manifest))
+        old = {**manifest, "tick_rule": "tick-v1"}
+        self.assertNotIn("Tick rule", builder.release_body(old))
+        self.assertNotIn(str(10 ** 7), builder.release_body(manifest))
 
 
 if __name__ == "__main__":
