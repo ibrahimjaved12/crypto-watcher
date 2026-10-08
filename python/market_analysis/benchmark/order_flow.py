@@ -22,7 +22,10 @@ with at least ``min_history`` history values and ``MAD > 0``. ``side = sign(z)``
   ``COMPROMISED_FLAGS`` bit and ``V > 0``. An hour whose HH:00 open is within one
   minute of a funding ``calc_time_ms`` (``|calc - H| <= 60_000``) is excluded
   entirely: no signal and no history value (a different flow regime).
-  Signal: ``|z| >= 3/2``.
+  Signal: ``|z| >= 3/2``. Watch item (intended): while a contract settles hourly
+  (Binance switches to 1-hour funding after a rate-cap hit) every hour is a
+  settlement hour, so all those hours drop out and the sampling becomes irregular;
+  the count mode of the experiment runner shows the resulting signal rate.
 - ``of_cum240_4h``: ``I_t`` is the imbalance of the 240 minutes ending at minute
   ``d`` (inclusive), at hourly decision times only (``signal_ms % 60 min == 0``); it
   is invalid if any of those minutes is compromised or ``sum(V) == 0``. Signal on a

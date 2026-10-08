@@ -10,16 +10,16 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: register | plan | run
+        description: "register | plan | run | count (outcome-blind signal counts, development/validation only)"
         type: choice
-        options: [register, plan, run]
+        options: [register, plan, run, count]
         required: true
       question_id:
         description: Question id, e.g. ta-baselines-v1-60m
         type: string
         required: true
       segment:
-        description: "run: development | validation | hidden"
+        description: "run: development | validation | hidden; count: development | validation"
         type: choice
         options: [development, validation, hidden]
         default: development
@@ -110,6 +110,8 @@ jobs:
               args+=(--family "$FAMILY" --horizon "$HORIZON" --strategies "$STRATEGIES"
                      --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION" --seed "$SEED") ;;
             plan) ;;
+            count)
+              args+=(--segment "$SEGMENT") ;;
             run)
               args+=(--segment "$SEGMENT")
               if [ "$SEGMENT" = "hidden" ]; then
