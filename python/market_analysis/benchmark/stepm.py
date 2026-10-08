@@ -61,15 +61,21 @@ def critical_rank(alpha: float, B: int) -> int:
     return rank
 
 
-def stepm(f, f0=None, *, alpha: float = 0.05, B: int = 10_000, mean_block: int | None = None, seed: int,
-          stream_prefix: str) -> StepMResult:
+def _centred(f, f0, B, mean_block, seed, stream_prefix):
+    """Shared draws for stepm() and stepm_p_values(): studentized, dbar-centred replicate means."""
     stats = _studentize(f, f0, B, mean_block, seed, stream_prefix)
-    rank = critical_rank(alpha, stats.B)
     root_t = math.sqrt(stats.T)
     # Same elementwise expression as the SPA upper / Reality Check recentering, studentized.
     centred = np.zeros_like(stats.dstar)
     centred[:, stats.valid] = (root_t * (stats.dstar[:, stats.valid] - stats.dbar[stats.valid])
                                / stats.omega[stats.valid])
+    return stats, centred
+
+
+def stepm(f, f0=None, *, alpha: float = 0.05, B: int = 10_000, mean_block: int | None = None, seed: int,
+          stream_prefix: str) -> StepMResult:
+    stats, centred = _centred(f, f0, B, mean_block, seed, stream_prefix)
+    rank = critical_rank(alpha, stats.B)
     active = [k for k in range(stats.K) if stats.valid[k]]
     rejected, critical_values = [], []
     while active:
@@ -86,3 +92,29 @@ def stepm(f, f0=None, *, alpha: float = 0.05, B: int = 10_000, mean_block: int |
         alpha=alpha, B=stats.B, t_stats=tuple(float(value) for value in stats.t), T=stats.T, K=stats.K,
         mean_block=stats.mean_block, seed=seed, stream_prefix=stream_prefix,
     )
+
+
+def stepm_p_values(f, f0=None, *, B: int = 10_000, mean_block: int | None = None, seed: int,
+                   stream_prefix: str) -> list[Fraction]:
+    """Exact step-down adjusted p-values on stepm()'s own draws (same arguments, same stream).
+
+    One-at-a-time step-down in decreasing t (tied t share one step):
+    ``p = max(previous p, count(M_b >= t) / B)`` with ``M_b`` the max over the
+    still-active trials. Because ``t > c`` holds exactly when
+    ``count(M_b >= t) <= B - ceil((1 - alpha) * B)``, a trial is in
+    ``stepm(alpha=alpha).rejected`` exactly when its p <= alpha (exact, as
+    critical_rank reads alpha). Degenerate trials have p = 1.
+    """
+    stats, centred = _centred(f, f0, B, mean_block, seed, stream_prefix)
+    active = [k for k in range(stats.K) if stats.valid[k]]
+    result, previous = [Fraction(1)] * stats.K, Fraction(0)
+    while active:
+        observed = max(float(stats.t[k]) for k in active)
+        tied = [k for k in active if float(stats.t[k]) == observed]
+        maxima = centred[:, active].max(axis=1)
+        value = max(previous, Fraction(int(np.count_nonzero(maxima >= observed)), stats.B))
+        for k in tied:
+            result[k] = value
+        previous = value
+        active = [k for k in active if k not in tied]
+    return result

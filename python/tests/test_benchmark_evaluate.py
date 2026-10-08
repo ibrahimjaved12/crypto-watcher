@@ -125,8 +125,23 @@ class EvaluateTests(unittest.TestCase):
         constant = bootstrap_ci([2 * UR] * 20, B=40, seed=7, stream_prefix="q/constant")
         self.assertEqual((constant["lower"], constant["upper"]), ("2", "2"))
         self.assertIsNone(constant["t_statistic"])
+        self.assertIsNone(constant["t_iid"])
         small = bootstrap_ci([-UR, 0, 2 * UR], B=40, seed=7, stream_prefix="q/t")
-        self.assertAlmostEqual(float(small["t_statistic"]), 1 / sqrt(7))
+        self.assertAlmostEqual(float(small["t_iid"]), 1 / sqrt(7))
+
+    def test_bootstrap_t_uses_replicate_mean_spread(self):
+        from market_analysis.benchmark.bootstrap import bootstrap_indices, bootstrap_mean_matrix, default_mean_block
+        import numpy as np
+        daily = array("q", [UR, -UR, 0, 2 * UR, 0, -UR, 3 * UR, UR])
+        result = bootstrap_ci(daily, B=60, seed=3, stream_prefix="q/se")
+        d = np.asarray(daily, dtype=np.int64).reshape(-1, 1)
+        indices = bootstrap_indices(len(daily), default_mean_block(len(daily)), 3, "q/se", range(60))
+        means = [Fraction(int(value), len(daily) * UR) for value in bootstrap_mean_matrix(d, indices)[:, 0]]
+        centre = sum(means) / 60
+        spread = sum((value - centre) ** 2 for value in means) / 60
+        expected = float(Fraction(5, 8)) / sqrt(spread)
+        self.assertAlmostEqual(float(result["t_statistic"]), expected, places=12)
+        self.assertNotEqual(result["t_statistic"], result["t_iid"])
         with self.assertRaises(ValueError):
             bootstrap_ci([], B=10, seed=7, stream_prefix="q/empty")
         with self.assertRaises(ValueError):

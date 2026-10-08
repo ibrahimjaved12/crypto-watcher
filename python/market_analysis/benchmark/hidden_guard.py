@@ -227,6 +227,10 @@ class HiddenGate:
         plan = read_plan(_plan_path(self.plans_dir, question_id, plan_id))
         if plan.question_id != question_id or plan.plan_id != plan_id:
             raise HiddenGuardError("plan identity does not match requested opening")
+        # Fixed-width ISO UTC strings order chronologically; a plan dated after the
+        # opening was not registered before the hidden data could be seen.
+        if plan.created_utc > now_utc:
+            raise HiddenGuardError("plan is dated after the opening time")
         records = self.read()
         if any(row["question_id"] == question_id for row in records) and not force:
             raise HiddenAlreadyOpened(question_id)
@@ -249,6 +253,15 @@ class HiddenGate:
             return False
         return any(all(row[name] == getattr(token, name)
                        for name in ("question_id", "plan_id", "opened_utc")) for row in records)
+
+    def plan_for(self, token) -> Plan:
+        """The pre-registered plan a verified token was opened under."""
+        if not self.verify(token):
+            raise HiddenStretchLocked("hidden stretch requires a verified opening token")
+        plan = read_plan(_plan_path(self.plans_dir, token.question_id, token.plan_id))
+        if plan.question_id != token.question_id or plan.plan_id != token.plan_id:
+            raise HiddenGuardError("plan identity does not match the opening token")
+        return plan
 
 
 def require_access(first_ms: int, end_ms: int, token, gate: HiddenGate | None) -> None:

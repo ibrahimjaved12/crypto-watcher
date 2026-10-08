@@ -5,30 +5,40 @@ Input geometries declare that universe. Both sides are loaded for baselines.
 The single-writer ledger receives one append_many call with final verdicts;
 joint SPA/StepM is computed first so no provisional trial records are needed.
 DSR uses the counted question-wide trials after that append, including history.
+
+The hidden segment is bound to its pre-registered plan: the token must belong
+to this question, every evaluated (strategy_id, strategy_version) must be in
+the plan and K must not exceed plan.variants, all checked before any label read
+or ledger write. Bootstrap statistics (CI, SPA, StepM) use B_stats replicates;
+the matched placebo uses B_placebo.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from fractions import Fraction
 import json
-from math import sqrt
+from statistics import NormalDist
 
 import numpy as np
 
-from .baselines import (PoolRow, always_side, load_volatility, matched_placebo,
-                        random_walk_comparison, trade_key)
+from .baselines import (PoolRow, always_side, manifest_ticks, matched_placebo,
+                        random_walk_comparison, trade_key, volatility_from_columns)
 from .best_trial import best_trial_dsr
 from .canonical import canonical_bytes, content_hash, exact_to_str
 from .evaluate import bootstrap_ci, daily_series, decimal_text, metrics, net_at, select
 from .experiment_log import TrialRecord, TrialStatus
-from .hidden_guard import require_months
+from .hidden_guard import HiddenGuardError, HiddenStretchLocked, require_months
 from .label_store import Geometry, load_geometry_columns
 from .power import n_independent_greedy, power_gate
 from .report import make_report, variant_details
 from .rng import u64_words
 from .segments import eligible, segment_bounds_ms, segment_months, worst_case_window_end_ms
-from .spa import _studentize, spa_test
-from .stepm import stepm
+from .spa import spa_test
+from .stepm import stepm, stepm_p_values
+
+ALPHA = Fraction(1, 20)
+MIN_B_STATS_HIDDEN = 1000
+MIN_B_PLACEBO = 99
 
 
 @dataclass(frozen=True)
@@ -70,60 +80,59 @@ class Variant:
                 "params_identity": params.identity(), "signals_hash": content_hash(self.strategy.signals)}
 
 
-def _stepm_p_values(matrix, *, B, seed, stream_prefix) -> list[str]:
-    """Adjusted upper-tail step-down p-values using StepM's exact same draws.
+def required_t(n_trials: int) -> float:
+    """max(3, z) with z = Phi^-1(1 - alpha / (2 n)): Bonferroni over n trials, two-sided."""
+    if type(n_trials) is not int or n_trials < 1:
+        raise ValueError("n_trials must be a positive integer")
+    return max(3.0, NormalDist().inv_cdf(1 - float(ALPHA) / (2 * n_trials)))
 
-    Inclusive >= handles ties consistently with strict t > critical rejection.
-    Tied observed t-statistics share one step. Degenerate columns have p = 1.
-    Decisions remain those returned by the existing stepm() implementation.
+
+def verdict(selection, power, ci, rejected: bool, *, p_placebo, required_t) -> str:
+    """NOT_ENOUGH_EVIDENCE > FRAGILE > PASS > FAIL; financial comparisons are exact.
+
+    p_placebo is the matched placebo's p at 1x cost (None when undefined);
+    required_t is the multiplicity-adjusted threshold (float or its repr).
     """
-    stats = _studentize(matrix, None, B, None, seed, stream_prefix)
-    centred = np.zeros_like(stats.dstar)
-    centred[:, stats.valid] = (sqrt(stats.T) * (stats.dstar[:, stats.valid] - stats.dbar[stats.valid])
-                              / stats.omega[stats.valid])
-    active = [i for i in range(stats.K) if stats.valid[i]]
-    result, previous = [Fraction(1)] * stats.K, Fraction(0)
-    while active:
-        observed = max(float(stats.t[i]) for i in active)
-        tied = [i for i in active if float(stats.t[i]) == observed]
-        maxima = centred[:, active].max(axis=1)
-        value = max(previous, Fraction(int(np.count_nonzero(maxima >= observed)), B))
-        for i in tied:
-            result[i] = value
-        previous = value
-        active = [i for i in active if i not in tied]
-    return [decimal_text(value) for value in result]
-
-
-def verdict(selection, power, ci, rejected: bool) -> str:
-    """Power first, fragility second; all financial comparisons are exact."""
     if not power["passes"]:
         return "NOT_ENOUGH_EVIDENCE"
     usable = [row for row in selection if row.outcome != "X"]
     one = sum(net_at(row) for row in usable)
     two = sum(net_at(row, 2) for row in usable)
     opt = sum(net_at(row, policy="opt") for row in usable)
+    n = len(selection)
     if ((one > 0 and two <= 0) or one * opt < 0
-            or (len(selection) and 10 * sum(row.amb for row in selection) > len(selection))):
+            or (n and 10 * sum(row.amb for row in selection) > n)
+            or (n and Fraction(n - len(usable), n) > ALPHA)):
         return "FRAGILE"
     if (rejected and ci["lower"] is not None and Fraction(ci["lower"]) > 0
-            and ci["t_statistic"] is not None and Fraction(ci["t_statistic"]) >= 3 and two > 0):
+            and ci["t_statistic"] is not None and Fraction(ci["t_statistic"]) >= Fraction(required_t)
+            and two > 0 and p_placebo is not None and Fraction(p_placebo) <= ALPHA):
         return "PASS"
     return "FAIL"
 
 
 def run_experiment(question_id, specs, geometries, segment, label_dir, params, log, *, token=None, gate=None,
-                   B, seed, code_commit, data_snapshot_id, now_utc) -> dict:
+                   B_stats: int = 2000, B_placebo: int = 200, seed, code_commit, data_snapshot_id,
+                   now_utc) -> dict:
     """Run all variants and return a hashed report-v1 record; no wall-clock reads.
 
     Existing successful identities append REPLAY lines via ExperimentLog and do
     not increase counted N. Thus identical inputs/history counts yield identical
     reports, even when the audit ledger records a repeated invocation.
     """
+    if type(B_stats) is not int or B_stats < 2:
+        raise ValueError("B_stats must be at least 2")
+    if segment == "hidden" and B_stats < MIN_B_STATS_HIDDEN:
+        raise ValueError(f"B_stats must be at least {MIN_B_STATS_HIDDEN} on the hidden segment")
+    if type(B_placebo) is not int or B_placebo < MIN_B_PLACEBO:
+        raise ValueError(f"B_placebo must be at least {MIN_B_PLACEBO}")
     months = segment_months(segment)
     require_months(months, token, gate)  # before metadata reads or ledger mutation
-    if type(B) is not int or B < 2:
-        raise ValueError("B must be at least 2")
+    plan = None
+    if segment == "hidden":
+        if token is None or token.question_id != question_id:
+            raise HiddenStretchLocked("hidden token was opened for another question")
+        plan = gate.plan_for(token)
     u64_words(seed, "runner", 0, 0)
     specs = list(specs)
     geometries = [Geometry(*value) for value in geometries]
@@ -152,15 +161,30 @@ def run_experiment(question_id, specs, geometries, segment, label_dir, params, l
     templates.sort(key=lambda item: item[0].trial_id)
     if len({trial.trial_id for trial, _, _ in templates}) != len(templates):
         raise ValueError("duplicate strategy/geometry variant")
+    K = len(templates)
+    if plan is not None:
+        allowed = {(item["strategy_id"], item["strategy_version"]) for item in plan.strategies}
+        for spec in specs:
+            if (spec.strategy_id, spec.strategy_version) not in allowed:
+                raise HiddenGuardError(f"strategy {spec.strategy_id}/{spec.strategy_version} is not in the plan")
+        if K > plan.variants:
+            raise HiddenGuardError(f"{K} variants exceed the plan's pre-registered {plan.variants}")
+    # Question-wide N after this run's append: history plus this run's identities
+    # (replayed identities are already in the history). Known before any verdict.
+    n_trials = max(K, len(set(log.counted_trial_ids(question_id=question_id))
+                          | {trial.trial_id for trial, _, _ in templates}))
+    # Hidden: the pre-registered finalists are the family; history is the search.
+    threshold = required_t(K if plan is not None else n_trials)
     # Add both directions solely for baselines, without adding statistical trials.
     expanded = sorted({g._replace(side=side) for g in geometries for side in (-1, 1)})
     columns, volatility = {}, {}
     for symbol in sorted({g.symbol for g in expanded}):
         requested = [g for g in expanded if g.symbol == symbol]
-        columns.update(load_geometry_columns(label_dir, symbol, months, requested, params,
-                                            token=token, gate=gate, segment=segment))
-        volatility.update(load_volatility(label_dir, symbol, months, requested, params, segment,
-                                          token=token, gate=gate))
+        ticks = manifest_ticks(label_dir, symbol, months, params)  # cheap check before parsing labels
+        loaded = load_geometry_columns(label_dir, symbol, months, requested, params,
+                                       token=token, gate=gate, segment=segment, metadata=True)
+        columns.update(loaded)
+        volatility.update(volatility_from_columns(loaded, ticks))
     first, end = segment_bounds_ms(segment)
     entries, selections, daily_columns = [], [], []
     baseline_cache = {}
@@ -181,7 +205,7 @@ def run_experiment(question_id, specs, geometries, segment, label_dir, params, l
         selected.signals += purged
         daily = daily_series(selected, segment)
         prefix = f"benchmark/{trial.trial_id}"
-        ci = bootstrap_ci(daily, B=B, seed=seed, stream_prefix=prefix + "/ci")
+        ci = bootstrap_ci(daily, B=B_stats, seed=seed, stream_prefix=prefix + "/ci")
         power = power_gate(daily, Fraction(len(selected), len(daily)))
         cache_key = variant.horizon_min, variant.k, variant.rr_index
         if cache_key not in baseline_cache:
@@ -200,29 +224,34 @@ def run_experiment(question_id, specs, geometries, segment, label_dir, params, l
                         "geometry": {"k": decimal_text(variant.k), "rr_index": variant.rr_index,
                                      "rr": decimal_text(params.rr_grid[variant.rr_index]), "horizon_min": variant.horizon_min},
                         "power": power, "bootstrap_ci": ci, "n_independent_greedy": n_independent_greedy(selected),
+                        "required_t": repr(threshold),
                         "baselines": {"random_walk": random_walk_comparison(selected, params.rr_grid[variant.rr_index]),
                                       "always_long": long_metrics, "always_short": short_metrics,
-                                      "placebo": matched_placebo(rows, pool, B=B, seed=seed, stream_prefix=prefix + "/placebo")}})
+                                      "placebo": matched_placebo(rows, pool, B=B_placebo, seed=seed,
+                                                                 stream_prefix=prefix + "/placebo")}})
         entries.append(details)
         selections.append(selected)
         daily_columns.append(daily)
     matrix = np.column_stack([np.asarray(daily, dtype=np.int64) for daily in daily_columns])
     joint_stream = "benchmark/" + content_hash([question_id, [item["variant_id"] for item in entries]]) + "/joint"
-    spa = spa_test(matrix, B=B, seed=seed, stream_prefix=joint_stream)
-    step = stepm(matrix, B=B, seed=seed, stream_prefix=joint_stream)
-    adjusted = _stepm_p_values(matrix, B=B, seed=seed, stream_prefix=joint_stream)
+    spa = spa_test(matrix, B=B_stats, seed=seed, stream_prefix=joint_stream)
+    step = stepm(matrix, B=B_stats, seed=seed, stream_prefix=joint_stream)
+    adjusted = [decimal_text(value) for value in
+                stepm_p_values(matrix, B=B_stats, seed=seed, stream_prefix=joint_stream)]
     records = []
     for index, (entry, selected, (trial, _, _)) in enumerate(zip(entries, selections, templates)):
-        entry["verdict"] = verdict(selected, entry["power"], entry["bootstrap_ci"], index in step.rejected)
+        p_placebo = entry["baselines"]["placebo"]["p_placebo"]
+        entry["verdict"] = verdict(selected, entry["power"], entry["bootstrap_ci"], index in step.rejected,
+                                   p_placebo=p_placebo, required_t=threshold)
         entry["stepm_p_value"] = adjusted[index]
         entry["stepm_rejected"] = index in step.rejected
         entry["spa_p_value"] = repr(spa.p_consistent)
         summary = {"n_trades": len(selected), "mean_net_r": entry["metrics"]["mean_net_r"] or "undefined",
-                   "t_stat": entry["bootstrap_ci"]["t_statistic"] or "undefined", "verdict": entry["verdict"]}
+                   "t_stat": entry["bootstrap_ci"]["t_statistic"] or "undefined",
+                   "required_t": repr(threshold), "p_placebo": p_placebo or "undefined",
+                   "B_stats": B_stats, "B_placebo": B_placebo, "verdict": entry["verdict"]}
         records.append(replace(trial, result_summary=summary, result_hash=content_hash(entry)))
     log.append_many(records)
-    K = len(entries)
-    n_trials = max(K, log.trial_count(question_id=question_id))
     # The existing DSR estimator requires >=2 non-constant columns. Report this
     # limitation explicitly rather than invent a Sharpe variance for a singleton.
     nonconstant = sum(any(value != daily[0] for value in daily) for daily in daily_columns)
@@ -238,9 +267,11 @@ def run_experiment(question_id, specs, geometries, segment, label_dir, params, l
                         "raw": dsr["dsr_raw"] if is_best else None,
                         "effective": dsr["dsr_effective"] if is_best else None}
     return make_report({"question_id": question_id, "segment": segment, "created_utc": now_utc,
+                        "plan_id": plan.plan_id if plan is not None else None,
                         "code_commit": code_commit, "data_snapshot_id": data_snapshot_id,
                         "params_identity": params.identity(), "cost_model_version": params.cost_model.version,
-                        "cost_model_identity": params.cost_model.identity(), "B": B, "seed": seed,
-                        "n_trials": n_trials, "K": K, "variants": entries,
+                        "cost_model_identity": params.cost_model.identity(), "B_stats": B_stats,
+                        "B_placebo": B_placebo, "seed": seed, "n_trials": n_trials, "K": K,
+                        "required_t": repr(threshold), "variants": entries,
                         "spa": spa.to_record(), "stepm": {**step.to_record(), "adjusted_p_values": adjusted},
                         "best_trial_dsr": dsr})

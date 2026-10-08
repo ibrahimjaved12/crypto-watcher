@@ -61,10 +61,28 @@ def variant_details(selection, daily, rows, pool, segment) -> dict:
             "cost_grid": grid, "breakdowns": breakdowns}
 
 
+def headline(body: dict) -> dict:
+    """Decision summary derived from the full variant entries (never set independently)."""
+    rows = []
+    for variant in body["variants"]:
+        stats = variant["metrics"]
+        rows.append({
+            "variant_id": variant["variant_id"], "strategy_id": variant["strategy_id"],
+            "verdict": variant["verdict"], "trades": stats["trades"],
+            "mean_net_r_1x": stats["cost_grid_mean_net_r"]["1"], "mean_net_r_2x": stats["cost_grid_mean_net_r"]["2"],
+            "t_statistic": variant["bootstrap_ci"].get("t_statistic"), "required_t": variant.get("required_t"),
+            "p_placebo": variant["baselines"]["placebo"]["p_placebo"],
+            "x_share": stats["outcome_shares"]["X"], "ambiguity_share": stats["ambiguity_share"],
+            "stepm_p_value": variant["stepm_p_value"], "power_passes": variant["power"]["passes"]})
+    return {"plan_id": body.get("plan_id"), "B_stats": body.get("B_stats"), "B_placebo": body.get("B_placebo"),
+            "required_t": body.get("required_t"), "variants": rows}
+
+
 def make_report(experiment: dict) -> dict:
     body = {"schema": "report-v1", **experiment}
-    if body["schema"] != "report-v1" or "report_hash" in body:
-        raise ValueError("unexpected report schema/hash")
+    if body["schema"] != "report-v1" or "report_hash" in body or "headline" in body:
+        raise ValueError("unexpected report schema/hash/headline")
+    body["headline"] = headline(body)
     body["caveats"] = ["Survivorship: today's six majors only.",
                        "score is a ranking, not a probability",
                        f"Cost model version: {body['cost_model_version']}",
@@ -96,14 +114,18 @@ def markdown(report: dict) -> str:
     lines = [f"# Benchmark {_escape(report['question_id'])}", "",
              f"Segment: {_escape(report['segment'])}. Variants tried: {report['n_trials']}.", "",
              f"Report hash: `{report['report_hash']}`", "",
-             "All returns are R units. Daily P&L is attributed to the entry day.", "",
-             "| Variant | Trades | Mean net R | 2x net R | StepM p | Verdict |",
-             "| --- | ---: | ---: | ---: | ---: | --- |"]
-    for variant in report["variants"]:
-        stats = variant["metrics"]
+             "All returns are R units. Daily P&L is attributed to the entry day.", ""]
+    top = report["headline"]
+    lines += [f"Plan: {_escape(top['plan_id'] or 'none (not hidden)')}. B_stats: {_escape(top['B_stats'])}. "
+              f"B_placebo: {_escape(top['B_placebo'])}. Required t: {_escape(top['required_t'])}.", "",
+              "| Variant | Trades | Mean net R 1x | Mean net R 2x | t | Required t | Placebo p | X share "
+              "| Ambiguity share | StepM p | Power gate | Verdict |",
+              "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"]
+    for row in top["variants"]:
         lines.append("| " + " | ".join(_escape(value) for value in (
-            variant["variant_id"], stats["trades"], stats["mean_net_r"], stats["cost_grid_mean_net_r"]["2"],
-            variant["stepm_p_value"], variant["verdict"])) + " |")
+            row["variant_id"], row["trades"], row["mean_net_r_1x"], row["mean_net_r_2x"], row["t_statistic"],
+            row["required_t"], row["p_placebo"], row["x_share"], row["ambiguity_share"], row["stepm_p_value"],
+            "pass" if row["power_passes"] else "fail", row["verdict"])) + " |")
     for variant in report["variants"]:
         lines += ["", f"## {_escape(variant['strategy_id'])} / {_escape(variant['variant_id'])}", "",
                   "| Baseline | Mean net R / rate | Detail |", "| --- | ---: | --- |"]

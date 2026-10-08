@@ -11,12 +11,13 @@ from unittest.mock import patch
 from market_analysis.benchmark.canonical import canonical_bytes
 from market_analysis.benchmark.evaluate import Selection, Trade
 from market_analysis.benchmark.experiment_log import ExperimentLog, TrialStatus
-from market_analysis.benchmark.hidden_guard import HiddenStretchLocked
+from market_analysis.benchmark.hidden_guard import (HiddenGate, HiddenGuardError, HiddenStretchLocked, Plan,
+                                                    write_plan)
 from market_analysis.benchmark.label_store import Geometry
 from market_analysis.benchmark.labels import LabelParams
 from market_analysis.benchmark.report import canonical_json
 from market_analysis.benchmark.rng import u64_words
-from market_analysis.benchmark.runner import StrategySpec, run_experiment, verdict
+from market_analysis.benchmark.runner import StrategySpec, required_t, run_experiment, verdict
 from market_analysis.benchmark.segments import segment_bounds_ms, segment_months
 from market_analysis.data_lake import month_bounds_ms
 
@@ -26,23 +27,36 @@ PARAMS = LabelParams(horizons=(15,), half_life_days=((15, 1),), step_minutes=((1
 NOW = "2026-10-08T12:00:00Z"
 
 
-def make_labels(root):
+def make_labels(root, drift=False):
+    """Hour 0 has four signals a day; only minute 0 carries the planted edge.
+
+    The planted strategy picks minute 0 out of its hour-of-week placebo cell, so
+    it must beat the matched placebo. With drift=True every hour-0 long earns the
+    edge (a rising market) and the "drift" strategy simply takes all of them.
+    """
     first, end = segment_bounds_ms("validation")
     days = (end - first) // 86_400_000
     # Symmetric, nonconstant noise: exact zero mean, order from the counter RNG.
     words = u64_words(21, "fixture", 0, days // 2)
     half = [10_000 + int(word % 20_000) for word in words]
     noise = half + [-value for value in reversed(half)]
-    signals = {"planted": [], "noise": []}
+    signals = {"planted": [], "noise": [], "drift": []}
     for month in segment_months("validation"):
         start, finish, _ = month_bounds_ms(month)
         lines = [",".join(PARAMS.header)]
         for day_ms in range(start, finish, 86_400_000):
             day = (day_ms - first) // 86_400_000
-            for hour, name in ((0, "planted"), (1, "noise")):
-                ms = day_ms + hour * 3_600_000
-                signals[name].append(("BTCUSDT", ms, 1, 15))
-                net = 500_000 + noise[day] if name == "planted" else noise[day]
+            rows = [(0, 0, "planted", 500_000 + noise[day]),
+                    (0, 15, None, 500_000 + noise[day] if drift else noise[day]),
+                    (0, 30, None, 500_000 - noise[day] if drift else -noise[day]),
+                    (0, 45, None, 500_000 + noise[days - 1 - day] if drift else noise[days - 1 - day]),
+                    (1, 0, "noise", noise[day])]
+            for hour, minute, name, net in rows:
+                ms = day_ms + hour * 3_600_000 + minute * 60_000
+                if name is not None:
+                    signals[name].append(("BTCUSDT", ms, 1, 15))
+                if hour == 0:
+                    signals["drift"].append(("BTCUSDT", ms, 1, 15))
                 for side in (1, -1):
                     actual = net if side == 1 else -net
                     outcome = "T" if actual > 0 else "S"
@@ -53,7 +67,13 @@ def make_labels(root):
     manifest = {"schema": PARAMS.schema, "symbol": "BTCUSDT", "params_identity": PARAMS.identity(),
                 "ticks": {month: 100 for month in segment_months("validation")}}
     (root / "labels__BTCUSDT.manifest.json").write_bytes(canonical_bytes(manifest))
-    return [StrategySpec(name, "1", {}, rows) for name, rows in signals.items()]
+    specs = [StrategySpec(name, "1", {}, rows) for name, rows in signals.items()]
+    return specs[:2] if not drift else specs[2:]
+
+
+def good(n, x=0):
+    row = Trade(G, 0, "T", 1, 100, 1, 0, 100, 0, 100, 1, 0)
+    return Selection([row] * (n - x) + [replace(row, outcome="X", net_ur=0, cost_ur=0)] * x, signals=n)
 
 
 class RunnerTests(unittest.TestCase):
@@ -66,7 +86,7 @@ class RunnerTests(unittest.TestCase):
 
     def run_experiment(self, **changes):
         args = dict(question_id="q-c2", specs=self.specs, geometries=[G], segment="validation", label_dir=self.root,
-                    params=PARAMS, log=self.log, B=80, seed=5, code_commit="abc123",
+                    params=PARAMS, log=self.log, B_stats=80, B_placebo=99, seed=5, code_commit="abc123",
                     data_snapshot_id="synthetic-v1", now_utc=NOW)
         args.update(changes)
         return run_experiment(**args)
@@ -104,7 +124,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_hidden_refused_before_read_or_log_mutation(self):
         with self.assertRaises(HiddenStretchLocked):
-            self.run_experiment(segment="hidden", label_dir=self.root / "does-not-exist")
+            self.run_experiment(segment="hidden", label_dir=self.root / "does-not-exist", B_stats=1000)
         self.assertFalse(self.log.path.exists())
 
     def test_single_variant_reports_dsr_unavailable(self):
@@ -123,17 +143,104 @@ class RunnerTests(unittest.TestCase):
             self.run_experiment()
         self.assertFalse(self.log.path.exists())
 
+    def test_planted_beats_placebo_and_report_headline(self):
+        report = self.run_experiment()
+        planted = next(row for row in report["variants"] if row["strategy_id"] == "planted")
+        self.assertLessEqual(Fraction(planted["baselines"]["placebo"]["p_placebo"]), Fraction(1, 20))
+        self.assertEqual((report["B_stats"], report["B_placebo"], report["plan_id"]), (80, 99, None))
+        self.assertEqual(report["required_t"], repr(3.0))
+        self.assertEqual(planted["required_t"], report["required_t"])
+        heading = {row["variant_id"]: row for row in report["headline"]["variants"]}
+        self.assertEqual(heading[planted["variant_id"]]["verdict"], "PASS")
+        self.assertEqual(heading[planted["variant_id"]]["p_placebo"], planted["baselines"]["placebo"]["p_placebo"])
+
+    def test_drift_strategy_does_not_pass_because_of_placebo(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            specs = make_labels(root, drift=True)
+            report = self.run_experiment(specs=specs, label_dir=root, log=ExperimentLog(root / "trials.jsonl"))
+        drift = report["variants"][0]
+        # Everything except the placebo would say PASS: positive CI, StepM rejection, large t.
+        self.assertTrue(drift["power"]["passes"])
+        self.assertTrue(drift["stepm_rejected"])
+        self.assertGreater(Fraction(drift["bootstrap_ci"]["lower"]), 0)
+        self.assertGreaterEqual(Fraction(drift["bootstrap_ci"]["t_statistic"]), Fraction(drift["required_t"]))
+        self.assertGreater(Fraction(drift["baselines"]["placebo"]["p_placebo"]), Fraction(1, 20))
+        self.assertEqual(drift["verdict"], "FAIL")
+
+    def test_required_t_grows_with_trial_history(self):
+        self.assertEqual(required_t(1), 3.0)
+        self.assertLess(required_t(1000), required_t(10_000))
+        self.assertGreater(required_t(1000), 3.0)
+        base = self.run_experiment()
+        _, record = self.log.read()[0]
+        self.log.append_many([replace(record, strategy_id=f"history-{i}") for i in range(300)])
+        larger = self.run_experiment()
+        self.assertEqual(larger["n_trials"], 302)
+        self.assertEqual(larger["required_t"], repr(required_t(302)))
+        self.assertGreater(Fraction(larger["required_t"]), Fraction(base["required_t"]))
+        self.assertTrue(all(row["required_t"] == larger["required_t"] for row in larger["variants"]))
+
+    def hidden_gate(self, *, question_id="q-c2", strategies=("planted", "noise"), variants=2):
+        plans = self.root / "plans"
+        plans.mkdir(exist_ok=True)
+        gate = HiddenGate(plans, self.root / "opens.jsonl")
+        plan = Plan(question_id=question_id, hypothesis="planted edge survives",
+                    strategies=[{"strategy_id": name, "strategy_version": "1", "config": {}} for name in strategies],
+                    variants=variants, statistic="t", threshold="1/10", split_id="hidden",
+                    data_snapshot_id="synthetic-v1", created_utc=NOW)
+        write_plan(plans, plan)
+        return gate, gate.open_hidden(question_id, plan.plan_id, now_utc=NOW)
+
+    def assert_hidden_refused(self, error, gate, token, **changes):
+        missing = self.root / "does-not-exist"
+        with self.assertRaises(error):
+            self.run_experiment(segment="hidden", label_dir=missing, token=token, gate=gate, B_stats=1000, **changes)
+        self.assertFalse(self.log.path.exists())
+
+    def test_hidden_token_bound_to_question_and_plan(self):
+        gate, token = self.hidden_gate(question_id="q-other")
+        self.assert_hidden_refused(HiddenStretchLocked, gate, token)
+        gate, token = self.hidden_gate(variants=1)
+        self.assert_hidden_refused(HiddenGuardError, gate, token)
+
+    def test_hidden_strategy_outside_plan_refused(self):
+        gate, token = self.hidden_gate(strategies=("planted",))
+        self.assert_hidden_refused(HiddenGuardError, gate, token)
+
+    def test_hidden_needs_large_b_stats(self):
+        gate, token = self.hidden_gate()
+        with self.assertRaisesRegex(ValueError, "B_stats"):
+            self.run_experiment(segment="hidden", label_dir=self.root / "does-not-exist", token=token, gate=gate,
+                                B_stats=999)
+        with self.assertRaisesRegex(ValueError, "B_placebo"):
+            self.run_experiment(B_placebo=98)
+        self.assertFalse(self.log.path.exists())
+
     def test_verdict_precedence(self):
         row = Trade(G, 0, "S", 1, 10, 20, 0, 100, 0, 10, 20, 0)
         chosen = Selection([row], signals=1)
         ci = {"lower": "1", "t_statistic": "4"}
-        self.assertEqual(verdict(chosen, {"passes": False}, ci, True), "NOT_ENOUGH_EVIDENCE")
-        self.assertEqual(verdict(chosen, {"passes": True}, ci, True), "FRAGILE")
+        ok = dict(p_placebo="0.01", required_t=3.0)
+        self.assertEqual(verdict(chosen, {"passes": False}, ci, True, **ok), "NOT_ENOUGH_EVIDENCE")
+        self.assertEqual(verdict(chosen, {"passes": True}, ci, True, **ok), "FRAGILE")
         row = replace(row, net_ur=100, cost_ur=1, opt_net_ur=100, amb=1)
-        self.assertEqual(verdict(Selection([row]), {"passes": True}, ci, True), "FRAGILE")
+        self.assertEqual(verdict(Selection([row]), {"passes": True}, ci, True, **ok), "FRAGILE")
         row = replace(row, amb=0)
-        self.assertEqual(verdict(Selection([row]), {"passes": True}, ci, False), "FAIL")
-        self.assertEqual(verdict(Selection([row]), {"passes": True}, ci, True), "PASS")
+        self.assertEqual(verdict(Selection([row]), {"passes": True}, ci, False, **ok), "FAIL")
+        self.assertEqual(verdict(Selection([row]), {"passes": True}, ci, True, **ok), "PASS")
+        self.assertEqual(verdict(Selection([row]), {"passes": True}, ci, True,
+                                 p_placebo="0.05", required_t="4"), "PASS")
+        for changes in ({"p_placebo": "0.06"}, {"p_placebo": None}, {"required_t": 4.5}):
+            with self.subTest(changes=changes):
+                self.assertEqual(verdict(Selection([row]), {"passes": True}, ci, True, **{**ok, **changes}), "FAIL")
+
+    def test_x_share_above_five_percent_is_fragile(self):
+        ci = {"lower": "1", "t_statistic": "4"}
+        ok = dict(p_placebo="0.01", required_t=3.0)
+        self.assertEqual(verdict(good(20, x=1), {"passes": True}, ci, True, **ok), "PASS")
+        self.assertEqual(verdict(good(20, x=2), {"passes": True}, ci, True, **ok), "FRAGILE")
+        self.assertEqual(verdict(good(20, x=2), {"passes": False}, ci, True, **ok), "NOT_ENOUGH_EVIDENCE")
 
 
 if __name__ == "__main__":

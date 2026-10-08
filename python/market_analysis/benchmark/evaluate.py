@@ -256,7 +256,10 @@ def bootstrap_ci(daily, *, B: int, seed: int, stream_prefix: str) -> dict:
     """Stationary-bootstrap 95% nearest-rank percentile CI of mean daily R.
 
     Use the existing counter RNG via bootstrap_indices; exact replicate sums are
-    divided by T only as Fractions. t uses the ordinary sample standard error.
+    divided by T only as Fractions. t_statistic = mean / std of the B replicate
+    means (population std, exact from the integer sums; one sqrt at the end), so
+    it respects the serial dependence the stationary bootstrap keeps. t_iid is
+    the ordinary iid sample-standard-error t, kept for reference only.
     Replicates are batched to avoid retaining a B-by-T index matrix.
     """
     import numpy as np
@@ -276,8 +279,15 @@ def bootstrap_ci(daily, *, B: int, seed: int, stream_prefix: str) -> dict:
     for start in range(0, B, batch):
         indices = bootstrap_indices(T, block, seed, stream_prefix, range(start, min(B, start + batch)))
         sums.extend(int(value) for value in bootstrap_mean_matrix(d, indices)[:, 0])
-    statistic = float(mean) / sqrt(variance / T) if variance else None
+    iid = float(mean) / sqrt(variance / T) if variance else None
+    # Var_b(sum_b / (T * UR)) exactly: (B * sum(S^2) - (sum S)^2) / (B^2 * T^2 * UR^2).
+    spread = B * sum(value * value for value in sums) - sum(sums) ** 2
+    statistic = None
+    if spread > 0:
+        squared = mean * mean / Fraction(spread, (B * T * UR) ** 2)
+        statistic = (1 if mean >= 0 else -1) * sqrt(squared)
     return {"lower": decimal_text(Fraction(nearest_rank(sums, Fraction(1, 40)), T * UR)),
             "upper": decimal_text(Fraction(nearest_rank(sums, Fraction(39, 40)), T * UR)),
             "mean_daily_r": decimal_text(mean), "t_statistic": repr(statistic) if statistic is not None else None,
+            "t_iid": repr(iid) if iid is not None else None,
             "B": B, "T_days": T, "mean_block": block}

@@ -6,8 +6,9 @@ from market_analysis.benchmark.baselines import (
     PoolRow, always_side, matched_placebo, random_walk_comparison, random_walk_hit_rate,
     tercile_boundaries, volatility_tercile,
 )
-from market_analysis.benchmark.evaluate import Trade
+from market_analysis.benchmark.evaluate import Trade, decimal_text, nearest_rank, net_at
 from market_analysis.benchmark.label_store import Geometry, GeometryColumns
+from market_analysis.benchmark.rng import u64_words
 from market_analysis.benchmark.scan import UR
 
 G = Geometry("BTCUSDT", 15, 1, Fraction(1), 0)
@@ -68,6 +69,32 @@ class BaselineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             matched_placebo([pool_row(0, UR, geometry=G._replace(side=-1))], pool,
                             seed=0, stream_prefix="wrong-side")
+
+    def test_integer_placebo_path_equals_net_at(self):
+        # One matching cell; costs and a wallet floor that binds at higher multipliers.
+        pool = []
+        for i in range(9):
+            net, cost = (-UR if i % 3 == 0 else (i - 4) * UR // 3), 150_000 * (i % 4 + 1)
+            trade = Trade(G, MONDAY + i * WEEK, "T" if net > 0 else "S", 5, net, cost, 0,
+                          UR + 400_000, 0, net, cost, 0)
+            pool.append(PoolRow(trade, Fraction(1, 100)))
+        strategy = pool[1:6]
+        result = matched_placebo(strategy, pool, B=30, seed=4, stream_prefix="exact")
+        means = {m: [] for m in range(4)}
+        for b in range(30):
+            words = u64_words(4, f"exact/rep/{b}", 0, len(strategy))
+            drawn = [pool[int(word) % len(pool)].trade for word in words]
+            for m in range(4):
+                means[m].append(sum(net_at(row, m) for row in drawn) / len(strategy) / UR)
+        self.assertEqual(result["means_net_r"], [decimal_text(value) for value in means[1]])
+        for m in range(4):
+            observed = sum(net_at(row.trade, m) for row in strategy) / len(strategy) / UR
+            grid = result["cost_grid"][str(m)]
+            self.assertEqual(grid["quantiles"], {str(p): decimal_text(nearest_rank(means[m], Fraction(p, 100)))
+                                                 for p in (5, 50, 95)})
+            self.assertEqual(grid["p_placebo"], decimal_text(Fraction(1 + sum(v >= observed for v in means[m]), 31)))
+        floored = pool[0].trade
+        self.assertEqual(net_at(floored, 3), -floored.wallet_ur)  # the floor is exercised
 
 
 if __name__ == "__main__":

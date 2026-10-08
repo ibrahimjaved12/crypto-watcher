@@ -86,6 +86,19 @@ class GateTests(unittest.TestCase):
             self.open()
         self.assertFalse(self.opens.exists())
 
+    def test_plan_dated_after_opening_is_refused(self):
+        late = plan(created_utc="2026-10-09T12:00:00Z")
+        write_plan(self.directory, late)
+        with self.assertRaisesRegex(HiddenGuardError, "dated after"):
+            self.gate.open_hidden(late.question_id, late.plan_id, now_utc=NOW)
+        self.assertFalse(self.opens.exists())
+        self.gate.open_hidden(late.question_id, late.plan_id, now_utc="2026-10-09T12:00:00Z")
+
+    def test_plan_for_returns_the_opened_plan(self):
+        self.assertEqual(self.gate.plan_for(self.open()), self.plan)
+        with self.assertRaises(HiddenStretchLocked):
+            HiddenGate(self.directory, self.directory / "other.jsonl").plan_for(self.open(force=True, reason="x"))
+
     def test_tokens_are_minted_immutable_and_file_verified(self):
         with self.assertRaises(TypeError):
             OpenToken(self.plan.question_id, self.plan.plan_id, NOW)

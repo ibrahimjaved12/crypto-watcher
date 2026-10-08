@@ -55,9 +55,15 @@ class ReportTests(unittest.TestCase):
         text = markdown(report)
         for phrase in ("today's six majors only", "score is a ranking, not a probability", "cost-v1",
                        "Params identity: abc", "entry day", "Matched placebo", "quantiles_net_r",
-                       "non_trades", "funding_sign", "max_drawdown_r", "annualized_sharpe"):
+                       "non_trades", "funding_sign", "max_drawdown_r", "annualized_sharpe",
+                       "Placebo p", "Required t", "X share", "Ambiguity share", "Power gate", "B_placebo"):
             self.assertIn(phrase, text)
         self.assertEqual(text, markdown(report))
+        top = report["headline"]["variants"][0]
+        self.assertEqual((top["p_placebo"], top["stepm_p_value"], top["power_passes"], top["verdict"]),
+                         ("0.5", "0.5", False, "FAIL"))
+        with self.assertRaises(ValueError):
+            make_report({**self.body(), "headline": {}})
 
     def test_float_rejected(self):
         body = self.body()

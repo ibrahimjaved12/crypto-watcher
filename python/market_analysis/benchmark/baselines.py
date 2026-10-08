@@ -19,10 +19,10 @@ from pathlib import Path
 
 from .evaluate import Trade, decimal_text, nearest_rank, net_at, select
 from .hidden_guard import require_months
-from .labels import read_label_csv
+from .label_store import Geometry, load_geometry_columns
+from .labels import month_of
 from .rng import u64_words
 from .scan import UR
-from .segments import eligible, worst_case_window_end_ms
 
 
 def random_walk_hit_rate(rr) -> Fraction:
@@ -73,34 +73,52 @@ class PoolRow:
             raise ValueError("volatility must be a positive exact ratio")
 
 
+def manifest_ticks(label_dir, symbol, months, params) -> dict:
+    """Validated per-month tick sizes from the label manifest; no proxy ticks."""
+    manifest = json.loads((Path(label_dir) / f"labels__{symbol}.manifest.json").read_bytes())
+    if (manifest["params_identity"] != params.identity() or manifest["symbol"] != symbol
+            or manifest["schema"] != params.schema):
+        raise ValueError("label manifest does not match the requested parameters/symbol/schema")
+    ticks = {}
+    for month in sorted(months):
+        tick = manifest["ticks"][month]
+        if type(tick) is not int or tick <= 0:
+            raise ValueError("manifest tick must be a positive integer")
+        ticks[month] = tick
+    return ticks
+
+
+def volatility_from_columns(columns, ticks) -> dict:
+    """Exact d_ticks*tick/p0 per trade row from columns loaded with metadata=True."""
+    result = {}
+    for column in columns.values():
+        if column.metadata is None:
+            raise ValueError("columns were loaded without d_ticks/p0 metadata")
+        g = column.geometry
+        for ms, d_ticks, p0 in zip(column["signal_ms"], column.metadata["d_ticks"], column.metadata["p0"]):
+            result[(g.symbol, g.horizon_min, g.side, g.k, ms)] = Fraction(d_ticks * ticks[month_of(ms)], p0)
+    return result
+
+
 def load_volatility(label_dir, symbol, months, geometries, params, segment, *, token=None, gate=None) -> dict:
     """Read metadata omitted by C1; require the actual label manifest tick sizes.
 
     No proxy or inferred-from-outcomes volatility is allowed. The same hidden
     authorization and worst-case segment purge apply before metadata is exposed.
-    C1 validates file ordering/month ownership when loading the parallel columns.
+    Prefer load_geometry_columns(metadata=True) + volatility_from_columns when the
+    columns are needed too: that reads each label file once.
     """
     months = list(months)
     require_months(months, token, gate)
-    root = Path(label_dir)
-    manifest = json.loads((root / f"labels__{symbol}.manifest.json").read_bytes())
-    if (manifest["params_identity"] != params.identity() or manifest["symbol"] != symbol
-            or manifest["schema"] != params.schema):
-        raise ValueError("label manifest does not match the requested parameters/symbol/schema")
-    requested = {(g.horizon_min, g.side, g.k) for g in geometries}
-    result = {}
-    for month in sorted(months):
-        tick = manifest["ticks"][month]
-        if type(tick) is not int or tick <= 0:
-            raise ValueError("manifest tick must be a positive integer")
-        with (root / f"labels__{symbol}__{month}.csv.gz").open("rb") as stream:
-            for row in read_label_csv(stream, params):
-                if row.status != "T" or (row.horizon_min, row.side, row.k) not in requested:
-                    continue
-                if eligible(segment, row.signal_ms, worst_case_window_end_ms(
-                        row.signal_ms, row.horizon_min, params.time_limit_multiple)):
-                    result[(symbol, row.horizon_min, row.side, row.k, row.signal_ms)] = Fraction(row.d_ticks * tick, row.p0)
-    return result
+    ticks = manifest_ticks(label_dir, symbol, months, params)
+    # One column per (horizon, side, k): rr_index does not change d_ticks or p0.
+    distinct = {}
+    for value in geometries:
+        g = Geometry(*value)
+        distinct.setdefault((g.horizon_min, g.side, g.k), g._replace(rr_index=0))
+    columns = load_geometry_columns(label_dir, symbol, months, list(distinct.values()), params,
+                                    token=token, gate=gate, segment=segment, metadata=True)
+    return volatility_from_columns(columns, ticks)
 
 
 def _group(row: PoolRow) -> tuple:
@@ -167,12 +185,21 @@ def matched_placebo(strategy_trades, pool, B: int = 200, *, seed: int, stream_pr
                                        "quantiles": {"5": None, "50": None, "95": None}, "p_placebo": None}
                               for m in range(4)}}
     observed = sum(net_at(row.trade) for row in strategy) / len(strategy) / UR
+    # Integer micro-R per candidate and cost multiplier m: for integer m this is
+    # exactly net_at(row, m), so the replicate loop needs no Fraction arithmetic.
+    values = [[tuple(max(-row.wallet_ur, row.net_ur + (1 - m) * row.cost_ur) for row in rows)
+               for m in range(4)] for rows in candidates]
+    sizes = [len(rows) for rows in candidates]
+    denominator = len(strategy) * UR
     by_cost = {m: [] for m in range(4)}
     for b in range(B):
         words = u64_words(seed, f"{stream_prefix}/rep/{b}", 0, len(strategy))
-        drawn = [rows[int(word) % len(rows)] for rows, word in zip(candidates, words)]
+        drawn = [int(word) % size for size, word in zip(sizes, words)]
         for m in range(4):
-            by_cost[m].append(sum(net_at(row, m) for row in drawn) / len(strategy) / UR)
+            total = 0
+            for per_cost, index in zip(values, drawn):
+                total += per_cost[m][index]
+            by_cost[m].append(Fraction(total, denominator))
     means = by_cost[1]
     cost_grid = {}
     for m, values in by_cost.items():

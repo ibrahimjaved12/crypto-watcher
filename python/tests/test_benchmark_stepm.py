@@ -5,7 +5,9 @@ import unittest
 
 import numpy as np
 
-from market_analysis.benchmark.stepm import critical_rank, stepm
+from fractions import Fraction
+
+from market_analysis.benchmark.stepm import critical_rank, stepm, stepm_p_values
 
 UNIT = 1_000_000
 
@@ -28,6 +30,19 @@ class StepMTests(unittest.TestCase):
         # 60-simulation run gave 6 false-rejection simulations at B=200. 13 is a deterministic margin
         # that still fails if the step-down stops controlling the noise trials at all.
         self.assertGreaterEqual(clean, 13)
+
+    def test_adjusted_p_values_agree_with_rejections(self):
+        # B * alpha = 10 is an integer, the boundary case: rejection holds exactly when p <= alpha.
+        for simulation in range(6):
+            f = noise(70 + simulation, 300, 10)
+            if simulation % 2 == 0:
+                f[:, :3] += np.array([UNIT // 3, UNIT // 6, UNIT // 12])
+            arguments = dict(B=200, seed=simulation, stream_prefix="adjusted")
+            result, p = stepm(f, **arguments), stepm_p_values(f, **arguments)
+            with self.subTest(simulation=simulation):
+                self.assertEqual({k for k in range(10) if p[k] <= Fraction(1, 20)}, set(result.rejected))
+                if simulation % 2 == 0:
+                    self.assertIn(0, result.rejected)
 
     def test_step_structure(self):
         for simulation in range(5):
