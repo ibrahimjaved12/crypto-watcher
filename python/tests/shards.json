@@ -1,0 +1,9 @@
+{
+  "heavy-a": ["test_historical_market_state_study_part_c"],
+  "heavy-b": [
+    "test_historical_market_state_study",
+    "test_historical_market_state_study_evaluation",
+    "test_historical_market_state_study_statistics",
+    "test_historical_market_state_study_resolver"
+  ]
+}
