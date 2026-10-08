@@ -8,7 +8,9 @@ DSR uses the counted question-wide trials after that append, including history.
 
 The hidden segment is bound to its pre-registered plan: the token must belong
 to this question, every evaluated (strategy_id, strategy_version) must be in
-the plan and K must not exceed plan.variants, all checked before any label read
+the plan with its exact config, and the distinct hidden trial identities of
+this question (earlier ledger records plus this run, so a REPLAY does not count
+twice) must not exceed plan.variants, all checked before any label read
 or ledger write. Bootstrap statistics (CI, SPA, StepM) use B_stats replicates;
 the matched placebo uses B_placebo.
 """
@@ -163,12 +165,25 @@ def run_experiment(question_id, specs, geometries, segment, label_dir, params, l
         raise ValueError("duplicate strategy/geometry variant")
     K = len(templates)
     if plan is not None:
-        allowed = {(item["strategy_id"], item["strategy_version"]) for item in plan.strategies}
+        allowed = {}
+        for item in plan.strategies:
+            allowed.setdefault((item["strategy_id"], item["strategy_version"]), set()).add(
+                canonical_bytes(item["config"]))
         for spec in specs:
-            if (spec.strategy_id, spec.strategy_version) not in allowed:
+            key = spec.strategy_id, spec.strategy_version
+            if key not in allowed:
                 raise HiddenGuardError(f"strategy {spec.strategy_id}/{spec.strategy_version} is not in the plan")
+            if canonical_bytes(spec.config) not in allowed[key]:
+                raise HiddenGuardError(f"strategy {spec.strategy_id}/{spec.strategy_version} config differs from the plan")
         if K > plan.variants:
             raise HiddenGuardError(f"{K} variants exceed the plan's pre-registered {plan.variants}")
+        # Budget over the whole question, not per run: earlier hidden identities count.
+        spent = {record.trial_id for _, record in log.read()
+                 if record.question_id == question_id and record.split_id == "hidden"}
+        total = len(spent | {trial.trial_id for trial, _, _ in templates})
+        if total > plan.variants:
+            raise HiddenGuardError(f"{total} distinct hidden variants for this question exceed the plan's "
+                                   f"pre-registered {plan.variants}")
     # Question-wide N after this run's append: history plus this run's identities
     # (replayed identities are already in the history). Known before any verdict.
     n_trials = max(K, len(set(log.counted_trial_ids(question_id=question_id))

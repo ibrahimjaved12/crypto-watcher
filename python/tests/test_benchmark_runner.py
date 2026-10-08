@@ -27,21 +27,22 @@ PARAMS = LabelParams(horizons=(15,), half_life_days=((15, 1),), step_minutes=((1
 NOW = "2026-10-08T12:00:00Z"
 
 
-def make_labels(root, drift=False):
+def make_labels(root, drift=False, segment="validation"):
     """Hour 0 has four signals a day; only minute 0 carries the planted edge.
 
     The planted strategy picks minute 0 out of its hour-of-week placebo cell, so
     it must beat the matched placebo. With drift=True every hour-0 long earns the
     edge (a rising market) and the "drift" strategy simply takes all of them.
     """
-    first, end = segment_bounds_ms("validation")
+    first, end = segment_bounds_ms(segment)
     days = (end - first) // 86_400_000
     # Symmetric, nonconstant noise: exact zero mean, order from the counter RNG.
-    words = u64_words(21, "fixture", 0, days // 2)
+    # (Exact zero mean for an even day count; the 273-day hidden stretch is odd.)
+    words = u64_words(21, "fixture", 0, (days + 1) // 2)
     half = [10_000 + int(word % 20_000) for word in words]
     noise = half + [-value for value in reversed(half)]
     signals = {"planted": [], "noise": [], "drift": []}
-    for month in segment_months("validation"):
+    for month in segment_months(segment):
         start, finish, _ = month_bounds_ms(month)
         lines = [",".join(PARAMS.header)]
         for day_ms in range(start, finish, 86_400_000):
@@ -65,7 +66,7 @@ def make_labels(root, drift=False):
         with gzip.open(root / f"labels__BTCUSDT__{month}.csv.gz", "wt", encoding="ascii") as stream:
             stream.write("\n".join(lines) + "\n")
     manifest = {"schema": PARAMS.schema, "symbol": "BTCUSDT", "params_identity": PARAMS.identity(),
-                "ticks": {month: 100 for month in segment_months("validation")}}
+                "ticks": {month: 100 for month in segment_months(segment)}}
     (root / "labels__BTCUSDT.manifest.json").write_bytes(canonical_bytes(manifest))
     specs = [StrategySpec(name, "1", {}, rows) for name, rows in signals.items()]
     return specs[:2] if not drift else specs[2:]
@@ -181,12 +182,13 @@ class RunnerTests(unittest.TestCase):
         self.assertGreater(Fraction(larger["required_t"]), Fraction(base["required_t"]))
         self.assertTrue(all(row["required_t"] == larger["required_t"] for row in larger["variants"]))
 
-    def hidden_gate(self, *, question_id="q-c2", strategies=("planted", "noise"), variants=2):
+    def hidden_gate(self, *, question_id="q-c2", strategies=("planted", "noise"), variants=2, config=None):
         plans = self.root / "plans"
         plans.mkdir(exist_ok=True)
         gate = HiddenGate(plans, self.root / "opens.jsonl")
         plan = Plan(question_id=question_id, hypothesis="planted edge survives",
-                    strategies=[{"strategy_id": name, "strategy_version": "1", "config": {}} for name in strategies],
+                    strategies=[{"strategy_id": name, "strategy_version": "1", "config": config or {}}
+                                for name in strategies],
                     variants=variants, statistic="t", threshold="1/10", split_id="hidden",
                     data_snapshot_id="synthetic-v1", created_utc=NOW)
         write_plan(plans, plan)
@@ -207,6 +209,30 @@ class RunnerTests(unittest.TestCase):
     def test_hidden_strategy_outside_plan_refused(self):
         gate, token = self.hidden_gate(strategies=("planted",))
         self.assert_hidden_refused(HiddenGuardError, gate, token)
+
+    def test_hidden_config_must_match_plan(self):
+        gate, token = self.hidden_gate(config={"window": 20})
+        self.assert_hidden_refused(HiddenGuardError, gate, token)
+
+    def test_hidden_budget_counts_earlier_runs_but_not_replays(self):
+        hidden = self.root / "hidden"
+        hidden.mkdir()
+        specs = make_labels(hidden, segment="hidden")
+        gate, token = self.hidden_gate(variants=3)
+        args = dict(specs=specs, segment="hidden", label_dir=hidden, token=token, gate=gate, B_stats=1000)
+        first = self.run_experiment(**args)
+        self.assertEqual(first["plan_id"], gate.plan_for(token).plan_id)
+        replay = self.run_experiment(**args)  # same identities: REPLAY lines, budget unchanged
+        self.assertEqual(first, replay)
+        records = self.log.read()
+        self.assertEqual([record.status for _, record in records],
+                         [TrialStatus.OK, TrialStatus.OK, TrialStatus.REPLAY, TrialStatus.REPLAY])
+        # Both sides in one group changes the universe, so two new identities: 2 + 2 > 3 in total,
+        # although this run alone (K = 2) fits the plan.
+        with self.assertRaisesRegex(HiddenGuardError, "distinct hidden variants"):
+            self.run_experiment(**{**args, "geometries": [G, G._replace(side=-1)],
+                                   "label_dir": self.root / "does-not-exist"})
+        self.assertEqual(len(self.log.read()), 4)
 
     def test_hidden_needs_large_b_stats(self):
         gate, token = self.hidden_gate()

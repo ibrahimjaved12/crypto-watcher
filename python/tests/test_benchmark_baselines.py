@@ -71,21 +71,27 @@ class BaselineTests(unittest.TestCase):
                             seed=0, stream_prefix="wrong-side")
 
     def test_integer_placebo_path_equals_net_at(self):
-        # One matching cell; costs and a wallet floor that binds at higher multipliers.
+        # Two matching cells (hours 0 and 1), each shared by several strategy trades;
+        # costs and a wallet floor that binds at higher multipliers.
         pool = []
-        for i in range(9):
-            net, cost = (-UR if i % 3 == 0 else (i - 4) * UR // 3), 150_000 * (i % 4 + 1)
-            trade = Trade(G, MONDAY + i * WEEK, "T" if net > 0 else "S", 5, net, cost, 0,
-                          UR + 400_000, 0, net, cost, 0)
+        for i in range(18):
+            net, cost = (-UR if i % 3 == 0 else (i % 9 - 4) * UR // 3), 150_000 * (i % 4 + 1)
+            trade = Trade(G, MONDAY + (i % 9) * WEEK + (i // 9) * 3_600_000, "T" if net > 0 else "S", 5,
+                          net, cost, 0, UR + 400_000, 0, net, cost, 0)
             pool.append(PoolRow(trade, Fraction(1, 100)))
-        strategy = pool[1:6]
+        strategy = pool[1:6] + pool[10:16]
         result = matched_placebo(strategy, pool, B=30, seed=4, stream_prefix="exact")
+        order = sorted(strategy, key=lambda row: row.trade.signal_ms)
+        cells = [sorted((row for row in pool if (row.trade.signal_ms - MONDAY) % WEEK
+                         == (chosen.trade.signal_ms - MONDAY) % WEEK), key=lambda row: row.trade.signal_ms)
+                 for chosen in order]
+        self.assertEqual({len(cell) for cell in cells}, {9})
         means = {m: [] for m in range(4)}
         for b in range(30):
-            words = u64_words(4, f"exact/rep/{b}", 0, len(strategy))
-            drawn = [pool[int(word) % len(pool)].trade for word in words]
+            words = u64_words(4, f"exact/rep/{b}", 0, len(order))
+            drawn = [cell[int(word) % len(cell)].trade for cell, word in zip(cells, words)]
             for m in range(4):
-                means[m].append(sum(net_at(row, m) for row in drawn) / len(strategy) / UR)
+                means[m].append(sum(net_at(row, m) for row in drawn) / len(order) / UR)
         self.assertEqual(result["means_net_r"], [decimal_text(value) for value in means[1]])
         for m in range(4):
             observed = sum(net_at(row.trade, m) for row in strategy) / len(strategy) / UR
@@ -93,9 +99,8 @@ class BaselineTests(unittest.TestCase):
             self.assertEqual(grid["quantiles"], {str(p): decimal_text(nearest_rank(means[m], Fraction(p, 100)))
                                                  for p in (5, 50, 95)})
             self.assertEqual(grid["p_placebo"], decimal_text(Fraction(1 + sum(v >= observed for v in means[m]), 31)))
-        floored = pool[0].trade
+        floored = pool[3].trade  # net -1R, cost 0.6R: -2.2R at 3x, floored at -1.4R
         self.assertEqual(net_at(floored, 3), -floored.wallet_ur)  # the floor is exercised
-
 
 if __name__ == "__main__":
     unittest.main()

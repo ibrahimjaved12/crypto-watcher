@@ -187,8 +187,14 @@ def matched_placebo(strategy_trades, pool, B: int = 200, *, seed: int, stream_pr
     observed = sum(net_at(row.trade) for row in strategy) / len(strategy) / UR
     # Integer micro-R per candidate and cost multiplier m: for integer m this is
     # exactly net_at(row, m), so the replicate loop needs no Fraction arithmetic.
-    values = [[tuple(max(-row.wallet_ur, row.net_ur + (1 - m) * row.cost_ur) for row in rows)
-               for m in range(4)] for rows in candidates]
+    # Trades in one cell share the same candidate list object: build its tuples once.
+    shared = {}
+    values = []
+    for rows in candidates:
+        if id(rows) not in shared:
+            shared[id(rows)] = [tuple(max(-row.wallet_ur, row.net_ur + (1 - m) * row.cost_ur) for row in rows)
+                                for m in range(4)]
+        values.append(shared[id(rows)])
     sizes = [len(rows) for rows in candidates]
     denominator = len(strategy) * UR
     by_cost = {m: [] for m in range(4)}
