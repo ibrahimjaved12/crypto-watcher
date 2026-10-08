@@ -21,6 +21,7 @@ from .bars import BarSeries, read_bars_csv
 from .candles import TIMEFRAMES, CandleSeries, build_candles
 from .funding import FundingSeries, read_funding_csv
 from .hidden_guard import require_months
+from .premium import PremiumSeries, read_premium_csv
 
 
 def load_symbol_bars(bars_dir, symbol: str, first_month: str, last_month: str, *, token=None,
@@ -54,3 +55,16 @@ def load_symbol_funding(bars_dir, symbol: str, first_month: str, last_month: str
         with (Path(bars_dir) / data_lake.funding_asset_name(symbol, month)).open("rb") as stream:
             parts.append(read_funding_csv(stream, month))
     return FundingSeries.concat(parts)
+
+
+def load_symbol_premium(bars_dir, symbol: str, first_month: str, last_month: str, *, token=None,
+                        gate=None) -> PremiumSeries:
+    """Contiguous premium-index minutes (+ close, flags) for ``first_month..last_month`` of one symbol."""
+    data_lake.validate_symbol(symbol)
+    months = data_lake.months_between(first_month, last_month)
+    require_months(months, token, gate)  # all months, before opening any file
+    parts = []
+    for month in months:
+        with (Path(bars_dir) / data_lake.bars_asset_name(symbol, month)).open("rb") as stream:
+            parts.append(read_premium_csv(stream, symbol, month))
+    return PremiumSeries.concat(parts)
