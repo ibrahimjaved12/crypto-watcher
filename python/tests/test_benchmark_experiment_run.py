@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from market_analysis.benchmark import experiment_run as er
+from market_analysis.benchmark import experiment_run as er, order_flow
 from market_analysis.benchmark.canonical import canonical_bytes
 from market_analysis.benchmark.hidden_guard import HiddenGate, HiddenGuardError, HiddenStretchLocked, write_plan
 from market_analysis.benchmark.labels import LabelParams
@@ -55,6 +55,71 @@ class QuestionTests(unittest.TestCase):
         self.assertEqual(plan.strategies[0]["config"], strategy_config("rsi_14_reversion", 60))
         with self.assertRaises(er.QuestionError):
             er.build_plan(question(strategies=["rsi_14_reversion"]), ["macd_12_26_9"], NOW, "snapshot-1")
+
+
+OF_STRATEGIES = list(order_flow.STRATEGIES)
+
+
+def of_question(**changes):
+    values = dict(question_id="ord-flow-v1-240m", hypothesis="Taker imbalance continues", horizon_min=240,
+                  strategies=OF_STRATEGIES, seed=20261009, label_revision=3, data_revision=1, created_utc=NOW,
+                  family="order-flow")
+    values.update(changes)
+    return er.make_question(values.pop("question_id"), values.pop("hypothesis"), values.pop("horizon_min"),
+                            values.pop("strategies"), **values)
+
+
+class FamilyRegistryTests(unittest.TestCase):
+    def test_existing_ta_question_bytes_and_hash_unchanged(self):
+        # Pinned from the pre-registry code (slice G): registered ta-baselines questions keep their hash.
+        valid = question()
+        self.assertEqual(er.question_hash(valid), "8ba062bb71031cddc4b34a43a7648de16e21bbd974663d333af165f9460d707d")
+        self.assertEqual((valid["family"], valid["strategy_version"], valid["k_values"], valid["rr_indices"]),
+                         ("ta-baselines", "ta-v1", ["1", "2"], [0, 1, 2, 3]))
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "q.json"
+            path.write_bytes(er.question_bytes(valid))
+            self.assertEqual(er.load_question(path), valid)
+
+    def test_order_flow_question_geometry_and_plan(self):
+        valid = of_question()
+        self.assertEqual((valid["strategy_version"], valid["k_values"], valid["rr_indices"]), ("of-v1", ["2"], [1]))
+        geometries = er.build_geometries(valid)
+        self.assertEqual(len(geometries), 6 * 2)
+        self.assertEqual({(g.horizon_min, g.k, g.rr_index) for g in geometries}, {(240, 2, 1)})
+        plan = er.build_plan(valid, ["of_cum240_4h"], NOW, "snapshot-1")
+        self.assertEqual(plan.variants, 1)
+        self.assertEqual(plan.strategies, [{"strategy_id": "of_cum240_4h", "strategy_version": "of-v1",
+                                            "config": order_flow.strategy_config("of_cum240_4h", 240)}])
+
+    def test_family_entry_is_enforced(self):
+        valid = of_question()
+        for changes in ({"family": "nope"}, {"family": 1}, {"horizon_min": 60}, {"strategies": ["rsi_14_reversion"]},
+                        {"k_values": ["1", "2"]}, {"rr_indices": [0, 1, 2, 3]}, {"strategy_version": "ta-v1"}):
+            with self.subTest(changes=changes), self.assertRaises(er.QuestionError):
+                er.validate_question({**valid, **changes})
+        with self.assertRaises(er.QuestionError):
+            question(strategies=OF_STRATEGIES)
+        with self.assertRaises(er.QuestionError):
+            er.build_plan(valid, ["rsi_14_reversion"], NOW, "snapshot-1")
+
+    def test_order_flow_specs_load_one_symbol_at_a_time(self):
+        loads = []
+
+        def load(symbol):
+            loads.append(symbol)
+            return ("bars", symbol), ("funding", symbol)
+
+        def signals(name, bars, funding, horizon, *, first_ms, end_ms, label_step_min):
+            self.assertEqual((bars[1], funding[1], horizon, label_step_min), (loads[-1], loads[-1], 240, 15))
+            return [(loads[-1], first_ms + 15 * 60_000, 1, horizon)] if name == "of_toh1m_4h" else []
+
+        with patch.object(order_flow, "symbol_signals", signals):
+            specs = er.build_specs(of_question(), "development", load)
+        self.assertEqual(loads, list(er.data_lake.SYMBOLS))
+        self.assertEqual([(spec.strategy_id, spec.strategy_version, len(spec.signals)) for spec in specs],
+                         [("of_toh1m_4h", "of-v1", 6), ("of_cum240_4h", "of-v1", 0)])
+        self.assertEqual(specs[0].config, order_flow.strategy_config("of_toh1m_4h", 240))
 
 
 def write_labels(root, symbol, months, rd_tags, body=b"labels"):
