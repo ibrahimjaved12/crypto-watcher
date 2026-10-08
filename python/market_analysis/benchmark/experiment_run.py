@@ -392,7 +392,7 @@ def count_signals(specs, segment: str, symbols=data_lake.SYMBOLS) -> dict:
                            "symbols": {symbol: block([row for row in spec.signals if row[0] == symbol])
                                        for symbol in symbols},
                            "total": block(list(spec.signals))})
-    return {"segment": segment, "days": days, "strategies": strategies,
+    return {"segment": segment, "days": days, "symbols": list(symbols), "strategies": strategies,
             "total": block([row for spec in specs for row in spec.signals])}
 
 
@@ -416,23 +416,26 @@ def signal_counts(question: dict, segment: str, bars_dir, params: LabelParams | 
     return {"question_id": question["question_id"], "family": family.family_id, **count_signals(specs, segment)}
 
 
-def count_lines(counts: dict) -> list[str]:
-    """Markdown table of signal counts only (no labels, returns or outcomes)."""
-    lines = [f"question {counts['question_id']} ({counts['family']}) segment {counts['segment']}: "
-             f"outcome-blind signal counts over {counts['days']} days", "",
-             "| strategy | symbol | signals | per day | long | short | first | last |",
-             "| --- | --- | ---: | ---: | ---: | ---: | --- | --- |"]
+COUNTS_SCHEMA = "counts-v1"
 
-    def row(strategy, symbol, item):
-        lines.append(f"| {strategy} | {symbol} | {item['signals']} | {item['per_day']} | {item['long']} | "
-                     f"{item['short']} | {item['first'] or '-'} | {item['last'] or '-'} |")
 
-    for strategy in counts["strategies"]:
-        for symbol, item in strategy["symbols"].items():
-            row(strategy["strategy_id"], symbol, item)
-        row(strategy["strategy_id"], "all", strategy["total"])
-    row("all", "all", counts["total"])
-    return lines
+def count_public_lines(counts: dict) -> list[str]:
+    """Public totals only: no strategy names, per-symbol rows, sides or dates."""
+    return [f"question {counts['question_id']} segment {counts['segment']}: outcome-blind signal counts",
+            f"symbols {len(counts['symbols'])}, days {counts['days']}, total signals {counts['total']['signals']}"]
+
+
+def counts_file_bytes(existing: bytes | None, counts: dict, *, code_commit: str, now_utc: str) -> bytes:
+    """Private counts/<question>.json: the full per-strategy table per segment (a rerun replaces its segment)."""
+    record = {"schema": COUNTS_SCHEMA, "question_id": counts["question_id"], "family": counts["family"],
+              "segments": {}}
+    if existing is not None:
+        record = json.loads(existing)
+        if (record.get("schema") != COUNTS_SCHEMA or record.get("question_id") != counts["question_id"]
+                or record.get("family") != counts["family"]):
+            raise QuestionError("existing counts file belongs to another question or schema")
+    record["segments"][counts["segment"]] = {"code_commit": code_commit, "created_utc": now_utc, "counts": counts}
+    return canonical_bytes(record)
 
 
 VERDICTS = ("PASS", "FRAGILE", "FAIL", "NOT_ENOUGH_EVIDENCE")

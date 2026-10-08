@@ -241,7 +241,8 @@ def count(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path) -> li
     """Outcome-blind signal counts of a registered question; development/validation only.
 
     Downloads only the rd bars/funding inputs: no labels, no ledger, no plan or
-    opening log is read, and nothing is written or committed to the research-data repo.
+    opening log is read or written. The per-strategy table is committed privately
+    as counts/<id>.json (one entry per segment); the public lines carry totals only.
     """
     if args.segment not in er.COUNT_SEGMENTS:
         raise PublicError("signal counts are for development and validation only")
@@ -252,7 +253,15 @@ def count(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path) -> li
     bars_dir = workdir / "bars"
     bars_dir.mkdir(parents=True)
     _quiet(download_bars, repo, question, args.segment, bars_dir, None)
-    return er.count_lines(_quiet(er.signal_counts, question, args.segment, bars_dir))
+    counts = _quiet(er.signal_counts, question, args.segment, bars_dir)
+    path = checkout.path / "counts" / f"{args.question_id}.json"
+    path.parent.mkdir(exist_ok=True)
+    existing = path.read_bytes() if path.is_file() else None
+    path.write_bytes(er.counts_file_bytes(existing, counts, code_commit=os.environ.get("GITHUB_SHA", "local"),
+                                          now_utc=NOW_UTC))
+    checkout.commit_and_push([str(path.relative_to(checkout.path))],
+                             f"Signal counts for {args.question_id} on {args.segment}")
+    return er.count_public_lines(counts)
 
 
 # ---------------------------------------------------------------- CLI

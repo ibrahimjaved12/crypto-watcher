@@ -372,11 +372,30 @@ class SignalCountTests(unittest.TestCase):
         self.assertEqual((toh["total"]["signals"], toh["total"]["long"], toh["total"]["short"]), (4, 2, 2))
         self.assertEqual((cum["total"]["signals"], cum["total"]["first"]), (0, None))
         self.assertEqual(counts["total"]["signals"], 4)
-        lines = er.count_lines({"question_id": "ord-flow-v1-240m", "family": "order-flow", **counts})
-        self.assertIn("| of_cum240_4h | all | 0 | 0 | 0 | 0 | - | - |", lines)
-        per_day = decimal_text(Fraction(4, days), 3)
-        self.assertIn(f"| all | all | 4 | {per_day} | 2 | 2 | 2024-01-01 | 2025-06-30 |", lines)
-        self.assertEqual(len([line for line in lines if line.startswith("| of_toh1m_4h |")]), 7)  # six symbols + all
+        self.assertEqual(counts["symbols"], list(er.data_lake.SYMBOLS))
+        lines = er.count_public_lines({"question_id": "ord-flow-v1-240m", "family": "order-flow", **counts})
+        self.assertEqual(lines, ["question ord-flow-v1-240m segment development: outcome-blind signal counts",
+                                 "symbols 6, days 547, total signals 4"])
+        public = "\n".join(lines)
+        for secret in ("of_toh1m_4h", "of_cum240_4h", "BTCUSDT", "ETHUSDT", "2024-01-01", "long", "short"):
+            self.assertNotIn(secret, public)
+
+    def test_private_counts_file_keeps_one_entry_per_segment(self):
+        development = {"question_id": "q", "family": "order-flow", **er.count_signals(self.specs(), "development")}
+        validation = {"question_id": "q", "family": "order-flow",
+                      **er.count_signals(self.specs_for_validation(), "validation")}
+        first = er.counts_file_bytes(None, development, code_commit="c1", now_utc=NOW)
+        both = er.counts_file_bytes(first, validation, code_commit="c2", now_utc=NOW)
+        record = json.loads(both)
+        self.assertEqual((record["schema"], record["question_id"], record["family"]), ("counts-v1", "q", "order-flow"))
+        self.assertEqual(sorted(record["segments"]), ["development", "validation"])
+        self.assertEqual(record["segments"]["development"]["counts"], json.loads(canonical_bytes(development)))
+        self.assertEqual(record["segments"]["validation"]["code_commit"], "c2")
+        rerun = json.loads(er.counts_file_bytes(both, development, code_commit="c3", now_utc=NOW))
+        self.assertEqual((rerun["segments"]["development"]["code_commit"], sorted(rerun["segments"])),
+                         ("c3", ["development", "validation"]))
+        with self.assertRaises(er.QuestionError):
+            er.counts_file_bytes(both, {**development, "question_id": "other"}, code_commit="c", now_utc=NOW)
         outside = [StrategySpec("x", "of-v1", {}, [("BTCUSDT", segment_bounds_ms("validation")[0], 1, 240)])]
         with self.assertRaises(ValueError):
             er.count_signals(outside, "development")
@@ -414,7 +433,7 @@ class SignalCountTests(unittest.TestCase):
         first, _ = segment_bounds_ms("validation")
         return [StrategySpec("of_toh1m_4h", "of-v1", {}, [("XRPUSDT", first, 1, 240)])]
 
-    def test_script_count_reads_no_labels_and_writes_nothing(self):
+    def test_script_count_reads_no_labels_and_commits_only_the_private_counts(self):
         module = load_script()
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -437,9 +456,15 @@ class SignalCountTests(unittest.TestCase):
                     patch.object(er, "signal_counts", lambda *a, **k: counts):
                 lines = module.count(args, checkout, None, root / "data")
             self.assertEqual(calls, [("development", None)])
-            self.assertEqual(checkout.commits, [])
-            self.assertEqual(sorted(path.name for path in root.iterdir()), ["data", "questions"])
-            self.assertIn("| all | all | 4 |", "\n".join(lines))
+            name = f"counts/{q['question_id']}.json"
+            self.assertEqual(checkout.commits, [([name], f"Signal counts for {q['question_id']} on development")])
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["counts", "data", "questions"])
+            stored = json.loads((root / name).read_bytes())
+            self.assertEqual(stored["segments"]["development"]["counts"], json.loads(canonical_bytes(counts)))
+            self.assertEqual(lines, er.count_public_lines(counts))
+            public = "\n".join(lines + [message for _, message in checkout.commits])
+            for secret in ("of_toh1m_4h", "of_cum240_4h", "BTCUSDT", "2024-01-01"):
+                self.assertNotIn(secret, public)
             for argv in (["count", "--question-id", "q", "--segment", "hidden"], ["count", "--question-id", "q"]):
                 with self.subTest(argv=argv), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     module.parse_args(argv)
