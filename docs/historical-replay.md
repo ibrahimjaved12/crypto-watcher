@@ -317,7 +317,9 @@ HEAD as code revision by default; --code-revision can supply the exact revision
 for a packaged checkout. Existing report files require --overwrite and are
 written atomically. No network acquisition is performed.
 The example uses five symbols because canonical V1 requires at least five
-eligible symbols for market-wide classification.
+eligible symbols for market-wide classification. The five-symbol pilot universe is
+provisional and superseded for predictor work by the frozen six symbols (BTCUSDT,
+ETHUSDT, BNBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT).
 
 ATR uses archive candles only when first_seen_at_ms is strictly before the
 evaluation boundary and the candle minute ended strictly before that boundary.
@@ -474,7 +476,8 @@ is unchanged.
 
 Issue #128 supplies three separate descriptive sidecars. The ordered configured
 universe in the canonical replay manifest is authoritative; the provisional
-five-symbol research universe is not enforced. No source enters the core
+five-symbol research universe (superseded by the frozen six symbols for predictor
+work) is not enforced. No source enters the core
 `BinanceHistoricalReplayDataset`, movement, classification, lifecycle, fixed
 28-run suite, replay fingerprint, point stream, batch manifest or experiment
 hashes. These diagnostics add no signals, rankings or #123 forward outcomes.

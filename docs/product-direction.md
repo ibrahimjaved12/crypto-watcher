@@ -4,6 +4,31 @@
 > intent in [`CLAUDE.md`](../CLAUDE.md) takes precedence. Reconciliation is tracked in
 > [#181](https://github.com/ibrahimjaved12/crypto-watcher/issues/181).
 
+## Owner intent (from CLAUDE.md section 2)
+
+- **What the product is:** a personal crypto futures detection, prediction, logging and
+  auto-trading **simulation** tool (Binance USDⓈ-M perpetuals, long and short). The
+  owner uses it for their own trading. It should be buildable into a multi-user paid
+  product later (account-scoped data), without paying for services or over-building
+  until the tool proves it makes money.
+- **Two modes:** (1) current assessment and alerts: something is happening in the
+  market now; (2) forward trade predictions: "if X confirms, enter; exit by Y".
+- **What "prediction" means:** a conditional trade path with entry condition,
+  targets/resistance/support, stop, partial exits, invalidation and expiry. Level
+  hits, next-candle or trend direction and pattern completions are all strategies
+  and can be combined in one analysis.
+- **Success:** a profitable trade after costs on the stop-aware path. Price eventually
+  touching a target is not success if the stop (or liquidation) came first, and any
+  metric that ignores the stop is misleading. Beware benchmarks any naive strategy
+  would pass.
+- **A score is a ranking,** not a win probability: 90/100 does not mean 90%.
+- **Real-money execution stays manual for now.** That is not permanently excluded
+  and not permanently required. The automated fake-money simulation with realistic
+  futures costs is in scope and important.
+
+Setup and outcome definitions follow the stop-aware benchmark: see
+[analysis and evaluation](analysis-evaluation.md#setup-definition-the-benchmark-barrier-event).
+
 Decision snapshot: 2026-09-20, implementing [issue #12](https://github.com/ibrahimjaved12/crypto-watcher/issues/12).
 The [staged implementation and deployment roadmap](roadmap.md) separates current,
 proposed, and conditional work. [Analysis records and evaluation](analysis-evaluation.md)
@@ -29,8 +54,9 @@ movement, news/event, or other condition never occurred. Profitability must incl
 fees, spread, slippage, funding, execution latency, and capital constraints, with
 assumptions visible.
 
-Real-money decisions and execution remain manual. **No real-money automatic order
-placement is included in the roadmap.** Planned paper trading can automatically
+Real-money decisions and execution stay manual **for now**; this is not a permanent
+exclusion, and any change needs the owner's explicit decision. No real-money
+order placement is planned at present. Planned paper trading can automatically
 manage virtual positions; it requires no trading credentials or real order calls.
 There is no promise of profit. Never invent missing prices, news, or certainty.
 
@@ -49,24 +75,20 @@ features already delivered.
 | Historical replay and backtesting | Replay reconstructable inputs through the shared engine, then compare reproducible strategy/portfolio experiments with execution costs and chronological validation. A replay alone is not a wallet backtest. |
 | Paper trading                     | Execute eligible setups against a virtual futures wallet. Apply fills, margin, capital/exposure limits, costs, and an auditable ledger; a valid setup may be rejected for insufficient capital.               |
 
-For example, a versioned support-bounce setup can require entry into a defined zone,
-then a completed one-minute candle closing above a confirmation level before expiry.
-Entry uses the next executable price under a recorded fill model. Close 50% at the
-first target; extend the remainder only if a specified breakout confirms before a
-deadline, otherwise use the predefined fallback exit. Management transitions must
-track the remaining position quantity and the evidence/trigger responsible for each
-change. Numeric levels, quantities, deadlines, trigger price types, and evaluation
-rules must be stored as structured conditions, not inferred later from prose or
-chosen after observing the result. Short strategies require equally explicit
-directional rules.
+Numeric levels, quantities, deadlines, trigger price types, and evaluation rules
+must be stored as structured conditions, not inferred later from prose or chosen
+after observing the result. Management transitions track the remaining position
+quantity and the evidence or trigger responsible for each change. Short strategies
+require equally explicit directional rules. No strategy is chosen here; the setup
+definition is in [analysis and evaluation](analysis-evaluation.md#setup-definition-the-benchmark-barrier-event).
 
 Technical, movement-driven, news-driven, and mixed strategies may have different
 confirmation, expiry, management, and evaluation rules. Completed-candle TA is
 separate from intrabar movement detection: waiting for a 4h candle close must not
 be mistaken for the only way to detect rapid movement.
 
-The complete state transitions and a numeric support-bounce example are specified
-in [analysis and evaluation](analysis-evaluation.md#concrete-conditional-setup-example).
+Outcomes (T/S/E/L/X, in R units net of costs) are specified in
+[analysis and evaluation](analysis-evaluation.md#outcome-evaluation).
 
 ## News and event context
 
