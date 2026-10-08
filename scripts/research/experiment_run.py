@@ -13,18 +13,28 @@ finalists live in private drafts/ files of the research-data repo (committed by 
 owner, never by this script), never in dispatch inputs; nothing from them is printed.
 
 The wall clock is read ONCE at process start (now_utc) and passed down.
+
+Progress (``Progress``): one public line per phase (checkout, downloads, spec build,
+label load, evaluate/bootstrap/placebo per variant, joint bootstrap and step-down,
+report write, push) with elapsed seconds from a monotonic clock, integer counts and
+peak memory, plus a heartbeat at least every 60 s inside long stages, and a timing
+table in the job summary. Phase names and count keys come from fixed allowlists and
+counts must be integers, so no outcome, strategy name or symbol can reach these lines.
+The monotonic clock never reaches records or reports.
 """
 from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import json
 import os
 from pathlib import Path
+import resource
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
@@ -36,6 +46,7 @@ from market_analysis.benchmark import experiment_run as er  # noqa: E402
 from market_analysis.benchmark.experiment_log import ExperimentLog  # noqa: E402
 from market_analysis.benchmark.hidden_guard import HiddenGate, write_plan  # noqa: E402
 from market_analysis.benchmark.report import canonical_json, markdown  # noqa: E402
+from market_analysis.benchmark.runner import NO_PROGRESS  # noqa: E402
 from market_analysis.benchmark.segments import segment_months  # noqa: E402
 
 NOW_UTC = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())  # the only wall-clock read
@@ -99,6 +110,92 @@ def _quiet(function, *args, **kwargs):
         return function(*args, **kwargs)
 
 
+PHASES = frozenset({"checkout", "label download", "bars download", "snapshot", "hidden opening", "spec build",
+                    "label load", "evaluate", "bootstrap ci", "placebo", "spa bootstrap", "step-down", "report write",
+                    "push"})
+COUNT_KEYS = frozenset({"symbol_index", "symbols", "months", "files", "rows", "variant", "of", "total"})
+HEARTBEAT_SECONDS = 60.0
+
+
+def peak_memory_mb() -> int:
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024  # Linux reports KiB
+
+
+class Progress:
+    """Public progress lines: allowlisted phase names, integer counts, seconds and peak memory only.
+
+    The output stream is captured at construction, so lines still reach the public
+    log while ``_quiet`` sends library output to /dev/null.
+    """
+
+    def __init__(self, stream=None, *, clock=time.monotonic, memory=peak_memory_mb,
+                 interval: float = HEARTBEAT_SECONDS):
+        self.stream = stream if stream is not None else sys.stdout
+        self.clock, self.memory, self.interval = clock, memory, interval
+        self.started = clock()
+        self.timings: dict[str, float] = {}
+        self._open: tuple[str, float] | None = None
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _check(name: str, counts: dict) -> None:
+        if name not in PHASES:
+            raise ValueError(f"unknown progress phase {name!r}")
+        for key, value in counts.items():
+            if key not in COUNT_KEYS or type(value) is not int:
+                raise ValueError(f"progress counts are allowlisted integers only, not {key!r}")
+
+    def _write(self, kind: str, name: str, counts: dict) -> None:
+        now = self.clock()
+        fields = [f"{kind}={name.replace(' ', '_')}", f"t={now - self.started:.0f}s",
+                  *(f"{key}={value}" for key, value in counts.items()), f"maxrss_mb={self.memory()}"]
+        with self._lock:
+            self.stream.write("progress " + " ".join(fields) + "\n")
+            self.stream.flush()
+
+    def _close(self, now: float) -> None:
+        if self._open is not None:
+            name, since = self._open
+            self.timings[name] = self.timings.get(name, 0.0) + now - since
+        self._open = None
+
+    def phase(self, name: str, **counts) -> None:
+        self._check(name, counts)
+        now = self.clock()
+        self._close(now)
+        self._open = (name, now)
+        self._write("phase", name, counts)
+
+    @contextmanager
+    def stage(self, name: str, total: int | None = None):
+        """A long stage: a phase line now, then a heartbeat every ``interval`` seconds until it ends."""
+        self.phase(name, **({} if total is None else {"total": total}))
+        step = {"value": 0}
+        stop = threading.Event()
+
+        def beat():
+            while not stop.wait(self.interval):
+                counts = {"step": step["value"]} if total is None else {"step": step["value"], "of": total}
+                self._write("heartbeat", name, counts)
+
+        thread = threading.Thread(target=beat, name=f"heartbeat {name}", daemon=True)
+        thread.start()
+        try:
+            yield lambda value: step.__setitem__("value", int(value))
+        finally:
+            stop.set()
+            thread.join()
+
+    def finish(self) -> list[str]:
+        """Close the last phase; the timing table (markdown) for the job summary."""
+        now = self.clock()
+        self._close(now)
+        lines = ["### Experiment run timings", "", "| phase | seconds |", "| --- | ---: |"]
+        lines += [f"| {name} | {seconds:.0f} |" for name, seconds in self.timings.items()]
+        lines += [f"| total | {now - self.started:.0f} |", ""]
+        return lines
+
+
 def emit(lines: list[str], summary: Path | None) -> None:
     print("\n".join(lines), flush=True)
     if summary:
@@ -109,48 +206,67 @@ def emit(lines: list[str], summary: Path | None) -> None:
 # ---------------------------------------------------------------- downloads
 
 
-def download_labels(repo: ResearchDataRepo, question: dict, segment: str, label_dir: Path) -> None:
+def download_labels(repo: ResearchDataRepo, question: dict, segment: str, label_dir: Path,
+                    progress=NO_PROGRESS) -> None:
     """lb1 manifest + the segment's monthly label files per symbol, sha256-verified against the manifest."""
-    for symbol in lake.SYMBOLS:
-        tag = label_tag(symbol, er.LABEL_FIRST_MONTH, er.LABEL_LAST_MONTH, question["label_revision"])
-        release = repo.published_release(tag)
-        if release is None or release.get("tag_name") != tag or release.get("draft") is not False:
-            raise PublicError(f"missing published release: {tag}")
-        assets = repo.assets(release["id"])
-        manifest_name = er.label_manifest_name(symbol)
-        if manifest_name not in assets:
-            raise PublicError(f"{tag}: missing {manifest_name}")
-        manifest_path = label_dir / manifest_name
-        download(repo, assets[manifest_name], manifest_path, limit=16 << 20)
-        outputs = {item["month"]: item for item in json.loads(manifest_path.read_bytes())["outputs"]}
-        for month in segment_months(segment):
-            item = outputs.get(month)
-            if item is None or item["name"] not in assets:
-                raise PublicError(f"{tag}: missing label file for {month}")
-            download(repo, assets[item["name"]], label_dir / item["name"], item["sha256"])
+    with progress.stage("label download", total=len(lake.SYMBOLS)) as set_symbol:
+        for symbol_index, symbol in enumerate(lake.SYMBOLS, 1):
+            set_symbol(symbol_index)
+            _download_symbol_labels(repo, question, segment, label_dir, symbol)
+            progress.phase("label download", symbol_index=symbol_index, symbols=len(lake.SYMBOLS),
+                           months=len(segment_months(segment)), files=len(segment_months(segment)) + 1)
+
+
+def _download_symbol_labels(repo: ResearchDataRepo, question: dict, segment: str, label_dir: Path,
+                            symbol: str) -> None:
+    tag = label_tag(symbol, er.LABEL_FIRST_MONTH, er.LABEL_LAST_MONTH, question["label_revision"])
+    release = repo.published_release(tag)
+    if release is None or release.get("tag_name") != tag or release.get("draft") is not False:
+        raise PublicError(f"missing published release: {tag}")
+    assets = repo.assets(release["id"])
+    manifest_name = er.label_manifest_name(symbol)
+    if manifest_name not in assets:
+        raise PublicError(f"{tag}: missing {manifest_name}")
+    manifest_path = label_dir / manifest_name
+    download(repo, assets[manifest_name], manifest_path, limit=16 << 20)
+    outputs = {item["month"]: item for item in json.loads(manifest_path.read_bytes())["outputs"]}
+    for month in segment_months(segment):
+        item = outputs.get(month)
+        if item is None or item["name"] not in assets:
+            raise PublicError(f"{tag}: missing label file for {month}")
+        download(repo, assets[item["name"]], label_dir / item["name"], item["sha256"])
 
 
 def download_bars(repo: ResearchDataRepo, question: dict, segment: str, bars_dir: Path,
-                  label_dir: Path | None) -> None:
+                  label_dir: Path | None, progress=NO_PROGRESS) -> None:
     """rd bars (and funding) of FIRST_MONTH..segment's last month; checks they are the labels' inputs.
 
     ``label_dir=None`` (count mode) skips that check, so no label file is read.
     """
     months = lake.months_between(lake.FIRST_MONTH, segment_months(segment)[-1])
-    for symbol in lake.SYMBOLS:
-        try:
-            releases = published_inputs(repo, symbol, months, question["data_revision"])
-        except GitHubError as error:
-            if str(error).startswith("missing published data releases: "):
-                raise PublicError(str(error)) from None
-            raise
-        download_inputs(repo, symbol, releases, bars_dir)
-        if label_dir is None:
-            continue
-        label_rd = set(json.loads((label_dir / er.label_manifest_name(symbol)).read_bytes())
-                       .get("rd_tags", []))
-        if not {tag for tag, _ in releases.values()} <= label_rd:
-            raise PublicError(f"{symbol}: data revision differs from the rd inputs of its label release")
+    with progress.stage("bars download", total=len(lake.SYMBOLS)) as set_symbol:
+        for symbol_index, symbol in enumerate(lake.SYMBOLS, 1):
+            set_symbol(symbol_index)
+            _download_symbol_bars(repo, question, bars_dir, label_dir, symbol, months)
+            progress.phase("bars download", symbol_index=symbol_index, symbols=len(lake.SYMBOLS),
+                           months=len(months))
+
+
+def _download_symbol_bars(repo: ResearchDataRepo, question: dict, bars_dir: Path, label_dir: Path | None,
+                          symbol: str, months: list[str]) -> None:
+    try:
+        releases = published_inputs(repo, symbol, months, question["data_revision"])
+    except GitHubError as error:
+        if str(error).startswith("missing published data releases: "):
+            raise PublicError(str(error)) from None
+        raise
+    download_inputs(repo, symbol, releases, bars_dir)
+    if label_dir is None:
+        return
+    label_rd = set(json.loads((label_dir / er.label_manifest_name(symbol)).read_bytes())
+                   .get("rd_tags", []))
+    if not {tag for tag, _ in releases.values()} <= label_rd:
+        raise PublicError(f"{symbol}: data revision differs from the rd inputs of its label release")
 
 
 # ---------------------------------------------------------------- subcommands
@@ -201,7 +317,7 @@ def plan(args, checkout: Checkout) -> list[str]:
     return [f"plan {record.plan_id} for question {args.question_id}, {record.variants} variants"]
 
 
-def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path) -> list[str]:
+def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progress=NO_PROGRESS) -> list[str]:
     root = checkout.path
     question_path = root / "questions" / f"{args.question_id}.json"
     if not question_path.is_file():
@@ -212,11 +328,13 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path) -> list
     label_dir, bars_dir = workdir / "labels", workdir / "bars"
     label_dir.mkdir(parents=True)
     bars_dir.mkdir(parents=True)
-    _quiet(download_labels, repo, question, args.segment, label_dir)
-    _quiet(download_bars, repo, question, args.segment, bars_dir, label_dir)
+    _quiet(download_labels, repo, question, args.segment, label_dir, progress)
+    _quiet(download_bars, repo, question, args.segment, bars_dir, label_dir, progress)
+    progress.phase("snapshot", symbols=len(lake.SYMBOLS), months=len(segment_months(args.segment)))
     snapshot = _quiet(er.data_snapshot, label_dir, segment_months(args.segment))
     token = gate = None
     if args.segment == "hidden":
+        progress.phase("hidden opening")
         gate = HiddenGate(root / "plans", root / OPENS)
         # The opening is committed and pushed before any hidden label or bar is read;
         # if the push fails, the run stops here with nothing read.
@@ -228,17 +346,19 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path) -> list
     ledger.parent.mkdir(exist_ok=True)
     report = _quiet(er.run_question, question, args.segment, bars_dir, label_dir, ExperimentLog(ledger),
                     token=token, gate=gate, now_utc=NOW_UTC, code_commit=os.environ.get("GITHUB_SHA", "local"),
-                    data_snapshot_id=snapshot)
+                    data_snapshot_id=snapshot, progress=progress)
+    progress.phase("report write")
     json_name, md_name = er.report_paths(args.question_id, args.segment, report)
     (root / "reports").mkdir(exist_ok=True)
     (root / json_name).write_bytes(canonical_json(report))
     (root / md_name).write_text(markdown(report), encoding="utf-8")
+    progress.phase("push", files=3)
     checkout.commit_and_push([str(ledger.relative_to(root)), json_name, md_name],
                              f"Run {args.question_id} on {args.segment}: report {report['report_hash']}")
     return er.public_summary(report)
 
 
-def count(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path) -> list[str]:
+def count(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progress=NO_PROGRESS) -> list[str]:
     """Outcome-blind signal counts of a registered question; development/validation only.
 
     Downloads only the rd bars/funding inputs: no labels, no ledger, no plan or
@@ -253,13 +373,15 @@ def count(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path) -> li
     question = er.load_question(question_path)
     bars_dir = workdir / "bars"
     bars_dir.mkdir(parents=True)
-    _quiet(download_bars, repo, question, args.segment, bars_dir, None)
-    counts = _quiet(er.signal_counts, question, args.segment, bars_dir)
+    _quiet(download_bars, repo, question, args.segment, bars_dir, None, progress)
+    counts = _quiet(er.signal_counts, question, args.segment, bars_dir, progress=progress)
+    progress.phase("report write")
     path = checkout.path / "counts" / f"{args.question_id}.json"
     path.parent.mkdir(exist_ok=True)
     existing = path.read_bytes() if path.is_file() else None
     path.write_bytes(er.counts_file_bytes(existing, counts, code_commit=os.environ.get("GITHUB_SHA", "local"),
                                           now_utc=NOW_UTC))
+    progress.phase("push", files=1)
     checkout.commit_and_push([str(path.relative_to(checkout.path))],
                              f"Signal counts for {args.question_id} on {args.segment}")
     return er.count_public_lines(counts)
@@ -304,24 +426,30 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     # Never remove a pre-existing caller directory; own only this newly created one.
     args.workdir.mkdir(parents=True, exist_ok=False)
+    progress = Progress(sys.stdout)  # captured before any _quiet redirect
     try:
         repository, token = os.environ.get("RESEARCH_DATA_REPOSITORY", ""), os.environ.get("RESEARCH_DATA_TOKEN", "")
         try:  # validates owner/name, a separate repository, the token, and that it is private
             repo = ResearchDataRepo(repository, token)
         except ValueError as error:
             raise PublicError(str(error)) from None
+        progress.phase("checkout")
         checkout = Checkout(repository, token, args.workdir / "research-data")
         if args.command == "register":
             lines = register(args, checkout)
         elif args.command == "plan":
             lines = plan(args, checkout)
         elif args.command == "count":
-            lines = count(args, checkout, repo, args.workdir / "data")
+            lines = count(args, checkout, repo, args.workdir / "data", progress)
         else:
-            lines = run(args, checkout, repo, args.workdir / "data")
+            lines = run(args, checkout, repo, args.workdir / "data", progress)
         emit(lines, args.summary)
     finally:
         shutil.rmtree(args.workdir, ignore_errors=True)
+        timings = progress.finish()  # also on failure: shows where a run stopped
+        if args.summary:
+            with args.summary.open("a", encoding="utf-8") as stream:
+                stream.write("\n".join(timings))
     return 0
 
 
