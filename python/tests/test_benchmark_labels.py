@@ -99,6 +99,18 @@ class LabelTableTests(unittest.TestCase):
         (_, unleveraged), = build(params=replace(PARAMS, cost_model=strict))
         self.assertEqual({row.status for row in unleveraged}, {"V", "N", "I"})
 
+    def test_off_tick_entry_open_is_p_not_an_error(self):
+        # tick-v2 tolerates rare off-grid prints (SOLUSDT 2025-07); one at an entry open is a non-trade.
+        rows = walk_rows()
+        traded = next(row for row in self.rows if row.status == "T")
+        entry = (traded.signal_ms - START) // 60_000
+        opened, high, low, close = rows[entry]
+        rows[entry] = (opened + TICK // 2, max(high, opened + TICK // 2), low, close)
+        (_, labelled), = build(rows)
+        marked = [row for row in labelled if row.signal_ms == traded.signal_ms]
+        self.assertEqual({row.status for row in marked}, {"P"})
+        self.assertEqual(list(read_label_csv(io.BytesIO(csv_bytes(labelled)), PARAMS)), labelled)
+
     def test_csv_round_trip_and_determinism(self):
         data = csv_bytes(self.rows)
         self.assertEqual(list(read_label_csv(io.BytesIO(data), PARAMS)), self.rows)
