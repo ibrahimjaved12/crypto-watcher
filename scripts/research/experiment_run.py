@@ -130,8 +130,12 @@ def download_labels(repo: ResearchDataRepo, question: dict, segment: str, label_
             download(repo, assets[item["name"]], label_dir / item["name"], item["sha256"])
 
 
-def download_bars(repo: ResearchDataRepo, question: dict, segment: str, bars_dir: Path, label_dir: Path) -> None:
-    """rd bars (and funding) of FIRST_MONTH..segment's last month; checks they are the labels' inputs."""
+def download_bars(repo: ResearchDataRepo, question: dict, segment: str, bars_dir: Path,
+                  label_dir: Path | None) -> None:
+    """rd bars (and funding) of FIRST_MONTH..segment's last month; checks they are the labels' inputs.
+
+    ``label_dir=None`` (count mode) skips that check, so no label file is read.
+    """
     months = lake.months_between(lake.FIRST_MONTH, segment_months(segment)[-1])
     for symbol in lake.SYMBOLS:
         try:
@@ -141,6 +145,8 @@ def download_bars(repo: ResearchDataRepo, question: dict, segment: str, bars_dir
                 raise PublicError(str(error)) from None
             raise
         download_inputs(repo, symbol, releases, bars_dir)
+        if label_dir is None:
+            continue
         label_rd = set(json.loads((label_dir / er.label_manifest_name(symbol)).read_bytes())
                        .get("rd_tags", []))
         if not {tag for tag, _ in releases.values()} <= label_rd:
@@ -181,7 +187,8 @@ def plan(args, checkout: Checkout) -> list[str]:
     question = er.load_question(checkout.path / "questions" / f"{args.question_id}.json")
     try:
         snapshot = er.snapshot_from_reports(checkout.path / "reports", args.question_id)
-        record = er.build_plan(question, er.read_finalists(checkout.path / "drafts", args.question_id),
+        record = er.build_plan(question, er.read_finalists(checkout.path / "drafts", args.question_id,
+                                                           question["family"]),
                                NOW_UTC, snapshot)
     except er.QuestionError as error:
         raise PublicError(str(error)) from None
@@ -230,6 +237,33 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path) -> list
     return er.public_summary(report)
 
 
+def count(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path) -> list[str]:
+    """Outcome-blind signal counts of a registered question; development/validation only.
+
+    Downloads only the rd bars/funding inputs: no labels, no ledger, no plan or
+    opening log is read or written. The per-strategy table is committed privately
+    as counts/<id>.json (one entry per segment); the public lines carry totals only.
+    """
+    if args.segment not in er.COUNT_SEGMENTS:
+        raise PublicError("signal counts are for development and validation only")
+    question_path = checkout.path / "questions" / f"{args.question_id}.json"
+    if not question_path.is_file():
+        raise PublicError(f"question {args.question_id} is not registered")
+    question = er.load_question(question_path)
+    bars_dir = workdir / "bars"
+    bars_dir.mkdir(parents=True)
+    _quiet(download_bars, repo, question, args.segment, bars_dir, None)
+    counts = _quiet(er.signal_counts, question, args.segment, bars_dir)
+    path = checkout.path / "counts" / f"{args.question_id}.json"
+    path.parent.mkdir(exist_ok=True)
+    existing = path.read_bytes() if path.is_file() else None
+    path.write_bytes(er.counts_file_bytes(existing, counts, code_commit=os.environ.get("GITHUB_SHA", "local"),
+                                          now_utc=NOW_UTC))
+    checkout.commit_and_push([str(path.relative_to(checkout.path))],
+                             f"Signal counts for {args.question_id} on {args.segment}")
+    return er.count_public_lines(counts)
+
+
 # ---------------------------------------------------------------- CLI
 
 
@@ -255,6 +289,9 @@ def parse_args(argv=None):
     rn.add_argument("--segment", choices=er.SEGMENTS, required=True)
     rn.add_argument("--plan-id", default="")
     rn.add_argument("--confirm-hidden", default="")
+    cnt = commands.add_parser("count")
+    cnt.add_argument("--question-id", required=True)
+    cnt.add_argument("--segment", choices=er.COUNT_SEGMENTS, required=True)
     args = parser.parse_args(argv)
     if args.command == "run" and args.segment == "hidden" and (
             not args.plan_id or args.confirm_hidden != args.question_id):
@@ -277,6 +314,8 @@ def main(argv=None) -> int:
             lines = register(args, checkout)
         elif args.command == "plan":
             lines = plan(args, checkout)
+        elif args.command == "count":
+            lines = count(args, checkout, repo, args.workdir / "data")
         else:
             lines = run(args, checkout, repo, args.workdir / "data")
         emit(lines, args.summary)

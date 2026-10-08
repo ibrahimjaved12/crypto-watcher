@@ -23,6 +23,8 @@ never in (public) workflow dispatch inputs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from fractions import Fraction
 import hashlib
 import json
 from pathlib import Path
@@ -32,6 +34,7 @@ from typing import Callable
 from .. import data_lake
 from . import order_flow, ta_strategies
 from .canonical import canonical_bytes, content_hash, exact_from_str
+from .evaluate import decimal_text
 from .hidden_guard import HiddenGate, HiddenGuardError, HiddenStretchLocked, Plan
 from .label_store import Geometry
 from .labels import LabelParams
@@ -104,7 +107,6 @@ FAMILIES = {family.family_id: family for family in (
            tuple(order_flow.K_VALUES), tuple(order_flow.RR_INDICES), "bars+funding", _load_bars_funding,
            _order_flow_signals, order_flow.strategy_config),
 )}
-ALL_STRATEGIES = frozenset(name for family in FAMILIES.values() for name in family.strategies)
 
 
 def family_of(question: dict) -> Family:
@@ -136,8 +138,13 @@ def read_hypothesis(drafts_dir, question_id: str) -> str:
     return text
 
 
-def read_finalists(drafts_dir, question_id: str) -> list[str]:
-    """drafts/<id>.finalists.txt: one strategy name per line; blank lines and # comments ignored."""
+def read_finalists(drafts_dir, question_id: str, family_id: str) -> list[str]:
+    """drafts/<id>.finalists.txt: one strategy name per line; blank lines and # comments ignored.
+
+    Every name must be a strategy of the question's own family (``build_plan`` then
+    also requires it to be one of the question's strategies).
+    """
+    family = family_of({"family": family_id})
     names = []
     for line in _draft_text(Path(drafts_dir) / f"{question_id}.finalists.txt").splitlines():
         name = line.split("#", 1)[0].strip()
@@ -147,8 +154,8 @@ def read_finalists(drafts_dir, question_id: str) -> list[str]:
         raise QuestionError(f"write drafts/{question_id}.finalists.txt in the research-data repo first")
     if len(set(names)) != len(names):
         raise QuestionError("finalists draft lists a strategy more than once")
-    if any(name not in ALL_STRATEGIES for name in names):
-        raise QuestionError("finalists draft names an unknown strategy")
+    if any(name not in family.strategies for name in names):
+        raise QuestionError(f"finalists draft names a strategy outside the {family.family_id} family")
     return names
 
 
@@ -361,6 +368,74 @@ def run_question(question: dict, segment: str, bars_dir, label_dir, log, *, toke
     return run_experiment(question_id, specs, geometries, segment, label_dir, params, log, token=token, gate=gate,
                           B_stats=question["B_stats"], B_placebo=question["B_placebo"], seed=question["seed"],
                           code_commit=code_commit, data_snapshot_id=data_snapshot_id, now_utc=now_utc)
+
+
+COUNT_SEGMENTS = ("development", "validation")
+
+
+def count_signals(specs, segment: str, symbols=data_lake.SYMBOLS) -> dict:
+    """Outcome-blind counts per strategy and symbol: signals, per day, long/short, first/last UTC date."""
+    first_ms, end_ms = segment_bounds_ms(segment)
+    days = (end_ms - first_ms) // 86_400_000
+
+    def block(rows):
+        times = [row[1] for row in rows]
+        return {"signals": len(rows), "per_day": decimal_text(Fraction(len(rows), days), 3),
+                "long": sum(1 for row in rows if row[2] == 1), "short": sum(1 for row in rows if row[2] == -1),
+                "first": _utc_date(min(times)) if times else None, "last": _utc_date(max(times)) if times else None}
+
+    strategies = []
+    for spec in specs:
+        if any(not first_ms <= row[1] < end_ms for row in spec.signals):
+            raise ValueError(f"{spec.strategy_id}: signal outside the {segment} segment")
+        strategies.append({"strategy_id": spec.strategy_id, "strategy_version": spec.strategy_version,
+                           "symbols": {symbol: block([row for row in spec.signals if row[0] == symbol])
+                                       for symbol in symbols},
+                           "total": block(list(spec.signals))})
+    return {"segment": segment, "days": days, "symbols": list(symbols), "strategies": strategies,
+            "total": block([row for spec in specs for row in spec.signals])}
+
+
+def _utc_date(ms: int) -> str:
+    return datetime.fromtimestamp(ms // 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def signal_counts(question: dict, segment: str, bars_dir, params: LabelParams | None = None) -> dict:
+    """Build the question's signals for a development/validation segment exactly as run_question does.
+
+    Reads only the family's guarded inputs (no token: hidden months stay locked);
+    never labels, outcomes, the ledger, plans or the opening log. Hidden is refused.
+    """
+    validate_question(question)
+    if segment not in COUNT_SEGMENTS:
+        raise HiddenStretchLocked("signal counts are for development and validation only")
+    family, last_month = family_of(question), segment_months(segment)[-1]
+    specs = build_specs(question, segment, lambda symbol: family.load(bars_dir, symbol, last_month,
+                                                                      question["horizon_min"], None, None),
+                        None, params or LabelParams())
+    return {"question_id": question["question_id"], "family": family.family_id, **count_signals(specs, segment)}
+
+
+COUNTS_SCHEMA = "counts-v1"
+
+
+def count_public_lines(counts: dict) -> list[str]:
+    """Public totals only: no strategy names, per-symbol rows, sides or dates."""
+    return [f"question {counts['question_id']} segment {counts['segment']}: outcome-blind signal counts",
+            f"symbols {len(counts['symbols'])}, days {counts['days']}, total signals {counts['total']['signals']}"]
+
+
+def counts_file_bytes(existing: bytes | None, counts: dict, *, code_commit: str, now_utc: str) -> bytes:
+    """Private counts/<question>.json: the full per-strategy table per segment (a rerun replaces its segment)."""
+    record = {"schema": COUNTS_SCHEMA, "question_id": counts["question_id"], "family": counts["family"],
+              "segments": {}}
+    if existing is not None:
+        record = json.loads(existing)
+        if (record.get("schema") != COUNTS_SCHEMA or record.get("question_id") != counts["question_id"]
+                or record.get("family") != counts["family"]):
+            raise QuestionError("existing counts file belongs to another question or schema")
+    record["segments"][counts["segment"]] = {"code_commit": code_commit, "created_utc": now_utc, "counts": counts}
+    return canonical_bytes(record)
 
 
 VERDICTS = ("PASS", "FRAGILE", "FAIL", "NOT_ENOUGH_EVIDENCE")

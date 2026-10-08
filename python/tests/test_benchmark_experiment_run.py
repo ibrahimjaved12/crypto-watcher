@@ -1,5 +1,6 @@
 """Question schema, geometries, data snapshot, hidden ordering and public-output redaction (no network)."""
 from contextlib import redirect_stderr
+from fractions import Fraction
 import hashlib
 import importlib.util
 import io
@@ -12,8 +13,11 @@ from unittest.mock import patch
 
 from market_analysis.benchmark import experiment_run as er, order_flow
 from market_analysis.benchmark.canonical import canonical_bytes
+from market_analysis.benchmark.evaluate import decimal_text
 from market_analysis.benchmark.hidden_guard import HiddenGate, HiddenGuardError, HiddenStretchLocked, write_plan
 from market_analysis.benchmark.labels import LabelParams
+from market_analysis.benchmark.runner import StrategySpec
+from market_analysis.benchmark.segments import segment_bounds_ms
 from market_analysis.benchmark.ta_strategies import STRATEGIES, strategy_config
 
 NOW = "2026-10-09T12:00:00Z"
@@ -272,16 +276,30 @@ class DraftTests(unittest.TestCase):
             root = Path(directory)
             path = root / "q.finalists.txt"
             path.write_text("# finalists\n\nrsi_14_reversion  # strongest\n  macd_12_26_9\n\n", encoding="utf-8")
-            self.assertEqual(er.read_finalists(root, "q"), ["rsi_14_reversion", "macd_12_26_9"])
+            self.assertEqual(er.read_finalists(root, "q", "ta-baselines"), ["rsi_14_reversion", "macd_12_26_9"])
             for text in ("rsi_14_reversion\nrsi_14_reversion\n", "sma_magic\n", "# only a comment\n"):
                 path.write_text(text, encoding="utf-8")
                 with self.subTest(text=text), self.assertRaises(er.QuestionError):
-                    er.read_finalists(root, "q")
+                    er.read_finalists(root, "q", "ta-baselines")
+
+    def test_finalists_restricted_to_the_question_family(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "q.finalists.txt").write_text("of_cum240_4h\n", encoding="utf-8")
+            self.assertEqual(er.read_finalists(root, "q", "order-flow"), ["of_cum240_4h"])
+            with self.assertRaisesRegex(er.QuestionError, "outside the ta-baselines family"):
+                er.read_finalists(root, "q", "ta-baselines")
+            (root / "q.finalists.txt").write_text("rsi_14_reversion\n", encoding="utf-8")
+            with self.assertRaisesRegex(er.QuestionError, "outside the order-flow family"):
+                er.read_finalists(root, "q", "order-flow")
+            with self.assertRaises(er.QuestionError):
+                er.read_finalists(root, "q", "nope")
 
     def test_hypothesis_and_missing_files(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            for reader, name in ((er.read_hypothesis, "q.hypothesis.txt"), (er.read_finalists, "q.finalists.txt")):
+            for reader, name in ((er.read_hypothesis, "q.hypothesis.txt"),
+                                 (lambda path, qid: er.read_finalists(path, qid, "ta-baselines"), "q.finalists.txt")):
                 with self.assertRaisesRegex(er.QuestionError,
                                             f"write drafts/{name} in the research-data repo first"):
                     reader(root, "q")
@@ -331,6 +349,128 @@ class ScriptDraftTests(unittest.TestCase):
             self.assertFalse(any(path.startswith("drafts") for path in committed))
             stored = json.loads((root / "questions" / f"{qid}.json").read_bytes())
             self.assertEqual(stored["hypothesis"], SECRET_HYPOTHESIS)
+
+
+class SignalCountTests(unittest.TestCase):
+    def specs(self):
+        first, end = segment_bounds_ms("development")
+        minute, day = 60_000, 86_400_000
+        toh = StrategySpec("of_toh1m_4h", "of-v1", {}, [
+            ("BTCUSDT", first + 15 * minute, 1, 240), ("BTCUSDT", first + day + 15 * minute, -1, 240),
+            ("BTCUSDT", first + 2 * day, 1, 240), ("ETHUSDT", end - 15 * minute, -1, 240)])
+        return [toh, StrategySpec("of_cum240_4h", "of-v1", {}, [])]
+
+    def test_counts_dates_and_table(self):
+        counts = er.count_signals(self.specs(), "development")
+        days = counts["days"]
+        self.assertEqual(days, 547)  # 2024-01-01 .. 2025-06-30
+        toh, cum = counts["strategies"]
+        self.assertEqual(toh["symbols"]["BTCUSDT"], {"signals": 3, "per_day": decimal_text(Fraction(3, days), 3),
+                                                     "long": 2, "short": 1, "first": "2024-01-01",
+                                                     "last": "2024-01-03"})
+        self.assertEqual((toh["symbols"]["ETHUSDT"]["last"], toh["symbols"]["SOLUSDT"]["signals"]), ("2025-06-30", 0))
+        self.assertEqual((toh["total"]["signals"], toh["total"]["long"], toh["total"]["short"]), (4, 2, 2))
+        self.assertEqual((cum["total"]["signals"], cum["total"]["first"]), (0, None))
+        self.assertEqual(counts["total"]["signals"], 4)
+        self.assertEqual(counts["symbols"], list(er.data_lake.SYMBOLS))
+        lines = er.count_public_lines({"question_id": "ord-flow-v1-240m", "family": "order-flow", **counts})
+        self.assertEqual(lines, ["question ord-flow-v1-240m segment development: outcome-blind signal counts",
+                                 "symbols 6, days 547, total signals 4"])
+        public = "\n".join(lines)
+        for secret in ("of_toh1m_4h", "of_cum240_4h", "BTCUSDT", "ETHUSDT", "2024-01-01", "long", "short"):
+            self.assertNotIn(secret, public)
+
+    def test_private_counts_file_keeps_one_entry_per_segment(self):
+        development = {"question_id": "q", "family": "order-flow", **er.count_signals(self.specs(), "development")}
+        validation = {"question_id": "q", "family": "order-flow",
+                      **er.count_signals(self.specs_for_validation(), "validation")}
+        first = er.counts_file_bytes(None, development, code_commit="c1", now_utc=NOW)
+        both = er.counts_file_bytes(first, validation, code_commit="c2", now_utc=NOW)
+        record = json.loads(both)
+        self.assertEqual((record["schema"], record["question_id"], record["family"]), ("counts-v1", "q", "order-flow"))
+        self.assertEqual(sorted(record["segments"]), ["development", "validation"])
+        self.assertEqual(record["segments"]["development"]["counts"], json.loads(canonical_bytes(development)))
+        self.assertEqual(record["segments"]["validation"]["code_commit"], "c2")
+        rerun = json.loads(er.counts_file_bytes(both, development, code_commit="c3", now_utc=NOW))
+        self.assertEqual((rerun["segments"]["development"]["code_commit"], sorted(rerun["segments"])),
+                         ("c3", ["development", "validation"]))
+        with self.assertRaises(er.QuestionError):
+            er.counts_file_bytes(both, {**development, "question_id": "other"}, code_commit="c", now_utc=NOW)
+        outside = [StrategySpec("x", "of-v1", {}, [("BTCUSDT", segment_bounds_ms("validation")[0], 1, 240)])]
+        with self.assertRaises(ValueError):
+            er.count_signals(outside, "development")
+
+    def test_hidden_refused_before_any_read(self):
+        reads = []
+        record = lambda *a, **k: reads.append(a)  # noqa: E731
+        with patch.object(er, "load_symbol_bars", record), patch.object(er, "load_symbol_funding", record), \
+                patch.object(er, "load_symbol_candles", record):
+            for q in (of_question(), question()):
+                with self.subTest(family=q["family"]), self.assertRaises(HiddenStretchLocked):
+                    er.signal_counts(q, "hidden", "bars")
+        self.assertEqual(reads, [])
+
+    def test_specs_built_as_run_with_unprivileged_guarded_loads(self):
+        loads = []
+
+        def load(*args, token=None, gate=None):
+            loads.append((args[1], args[2], args[3], token, gate))
+            return args[1]
+
+        def build(q, segment, load_inputs, strategies, params):
+            self.assertEqual((segment, strategies), ("validation", None))
+            load_inputs("BTCUSDT")
+            return self.specs_for_validation()
+
+        with patch.object(er, "load_symbol_bars", load), patch.object(er, "load_symbol_funding", load), \
+                patch.object(er, "build_specs", build):
+            counts = er.signal_counts(of_question(), "validation", "bars")
+        self.assertEqual(loads, [("BTCUSDT", "2024-01", "2025-12", None, None)] * 2)
+        self.assertEqual((counts["question_id"], counts["family"], counts["total"]["signals"]),
+                         ("ord-flow-v1-240m", "order-flow", 1))
+
+    def specs_for_validation(self):
+        first, _ = segment_bounds_ms("validation")
+        return [StrategySpec("of_toh1m_4h", "of-v1", {}, [("XRPUSDT", first, 1, 240)])]
+
+    def test_script_count_reads_no_labels_and_commits_only_the_private_counts(self):
+        module = load_script()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = FakeCheckout(root)
+            (root / "questions").mkdir()
+            q = of_question()
+            (root / "questions" / f"{q['question_id']}.json").write_bytes(er.question_bytes(q))
+            calls = []
+
+            def no_labels(*args, **kwargs):
+                raise AssertionError("count must not download labels")
+
+            def bars(repo, question_, segment, bars_dir, label_dir):
+                calls.append((segment, label_dir))
+
+            counts = {"question_id": q["question_id"], "family": "order-flow",
+                      **er.count_signals(self.specs(), "development")}
+            args = module.parse_args(["count", "--question-id", q["question_id"], "--segment", "development"])
+            with patch.object(module, "download_labels", no_labels), patch.object(module, "download_bars", bars), \
+                    patch.object(er, "signal_counts", lambda *a, **k: counts):
+                lines = module.count(args, checkout, None, root / "data")
+            self.assertEqual(calls, [("development", None)])
+            name = f"counts/{q['question_id']}.json"
+            self.assertEqual(checkout.commits, [([name], f"Signal counts for {q['question_id']} on development")])
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["counts", "data", "questions"])
+            stored = json.loads((root / name).read_bytes())
+            self.assertEqual(stored["segments"]["development"]["counts"], json.loads(canonical_bytes(counts)))
+            self.assertEqual(lines, er.count_public_lines(counts))
+            public = "\n".join(lines + [message for _, message in checkout.commits])
+            for secret in ("of_toh1m_4h", "of_cum240_4h", "BTCUSDT", "2024-01-01"):
+                self.assertNotIn(secret, public)
+            for argv in (["count", "--question-id", "q", "--segment", "hidden"], ["count", "--question-id", "q"]):
+                with self.subTest(argv=argv), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    module.parse_args(argv)
+            missing = module.parse_args(["count", "--question-id", "unregistered", "--segment", "validation"])
+            with self.assertRaises(module.PublicError):
+                module.count(missing, checkout, None, root / "data2")
 
 
 class ScriptArgumentTests(unittest.TestCase):
