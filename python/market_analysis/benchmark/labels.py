@@ -21,7 +21,10 @@ tick (``bars.infer_tick`` per monthly series before concatenation).
 Non-trade statuses: V volatility unavailable (warm-up or no 5-minute block yet),
 C entry minute compromised, G stop narrower than ``min_stop_ticks``, N no
 admissible leverage (also a long stop at or below zero, i.e. a stop wider than
-the price), I incomplete window (the window runs past the data). Non-trade rows
+the price), I incomplete window (the window runs past the data), P entry open off
+the entry month's tick grid (one of the rare off-tick prints ``bars.infer_tick``
+tolerates under tick-v2: no stop/target grid can be built from it, and snapping it
+would invent a fill price). Non-trade rows
 leave every column after ``status`` empty.
 
 CSV ``labels__SYMBOL__YYYY-MM.csv.gz`` (ASCII, deterministic gzip): header
@@ -49,6 +52,7 @@ from .scan import NON_TRADE_STATUSES, OUTCOMES, Cell, CellPair, label_trade, nex
 from .volatility import BLOCK_MINUTES, LAMBDA_NUM, VAR_SCALE, build_variance, horizon_sigma
 
 SCHEMA = "labels-v1"
+LABEL_NON_TRADE_STATUSES = (*NON_TRADE_STATUSES, "P")
 FIXED_COLUMNS = ("signal_ms", "horizon_min", "side", "k", "status", "p0", "sigma", "d_ticks", "leverage",
                  "wallet_ur")
 _INTEGER = re.compile(r"-?[0-9]+\Z")
@@ -219,7 +223,7 @@ def _row(bars, funding, params, signal_ms, d, horizon, side, k, variance, next_c
     p0 = bars.open[e]
     tick = tick_at(e)
     if p0 % tick:
-        raise ValueError(f"entry open {p0} at minute {e} is not a multiple of the month tick {tick}")
+        return LabelRow(*base, "P")
     sigma = horizon_sigma(var, horizon)
     d_ticks = _ceil_div(k.numerator * sigma * p0, k.denominator * VAR_SCALE * tick)
     if d_ticks < params.min_stop_ticks:
@@ -312,7 +316,7 @@ def read_label_csv(fileobj, params: LabelParams) -> Iterator[LabelRow]:
     header = next(reader, None)
     if header is None or tuple(header) != params.header:
         raise ValueError(f"labels header differs from {','.join(params.header)}")
-    statuses = ("T", *NON_TRADE_STATUSES)
+    statuses = ("T", *LABEL_NON_TRADE_STATUSES)
     for line, values in enumerate(reader, start=1):
         if len(values) != len(params.header):
             raise ValueError(f"labels line {line}: expected {len(params.header)} columns, got {len(values)}")
