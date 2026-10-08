@@ -108,6 +108,7 @@ Keep price types and contract identity explicit when a fallback is used.
 - Include good improvements you notice rather than leaving them as optional notes.
 - Lovable sync: never rewrite pushed git history; keep the connected branch working.
 - Never invent prices, news, or certainty. The repo is public: no secrets, no private notes.
+- Python CI budget: the whole Python job must finish in under 3 minutes wall-clock. New test modules should stay under ~10 s; heavier statistical acceptance tests use tests/slow.py and run in slow-tests.yml; update python/tests/shards.json if a module exceeds ~40 s.
 
 ## 7. Known drift under review (2026-10-07)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from array import array
 from fractions import Fraction
+from functools import lru_cache
 import gzip
 import io
 import unittest
@@ -29,17 +30,27 @@ DEFAULT_ROW = {
 }
 
 
+def _row(index, changes=None):
+    values = {name: "" for name in data_lake.COLUMNS}
+    values.update(DEFAULT_ROW, open_time_ms=str(START + index * 60_000))
+    values.update(changes or {})
+    return ",".join(values[name] for name in data_lake.COLUMNS)
+
+
+@lru_cache(maxsize=1)
+def _default_rows() -> tuple:
+    """The month's default data rows, built once per test run (only read, never mutated)."""
+    return tuple(_row(index) for index in range(MINUTES))
+
+
 def bars_text(overrides=None, drop=(), header=None):
     """A whole month of data-lake bar rows; ``overrides`` maps a minute index to changed columns."""
     overrides = overrides or {}
+    rows = list(_default_rows())
+    for index, changes in overrides.items():
+        rows[index] = _row(index, changes)
     lines = [header if header is not None else ",".join(data_lake.COLUMNS)]
-    for index in range(MINUTES):
-        if index in drop:
-            continue
-        values = {name: "" for name in data_lake.COLUMNS}
-        values.update(DEFAULT_ROW, open_time_ms=str(START + index * 60_000))
-        values.update(overrides.get(index, {}))
-        lines.append(",".join(values[name] for name in data_lake.COLUMNS))
+    lines += [row for index, row in enumerate(rows) if index not in drop]
     return "\n".join(lines) + "\n"
 
 
@@ -69,6 +80,12 @@ class CompromisedIndexTests(unittest.TestCase):
 
 
 class ReadBarsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # The default month text and its parse are only read by the tests: build them once.
+        cls.text = bars_text()
+        cls.parsed = read_bars_csv(io.StringIO(cls.text), "BTCUSDT", MONTH)
+
     def test_parsing_missing_and_flags(self):
         bars = read_bars_csv(io.StringIO(bars_text({
             1: {"open": "", "high": "", "low": "", "close": "", "volume": "0", "taker_buy_volume": "0",
@@ -91,9 +108,8 @@ class ReadBarsTests(unittest.TestCase):
                 bars.index_of(bad)
 
     def test_gzip_binary_equals_text(self):
-        text = bars_text()
-        self.assertEqual(read_bars_csv(io.BytesIO(gzip.compress(text.encode("ascii"))), "BTCUSDT", MONTH),
-                         read_bars_csv(io.StringIO(text), "BTCUSDT", MONTH))
+        self.assertEqual(read_bars_csv(io.BytesIO(gzip.compress(self.text.encode("ascii"))), "BTCUSDT", MONTH),
+                         self.parsed)
 
     def test_structural_errors_name_line_and_column(self):
         cases = (
@@ -109,11 +125,11 @@ class ReadBarsTests(unittest.TestCase):
         for text, message in cases:
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 read_bars_csv(io.StringIO(text), "BTCUSDT", MONTH)
-        extra = bars_text() + ",".join(["1"] * len(data_lake.COLUMNS)) + "\n"
+        extra = self.text + ",".join(["1"] * len(data_lake.COLUMNS)) + "\n"
         with self.assertRaisesRegex(ValueError, rf"line {MINUTES + 1}"):
             read_bars_csv(io.StringIO(extra), "BTCUSDT", MONTH)
         with self.assertRaises(ValueError):
-            read_bars_csv(io.StringIO(bars_text()), "ADAUSDT", MONTH)
+            read_bars_csv(io.StringIO(self.text), "ADAUSDT", MONTH)
 
 
 class SeriesTests(unittest.TestCase):
