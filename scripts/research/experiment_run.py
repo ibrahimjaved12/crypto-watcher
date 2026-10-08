@@ -37,7 +37,6 @@ from market_analysis.benchmark.experiment_log import ExperimentLog  # noqa: E402
 from market_analysis.benchmark.hidden_guard import HiddenGate, write_plan  # noqa: E402
 from market_analysis.benchmark.report import canonical_json, markdown  # noqa: E402
 from market_analysis.benchmark.segments import segment_months  # noqa: E402
-from market_analysis.benchmark.ta_strategies import STRATEGIES  # noqa: E402
 
 NOW_UTC = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())  # the only wall-clock read
 OPENS = "hidden-opens.jsonl"
@@ -152,12 +151,16 @@ def download_bars(repo: ResearchDataRepo, question: dict, segment: str, bars_dir
 
 
 def register(args, checkout: Checkout) -> list[str]:
-    strategies = list(STRATEGIES) if args.strategies == "all" else args.strategies.split(",")
+    if args.family not in er.FAMILIES:
+        raise PublicError(f"family must be one of {sorted(er.FAMILIES)}")
+    family = er.FAMILIES[args.family]
+    strategies = list(family.strategies) if args.strategies == "all" else args.strategies.split(",")
     try:
         hypothesis = er.read_hypothesis(checkout.path / "drafts", args.question_id)
         question = er.make_question(args.question_id, hypothesis, args.horizon, strategies, seed=args.seed,
                                     label_revision=args.label_revision, data_revision=args.data_revision,
-                                    created_utc=NOW_UTC, B_stats=args.b_stats, B_placebo=args.b_placebo)
+                                    created_utc=NOW_UTC, B_stats=args.b_stats, B_placebo=args.b_placebo,
+                                    family=args.family)
     except er.QuestionError as error:
         raise PublicError(str(error)) from None
     path = checkout.path / "questions" / f"{args.question_id}.json"
@@ -237,6 +240,7 @@ def parse_args(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     reg = commands.add_parser("register")
     reg.add_argument("--question-id", required=True)
+    reg.add_argument("--family", default="ta-baselines")
     reg.add_argument("--horizon", type=int, required=True)
     reg.add_argument("--strategies", default="all")
     reg.add_argument("--label-revision", type=int, required=True)

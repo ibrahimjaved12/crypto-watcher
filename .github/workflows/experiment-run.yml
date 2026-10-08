@@ -23,12 +23,17 @@ on:
         type: choice
         options: [development, validation, hidden]
         default: development
+      family:
+        description: "register: signal family"
+        type: choice
+        options: [ta-baselines, order-flow]
+        default: ta-baselines
       horizon:
-        description: "register: horizon in minutes (15, 60 or 240)"
+        description: "register: horizon in minutes (15, 60 or 240; order-flow: 240)"
         type: string
         default: "60"
       strategies:
-        description: "register: comma-separated ta-v1 strategy names or all"
+        description: "register: comma-separated strategy names of the family or all"
         type: string
         default: all
       plan_id:
@@ -87,6 +92,7 @@ jobs:
           MODE: ${{ inputs.mode }}
           QUESTION_ID: ${{ inputs.question_id }}
           SEGMENT: ${{ inputs.segment }}
+          FAMILY: ${{ inputs.family }}
           HORIZON: ${{ inputs.horizon }}
           STRATEGIES: ${{ inputs.strategies }}
           PLAN_ID: ${{ inputs.plan_id }}
@@ -101,7 +107,7 @@ jobs:
           args=(--workdir experiment-run-work --summary "$EXPERIMENT_SUMMARY" "$MODE" --question-id "$QUESTION_ID")
           case "$MODE" in
             register)
-              args+=(--horizon "$HORIZON" --strategies "$STRATEGIES"
+              args+=(--family "$FAMILY" --horizon "$HORIZON" --strategies "$STRATEGIES"
                      --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION" --seed "$SEED") ;;
             plan) ;;
             run)
