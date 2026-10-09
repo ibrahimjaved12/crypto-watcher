@@ -252,7 +252,7 @@ function HistoryRow({ row }: { row: HistoryRowData }) {
           <span className="text-muted-foreground"> · {timeframe}</span>
         </td>
         <td className="num whitespace-nowrap p-2" title={`Opened ${new Date(row.candle_at).toLocaleString()}`}>
-          {closed.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}
+          {closed.toLocaleString(undefined, { dateStyle: "short", timeStyle: "medium" })}
         </td>
         <td className="p-2">
           <span className={cn("inline-flex items-center gap-1 font-medium", tone)}>
