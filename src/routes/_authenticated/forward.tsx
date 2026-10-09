@@ -588,7 +588,8 @@ function TrendSection() {
                             )}
                           </div>
                           <p className="mt-2 text-xs text-muted-foreground">
-                            Positive weights are long; negative weights are short.
+                            Each weight is exposure to that coin before equal-weight averaging.
+                            Positive is long; negative is short.
                           </p>
                         </>
                       ) : (

@@ -23,6 +23,19 @@ test("machine reasons have readable labels, including embedded run errors", () =
     "invalid_data",
     "stale_data",
     "insufficient_history",
+    "invalid_futures_contract_identity",
+    "unsupported_price_type",
+    "unsupported_timeframe",
+    "unsupported_calculation_version",
+    "invalid_timestamp",
+    "future_timestamp",
+    "invalid_target_candle",
+    "target_candle_not_complete",
+    "target_candle_unavailable",
+    "invalid_ohlcv_or_gap",
+    "invalid_gap_marker",
+    "missing_candles",
+    "stale_candles",
     "ok",
     "insufficient",
     "unavailable",
@@ -68,10 +81,23 @@ test("labels cover the emitted indicator and trend strategy registries", async (
     new URL("../python/market_analysis/benchmark/trend.py", import.meta.url),
     "utf8",
   );
+  const wiring = await readFile(
+    new URL("../src/lib/forward/forward-deps.server.ts", import.meta.url),
+    "utf8",
+  );
+  const wiredNames = [
+    ...wiring
+      .split("const TA_STRATEGIES = [")[1]
+      .split("];", 1)[0]
+      .matchAll(/"([^"]+)"/g),
+  ].map(([, name]) => name);
   const taRegistry = ta.split("STRATEGIES = {")[1].split("\n}")[0];
   const ids = [...taRegistry.matchAll(/^\s+"([^"]+)":/gm)].flatMap(([, name]) =>
     [15, 60, 240].flatMap((minutes) => [`${name}:${minutes}`, `placebo-v1:${name}:${minutes}`]),
   );
+  for (const name of wiredNames)
+    for (const minutes of [15, 60, 240])
+      ids.push(`${name}:${minutes}`, `placebo-v1:${name}:${minutes}`);
   const variants = [...trend.matchAll(/TrendVariant\("([^"]+)", "([^"]+)", "0\.(\d+)"/g)];
   ids.push(
     ...variants.map(([, name]) => name),
@@ -81,7 +107,7 @@ test("labels cover the emitted indicator and trend strategy registries", async (
     ),
   );
   assert.equal(variants.length, 9);
-  assert.equal(ids.filter((id) => id.startsWith("placebo-v1:")).length, 18);
+  assert.equal(new Set(ids.filter((id) => id.startsWith("placebo-v1:"))).size, 18);
   for (const id of new Set(ids)) {
     const label = strategyLabel(id);
     assert.ok(label.name && label.blurb, id);

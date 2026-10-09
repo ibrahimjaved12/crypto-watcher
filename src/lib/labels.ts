@@ -69,6 +69,45 @@ const reasons: Record<string, ReasonLabel> = {
     level: "wait",
   },
   stale: { short: "Waiting for fresh data", level: "wait" },
+  invalid_futures_contract_identity: {
+    short: "The price source does not match the requested futures contract",
+    level: "problem",
+  },
+  unsupported_price_type: {
+    short: "This price feed cannot be used for indicator analysis",
+    level: "problem",
+  },
+  unsupported_timeframe: { short: "This timeframe is not supported", level: "problem" },
+  unsupported_calculation_version: {
+    short: "The indicator service version needs to be updated",
+    level: "problem",
+  },
+  invalid_timestamp: { short: "A price update has an invalid time", level: "problem" },
+  future_timestamp: { short: "A price update is dated in the future", level: "problem" },
+  invalid_target_candle: {
+    short: "The requested candle does not match this timeframe",
+    level: "problem",
+  },
+  target_candle_not_complete: { short: "Waiting for the requested candle to close", level: "wait" },
+  target_candle_unavailable: { short: "The requested candle has not arrived yet", level: "wait" },
+  invalid_ohlcv_or_gap: {
+    short: "Price or volume history contains invalid values or gaps",
+    level: "problem",
+  },
+  invalid_gap_marker: {
+    short: "The price history has an inconsistent gap record",
+    level: "problem",
+  },
+  missing_candles: {
+    short: "Some price candles are missing from the history",
+    help: "Wait for collection to catch up.",
+    level: "wait",
+  },
+  stale_candles: {
+    short: "The latest completed candles are too old to use",
+    help: "Wait for fresh market data.",
+    level: "wait",
+  },
   insufficient_history: {
     short: "Not enough past candles yet for this timeframe",
     help: "Keep collection running while the price history fills up.",
