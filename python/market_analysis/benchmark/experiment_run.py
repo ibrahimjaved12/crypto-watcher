@@ -11,7 +11,8 @@ horizons, the geometry, the data a strategy needs and how specs are built:
 x 8), ``order-flow`` (of-v1 on minute bars + funding, 240 minutes, k 2 x rr_index 1) and
 ``funding-basis`` (fb-v1 on the 1-minute premium index; 240 minutes with k 2 x rr_index 1,
 60 minutes with k 2 x rr_index 0; each strategy belongs to one horizon, so K = the
-question's strategies). Inputs are loaded one symbol at a time and released once that
+question's strategies) and ``order-flow-v2`` (of-v2, the of-v1 cum240 rule at crossing
+thresholds 2, 5/2, 3, 7/2; 240 minutes, k 2 x rr_index 1..3, K = strategies x 3). Inputs are loaded one symbol at a time and released once that
 symbol's part is built; a family's ``combine`` then joins the parts (the cross-sectional
 fb_xs_4h ranks per-symbol z values there).
 
@@ -35,7 +36,7 @@ import re
 from typing import Callable
 
 from .. import data_lake
-from . import funding_basis, order_flow, ta_strategies
+from . import funding_basis, order_flow, order_flow_v2, ta_strategies
 from .canonical import canonical_bytes, content_hash, exact_from_str
 from .evaluate import decimal_text
 from .hidden_guard import HiddenGate, HiddenGuardError, HiddenStretchLocked, Plan
@@ -116,6 +117,12 @@ def _order_flow_signals(inputs, symbol, name, horizon, first_ms, end_ms, params)
                                      label_step_min=params.step(horizon))
 
 
+def _order_flow_v2_signals(inputs, symbol, name, horizon, first_ms, end_ms, params):
+    bars, funding = inputs
+    return order_flow_v2.symbol_signals(name, bars, funding, horizon, first_ms=first_ms, end_ms=end_ms,
+                                        label_step_min=params.step(horizon))
+
+
 def _load_premium(bars_dir, symbol, last_month, horizon, token, gate):
     return load_symbol_premium(bars_dir, symbol, data_lake.FIRST_MONTH, last_month, token=token, gate=gate)
 
@@ -135,6 +142,9 @@ FAMILIES = {family.family_id: family for family in (
     Family("funding-basis", funding_basis.VERSION, tuple(funding_basis.STRATEGIES), dict(funding_basis.GEOMETRY),
            "premium", _load_premium, _funding_basis_signals, funding_basis.strategy_config,
            strategy_horizons=dict(funding_basis.STRATEGY_HORIZONS), combine=funding_basis.combine),
+    Family("order-flow-v2", order_flow_v2.VERSION, tuple(order_flow_v2.STRATEGIES),
+           {order_flow_v2.HORIZON: (tuple(order_flow_v2.K_VALUES), tuple(order_flow_v2.RR_INDICES))}, "bars+funding",
+           _load_bars_funding, _order_flow_v2_signals, order_flow_v2.strategy_config),
 )}
 
 
