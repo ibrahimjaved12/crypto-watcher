@@ -19,7 +19,7 @@ persists it (`forward_*`, `paper_*` tables).
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `bars_adapter.py` | Collector 1-minute rows (doubles) become a benchmark `BarSeries` (integers at 10^8). Also builds 15/60/240 candles with `candles.build_candles`. |
 | `signals.py`      | The `FORWARD_STRATEGIES` registry and `generate_signals`.                                                                                        |
-| `setups.py`       | `build_setup`, using the labels-v2 geometry.                                                                                                     |
+| `setups.py`       | `build_setup`, using the labels-v3 `ewma-robust-hcal` geometry (P16; `ForwardSigma`).                                                           |
 | `outcomes.py`     | `resolve_setup`: incremental resolution, identical to `labels.build_labels`.                                                                     |
 | `wallet.py`       | `step(state, events, config)`: the paper wallet, pure and append-only.                                                                           |
 | `evaluate.py`     | One evaluation; the body of the endpoint.                                                                                                        |
@@ -32,10 +32,14 @@ persists it (`forward_*`, `paper_*` tables).
     idempotent.
 - **Setup** (`forward_setups`, immutable): one per `(k, rr)` of the grid. With `k = 2` and
   `rr in {1.5, 2}` that is two setups per signal, each with its own id; K is visible.
-  - It saves every input: variance, the seasonal factor weight, sigma, the entry open `p0`,
-    tick, `d_ticks`, stop and target prices, the label leverage, the time limit, the label
-    parameter hash (`params_hash`) and every component version.
-  - Its status is T for tradeable, or one of the non-trade codes of the labels: V, C, P, G, N.
+  - It saves every input: the robust level (`var`), the horizon multiplier c_h
+    (`factor_weight`, fixed point 10^6), sigma, the entry open `p0`, tick, `d_ticks`, stop and
+    target prices, the label leverage, the time limit, the label parameter hash (`params_hash`) and
+    every component version.
+  - Its status is T for tradeable, or one of the non-trade codes of the labels: C, P, G, N.
+  - Both signal and setup rows carry `candle_version` (P15): SHA-256 over the candle-v1 hashes of
+    the 1m candles forming the decision candle (operational `collector_candle_hash`). A later REST
+    revision of one of those candles (`collector_candle_revisions.supersedes`) can be traced to it.
 - **Outcome** (`forward_outcomes`, append-only): `pending | open | T | S | E | L | X | ambiguous`.
   - The net, cost and funding are in micro-R (1 R = the entry-to-stop distance).
   - For `ambiguous`, the pessimistic result is the net. The optimistic one is stored beside it
@@ -50,9 +54,20 @@ persists it (`forward_*`, `paper_*` tables).
 - **Signals:** a TA signal at a candle close uses closed candles only (`ta-v1`). The entry is
   the open of the minute after the decision. A decision is evaluated only once that entry minute
   exists in the data (`processed_to_ms`).
-- **Sigma:** the seasonal model (`sigma_model=ewma-seasonal`).
-  - The intraday factors of day D use only days before D.
-  - The deseasonalised EWMA uses closes up to the decision.
+- **Sigma (P16, 2026-10-10):** `ewma-robust-hcal` (labels-v3, the lb3h release model), chosen
+  because the calibration audit found it closest to theory (target-first shares match b/(a+b) and
+  the k = 1 expiry share matches the continuous-monitoring theory).
+  - Robust |r| level (EWMA of |5-minute return| / 0.7979) of the block ending at the decision, the
+    entry day's |r| slot factors (28-day window, days before D only), times the point-in-time
+    horizon multiplier c_h (`volatility.horizon_calibration` on the label-step grid: median of
+    |ln(open[e+h]/open[e])| / sigma over completed past windows, / 0.6745, clipped to [0.5, 2]).
+  - c_h exists only after 60 days of completed past windows, so the job reads about 120 days of 1m
+    history (`FORWARD_HISTORY_DAYS = 120`, operational 1m retention 140 days) and backfills 130 days
+    once from public REST klines when the stored history starts later.
+  - Until the sigma exists a signal emits **no setup** and the evaluation reports
+    `reasons[SYMBOL].sigma = "no_sigma: ..."`; it never falls back to another model.
+  - Over the rolling 120-day request c_h is an expanding median from the request start (point in
+    time; it can differ slightly from the lb3h labels, which expand from 2024-01).
   - Half-lives come from `LabelParams`: 1 day at 15 m, 3 days at 60 m, 7 days at 240 m.
 - **Resolution:** a resolution uses only minutes from the entry onward and is final once an event
   occurs. Calling it again with more bars never changes a final result.
@@ -72,10 +87,11 @@ persists it (`forward_*`, `paper_*` tables).
 
 ## Comparison with backtests
 
-Forward resolution _is_ the benchmark label. A test builds labels-v2 for a synthetic fixture
-with `build_labels` and checks that every forward setup and resolution equals the label row
-field by field: status, p0, sigma, d_ticks, leverage, outcome, net/cost/funding micro-R and
-ambiguity.
+Forward resolution _is_ the benchmark label. A test builds labels for a synthetic fixture with
+`build_labels` and checks that every forward setup and resolution equals the label row field by
+field: status, p0, sigma, d_ticks, leverage, outcome, net/cost/funding micro-R and ambiguity
+(the geometry test runs on the labels-v2 parameters; a second test checks that the hcal sigma is
+exactly `RobustSigma(hcal=True).sigma` and that nothing is emitted before 60 days of windows).
 
 So a forward outcome table by strategy and version is directly comparable with the
 development and validation reports for the same strategy id, version and parameter hash. The

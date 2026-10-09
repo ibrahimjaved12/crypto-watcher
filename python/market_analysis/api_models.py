@@ -423,7 +423,8 @@ class ForwardFundingEvent(InputModel):
 
 class ForwardSymbolInput(InputModel):
     symbol: str = Field(min_length=5, max_length=16, pattern=r"^[A-Z0-9]+$")
-    rows: Annotated[tuple[ForwardCollectorRow, ...], Field(min_length=1, max_length=100_000)]
+    # P16: about 120 days of 1m history (ewma-robust-hcal warm-up) = 172,800 rows.
+    rows: Annotated[tuple[ForwardCollectorRow, ...], Field(min_length=1, max_length=200_000)]
     funding: Annotated[tuple[ForwardFundingEvent, ...], Field(max_length=1000)] = ()
     # False when the caller could not fetch funding history: windows that contain a possible funding
     # time are then left open instead of being finalised with zero funding.

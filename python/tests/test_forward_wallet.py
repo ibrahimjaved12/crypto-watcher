@@ -148,9 +148,10 @@ class ApiTests(unittest.TestCase):
         response = asyncio.run(send(body, {"Authorization": f"Bearer {token}"}))
         self.assertEqual(response.status_code, 200, response.text)
         data = response.json()
-        self.assertEqual(data["versions"]["forward"], "forward-v1")
-        self.assertEqual(data["wallet_state"]["balance_e8"], 100 * 10 ** 8)  # no factors yet: setups are V
-        self.assertTrue(all(s["status"] == "V" for s in data["setups"]))
+        self.assertEqual(data["versions"]["forward"], "forward-v2")
+        self.assertEqual(data["wallet_state"]["balance_e8"], 100 * 10 ** 8)
+        self.assertEqual(data["setups"], [])  # P16: no ewma-robust-hcal sigma yet, so no setups at all
+        self.assertTrue(all("no_sigma" in r.get("sigma", "no_sigma") for r in data["reasons"].values()))
         self.assertEqual(asyncio.run(send(body, {})).status_code, 401)
         bad = {**body, "symbols": [{"symbol": "BTCUSDT", "rows": [{**rows[0], "open_time_ms": START + 1}]}]}
         self.assertEqual(asyncio.run(send(bad, {"Authorization": f"Bearer {token}"})).status_code, 422)

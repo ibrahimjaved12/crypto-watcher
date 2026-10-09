@@ -288,6 +288,14 @@ function SettingsPage() {
                           <td className="py-2 pr-3">{formatInterval(row.timeframe_minutes)}</td>
                           <td className="py-2 pr-3">
                             <StatusChip level={state.level}>{state.short}</StatusChip>
+                            {row.conflict_count_24h ? (
+                              <span
+                                className="ml-1.5 inline-flex items-center rounded-full border border-warn/40 px-1.5 text-[11px] text-warn"
+                                title={`${row.conflict_count_24h} candle(s) in the last 24 h arrived from REST with values that differ from the stored stream candle. The stored candle is kept; the difference is logged for review. Health is not affected.${row.last_conflict_at ? ` Latest: ${new Date(row.last_conflict_at).toLocaleString()}.` : ""}`}
+                              >
+                                conflicts: {row.conflict_count_24h}
+                              </span>
+                            ) : null}
                           </td>
                           <td className="num py-2 pr-3">{formatLag(row.lag_ms)}</td>
                           <td className="py-2 pr-3">

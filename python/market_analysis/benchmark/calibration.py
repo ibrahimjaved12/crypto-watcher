@@ -35,12 +35,22 @@ counted separately) next to the driftless Brownian values of SPEC-1 section 4,
 continuous and with the Broadie-Glasserman-Kou widening ``0.5826 sqrt(step / h)``,
 plus the realized/predicted sigma ratio that reproduces the observed expiry share.
 
-Two verdicts per symbol x horizon x half-life, reported separately: ``sd_ok``
-(sd(z) in SD_BAND) and ``barrier_ok`` (every (k, rr) pooled expiry share within
-``max(EXPIRY_TOLERANCE_REL x theory, EXPIRY_TOLERANCE_ABS)`` of the BGK-widened
-theory for the label step; set on every 240 m row from the lb1 labels, None for
-other horizons or when no labels were read). ``pass`` requires ``sd_ok`` and, where
-``barrier_ok`` is not None, ``barrier_ok``, so a FAIL shows which part failed.
+Monitoring step (P16, #220): ``scan.label_trade`` checks every 1-minute bar's high and low, i.e.
+quasi-continuous monitoring, so the discrete-monitoring (BGK) widening uses the 1-minute
+MONITORING step, ``0.5826 sqrt(1 / h)`` (0.0376 sigma_h at 240 m), not the label step. The old
+widening for the 15-minute label step (``0.5826 sqrt(15 / 240)`` = 0.1457) and every verdict built
+on it are kept in the JSON under their old names for traceability (``expiry_widened``,
+``implied_sigma_ratio_widened``, ``expiry_within_tolerance``, ``pass_v1``, ``barrier_ok_v1``).
+
+Barrier criterion (P16, pre-stated, applied identically to every sigma model, no tuning):
+(a) target-first share T/(T+S) within TARGET_FIRST_TOLERANCE (0.02) of b/(a+b) for every
+(k, rr, side) with k in {1, 2}; (b) for k = 1, the realized/predicted sigma ratio implied by the
+pooled expiry share against the monitoring-step theory within IMPLIED_RATIO_BAND [0.85, 1.15] for
+every rr; (c) for k = 2 the implied ratio is reported and marked DESCRIPTIVE: far barriers are hit
+more often than Brownian motion predicts (heavy tails, volatility clustering), which no scalar sigma
+can fix, so it is documented, not failed. ``barrier_ok`` = (a) and (b) on 240 m rows (None for other
+horizons or when no labels were read). ``pass`` = (``sd_ok`` or ``robust_ok``) and, where set,
+``barrier_ok``.
 
 Sigma models (#220 P8): every (horizon, half-life) row exists per sigma model, ``ewma`` (rows under
 ``horizons``, the lb1 engine) and ``ewma-seasonal`` (rows under ``horizons_seasonal``: variance from
@@ -51,8 +61,8 @@ absent.
 
 Robust statistics in every z block: ``robust_sd = 1.4826 * MAD(z)`` and ``mean_abs_ratio =
 mean|z| / 0.797885`` (both 1 for a standard normal). ``robust_ok``: both in ROBUST_BAND overall
-and in ROBUST_HOUR_BAND in every one of the 24 UTC hours (an empty hour fails). ``pass`` =
-``sd_ok`` and ``robust_ok`` and, where set, ``barrier_ok``.
+and in ROBUST_HOUR_BAND in every one of the 24 UTC hours (an empty hour fails). The pre-P16 rule
+(``sd_ok`` and ``robust_ok`` and the label-step barrier check) is kept as ``pass_v1``.
 
 Floats are only statistics: the report renders them as fixed 6-decimal strings,
 so it stays canonical JSON (``canonical.canonical_bytes``) and hashable.
@@ -76,7 +86,7 @@ from .segments import SEGMENTS, segment_bounds_ms, segment_months
 from .volatility import (BLOCK_MINUTES, BLOCK_MS, BLOCKS_PER_DAY, DAY_MS, VAR_SCALE, build_variance,
                          build_variance_deseasonalised, horizon_sigma, horizon_sigma_seasonal, seasonal_factors)
 
-SCHEMA = "calibration-v1"
+SCHEMA = "calibration-v2"
 AUDIT_SEGMENTS = ("development", "validation")
 HORIZONS = (15, 60, 240)
 HALF_LIVES = (1, 3, 7)
@@ -100,6 +110,10 @@ EXPIRY_TOLERANCE_ABS = 0.02
 BARRIER_HORIZON = 240
 BARRIER_K = (1, 2)
 BGK_BETA = 0.5826                # -zeta(1/2) / sqrt(2 pi), Broadie-Glasserman-Kou
+MONITORING_STEP_MIN = 1          # scan.label_trade checks every 1-minute bar's high/low
+TARGET_FIRST_TOLERANCE = 0.02    # criterion (a): |T/(T+S) - b/(a+b)| <= 0.02 per (k, rr, side)
+IMPLIED_RATIO_BAND = (0.85, 1.15)  # criterion (b): k = 1 implied sigma ratio vs monitoring-step theory
+JUDGED_K = (1,)                  # k = 2 implied ratios are descriptive (criterion c)
 VR_MIN_RETURNS = 7 * BLOCKS_PER_DAY
 IMPLIED_RATIO_RANGE = (0.05, 20.0)
 OUTCOME_CODES = ("T", "S", "E", "L", "X")
@@ -305,7 +319,9 @@ def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=N
     result["sd_ok"] = sd_ok(result["z"])
     result["robust_ok"] = robust_ok(result["z"], result["z_by_hour"])
     result["barrier_ok"] = None  # set by set_barrier_verdict on 240 m rows
-    result["pass"] = result["sd_ok"] and result["robust_ok"]
+    result["barrier_ok_v1"] = None
+    result["pass"] = result["sd_ok"] or result["robust_ok"]
+    result["pass_v1"] = result["sd_ok"] and result["robust_ok"]
     if vr_expanding is not None:
         ratio = vr_expanding[b]
         has = np.isfinite(ratio) & (ratio > 0)
@@ -391,7 +407,11 @@ def expiry_probability(a: float, b: float, horizons: float, *, tolerance: float 
 
 
 def discrete_widening(step_minutes: int, horizon_minutes: int) -> float:
-    """BGK continuity correction in sigma_h units: 0.5826 * sqrt(step / h)."""
+    """BGK continuity correction in sigma_h units: 0.5826 * sqrt(step / h).
+
+    ``step_minutes`` must be the MONITORING step of the barrier scan (MONITORING_STEP_MIN = 1 for
+    ``scan.label_trade``); the label step is only used for the traced pre-P16 fields.
+    """
     return BGK_BETA * sqrt(step_minutes / horizon_minutes)
 
 
@@ -440,10 +460,32 @@ def barrier_geometries(symbol: str, params: LabelParams) -> list[Geometry]:
             for rr_index in range(len(params.rr_grid))]
 
 
+def _target_first_ok(value: float, theory: float) -> bool:
+    return isfinite(value) and abs(value - theory) <= TARGET_FIRST_TOLERANCE
+
+
+def _ratio_in_band(value) -> bool:
+    return value is not None and isfinite(value) and IMPLIED_RATIO_BAND[0] <= value <= IMPLIED_RATIO_BAND[1]
+
+
+def _median_summary(values) -> dict:
+    values = sorted(value for value in values if value is not None and isfinite(value))
+    n = len(values)
+    median = (values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2) if n else float("nan")
+    return {"median": median, "min": values[0] if n else float("nan"), "max": values[-1] if n else float("nan"),
+            "cells": n}
+
+
 def barrier_summary(columns: dict, params: LabelParams) -> dict:
-    """Observed outcome shares per (k, rr) next to Brownian theory; non-trades and purged rows separately."""
+    """Observed outcome shares per (k, rr) next to Brownian theory and the P16 criteria (a)-(c).
+
+    Non-trades and purged rows are counted separately. Theory: continuous, widened by the 1-minute
+    monitoring step (judged), and widened by the label step (pre-P16, traced only).
+    """
     horizons = params.time_limit_multiple
-    widening = discrete_widening(params.step(BARRIER_HORIZON), BARRIER_HORIZON)
+    label_step = params.step(BARRIER_HORIZON)
+    widening = discrete_widening(MONITORING_STEP_MIN, BARRIER_HORIZON)
+    widening_label = discrete_widening(label_step, BARRIER_HORIZON)
     rows = []
     for k in [k for k in params.k_grid if k in BARRIER_K]:
         for rr_index, rr in enumerate(params.rr_grid):
@@ -452,49 +494,77 @@ def barrier_summary(columns: dict, params: LabelParams) -> dict:
             b, a = float(k), float(k * rr)
             theory = {"target_first_no_limit": target_first_probability(a, b),
                       "expiry_continuous": expiry_probability(a, b, horizons),
-                      "expiry_widened": expiry_probability(a + widening, b + widening, horizons)}
+                      "expiry_monitoring": expiry_probability(a + widening, b + widening, horizons),
+                      "expiry_widened": expiry_probability(a + widening_label, b + widening_label, horizons)}
             sides = {}
             for name, group in (("long", parts[1]), ("short", parts[-1]), ("both", parts[1] + parts[-1])):
                 observed = _outcome_counts(group)
                 counts = observed["counts"]
                 shares = _shares(counts)
                 resolved = counts["T"] + counts["S"] + counts["L"]
+                decided = counts["T"] + counts["S"]
+                target_first = counts["T"] / decided if decided else float("nan")
                 non_trades = {}
                 for column in group:
                     for reason in column.non_trades["reason"]:
                         non_trades[chr(reason)] = non_trades.get(chr(reason), 0) + 1
                 sides[name] = {"trades": sum(counts.values()), **observed, "shares": shares,
                                "target_first_resolved": counts["T"] / resolved if resolved else float("nan"),
+                               "target_first_ts": target_first,
+                               "target_first_ok": _target_first_ok(target_first, theory["target_first_no_limit"]),
                                "non_trades": dict(sorted(non_trades.items())),
                                "purged": sum(len(column.purged_signal_ms) for column in group),
                                "implied_sigma_ratio_continuous": implied_sigma_ratio(shares["E"], a, b, horizons),
+                               "implied_sigma_ratio_monitoring": implied_sigma_ratio(shares["E"], a, b, horizons,
+                                                                                      widening),
                                "implied_sigma_ratio_widened": implied_sigma_ratio(shares["E"], a, b, horizons,
-                                                                                   widening)}
+                                                                                   widening_label)}
             expiry = sides["both"]["shares"]["E"]
-            within = expiry_within_tolerance(expiry, theory["expiry_widened"])  # judged on the widened theory
+            judged = int(k) in JUDGED_K and k.denominator == 1
+            ratio = sides["both"]["implied_sigma_ratio_monitoring"]
             rows.append({"k": exact_to_str(k), "rr": exact_to_str(rr), "theory": theory, "sides": sides,
-                         "expiry_within_tolerance": bool(within)})
-    implied = sorted(value for value in (row["sides"]["both"]["implied_sigma_ratio_widened"] for row in rows)
-                     if value is not None and isfinite(value))
-    implied_median = (implied[len(implied) // 2] if len(implied) % 2 else
-                      (implied[len(implied) // 2 - 1] + implied[len(implied) // 2]) / 2) if implied else float("nan")
+                         # (a) every side, (b) pooled sides at k = 1, (c) k = 2 descriptive.
+                         "target_first_ok": all(sides[side]["target_first_ok"] for side in ("long", "short")),
+                         "implied_ratio_role": "judged" if judged else "descriptive",
+                         "implied_ratio_ok": _ratio_in_band(ratio) if judged else None,
+                         # pre-P16 check, traced only: pooled expiry vs the label-step widened theory.
+                         "expiry_within_tolerance": bool(expiry_within_tolerance(expiry, theory["expiry_widened"]))})
+    criterion_a = bool(rows) and all(row["target_first_ok"] for row in rows)
+    judged_rows = [row for row in rows if row["implied_ratio_role"] == "judged"]
+    criterion_b = bool(judged_rows) and all(row["implied_ratio_ok"] for row in judged_rows)
     return {"horizon_min": BARRIER_HORIZON, "half_life_days": params.half_life(BARRIER_HORIZON),
             "sigma_model": params.sigma_model,
-            "implied_sigma_ratio_widened": {"median": implied_median, "min": implied[0] if implied else float("nan"),
-                                            "max": implied[-1] if implied else float("nan"), "cells": len(implied)},
-            "time_limit_multiple": horizons, "monitoring_step_min": params.step(BARRIER_HORIZON),
-            "discrete_widening_sigma_h": widening, "geometries": rows,
-            "pass": bool(rows) and all(row["expiry_within_tolerance"] for row in rows)}
+            "implied_sigma_ratio_monitoring": _median_summary(
+                row["sides"]["both"]["implied_sigma_ratio_monitoring"] for row in rows),
+            "implied_sigma_ratio_widened": _median_summary(
+                row["sides"]["both"]["implied_sigma_ratio_widened"] for row in rows),
+            "time_limit_multiple": horizons, "monitoring_step_min": MONITORING_STEP_MIN,
+            "label_step_min": label_step,
+            "discrete_widening_monitoring_sigma_h": widening,
+            "discrete_widening_sigma_h": widening_label,
+            "criteria": {"target_first_tolerance": TARGET_FIRST_TOLERANCE,
+                         "implied_ratio_band": list(IMPLIED_RATIO_BAND), "judged_k": list(JUDGED_K),
+                         "target_first_ok": criterion_a, "implied_ratio_ok": criterion_b},
+            "geometries": rows,
+            "pass": criterion_a and criterion_b,
+            "pass_v1": bool(rows) and all(row["expiry_within_tolerance"] for row in rows)}
 
 
 # ---------------------------------------------------------------- per symbol / report
 
 
-def set_barrier_verdict(result: dict, barrier_ok: bool, model: str = "ewma") -> None:
-    """Attach the barrier verdict to every 240 m row of one sigma model; pass = sd_ok, robust_ok and barrier_ok."""
+def set_barrier_verdict(result: dict, barrier_ok: bool, model: str = "ewma", barrier_ok_v1: bool | None = None) -> None:
+    """Attach the barrier verdict to every 240 m row of one sigma model.
+
+    pass = (sd_ok or robust_ok) and barrier_ok (P16); the pre-P16 verdict stays as pass_v1 =
+    sd_ok and robust_ok and barrier_ok_v1 when the old barrier verdict is given.
+    """
     for row in result.get(MODEL_KEYS[model][0], {}).get(str(BARRIER_HORIZON), {}).values():
         row["barrier_ok"] = bool(barrier_ok)
-        row["pass"] = bool(row["sd_ok"]) and bool(row["robust_ok"]) and row["barrier_ok"]
+        row["pass"] = (bool(row["sd_ok"]) or bool(row["robust_ok"])) and row["barrier_ok"]
+        if barrier_ok_v1 is not None:
+            row["barrier_ok_v1"] = bool(barrier_ok_v1)
+            row["pass_v1"] = bool(row["sd_ok"]) and bool(row["robust_ok"]) and row["barrier_ok_v1"]
 
 
 def audit_symbol(bars_dir, label_dir, symbol: str, segment: str, *, horizons=HORIZONS, half_lives=HALF_LIVES,
@@ -522,7 +592,7 @@ def audit_symbol(bars_dir, label_dir, symbol: str, segment: str, *, horizons=HOR
                                             model_params, segment=segment)
             key = MODEL_KEYS[model][1]
             result[key] = barrier_summary(columns, model_params)
-            set_barrier_verdict(result, result[key]["pass"], model)
+            set_barrier_verdict(result, result[key]["pass"], model, result[key]["pass_v1"])
     return result
 
 
@@ -546,7 +616,16 @@ def build_report(segment: str, symbols: dict, *, horizons, half_lives, params: L
               "robust_band": [str(ROBUST_BAND[0]), str(ROBUST_BAND[1])],
               "robust_hour_band": [str(ROBUST_HOUR_BAND[0]), str(ROBUST_HOUR_BAND[1])],
               "expiry_tolerance_rel": str(EXPIRY_TOLERANCE_REL), "expiry_tolerance_abs": str(EXPIRY_TOLERANCE_ABS),
-              "expiry_reference": "discrete (BGK widening for the label step)", "vr_min_q_sums": VR_MIN_RETURNS,
+              "expiry_reference": "continuous-monitoring Brownian theory widened by the 1-minute monitoring step "
+                                  "(scan.label_trade checks every 1-minute high/low; BGK 0.5826 sqrt(1/h)); the "
+                                  "label-step widening is kept only in the traced pre-P16 fields",
+              "monitoring_step_min": MONITORING_STEP_MIN,
+              "barrier_criteria": {"a": f"T/(T+S) within {TARGET_FIRST_TOLERANCE} of b/(a+b) for every (k, rr, side)",
+                                   "b": f"k = 1: implied sigma ratio (pooled sides, monitoring-step theory) in "
+                                        f"[{IMPLIED_RATIO_BAND[0]}, {IMPLIED_RATIO_BAND[1]}] for every rr",
+                                   "c": "k = 2: implied ratio reported, DESCRIPTIVE (not judged)",
+                                   "pass": "(sd_ok or robust_ok) and, on 240 m rows, (a) and (b)"},
+              "vr_min_q_sums": VR_MIN_RETURNS,
               "label_params_identity": params.identity(), "data_snapshot_id": data_snapshot_id,
               "code_commit": code_commit, "created_utc": created_utc, "symbols": _render(symbols)}
     report["report_hash"] = content_hash(report)
@@ -610,10 +689,13 @@ def markdown(report: dict) -> str:
     lines = [f"# Sigma calibration audit ({report['segment']})", "",
              f"Report hash: `{report['report_hash']}`. Code commit `{report['code_commit']}`, "
              f"created {report['created_utc']}.", "",
-             f"PASS = sd verdict (sd(z) in [{report['sd_band'][0]}, {report['sd_band'][1]}]) and, on "
-             f"{BARRIER_HORIZON} m rows, barrier verdict (every expiry share within "
-             f"max({report['expiry_tolerance_rel']} x theory, {report['expiry_tolerance_abs']}) of the BGK-widened "
-             "Brownian theory for the label step); robust verdict: robust sd = 1.4826 MAD(z) and mean|z| / 0.7979 "
+             f"PASS = (sd verdict, sd(z) in [{report['sd_band'][0]}, {report['sd_band'][1]}], or robust verdict) and, "
+             f"on {BARRIER_HORIZON} m rows, barrier verdict: (a) T/(T+S) within {TARGET_FIRST_TOLERANCE} of b/(a+b) "
+             f"for every (k, rr, side); (b) at k = 1 the implied sigma ratio against the theory widened by the "
+             f"{MONITORING_STEP_MIN}-minute MONITORING step (the scan checks every 1-minute high/low) in "
+             f"[{IMPLIED_RATIO_BAND[0]}, {IMPLIED_RATIO_BAND[1]}]; (c) k = 2 ratios are descriptive. The pre-P16 "
+             "label-step widening and its verdicts stay in the JSON (pass_v1). Robust verdict: robust sd = 1.4826 MAD(z) "
+             "and mean|z| / 0.7979 "
              f"in [{report['robust_band'][0]}, {report['robust_band'][1]}] overall and in "
              f"[{report['robust_hour_band'][0]}, {report['robust_hour_band'][1]}] in every UTC hour.", ""]
     for symbol, result in report["symbols"].items():
@@ -645,30 +727,41 @@ def markdown(report: dict) -> str:
                     lines.append("")
             barriers = result.get(barrier_key)
             if barriers is not None:
+                criteria = barriers.get("criteria", {})
                 lines += [f"### Barriers ({model}) at {barriers['horizon_min']} m (labels' half-life {barriers['half_life_days']} d, "
-                          f"limit {barriers['time_limit_multiple']} x h, BGK widening {barriers['discrete_widening_sigma_h']} "
-                          f"sigma_h): "
-                          f"{'PASS' if barriers['pass'] else 'FAIL'}", "",
-                          "| k | rr | side | trades | T | S | E | L | X | amb | T/(T+S+L) | theory b/(a+b) | "
-                          "theory E cont. | theory E widened | implied ratio cont. | implied ratio widened | non-trades | "
-                          "purged |", "|" + " --- |" * 18]
+                          f"limit {barriers['time_limit_multiple']} x h, monitoring step "
+                          f"{barriers.get('monitoring_step_min')} min, widening "
+                          f"{barriers.get('discrete_widening_monitoring_sigma_h')} sigma_h; label-step widening "
+                          f"{barriers['discrete_widening_sigma_h']} traced only): "
+                          f"{'PASS' if barriers['pass'] else 'FAIL'} (a {_verdict(criteria.get('target_first_ok'))}, "
+                          f"b {_verdict(criteria.get('implied_ratio_ok'))}; pre-P16 "
+                          f"{_verdict(barriers.get('pass_v1'))})", "",
+                          "| k | rr | side | trades | T | S | E | L | X | amb | T/(T+S) | theory b/(a+b) | (a) | "
+                          "theory E cont. | theory E monitoring | implied ratio cont. | implied ratio monitoring | role | "
+                          "theory E label-step | implied ratio label-step | non-trades | purged |", "|" + " --- |" * 22]
                 for row in barriers["geometries"]:
                     theory = row["theory"]
                     for side, item in row["sides"].items():
                         shares = item["shares"]
+                        role = row.get("implied_ratio_role", "")
+                        if side == "both" and row.get("implied_ratio_ok") is not None:
+                            role += f" {_verdict(row['implied_ratio_ok'])}"
                         lines.append(" | ".join([
                             f"| {row['k']}", row["rr"], side, str(item["trades"]),
                             *(_cell(shares[code]) for code in OUTCOME_CODES), str(item["ambiguous"]),
-                            _cell(item["target_first_resolved"]), _cell(theory["target_first_no_limit"]),
-                            _cell(theory["expiry_continuous"]), _cell(theory["expiry_widened"]),
-                            _cell(item["implied_sigma_ratio_continuous"]), _cell(item["implied_sigma_ratio_widened"]),
+                            _cell(item.get("target_first_ts")), _cell(theory["target_first_no_limit"]),
+                            _verdict(item.get("target_first_ok")) if side != "both" else "",
+                            _cell(theory["expiry_continuous"]), _cell(theory.get("expiry_monitoring")),
+                            _cell(item["implied_sigma_ratio_continuous"]),
+                            _cell(item.get("implied_sigma_ratio_monitoring")), role,
+                            _cell(theory["expiry_widened"]), _cell(item["implied_sigma_ratio_widened"]),
                             ", ".join(f"{code} {count}" for code, count in item["non_trades"].items()) or "none",
                             str(item["purged"])]) + " |")
-                ratio = barriers.get("implied_sigma_ratio_widened")
+                ratio = barriers.get("implied_sigma_ratio_monitoring")
                 if ratio is not None:
-                    lines += [f"Implied sigma ratio ({barriers.get('sigma_model', model)}, widened theory, both sides): "
-                              f"median {_cell(ratio['median'])}, min {_cell(ratio['min'])}, max {_cell(ratio['max'])} "
-                              f"over {ratio['cells']} (k, rr) cells (1 = the barrier geometry matches the realized "
-                              "expiry share).", ""]
+                    lines += [f"Implied sigma ratio ({barriers.get('sigma_model', model)}, monitoring-step theory, both "
+                              f"sides): median {_cell(ratio['median'])}, min {_cell(ratio['min'])}, max "
+                              f"{_cell(ratio['max'])} over {ratio['cells']} (k, rr) cells (1 = the barrier geometry "
+                              "matches the realized expiry share; k = 2 cells are descriptive).", ""]
                 lines.append("")
     return "\n".join(lines) + "\n"

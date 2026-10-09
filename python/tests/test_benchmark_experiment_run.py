@@ -473,6 +473,62 @@ class SignalCountTests(unittest.TestCase):
                 module.count(missing, checkout, None, root / "data2")
 
 
+class SigmaModelQuestionTests(unittest.TestCase):
+    """P16: question-v2 carries sigma_model; question-v1 files stay valid and byte-identical."""
+
+    def test_old_question_files_still_load_unchanged(self):
+        old = question()
+        self.assertEqual(old["schema"], "question-v1")
+        self.assertNotIn("sigma_model", old)
+        self.assertEqual(er.question_hash(old), "8ba062bb71031cddc4b34a43a7648de16e21bbd974663d333af165f9460d707d")
+        self.assertEqual(er.question_sigma_model(old), "ewma")
+        self.assertEqual(er.question_params(old).identity(), LabelParams().identity())
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "q.json"
+            path.write_bytes(er.question_bytes(old))
+            self.assertEqual(er.load_question(path), old)
+        with self.assertRaises(er.QuestionError):  # v1 never carries the field
+            er.validate_question({**old, "sigma_model": "ewma-robust-hcal"})
+
+    def test_v2_question_names_the_model_in_hash_and_params(self):
+        hcal = question(sigma_model="ewma-robust-hcal")
+        self.assertEqual((hcal["schema"], hcal["sigma_model"]), ("question-v2", "ewma-robust-hcal"))
+        self.assertNotEqual(er.question_hash(hcal), er.question_hash(question()))
+        params = er.question_params(hcal)
+        self.assertEqual((params.sigma_model, params.schema), ("ewma-robust-hcal", "labels-v3"))
+        self.assertNotEqual(params.identity(), LabelParams().identity())  # snapshot, trials and plans differ
+        for bad in ({"sigma_model": "garch"}, {"sigma_model": None}):
+            with self.subTest(bad=bad), self.assertRaises(er.QuestionError):
+                er.validate_question({**hcal, **bad})
+        missing = dict(hcal)
+        del missing["sigma_model"]
+        with self.assertRaises(er.QuestionError):
+            er.validate_question(missing)
+
+    def test_hcal_question_selects_the_lb3h_release(self):
+        module = load_script()
+        requested = []
+
+        class Repo:
+            def published_release(self, tag):
+                requested.append(tag)
+                return None
+
+        for model, prefix in (("ewma", "lb1"), ("ewma-seasonal", "lb2"), ("ewma-robust", "lb3"),
+                              ("ewma-robust-hcal", "lb3h")):
+            with self.subTest(model=model), TemporaryDirectory() as directory:
+                with self.assertRaises(module.PublicError):
+                    module._download_symbol_labels(Repo(), question(sigma_model=model), "development",
+                                                   Path(directory), "BTCUSDT")
+                self.assertEqual(requested[-1], f"{prefix}-BTCUSDT-2024-01_2026-09-r2")
+        args = module.parse_args(["register", "--question-id", "q", "--horizon", "60", "--label-revision", "1",
+                                  "--data-revision", "1", "--seed", "7", "--sigma-model", "ewma-robust-hcal"])
+        self.assertEqual(args.sigma_model, "ewma-robust-hcal")
+        default = module.parse_args(["register", "--question-id", "q", "--horizon", "60", "--label-revision", "1",
+                                     "--data-revision", "1", "--seed", "7"])
+        self.assertIsNone(default.sigma_model)  # the family's fixed model, else ewma (question-v1)
+
+
 class ScriptArgumentTests(unittest.TestCase):
     def test_hidden_run_refused_by_arguments(self):
         module = load_script()

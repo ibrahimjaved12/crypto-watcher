@@ -26,10 +26,15 @@ on:
       family:
         description: "register: signal family"
         type: choice
-        options: [ta-baselines, order-flow, funding-basis, order-flow-v2]
+        options: [ta-baselines, order-flow, funding-basis, order-flow-v2, positioning-v1]
         default: ta-baselines
+      sigma_model:
+        description: "register: label sigma model (family-default: the family's fixed model, else ewma = lb1 question-v1; others write question-v2: lb2, lb3, lb3h)"
+        type: choice
+        options: [family-default, ewma, ewma-seasonal, ewma-robust, ewma-robust-hcal]
+        default: family-default
       horizon:
-        description: "register: horizon in minutes (15, 60 or 240; order-flow and order-flow-v2: 240; funding-basis: 240 or 60)"
+        description: "register: horizon in minutes (15, 60 or 240; order-flow, order-flow-v2, positioning-v1: 240; funding-basis: 240 or 60)"
         type: string
         default: "60"
       strategies:
@@ -93,6 +98,7 @@ jobs:
           QUESTION_ID: ${{ inputs.question_id }}
           SEGMENT: ${{ inputs.segment }}
           FAMILY: ${{ inputs.family }}
+          SIGMA_MODEL: ${{ inputs.sigma_model }}
           HORIZON: ${{ inputs.horizon }}
           STRATEGIES: ${{ inputs.strategies }}
           PLAN_ID: ${{ inputs.plan_id }}
@@ -108,7 +114,8 @@ jobs:
           case "$MODE" in
             register)
               args+=(--family "$FAMILY" --horizon "$HORIZON" --strategies "$STRATEGIES"
-                     --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION" --seed "$SEED") ;;
+                     --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION" --seed "$SEED")
+              if [ "$SIGMA_MODEL" != "family-default" ]; then args+=(--sigma-model "$SIGMA_MODEL"); fi ;;
             plan) ;;
             count)
               args+=(--segment "$SEGMENT") ;;

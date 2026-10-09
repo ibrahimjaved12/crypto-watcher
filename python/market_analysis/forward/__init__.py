@@ -6,13 +6,13 @@ Benchmark modules are only imported, never changed.
 """
 
 VERSIONS = {
-    "forward": "forward-v1",
+    "forward": "forward-v2",
     "bars_adapter": "bars-adapter-v1",
     "signals": "signals-v1",
     "ta": "ta-v1",
     "placebo": "placebo-v1",
-    "setups": "setups-v1",
-    "labels_schema": "labels-v2",
+    "setups": "setups-v2",
+    "labels_schema": "labels-v3",
     "outcomes": "outcomes-v1",
     "wallet": "wallet-v1",
 }

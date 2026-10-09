@@ -77,15 +77,20 @@ export function createForwardRepository(client: SupabaseClient): ForwardReposito
       fail(error, "run insert");
       return (data as { id: string }).id;
     },
-    async persistEvaluation(userId, runId, response: ForwardEvaluateResponse, previous) {
+    async persistEvaluation(userId, runId, response: ForwardEvaluateResponse, previous, candleVersions) {
       const owned = <T extends Record<string, unknown>>(rows: T[]) =>
         rows.map((row) => ({ ...row, user_id: userId, run_id: runId }));
-      const signals = await insert("forward_signals", owned(response.signals), "user_id,signal_id");
+      // P15: the decision candle version is a column only (the setup payload goes back to Python).
+      const version = (signalId: string) =>
+        candleVersions ? { candle_version: candleVersions.get(signalId) ?? null } : {};
+      const signals = await insert("forward_signals", owned(response.signals.map((signal) => ({
+        ...signal, ...version(signal.signal_id) }))), "user_id,signal_id");
       const setups = await insert("forward_setups", owned(response.setups.map((setup) => ({
         setup_id: setup.setup_id, signal_id: setup.signal_id, strategy_id: setup.strategy_id,
         version: setup.version, symbol: setup.symbol, side: setup.side, horizon_min: setup.horizon_min,
         signal_ms: setup.signal_ms, entry_ms: setup.entry_ms, k: setup.k, rr: setup.rr, status: setup.status,
-        params_hash: setup.params_hash, payload: setup }))), "user_id,setup_id");
+        params_hash: setup.params_hash, ...version(setup.signal_id), payload: setup }))),
+        "user_id,setup_id");
       const outcomes = await insert("forward_outcomes", owned(newOutcomeRows(response, previous)),
         "user_id,setup_id,status");
       const ledger = await insert("paper_ledger", owned(response.ledger.map((line) => ({

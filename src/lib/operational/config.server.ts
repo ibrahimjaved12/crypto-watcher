@@ -66,13 +66,14 @@ export function operationalDbConfig(
     url: url.origin,
     serviceRoleKey,
     candleRetentionDays: boundedInteger(env["OPERATIONAL_CANDLE_RETENTION_DAYS"], 8, 1, 30),
-    // 1m collector candles feed the forward engine (#239): 28-day seasonal profile + EWMA
-    // warm-up + 30-day signal history. Enforced by record_collector_candles (31..90).
+    // 1m collector candles feed the forward engine (#239): its ewma-robust-hcal sigma (P16)
+    // needs 60 days of completed horizon windows + the 28-day slot-factor warm-up + EWMA
+    // history (about 120 days). Enforced by record_collector_candles (31..200, default 140).
     minuteCandleRetentionDays: boundedInteger(
       env["OPERATIONAL_MINUTE_CANDLE_RETENTION_DAYS"],
-      62,
+      140,
       31,
-      90,
+      200,
     ),
     monitorRunRetentionDays: boundedInteger(
       env["OPERATIONAL_MONITOR_RUN_RETENTION_DAYS"],

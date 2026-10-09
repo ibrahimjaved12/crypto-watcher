@@ -122,13 +122,56 @@ the 8-day whole-day setting for these inputs. Retention is a resource bound: inc
 identical canonical inputs is science-neutral; reducing required coverage can make history explicitly
 unavailable and is not equivalent.
 
-**One-minute collector candles** have their own retention, **62 days** by default
-(`OPERATIONAL_MINUTE_CANDLE_RETENTION_DAYS`, allowed range 31–90 days, #239). The forward engine
-needs 28 days of intraday seasonal profile plus the EWMA warm-up, and 30 days of signal history,
-for each symbol. The bound is enforced in two places: by `record_collector_candles`
-(`p_minute_retention_days`) in the operational baseline, and by `operationalDbConfig`. At 1440
-rows per symbol per day that is about 90,000 rows per symbol; 15m, 1h and 4h candles keep the
-general day window.
+**One-minute collector candles** have their own retention, **140 days** by default
+(`OPERATIONAL_MINUTE_CANDLE_RETENTION_DAYS`, allowed range 31–200 days, #239 P16). The forward
+engine's `ewma-robust-hcal` sigma needs 60 days of completed horizon windows after the 28-day
+intraday slot-factor warm-up and the level warm-up: the forward job reads about 120 days of 1m
+candles per symbol, and on a run whose stored history starts later it backfills 130 days once from
+public `GET /fapi/v1/klines?interval=1m` (limit 1500 per request, paginated, `X-MBX-USED-WEIGHT-1M`
+aware) through `record_collector_candles`. The bound is enforced in two places: by
+`record_collector_candles` (`p_minute_retention_days`) in the operational baseline, and by
+`operationalDbConfig`. At 1440 rows per symbol per day that is about 200,000 rows per symbol;
+15m, 1h and 4h candles keep the general day window.
+
+## Candle conflicts and revisions (#239 P15)
+
+Owner policy (2026-10-10). A candle finalised from the WebSocket stream can differ from the REST
+candle for the same open time (missed trades after a disconnect; seen live as BTCUSDT 15m volume
+1006.95 from the stream vs 1007.427 from REST). Before this policy the immutability check raised for
+the whole recovery batch and every symbol went UNAVAILABLE.
+
+- **Stored candles are immutable.** `collector_recent_candles` rows are never overwritten; a
+  conflicting candle is never inserted.
+- **A conflict never fails the batch.** `record_collector_candles` writes every non-conflicting row
+  and appends each conflicting offer to `collector_candle_conflicts` (provider, instrument, symbol,
+  timeframe, open time, `stored` + `stored_transport` + `stored_hash`, `offered` +
+  `offered_transport` + `offered_hash`, `differing_fields`, `rest_side` = which side came from REST:
+  `stored`, `offered`, `both` or `neither`, `detected_at`). The unique key (identity + offered hash)
+  makes replays idempotent. The table is append-only (UPDATE/DELETE rejected) and is evidence, never
+  a data source.
+- **Health is not degraded.** `collector_health` gains `conflict_count_24h` and `last_conflict_at`,
+  refreshed after every candle batch and every health write. The status stays as measured (for
+  example LIVE); only structural problems (a gap, a missing candle) degrade it. The Control room
+  shows "conflicts: n" next to the feed chip.
+- **Research parity.** REST is what the Binance archive matches. `reconcile_conflicts(older_than_hours
+  DEFAULT 24, p_price_tolerance DEFAULT 0.002, p_volume_tolerance DEFAULT 0.02)` appends, for every
+  conflict older than the window whose offered side is REST (stored side is the stream) and whose
+  only differing fields are high/low/close/volume/quote_volume within the stated tolerance (prices:
+  relative difference at most 0.2 %; volumes: absolute difference at most 2 % of the larger value),
+  one row to the append-only `collector_candle_revisions` (`revision_id`, `conflict_id`, identity,
+  `fields` = the REST values and their hash, `source = 'rest'`, `supersedes` = the stored candle's
+  hash, `tolerance`). It never modifies `collector_recent_candles`; readers keep the original candle.
+  Conflicts outside the tolerance or without a REST side stay for manual review.
+- **Candle versions.** `collector_candle_hash(...)` ("candle-v1": md5 over identity, open time and
+  OHLCV text) identifies a candle's values. `get_collector_forward_minutes` returns it with every
+  1m row; the forward job stores, with every `forward_signals` / `forward_setups` row (application
+  database), `candle_version` = SHA-256 over the hashes of the 1m candles forming the decision
+  candle, so any decision can say which version it used and a later revision can be traced to it.
+  Hashes are never sent to Python and the forward engine's input is unchanged.
+
+`get_collector_candle_conflicts(p_hours, p_limit)` lists recent conflicts with their revision id.
+After pulling this change, reset the local operational database (the baseline is edited in place):
+`supabase db reset --local --workdir operational-db`.
 
 Monitor runs default to 30 days (allowed range 1–90 days), and inactive checkpoints expire after
 30 days. Writes perform database-wide bounded cleanup. Age-based retention and the protected

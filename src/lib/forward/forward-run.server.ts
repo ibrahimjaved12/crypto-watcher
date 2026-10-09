@@ -15,9 +15,20 @@ import {
  * append-only outcomes and ledger), and record one `paper_runs` row. Stale data (a gap in the
  * candle history, a missing last minute, or collector health not LIVE) records `skipped_stale`
  * and generates no signals. Dependencies are injected so the logic is testable without services.
+ *
+ * History (P16): the ewma-robust-hcal sigma needs about 120 days of 1m candles (60 days of
+ * completed horizon windows after the 28-day slot-factor and level warm-ups). When the stored
+ * history starts later than that, the older part is backfilled once from public REST klines
+ * (`backfillMinutes`, BACKFILL_DAYS) before reading again; until enough history exists Python emits
+ * no setups and reports `no_sigma`.
+ *
+ * Candle versions (P15): each signal and setup is stored with the candle_version of its decision
+ * candle (SHA-256 over the candle-v1 hashes of its 1m candles). Hashes are never sent to Python.
  */
 export const FORWARD_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT"] as const;
-export const FORWARD_HISTORY_DAYS = 60;
+export const FORWARD_HISTORY_DAYS = 120;
+/** P16: days of 1m history fetched from REST when the stored history starts too late. */
+export const BACKFILL_DAYS = 130;
 export const HOUR_MS = 3_600_000;
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
@@ -31,7 +42,8 @@ export interface ForwardRepository {
   openSetups(userId: string): Promise<StoredOpenSetup[]>;
   insertRun(userId: string, row: Record<string, unknown>): Promise<string>;
   persistEvaluation(userId: string, runId: string, response: ForwardEvaluateResponse,
-                    previous: Map<string, string | null>): Promise<Record<string, number>>;
+                    previous: Map<string, string | null>,
+                    candleVersions?: Map<string, string | null>): Promise<Record<string, number>>;
 }
 
 export type ForwardDeps = {
@@ -41,6 +53,8 @@ export type ForwardDeps = {
   callPython(body: unknown): Promise<unknown>;
   /** Public funding history from `startMs` (Binance `/fapi/v1/fundingRate`, limit 1000). */
   fetchFunding(symbol: string, startMs: number): Promise<FundingEvent[]>;
+  /** P16: fetch and record 1m REST candles for [startMs, endMs); returns candles offered. */
+  backfillMinutes?(symbol: string, startMs: number, endMs: number): Promise<number>;
   repository: ForwardRepository;
 };
 
@@ -114,7 +128,17 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
 
   const sinceMs = boundaryMs - FORWARD_HISTORY_DAYS * DAY_MS;
   const rows = new Map<string, ForwardMinuteRow[]>();
-  for (const symbol of symbols) rows.set(symbol, await deps.readMinutes(symbol, sinceMs, boundaryMs));
+  for (const symbol of symbols) {
+    let series = await deps.readMinutes(symbol, sinceMs, boundaryMs);
+    const missing = deps.backfillMinutes ? backfillRange(series, sinceMs, boundaryMs) : null;
+    if (missing && deps.backfillMinutes) {
+      // Best effort: a failed backfill leaves the history short (no_sigma / staleness say so).
+      const offered = await deps.backfillMinutes(symbol, boundaryMs - BACKFILL_DAYS * DAY_MS, missing.endMs)
+        .catch(() => 0);
+      if (offered) series = await deps.readMinutes(symbol, sinceMs, boundaryMs);
+    }
+    rows.set(symbol, series);
+  }
   const health = await deps.listHealth([...symbols]);
   const freshness = Object.fromEntries(
     symbols.map((symbol) => {
@@ -141,7 +165,7 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
     schema_version: 1,
     symbols: symbols.map((symbol) => ({
       symbol,
-      rows: rows.get(symbol),
+      rows: (rows.get(symbol) ?? []).map(({ candle_hash: _hash, ...row }) => row),
       funding: funding.get(symbol) ?? [],
       funding_available: funding.get(symbol) !== null,
     })),
@@ -161,10 +185,61 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
     wallet_config: response.wallet_config, wallet_state: response.wallet_state,
     assumptions: response.assumptions, reasons: response.reasons, freshness,
   });
-  const counts = await repository.persistEvaluation(input.userId, runId, response, previous);
+  const candleVersions = await decisionCandleVersions(response, rows);
+  const counts = await repository.persistEvaluation(input.userId, runId, response, previous, candleVersions);
   return fundingUnavailable.length
     ? { runKey, status: "ok", counts, reason: `funding_unavailable: ${fundingUnavailable.join(",")}` }
     : { runKey, status: "ok", counts };
+}
+
+/** The older range to backfill when stored 1m history starts after `requiredFromMs` (or is empty). */
+export function backfillRange(
+  rows: { open_time_ms: number }[],
+  requiredFromMs: number,
+  boundaryMs: number,
+): { startMs: number; endMs: number } | null {
+  const first = rows[0]?.open_time_ms ?? boundaryMs;
+  return first > requiredFromMs ? { startMs: requiredFromMs, endMs: first } : null;
+}
+
+/** Strategy timeframe of a forward strategy id (`name:minutes`, `placebo-v1:name:minutes`). */
+export function decisionMinutes(strategyId: string, horizonMin: number): number {
+  const match = /:(\d+)$/.exec(strategyId);
+  return match ? Number(match[1]) : horizonMin;
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * candle_version per signal id (P15): SHA-256 of `candle-version-v1|<symbol>|<minutes>|` plus the
+ * comma-joined candle-v1 hashes of the 1m candles in [signal_ms - minutes, signal_ms), oldest
+ * first; null when any of those candles (or its hash) is missing. Setups inherit their signal's.
+ */
+export async function decisionCandleVersions(
+  response: Pick<ForwardEvaluateResponse, "signals" | "setups">,
+  rows: Map<string, ForwardMinuteRow[]>,
+): Promise<Map<string, string | null>> {
+  const index = new Map<string, Map<number, string | undefined>>();
+  for (const [symbol, series] of rows)
+    index.set(symbol, new Map(series.map((row) => [row.open_time_ms, row.candle_hash])));
+  const out = new Map<string, string | null>();
+  for (const signal of response.signals) {
+    const minutes = decisionMinutes(signal.strategy_id, signal.horizon_min);
+    const byOpen = index.get(signal.symbol);
+    const hashes: string[] = [];
+    for (let open = signal.signal_ms - minutes * MINUTE_MS; open < signal.signal_ms; open += MINUTE_MS) {
+      const hash = byOpen?.get(open);
+      if (!hash) break;
+      hashes.push(hash);
+    }
+    out.set(signal.signal_id, hashes.length === minutes
+      ? await sha256Hex(`candle-version-v1|${signal.symbol}|${minutes}|${hashes.join(",")}`)
+      : null);
+  }
+  return out;
 }
 
 /** Outcome rows worth appending: a status not recorded before for that setup. */

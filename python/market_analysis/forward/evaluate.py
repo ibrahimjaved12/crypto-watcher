@@ -7,6 +7,9 @@ tradeable setup, wallet ledger entries and the new wallet state, plus versions, 
 ``processed_to_ms`` (the last decision time whose entry minute existed; pass it as the next
 ``from_ms``). Nothing is read from or written to any store.
 
+Sigma: ``ewma-robust-hcal`` (P16); a signal without that sigma yet emits no setup and the symbol's
+``reasons`` gets ``sigma: no_sigma: ...``.
+
 Funding: with ``funding_available: false`` for a symbol (the caller's funding fetch failed), a
 resolution whose window ``(entry, exit]`` contains a possible funding time (every UTC hour
 boundary: Binance settles on 1, 2, 4 or 8-hour boundaries) is reported as ``open`` and not
@@ -19,7 +22,6 @@ from fractions import Fraction
 from ..benchmark.bars import infer_tick
 from ..benchmark.funding import FundingSeries
 from ..benchmark.scan import next_compromised
-from ..benchmark.volatility import build_variance_deseasonalised, seasonal_factors
 from . import VERSIONS
 from .bars_adapter import ASSUMPTIONS, MINUTE_MS, bars_from_collector_rows
 from .outcomes import Resolution, resolve_setup
@@ -30,7 +32,7 @@ HOUR_MS = 3_600_000
 def crosses_funding_time(entry_ms: int, exit_ms: int) -> bool:
     """True when (entry_ms, exit_ms] contains a UTC hour boundary (a possible funding settlement)."""
     return exit_ms // HOUR_MS * HOUR_MS > entry_ms
-from .setups import FORWARD_PARAMS, Setup, build_setup
+from .setups import FORWARD_PARAMS, NO_SIGMA, ForwardSigma, Setup, build_setup
 from .signals import generate_signals
 from .wallet import WalletConfig, initial_state, liquidation_events, step
 
@@ -62,20 +64,24 @@ def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setu
         signals, symbol_reasons = generate_signals(symbol, bars, from_ms, to_ms, strategy_ids)
         reasons[symbol] = symbol_reasons
         processed_to[symbol] = min(to_ms, bars.end_ms - MINUTE_MS)
-        factors = seasonal_factors(bars)
-        variance = {days: build_variance_deseasonalised(bars, days, factors).variance
-                    for days in {FORWARD_PARAMS.half_life(h) for h in FORWARD_PARAMS.horizons}}
+        sigma = ForwardSigma(bars, FORWARD_PARAMS)
         tick = infer_tick(bars)
         nc = next_compromised(bars)
         new = []
+        no_sigma = 0
         for signal in signals:
-            setups = build_setup(signal, bars, factors, variance, tick=tick, next_comp=nc)
+            setups = build_setup(signal, bars, sigma, tick=tick, next_comp=nc)
+            if setups == NO_SIGMA:
+                no_sigma += 1
             out_signals.append(signal.to_dict())
             for setup in setups or ():
                 out_setups.append(setup.to_dict())
                 if setup.status == "T":
                     new.append((setup, None))
                     wallet_events.append({"type": "open", "ms": setup.entry_ms, "setup": setup.to_dict()})
+        if no_sigma:  # never another model: the signal stands, no setup is emitted (P16)
+            symbol_reasons["sigma"] = (f"no_sigma: {no_sigma} signal(s) before {FORWARD_PARAMS.sigma_model} "
+                                       "history exists (60 days of completed windows)")
         resolutions = {}
         for setup, previous in [pair for pair in saved if pair[0].symbol == symbol] + new:
             if setup.entry_ms < bars.start_ms:

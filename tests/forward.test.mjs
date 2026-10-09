@@ -199,3 +199,86 @@ test("Binance funding responses are validated", () => {
   assert.throws(() => contract.parseBinanceFunding("BTCUSDT", [rows[1], rows[0]]), /Invalid Binance funding/);
   assert.throws(() => contract.parseBinanceFunding("BTCUSDT", { code: -1 }), /Invalid Binance funding/);
 });
+
+// P16: one-time 1m backfill (public REST klines, paginated, weight aware) when history starts too late.
+const backfill = await import(await moduleUrl("../src/lib/forward/forward-backfill.server.ts", { zod: import.meta.resolve("zod") }));
+
+function kline(openTime, volume = "1.5") {
+  return [openTime, "100.0", "101.0", "99.0", "100.5", volume, openTime + 59_999, "150.75", 3, "0.7", "70.35", "0"];
+}
+
+test("1m klines are validated and only completed candles become REST collector candles", () => {
+  const rows = [kline(BOUNDARY - 120_000), kline(BOUNDARY - 60_000), kline(BOUNDARY)];
+  const candles = backfill.parseMinuteKlines("btcusdt", rows, BOUNDARY + 30_000, BOUNDARY + 30_000);
+  assert.equal(candles.length, 2, "the still-open minute is dropped");
+  assert.deepEqual(
+    [candles[0].symbol, candles[0].transport, candles[0].endpoint, candles[0].sourceEventTime, candles[0].timeframeMinutes],
+    ["BTCUSDT", "rest", "/fapi/v1/klines", null, 1],
+  );
+  assert.throws(() => backfill.parseMinuteKlines("BTCUSDT", [kline(BOUNDARY + 1)], NOW, NOW), /Invalid/);
+  assert.throws(() => backfill.parseMinuteKlines("BTCUSDT", [kline(BOUNDARY), kline(BOUNDARY)], NOW + HOUR, NOW), /order/);
+  assert.throws(() => backfill.parseMinuteKlines("BTCUSDT", [{ open: 1 }], NOW, NOW), /Invalid/);
+});
+
+test("the backfill pages oldest first, records through the collector write and pauses on high weight", async () => {
+  const pages = [];
+  const recorded = [];
+  const sleeps = [];
+  const start = BOUNDARY - 4000 * 60_000;
+  const deps = {
+    now: () => NOW,
+    async fetchPage(symbol, from, to) {
+      pages.push([from, to]);
+      const rows = [];
+      for (let open = from; open <= to && rows.length < backfill.KLINE_PAGE_LIMIT; open += 60_000) rows.push(kline(open));
+      return { rows, usedWeight: pages.length === 1 ? 1600 : 40 };
+    },
+    async record(candles) { recorded.push(candles.length); },
+    async sleep(ms) { sleeps.push(ms); },
+  };
+  const offered = await backfill.backfillMinuteHistory(deps, "BTCUSDT", start, BOUNDARY);
+  assert.equal(offered, 4000);
+  assert.deepEqual(pages.map(([from]) => from), [start, start + 1500 * 60_000, start + 3000 * 60_000]);
+  assert.ok(recorded.every((size) => size <= 1000), "each RPC batch stays within the 1000-row limit");
+  assert.equal(sleeps.length, 1, "one pause after the page that reported weight above the threshold");
+});
+
+test("a forward run backfills short history once and stores candle versions, never sent to Python", async () => {
+  const { calls, deps } = fakeDeps();
+  const reads = [];
+  const hashed = (rows) => rows.map((row) => ({ ...row, candle_hash: `${(row.open_time_ms / 60_000) % 1e6}`.padStart(32, "0") }));
+  deps.readMinutes = async (symbol, since) => { reads.push(since); return hashed(minutes(symbol, 120)); };
+  const backfills = [];
+  deps.backfillMinutes = async (symbol, startMs, endMs) => { backfills.push([symbol, startMs, endMs]); return 5; };
+  const persisted = [];
+  deps.repository.persistEvaluation = async (userId, runId, value, previous, versions) => {
+    persisted.push(versions);
+    return { signals: 1 };
+  };
+  const summary = await run.runForward(deps, { userId: USER, trigger: "hourly", strategyIds: ["ema_cross_20_50:60"], symbols: ["BTCUSDT"] });
+  assert.equal(summary.status, "ok");
+  assert.equal(run.FORWARD_HISTORY_DAYS, 120);
+  assert.deepEqual(backfills, [["BTCUSDT", BOUNDARY - run.BACKFILL_DAYS * 86_400_000, BOUNDARY - 120 * 60_000]]);
+  assert.equal(reads.length, 2, "history is read again after the backfill");
+  assert.ok(calls.python[0].symbols[0].rows.every((row) => !("candle_hash" in row)), "hashes never go to Python");
+  const version = persisted[0].get(hex("a"));
+  assert.match(version, /^[0-9a-f]{64}$/, "the 60m decision candle has all 60 one-minute hashes");
+  const again = await run.decisionCandleVersions(response(), new Map([["BTCUSDT", hashed(minutes("BTCUSDT", 120))]]));
+  assert.equal(again.get(hex("a")), version, "deterministic");
+  const gap = await run.decisionCandleVersions(response(), new Map([["BTCUSDT", hashed(minutes("BTCUSDT", 120, 90))]]));
+  assert.equal(gap.get(hex("a")), null, "an incomplete decision candle has no version");
+});
+
+test("the repository stores candle_version as a column, never inside the setup payload", async () => {
+  const writes = [];
+  const client = { from(table) {
+    return { async upsert(rows) { writes.push({ table, rows }); return { error: null }; } };
+  } };
+  const repository = createForwardRepository(client);
+  await repository.persistEvaluation(USER, "run-9", response(), new Map(), new Map([[hex("a"), "f".repeat(64)]]));
+  const signal = writes.find((item) => item.table === "forward_signals").rows[0];
+  const setup = writes.find((item) => item.table === "forward_setups").rows[0];
+  assert.equal(signal.candle_version, "f".repeat(64));
+  assert.equal(setup.candle_version, "f".repeat(64));
+  assert.ok(!("candle_version" in setup.payload));
+});

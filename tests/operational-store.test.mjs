@@ -716,36 +716,132 @@ test("collector persistence binds transport, endpoint and source event without c
   assert.ok(stored.received_at_ms < stored.source_event_at_ms);
 });
 
-test("a conflicting completed candle is quarantined: never overwritten, never fails the batch", async () => {
-  await db.query("DELETE FROM collector_recent_candles");
-  await db.query("DELETE FROM collector_candle_quarantine");
-  const opening = Math.floor(Date.now() / 60_000) * 60_000 - 5 * 60_000;
-  const candle = (index, overrides = {}) => ({
+// P15 candle conflict policy: stored candles are immutable, a conflict never fails the batch, it is
+// recorded once as append-only evidence, health only counts it, and revisions never touch the stored row.
+async function resetConflicts() {
+  await db.exec("TRUNCATE collector_candle_revisions, collector_candle_conflicts;");
+}
+
+function collectorCandle(opening, index, overrides = {}, minutes = 1) {
+  const duration = minutes * 60_000;
+  return {
     provider: "binance-usdm", instrument_id: "binance-usdm:BTCUSDT", symbol: "BTCUSDT",
-    native_symbol: "BTCUSDT", price_type: "trade", timeframe_minutes: 1,
-    open_time: new Date(opening + index * 60_000).toISOString(),
-    close_time: new Date(opening + index * 60_000 + 59_999).toISOString(),
+    native_symbol: "BTCUSDT", price_type: "trade", timeframe_minutes: minutes,
+    open_time: new Date(opening + index * duration).toISOString(),
+    close_time: new Date(opening + index * duration + duration - 1).toISOString(),
     open: 100, high: 102, low: 99, close: 101, volume: 2, quote_volume: 202,
     transport: "rest", endpoint: "/fapi/v1/klines", source_event_at: null,
-    received_at: new Date(opening + index * 60_000 + 60_100).toISOString(), ...overrides,
-  });
-  const count = async (table) =>
-    (await db.query(`SELECT count(*)::int AS count FROM ${table}`)).rows[0].count;
+    received_at: new Date(opening + index * duration + duration + 100).toISOString(), ...overrides,
+  };
+}
+
+const countRows = async (table) =>
+  (await db.query(`SELECT count(*)::int AS count FROM ${table}`)).rows[0].count;
+
+test("a batch with one conflicting row writes the rest and records exactly one conflict (idempotent replay)", async () => {
+  await resetConflicts();
+  const opening = Math.floor(Date.now() / 60_000) * 60_000 - 5 * 60_000;
+  const candle = (index, overrides) => collectorCandle(opening, index, overrides);
   await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([candle(0)])]);
   // Same identity, different volume (stream candle that missed trades vs. the REST candle).
   const conflicting = candle(0, { volume: 2.5, quote_volume: 252.5 });
-  const batch = JSON.stringify([conflicting, candle(1), candle(0)]);
+  const batch = JSON.stringify([conflicting, candle(1), candle(0), candle(2)]);
   const written = (await db.query("SELECT * FROM record_collector_candles($1,7)", [batch])).rows;
-  assert.equal(written.length, 1, "only the new, non-conflicting candle is written");
+  assert.equal(written.length, 2, "both new, non-conflicting candles are written");
   const rows = (await db.query("SELECT open_time, volume FROM collector_recent_candles ORDER BY open_time")).rows;
-  assert.deepEqual(rows.map((row) => row.volume), [2, 2], "the stored candle is never overwritten");
-  assert.equal(await count("collector_candle_quarantine"), 1);
-  const quarantined = (await db.query("SELECT stored, incoming FROM collector_candle_quarantine")).rows[0];
-  assert.equal(quarantined.stored.volume, 2);
-  assert.equal(quarantined.incoming.volume, 2.5);
-  // A retried recovery re-submits the same conflicting candle; it is not logged twice.
-  await db.query("SELECT record_collector_candles($1,7)", [batch]);
-  assert.equal(await count("collector_candle_quarantine"), 1);
+  assert.deepEqual(rows.map((row) => row.volume), [2, 2, 2], "the stored candle is never overwritten");
+  assert.equal(await countRows("collector_candle_conflicts"), 1);
+  const recorded = (await db.query("SELECT * FROM collector_candle_conflicts")).rows[0];
+  assert.equal(recorded.stored.volume, 2);
+  assert.equal(recorded.offered.volume, 2.5);
+  assert.deepEqual(recorded.differing_fields, ["volume", "quote_volume"]);
+  assert.equal(recorded.stored_transport, "rest");
+  assert.equal(recorded.rest_side, "both");
+  assert.match(recorded.stored_hash, /^[0-9a-f]{32}$/);
+  assert.notEqual(recorded.stored_hash, recorded.offered_hash);
+  // A retried recovery re-submits the same conflicting candle: no duplicate, still no failure.
+  const replay = (await db.query("SELECT * FROM record_collector_candles($1,7)", [batch])).rows;
+  assert.equal(replay.length, 0);
+  assert.equal(await countRows("collector_candle_conflicts"), 1);
+  await assert.rejects(db.query("DELETE FROM collector_candle_conflicts"), /append-only/);
+  await assert.rejects(db.query("UPDATE collector_candle_conflicts SET rest_side = 'stored'"), /append-only/);
+});
+
+test("the observed failure: stream 15m candle then a REST candle with another volume stays LIVE", async () => {
+  await resetConflicts();
+  await db.query("SELECT assign_collector_subscriptions($1)", [["BTCUSDT"]]);
+  const duration = 15 * 60_000;
+  const opening = Math.floor(Date.now() / duration) * duration - 2 * duration;
+  const stream = collectorCandle(opening, 0, {
+    volume: 1006.95, quote_volume: 1006.95 * 101, transport: "websocket",
+    endpoint: "wss://fstream.binance.com/market/stream",
+    source_event_at: new Date(opening + duration + 10).toISOString(),
+  }, 15);
+  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([stream])]);
+  await db.query("SELECT record_collector_health($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [
+    "binance-usdm:BTCUSDT", "BTCUSDT", 15, "LIVE", new Date().toISOString(),
+    new Date(opening).toISOString(), 250, 0, 0, null]);
+  // Recovery: REST batch with the same open time (different volume) and the next candle.
+  const rest = collectorCandle(opening, 0, { volume: 1007.427, quote_volume: 1007.427 * 101 }, 15);
+  const next = collectorCandle(opening, 1, {}, 15);
+  const written = (await db.query("SELECT * FROM record_collector_candles($1,7)",
+    [JSON.stringify([rest, next])])).rows;
+  assert.equal(written.length, 1, "the recovery batch does not fail; its other candle is written");
+  const stored = (await db.query(
+    "SELECT volume, transport FROM collector_recent_candles WHERE timeframe_minutes = 15 ORDER BY open_time")).rows;
+  assert.deepEqual(stored.map((row) => [row.volume, row.transport]), [[1006.95, "websocket"], [2, "rest"]]);
+  const conflict = (await db.query("SELECT * FROM collector_candle_conflicts")).rows[0];
+  assert.equal(conflict.rest_side, "offered");
+  assert.equal(conflict.offered_transport, "rest");
+  const health = (await db.query(
+    "SELECT * FROM collector_health WHERE symbol = 'BTCUSDT' AND timeframe_minutes = 15")).rows[0];
+  assert.equal(health.status, "LIVE", "a conflict never degrades health");
+  assert.equal(health.conflict_count_24h, 1);
+  assert.ok(health.last_conflict_at instanceof Date);
+  // A later health write keeps LIVE and keeps the counters.
+  await db.query("SELECT record_collector_health($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [
+    "binance-usdm:BTCUSDT", "BTCUSDT", 15, "LIVE", new Date().toISOString(),
+    new Date(opening + duration).toISOString(), 250, 0, 0, null]);
+  const again = (await db.query(
+    "SELECT status, conflict_count_24h FROM collector_health WHERE symbol = 'BTCUSDT' AND timeframe_minutes = 15")).rows[0];
+  assert.deepEqual([again.status, again.conflict_count_24h], ["LIVE", 1]);
+
+  // Reconcile: only conflicts older than the window; within tolerance; appended, never applied.
+  assert.equal((await db.query("SELECT reconcile_conflicts(24) AS n")).rows[0].n, 0);
+  assert.equal((await db.query("SELECT reconcile_conflicts(0) AS n")).rows[0].n, 1);
+  assert.equal((await db.query("SELECT reconcile_conflicts(0) AS n")).rows[0].n, 0, "idempotent");
+  const revision = (await db.query("SELECT * FROM collector_candle_revisions")).rows[0];
+  assert.equal(revision.source, "rest");
+  assert.equal(revision.supersedes, conflict.stored_hash);
+  assert.equal(revision.fields.volume, 1007.427);
+  assert.equal(revision.fields.candle_hash, conflict.offered_hash);
+  const after = (await db.query(
+    "SELECT volume, transport FROM collector_recent_candles WHERE timeframe_minutes = 15 ORDER BY open_time")).rows;
+  assert.deepEqual(after, stored, "a revision never modifies the stored candle");
+  await assert.rejects(db.query("DELETE FROM collector_candle_revisions"), /append-only/);
+});
+
+test("reconciliation skips conflicts outside the tolerance or without a REST offer", async () => {
+  await resetConflicts();
+  const opening = Math.floor(Date.now() / 60_000) * 60_000 - 10 * 60_000;
+  const ws = (index, overrides = {}) => collectorCandle(opening, index, {
+    transport: "websocket", endpoint: "wss://fstream.binance.com/market/stream",
+    source_event_at: new Date(opening + index * 60_000 + 60_010).toISOString(), ...overrides });
+  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([ws(0), ws(1), ws(2)])]);
+  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([
+    collectorCandle(opening, 0, { volume: 2.5, quote_volume: 252.5 }),  // REST, volume 25 % off: outside 2 %
+    collectorCandle(opening, 1, { open: 100.5 }),  // REST, the open differs: never reconciled
+    ws(2, { volume: 2.01, quote_volume: 203.01 }),  // stream vs stream: no REST side
+  ])]);
+  assert.equal(await countRows("collector_candle_conflicts"), 3);
+  assert.equal((await db.query("SELECT reconcile_conflicts(0) AS n")).rows[0].n, 0);
+  const sides = (await db.query("SELECT rest_side FROM collector_candle_conflicts ORDER BY open_time")).rows;
+  assert.deepEqual(sides.map((row) => row.rest_side), ["offered", "offered", "neither"]);
+  const versions = (await db.query(
+    "SELECT get_collector_forward_minutes('BTCUSDT', $1, $2) AS rows",
+    [new Date(opening).toISOString(), new Date(opening + 3 * 60_000).toISOString()])).rows[0].rows;
+  assert.equal(versions.length, 3);
+  assert.ok(versions.every((row) => row.length === 9 && /^[0-9a-f]{32}$/.test(row[8])));
 });
 
 test("collector TA candle RPC returns full ascending provenance for one frame", async () => {

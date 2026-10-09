@@ -10,11 +10,11 @@ from market_analysis import data_lake
 from market_analysis.benchmark.bars import MISSING, BarSeries
 from market_analysis.benchmark.labels import LabelParams, build_labels
 from market_analysis.benchmark.scan import next_compromised
-from market_analysis.benchmark.volatility import build_variance_deseasonalised, seasonal_factors
+from market_analysis.benchmark.robust_sigma import RobustSigma
 from market_analysis.forward import bars_adapter as ba
 from market_analysis.forward import signals as sg
 from market_analysis.forward.outcomes import resolve_setup
-from market_analysis.forward.setups import Setup, build_setup
+from market_analysis.forward.setups import FORWARD_PARAMS, NO_SIGMA, ForwardSigma, Setup, build_setup
 
 START = data_lake.month_bounds_ms("2025-01")[0]
 MINUTE = 60_000
@@ -143,14 +143,12 @@ class LabelEquivalenceTests(unittest.TestCase):
         cls.bars = walk_bars(17 * 1440, seed=5)
         cls.rows = [r for _, month in build_labels("BTCUSDT", cls.bars, ba_empty(cls.bars), PARAMS,
                                                    {"2025-01": TICK}) for r in month]
-        cls.factors = seasonal_factors(cls.bars)
-        cls.variance = {1: build_variance_deseasonalised(cls.bars, 1, cls.factors).variance}
+        cls.sigma = ForwardSigma(cls.bars, PARAMS)
         cls.nc = next_compromised(cls.bars)
 
     def setups_for(self, label_row):
         signal = sg.Signal("sig", "test:15", "test", "BTCUSDT", label_row.signal_ms, label_row.side, 15)
-        return build_setup(signal, self.bars, self.factors, self.variance, tick=TICK, params=PARAMS,
-                           next_comp=self.nc)
+        return build_setup(signal, self.bars, self.sigma, tick=TICK, params=PARAMS, next_comp=self.nc)
 
     def test_geometry_and_resolution_match_every_label_row(self):
         compared = traded = 0
@@ -216,6 +214,54 @@ class LabelEquivalenceTests(unittest.TestCase):
         self.assertLess(resolution.net_ur, 0)
         self.assertEqual(resolution.optimistic["outcome"], "T")
         self.assertGreater(resolution.optimistic["net_ur"], 0)
+
+
+HCAL = LabelParams(horizons=(15,), half_life_days=((15, 1),), step_minutes=((15, 15),), k_grid=(Fraction(2),),
+                   rr_grid=(Fraction(3, 2), Fraction(2)), sigma_model="ewma-robust-hcal")
+
+
+class HcalSigmaTests(unittest.TestCase):
+    """P16: forward setups use ewma-robust-hcal and emit nothing before 60 days of windows exist."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bars = walk_bars(96 * 1440, seed=11)
+        cls.sigma = ForwardSigma(cls.bars, HCAL)
+        cls.robust = RobustSigma(cls.bars, hcal=True)
+        cls.nc = next_compromised(cls.bars)
+
+    def setups_at(self, day: int, side=1):
+        signal_ms = START + day * 86_400_000 + 15 * MINUTE
+        signal = sg.Signal("sig", "test:15", "test", "BTCUSDT", signal_ms, side, 15)
+        return signal_ms, build_setup(signal, self.bars, self.sigma, tick=TICK, params=HCAL, next_comp=self.nc)
+
+    def test_forward_params_are_the_hcal_labels_v3_model(self):
+        self.assertEqual(FORWARD_PARAMS.sigma_model, "ewma-robust-hcal")
+        self.assertEqual(FORWARD_PARAMS.schema, "labels-v3")
+        self.assertIn("hcal", FORWARD_PARAMS.to_record()["robust"])
+
+    def test_refuses_to_emit_before_sixty_days_of_windows(self):
+        for day in (1, 30, 60):  # factors need 28 days, then 60 days of completed windows
+            _, setups = self.setups_at(day)
+            self.assertEqual(setups, NO_SIGMA, day)
+            self.assertIsNotNone(setups)
+
+    def test_sigma_is_the_label_engines_hcal_sigma(self):
+        signal_ms, setups = self.setups_at(94)
+        self.assertEqual(len(setups), 2)
+        expected = self.robust.sigma(15, 1, 15, signal_ms)
+        self.assertIsNotNone(expected)
+        multiplier = self.robust.multiplier(15, 1, 15, signal_ms)
+        for setup in setups:
+            if setup.status in ("T", "G", "N"):
+                self.assertEqual(setup.sigma, expected)
+            self.assertEqual(setup.factor_weight, multiplier)
+            self.assertEqual(setup.params_hash, HCAL.identity())
+
+    def test_sigma_inputs_must_match_the_params(self):
+        signal = sg.Signal("sig", "test:15", "test", "BTCUSDT", START + 94 * 86_400_000, 1, 15)
+        with self.assertRaises(ValueError):
+            build_setup(signal, self.bars, self.sigma, tick=TICK, params=PARAMS)
 
 
 def ba_empty(bars):
