@@ -35,13 +35,12 @@ counted separately) next to the driftless Brownian values of SPEC-1 section 4,
 continuous and with the Broadie-Glasserman-Kou widening ``0.5826 sqrt(step / h)``,
 plus the realized/predicted sigma ratio that reproduces the observed expiry share.
 
-Two verdicts per symbol x horizon x half-life, reported separately: ``sd_pass``
-(sd(z) in [0.9, 1.1]) and, for the 240 m row at the labels' half-life only,
-``barrier_expiry_pass`` (every (k, rr) pooled expiry share within
-``max(10 % x theory, 2 pp)`` of the BGK-widened theory for the label step; None
-elsewhere). ``pass`` requires both (a None barrier verdict does not count), so a
-FAIL shows which part failed. The absolute floor keeps low-expiry cells (k 1,
-rr 1: about 1 %) from failing on noise-level deviations.
+Two verdicts per symbol x horizon x half-life, reported separately: ``sd_ok``
+(sd(z) in SD_BAND) and ``barrier_ok`` (every (k, rr) pooled expiry share within
+``max(EXPIRY_TOLERANCE_REL x theory, EXPIRY_TOLERANCE_ABS)`` of the BGK-widened
+theory for the label step; set on every 240 m row from the lb1 labels, None for
+other horizons or when no labels were read). ``pass`` requires ``sd_ok`` and, where
+``barrier_ok`` is not None, ``barrier_ok``, so a FAIL shows which part failed.
 
 Floats are only statistics: the report renders them as fixed 6-decimal strings,
 so it stays canonical JSON (``canonical.canonical_bytes``) and hashable.
@@ -70,8 +69,11 @@ VR_QS = (3, 12, 48)
 QUANTILES = (1, 5, 25, 50, 75, 95, 99)
 Z_THRESHOLDS = (1, 2, 3)
 SD_BAND = (0.9, 1.1)
-EXPIRY_TOLERANCE = 0.10          # relative
-EXPIRY_ABS_FLOOR = 0.02          # absolute floor of the expiry tolerance (2 percentage points)
+# Barrier expiry cell tolerance: |observed - theory| <= max(REL * theory, ABS). The 10 % relative band
+# alone is about 0.1-0.3 percentage points on low-expiry cells (k 1, rr 1), below sampling noise and
+# the discrete-monitoring effect; the 2 percentage point floor keeps a calibrated sigma from failing there.
+EXPIRY_TOLERANCE_REL = 0.10
+EXPIRY_TOLERANCE_ABS = 0.02
 BARRIER_HORIZON = 240
 BARRIER_K = (1, 2)
 BGK_BETA = 0.5826                # -zeta(1/2) / sqrt(2 pi), Broadie-Glasserman-Kou
@@ -125,11 +127,12 @@ def z_stats_by_hour(z, hours) -> list[dict]:
 
 
 def expiry_within_tolerance(observed: float, theory: float) -> bool:
-    """|observed - theory| <= max(EXPIRY_TOLERANCE * theory, EXPIRY_ABS_FLOOR); False when observed is undefined."""
-    return isfinite(observed) and abs(observed - theory) <= max(EXPIRY_TOLERANCE * theory, EXPIRY_ABS_FLOOR)
+    """|observed - theory| <= max(EXPIRY_TOLERANCE_REL * theory, EXPIRY_TOLERANCE_ABS); False when undefined."""
+    return isfinite(observed) and abs(observed - theory) <= max(EXPIRY_TOLERANCE_REL * theory,
+                                                                 EXPIRY_TOLERANCE_ABS)
 
 
-def sd_pass(stats: dict) -> bool:
+def sd_ok(stats: dict) -> bool:
     return isfinite(stats["sd"]) and SD_BAND[0] <= stats["sd"] <= SD_BAND[1]
 
 
@@ -244,16 +247,16 @@ def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=N
     result = {"skipped": {"no_sigma": int(no_sigma.sum()), "entry_compromised": int(bad_entry.sum()),
                           "exit_compromised": int(bad_exit.sum())},
               "z": z_stats(z), "z_by_hour": z_stats_by_hour(z, hours)}
-    result["sd_pass"] = sd_pass(result["z"])
-    result["barrier_expiry_pass"] = None  # set by audit_symbol on the 240 m row at the labels' half-life
-    result["pass"] = result["sd_pass"]
+    result["sd_ok"] = sd_ok(result["z"])
+    result["barrier_ok"] = None  # set by set_barrier_verdict on 240 m rows
+    result["pass"] = result["sd_ok"]
     if vr_expanding is not None:
         ratio = vr_expanding[b]
         has = np.isfinite(ratio) & (ratio > 0)
         corrected = z[has] / np.sqrt(ratio[has])
         result["vr_corrected"] = {"q": horizon // BLOCK_MINUTES, "no_vr_estimate": int((~has).sum()),
                                   "z": z_stats(corrected), "z_by_hour": z_stats_by_hour(corrected, hours[has])}
-        result["vr_corrected"]["pass"] = sd_pass(result["vr_corrected"]["z"])
+        result["vr_corrected"]["sd_ok"] = sd_ok(result["vr_corrected"]["z"])
     return result
 
 
@@ -372,7 +375,7 @@ def barrier_summary(columns: dict, params: LabelParams) -> dict:
             b, a = float(k), float(k * rr)
             theory = {"target_first_no_limit": target_first_probability(a, b),
                       "expiry_continuous": expiry_probability(a, b, horizons),
-                      "expiry_discrete": expiry_probability(a + widening, b + widening, horizons)}
+                      "expiry_widened": expiry_probability(a + widening, b + widening, horizons)}
             sides = {}
             for name, group in (("long", parts[1]), ("short", parts[-1]), ("both", parts[1] + parts[-1])):
                 observed = _outcome_counts(group)
@@ -388,19 +391,26 @@ def barrier_summary(columns: dict, params: LabelParams) -> dict:
                                "non_trades": dict(sorted(non_trades.items())),
                                "purged": sum(len(column.purged_signal_ms) for column in group),
                                "implied_sigma_ratio_continuous": implied_sigma_ratio(shares["E"], a, b, horizons),
-                               "implied_sigma_ratio_discrete": implied_sigma_ratio(shares["E"], a, b, horizons,
+                               "implied_sigma_ratio_widened": implied_sigma_ratio(shares["E"], a, b, horizons,
                                                                                    widening)}
             expiry = sides["both"]["shares"]["E"]
-            within = expiry_within_tolerance(expiry, theory["expiry_discrete"])
+            within = expiry_within_tolerance(expiry, theory["expiry_widened"])  # judged on the widened theory
             rows.append({"k": exact_to_str(k), "rr": exact_to_str(rr), "theory": theory, "sides": sides,
                          "expiry_within_tolerance": bool(within)})
     return {"horizon_min": BARRIER_HORIZON, "half_life_days": params.half_life(BARRIER_HORIZON),
             "time_limit_multiple": horizons, "monitoring_step_min": params.step(BARRIER_HORIZON),
-            "discrete_widening": widening, "geometries": rows,
+            "discrete_widening_sigma_h": widening, "geometries": rows,
             "pass": bool(rows) and all(row["expiry_within_tolerance"] for row in rows)}
 
 
 # ---------------------------------------------------------------- per symbol / report
+
+
+def set_barrier_verdict(result: dict, barrier_ok: bool) -> None:
+    """Attach the barrier verdict to every 240 m row of a symbol result; pass = sd_ok and barrier_ok."""
+    for row in result["horizons"].get(str(BARRIER_HORIZON), {}).values():
+        row["barrier_ok"] = bool(barrier_ok)
+        row["pass"] = bool(row["sd_ok"]) and row["barrier_ok"]
 
 
 def audit_symbol(bars_dir, label_dir, symbol: str, segment: str, *, horizons=HORIZONS, half_lives=HALF_LIVES,
@@ -420,11 +430,7 @@ def audit_symbol(bars_dir, label_dir, symbol: str, segment: str, *, horizons=HOR
         columns = load_geometry_columns(label_dir, symbol, months, barrier_geometries(symbol, params), params,
                                         segment=segment)
         result["barriers"] = barrier_summary(columns, params)
-        label_half_life = str(params.half_life(BARRIER_HORIZON))
-        row = result["horizons"][str(BARRIER_HORIZON)].get(label_half_life)
-        if row is not None:
-            row["barrier_expiry_pass"] = result["barriers"]["pass"]
-            row["pass"] = row["sd_pass"] and row["barrier_expiry_pass"]
+        set_barrier_verdict(result, result["barriers"]["pass"])
     return result
 
 
@@ -445,7 +451,7 @@ def build_report(segment: str, symbols: dict, *, horizons, half_lives, params: L
                  created_utc: str, data_snapshot_id: str | None) -> dict:
     report = {"schema": SCHEMA, "segment": segment, "horizons": list(horizons), "half_lives": list(half_lives),
               "vr_qs": list(VR_QS), "sd_band": [str(SD_BAND[0]), str(SD_BAND[1])],
-              "expiry_tolerance": str(EXPIRY_TOLERANCE), "expiry_abs_floor": str(EXPIRY_ABS_FLOOR),
+              "expiry_tolerance_rel": str(EXPIRY_TOLERANCE_REL), "expiry_tolerance_abs": str(EXPIRY_TOLERANCE_ABS),
               "expiry_reference": "discrete (BGK widening for the label step)", "vr_min_q_sums": VR_MIN_RETURNS,
               "label_params_identity": params.identity(), "data_snapshot_id": data_snapshot_id,
               "code_commit": code_commit, "created_utc": created_utc, "symbols": _render(symbols)}
@@ -465,16 +471,24 @@ def report_paths(report: dict) -> tuple[str, str]:
 
 
 def public_lines(report: dict) -> list[str]:
-    """Public log: symbol, horizon, half-life, n and PASS/FAIL only (n = entries with a z value)."""
+    """Public log: symbol, horizon, half-life, n and verdicts only (n = entries with a z value).
+
+    ``SYMBOL h=H hl=D n=N sd=PASS|FAIL barrier=PASS|FAIL|NA PASS|FAIL`` (the last token is the overall verdict).
+    """
     check_report(report)
     lines = [f"calibration audit segment {report['segment']}"]
     for symbol, result in report["symbols"].items():
         for horizon, rows in result["horizons"].items():
             for half_life, row in rows.items():
-                verdict = "PASS" if row["pass"] else "FAIL"
-                lines.append(f"{symbol} h={int(horizon)} hl={int(half_life)} n={int(row['z']['n'])} {verdict}")
+                lines.append(f"{symbol} h={int(horizon)} hl={int(half_life)} n={int(row['z']['n'])} "
+                             f"sd={_verdict(row['sd_ok'])} barrier={_verdict(row['barrier_ok'])} "
+                             f"{_verdict(row['pass'])}")
     lines.append(f"report hash {report['report_hash']}")
     return lines
+
+
+def _verdict(value) -> str:
+    return "NA" if value is None else ("PASS" if value else "FAIL")
 
 
 def _cell(value) -> str:
@@ -499,10 +513,10 @@ def markdown(report: dict) -> str:
     lines = [f"# Sigma calibration audit ({report['segment']})", "",
              f"Report hash: `{report['report_hash']}`. Code commit `{report['code_commit']}`, "
              f"created {report['created_utc']}.", "",
-             f"PASS = sd verdict (sd(z) in [{report['sd_band'][0]}, {report['sd_band'][1]}]) and, for the "
-             f"{BARRIER_HORIZON} m row at the labels' half-life, barrier-expiry verdict (every expiry share within "
-             f"max({report['expiry_tolerance']} x theory, {report['expiry_abs_floor']}) of the BGK-widened Brownian "
-             "theory for the label step).", ""]
+             f"PASS = sd verdict (sd(z) in [{report['sd_band'][0]}, {report['sd_band'][1]}]) and, on "
+             f"{BARRIER_HORIZON} m rows, barrier verdict (every expiry share within "
+             f"max({report['expiry_tolerance_rel']} x theory, {report['expiry_tolerance_abs']}) of the BGK-widened "
+             "Brownian theory for the label step).", ""]
     for symbol, result in report["symbols"].items():
         lines += [f"## {symbol}", "", "### Variance ratio (segment, 5-minute log returns)", "",
                   "| q | VR | returns | q-sums |", "| --- | --- | --- | --- |"]
@@ -511,9 +525,8 @@ def markdown(report: dict) -> str:
         lines.append("")
         for horizon, rows in result["horizons"].items():
             for half_life, row in rows.items():
-                barrier = {True: "PASS", False: "FAIL", None: "n/a"}[row["barrier_expiry_pass"]]
-                lines += [f"### h = {horizon} m, half-life {half_life} d: {'PASS' if row['pass'] else 'FAIL'} "
-                          f"(sd {'PASS' if row['sd_pass'] else 'FAIL'}, barrier expiry {barrier})", "",
+                lines += [f"### h = {horizon} m, half-life {half_life} d: {_verdict(row['pass'])} "
+                          f"(sd {_verdict(row['sd_ok'])}, barrier {_verdict(row['barrier_ok'])})", "",
                           f"Entries {row['entries']}; skipped: " + ", ".join(
                               f"{name} {count}" for name, count in row["skipped"].items()) + ".", "",
                           _Z_HEADER, _Z_RULE, _z_row("EWMA", row["z"])]
@@ -531,10 +544,11 @@ def markdown(report: dict) -> str:
         barriers = result.get("barriers")
         if barriers is not None:
             lines += [f"### Barriers at {barriers['horizon_min']} m (labels' half-life {barriers['half_life_days']} d, "
-                      f"limit {barriers['time_limit_multiple']} x h, BGK widening {barriers['discrete_widening']}): "
+                      f"limit {barriers['time_limit_multiple']} x h, BGK widening {barriers['discrete_widening_sigma_h']} "
+                      f"sigma_h): "
                       f"{'PASS' if barriers['pass'] else 'FAIL'}", "",
                       "| k | rr | side | trades | T | S | E | L | X | amb | T/(T+S+L) | theory b/(a+b) | "
-                      "theory E cont. | theory E disc. | implied ratio cont. | implied ratio disc. | non-trades | "
+                      "theory E cont. | theory E widened | implied ratio cont. | implied ratio widened | non-trades | "
                       "purged |", "|" + " --- |" * 18]
             for row in barriers["geometries"]:
                 theory = row["theory"]
@@ -544,8 +558,8 @@ def markdown(report: dict) -> str:
                         f"| {row['k']}", row["rr"], side, str(item["trades"]),
                         *(_cell(shares[code]) for code in OUTCOME_CODES), str(item["ambiguous"]),
                         _cell(item["target_first_resolved"]), _cell(theory["target_first_no_limit"]),
-                        _cell(theory["expiry_continuous"]), _cell(theory["expiry_discrete"]),
-                        _cell(item["implied_sigma_ratio_continuous"]), _cell(item["implied_sigma_ratio_discrete"]),
+                        _cell(theory["expiry_continuous"]), _cell(theory["expiry_widened"]),
+                        _cell(item["implied_sigma_ratio_continuous"]), _cell(item["implied_sigma_ratio_widened"]),
                         ", ".join(f"{code} {count}" for code, count in item["non_trades"].items()) or "none",
                         str(item["purged"])]) + " |")
             lines.append("")

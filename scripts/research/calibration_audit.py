@@ -9,7 +9,7 @@ report (JSON + Markdown) to reports/calibration/ in the private repo. Labels, th
 label engine, the experiment ledger and existing reports are never written.
 
 Public output: per symbol x horizon x half-life only the symbol, horizon, half-life,
-n and PASS/FAIL (``calibration.public_lines``), the report hash, and allowlisted
+n and verdicts (sd, barrier, overall PASS/FAIL; ``calibration.public_lines``), the report hash, and allowlisted
 progress lines (experiment_run.Progress conventions: phase names, integer counts,
 seconds, peak memory, heartbeats, timing table in the job summary). The hidden
 segment is refused by the hidden guard before anything is downloaded. Library

@@ -4,7 +4,7 @@ run-name: "Calibration audit ${{ inputs.segment }}"
 # Sigma calibration audit (#220 slice A; scripts/research/calibration_audit.py). Read-only:
 # labels, the label engine and existing results are not changed. The full report goes to
 # reports/calibration/ in the private research-data repository; this public log and the
-# job summary carry only symbol, horizon, half-life, n and PASS/FAIL per row, the report
+# job summary carry only symbol, horizon, half-life, n and the sd, barrier and overall PASS/FAIL verdicts per row, the report
 # hash, and allowlisted progress lines. The hidden segment is not offered here and is
 # refused by the hidden guard in the script and the library.
 on:

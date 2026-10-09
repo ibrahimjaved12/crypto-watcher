@@ -41,8 +41,8 @@ class ZStatisticsTests(unittest.TestCase):
         self.assertGreater(row["z"]["n"], 2000)
         self.assertEqual(sum(row["skipped"].values()), 0)
         self.assertTrue(0.9 <= row["z"]["sd"] <= 1.1, row["z"]["sd"])
-        self.assertTrue(row["sd_pass"])
-        self.assertIsNone(row["barrier_expiry_pass"])  # only the 240 m row at the labels' half-life has one
+        self.assertTrue(row["sd_ok"])
+        self.assertIsNone(row["barrier_ok"])  # only 240 m rows carry a barrier verdict
         self.assertTrue(row["pass"])
         self.assertEqual(len(row["z_by_hour"]), 24)
         self.assertEqual(sum(hour["n"] for hour in row["z_by_hour"]), row["z"]["n"])
@@ -114,9 +114,15 @@ class BarrierTheoryTests(unittest.TestCase):
         self.assertAlmostEqual(cal.target_first_probability(3.0, 2.0), 0.4)
 
     def test_discrete_widening_raises_expiry(self):
-        widening = cal.discrete_widening(15, 240)
+        widening = cal.discrete_widening(15, 240)  # 0.5826 * sigma_step / sigma_h, sigma_step = sigma_h sqrt(15/240)
         self.assertAlmostEqual(widening, 0.5826 / 4)
         self.assertAlmostEqual(cal.expiry_probability(3 + widening, 2 + widening, 4), 0.60, delta=0.01)
+        # Widened barriers are further away, so more trades reach the time limit: every cell's share rises.
+        summary = cal.barrier_summary({}, LabelParams())
+        self.assertEqual(len(summary["geometries"]), 8)
+        for row in summary["geometries"]:
+            with self.subTest(k=row["k"], rr=row["rr"]):
+                self.assertGreater(row["theory"]["expiry_widened"], row["theory"]["expiry_continuous"])
 
     def test_implied_sigma_ratio_round_trip(self):
         observed = cal.expiry_probability(3 / 0.85, 2 / 0.85, 4)
@@ -147,23 +153,23 @@ class BarrierTheoryTests(unittest.TestCase):
         self.assertFalse(summary["pass"])  # the other geometries have no trades
 
 
-    def test_tiny_theory_cell_tolerates_noise_level_deviations(self):
+    def test_tiny_theory_cell_tolerates_one_point_deviation(self):
         widening = cal.discrete_widening(15, 240)
-        theory = cal.expiry_probability(1 + widening, 1 + widening, 4)  # k 1, rr 1: about 3 %
+        theory = cal.expiry_probability(1 + widening, 1 + widening, 4)  # k 1, rr 1: a few percent
         self.assertLess(theory, 0.05)
-        # 1.5 pp off is 50 % relative: it failed the relative-only rule, the 2 pp floor accepts it.
-        self.assertGreater(0.015, cal.EXPIRY_TOLERANCE * theory)
-        for observed in (theory - 0.015, theory + 0.015, theory + 0.0199):
+        # 1 pp is far beyond 10 % relative here: only the 2 pp absolute floor accepts it.
+        self.assertGreater(0.01, cal.EXPIRY_TOLERANCE_REL * theory)
+        for observed in (theory - 0.01, theory + 0.01):
             self.assertTrue(cal.expiry_within_tolerance(observed, theory), observed)
         self.assertFalse(cal.expiry_within_tolerance(theory + 0.021, theory))
 
-    def test_headline_cell_large_deviation_fails(self):
+    def test_headline_cell_deviation_beyond_band_fails(self):
         widening = cal.discrete_widening(15, 240)
         theory = cal.expiry_probability(3 + widening, 2 + widening, 4)  # k 2, rr 1.5: about 60 %
-        tolerance = max(cal.EXPIRY_TOLERANCE * theory, cal.EXPIRY_ABS_FLOOR)
-        self.assertAlmostEqual(tolerance, 0.060, delta=0.001)  # 10 % relative dominates the 2 pp floor here
-        # A 5 pp deviation is inside the 6.0 pp band; anything beyond it fails on either side.
-        self.assertTrue(cal.expiry_within_tolerance(theory + 0.05, theory))
+        tolerance = max(cal.EXPIRY_TOLERANCE_REL * theory, cal.EXPIRY_TOLERANCE_ABS)
+        # Here the 10 % relative term (about 6.0 pp) dominates the 2 pp floor, so a 5 pp deviation is
+        # still inside the band under this rule; deviations beyond about 6 pp fail on either side.
+        self.assertAlmostEqual(tolerance, 0.060, delta=0.001)
         for observed in (theory + 0.065, theory - 0.065, float("nan")):
             self.assertFalse(cal.expiry_within_tolerance(observed, theory), observed)
 
@@ -179,13 +185,31 @@ class ReportAndGuardTests(unittest.TestCase):
         self.assertEqual(lines[0], "calibration audit segment development")
         self.assertRegex(lines[-1], r"report hash [0-9a-f]{64}\Z")
         for line in lines[1:-1]:
-            self.assertRegex(line, r"[A-Z]+USDT h=(15|60|240) hl=[137] n=[0-9]+ (PASS|FAIL)\Z")
+            self.assertRegex(line, r"[A-Z]+USDT h=(15|60|240) hl=[137] n=[0-9]+ sd=(PASS|FAIL) "
+                                   r"barrier=(PASS|FAIL|NA) (PASS|FAIL)\Z")
+        self.assertIn(" barrier=NA ", lines[1])  # 15 m row: no barrier verdict
         json_name, md_name = cal.report_paths(report)
         self.assertTrue(json_name.startswith("reports/calibration/development__"))
         self.assertIn("## BTCUSDT", cal.markdown(report))
         report["segment"] = "validation"
         with self.assertRaises(ValueError):
             cal.public_lines(report)
+
+    def test_verdicts_are_independent(self):
+        row = {"z": {"n": 10}, "sd_ok": True, "barrier_ok": None, "pass": True}
+        result = {"horizons": {"240": {"7": dict(row)}, "60": {"7": dict(row)}}}
+        cal.set_barrier_verdict(result, False)
+        failed = result["horizons"]["240"]["7"]
+        self.assertEqual((failed["sd_ok"], failed["barrier_ok"], failed["pass"]), (True, False, False))
+        self.assertIsNone(result["horizons"]["60"]["7"]["barrier_ok"])
+        report = cal.build_report("development", {"BTCUSDT": result}, horizons=(60, 240), half_lives=(7,),
+                                  params=LabelParams(), code_commit="local", created_utc="2026-10-09T00:00:00Z",
+                                  data_snapshot_id=None)
+        lines = cal.public_lines(report)
+        self.assertIn("BTCUSDT h=240 hl=7 n=10 sd=PASS barrier=FAIL FAIL", lines)
+        self.assertIn("BTCUSDT h=60 hl=7 n=10 sd=PASS barrier=NA PASS", lines)
+        cal.set_barrier_verdict(result, True)
+        self.assertTrue(result["horizons"]["240"]["7"]["pass"])
 
     def test_hidden_segment_is_refused_by_the_guard(self):
         with self.assertRaises(HiddenStretchLocked):
