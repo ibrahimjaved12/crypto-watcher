@@ -2,6 +2,9 @@
 export type ReasonLabel = { short: string; help?: string; level?: "ok" | "wait" | "problem" };
 
 const reasons: Record<string, ReasonLabel> = {
+  "binance-usdm": { short: "Binance futures" },
+  "okx-usdt-swap": { short: "OKX futures" },
+  "kraken-futures": { short: "Kraken futures" },
   ok: { short: "Ready", level: "ok" },
   success: { short: "Completed", level: "ok" },
   failed: {

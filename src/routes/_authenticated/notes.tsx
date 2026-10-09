@@ -1,9 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Trash2 } from "lucide-react";
+import { NotebookPen, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { humanizeReason } from "@/lib/labels";
 import { AppShell } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -45,7 +46,7 @@ function NotesPage() {
       setSymbol("");
       queryClient.invalidateQueries({ queryKey: ["notes"] });
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(humanizeReason(e.message).short),
   });
 
   const remove = useMutation({
@@ -57,17 +58,18 @@ function NotesPage() {
     <AppShell>
       <h1 className="text-2xl font-semibold">Notes</h1>
       <p className="text-sm text-muted-foreground">
-        Analysis you want to keep. Stored with your account, never in the browser.
+        Keep your observations and trading ideas with the pairs you follow.
       </p>
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-[380px_1fr]">
+      <div className="mt-5 grid min-w-0 items-start gap-5 lg:grid-cols-[340px_minmax(0,1fr)]">
         <form
-          className="panel space-y-3 p-5"
+          className="panel min-w-0 space-y-4 p-5"
           onSubmit={(e) => {
             e.preventDefault();
             save.mutate();
           }}
         >
+          <h2 className="font-semibold">New note</h2>
           <div className="space-y-2">
             <Label htmlFor="note-title">Title</Label>
             <Input
@@ -106,11 +108,25 @@ function NotesPage() {
           </Button>
         </form>
 
-        <div className="space-y-3">
+        <div className="min-w-0 space-y-3">
+          {notes.isPending && (
+            <p role="status" className="panel p-5 text-sm text-muted-foreground">
+              Loading your notes…
+            </p>
+          )}
+          {notes.error && (
+            <div role="alert" className="panel p-5 text-sm text-bear">
+              {humanizeReason(notes.error.message).short}
+              <details className="text-xs">
+                <summary>Details</summary>
+                {notes.error.message}
+              </details>
+            </div>
+          )}
           {(notes.data ?? []).map((n) => (
-            <article key={n.id} className="panel p-5">
+            <article key={n.id} className="panel min-w-0 break-words p-5">
               <header className="flex items-start gap-3">
-                <div>
+                <div className="min-w-0">
                   <h2 className="font-semibold">{n.title}</h2>
                   <p className="num text-xs text-muted-foreground">
                     {n.symbol ? `${n.symbol} · ` : ""}
@@ -120,7 +136,7 @@ function NotesPage() {
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="ml-auto"
+                  className="ml-auto shrink-0"
                   aria-label="Delete note"
                   onClick={() => remove.mutate(n.id)}
                 >
@@ -133,7 +149,13 @@ function NotesPage() {
             </article>
           ))}
           {notes.data?.length === 0 ? (
-            <p className="panel p-6 text-sm text-muted-foreground">No notes yet.</p>
+            <div className="panel flex items-start gap-3 p-6 text-sm text-muted-foreground">
+              <NotebookPen className="size-7 shrink-0 text-primary" aria-hidden />
+              <p>
+                No notes yet. Save your first observation here; it will stay attached to your
+                account for your next review.
+              </p>
+            </div>
           ) : null}
         </div>
       </div>

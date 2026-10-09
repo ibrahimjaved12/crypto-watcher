@@ -27,13 +27,13 @@ export function QuoteCard({ quote, onRemove }: { quote: SymbolQuote; onRemove?: 
 
   return (
     <article className="panel flex min-w-0 flex-col gap-4 p-4 sm:p-5">
-      <header className="flex items-start gap-3">
+      <header className="flex flex-wrap items-start gap-3">
         <div>
           <h3 className="font-display text-lg font-semibold">
             {baseAsset(quote.symbol)}
             <span className="text-muted-foreground">/USDT</span>
           </h3>
-          <p className="num mt-1 text-xl font-semibold">
+          <p className="num mt-1 text-lg sm:text-xl font-semibold">
             {unavailable ? (
               <span className="text-base text-muted-foreground">Price unavailable</span>
             ) : (
