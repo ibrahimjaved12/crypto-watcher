@@ -268,6 +268,44 @@ becomes a new strategy version and is compared with the unchanged baseline on a
 later untouched period. Research includes successful trades, failures, expired
 setups, liquidations, and missed opportunities so it is not fitted only to losses.
 
+### Sigma calibration audit
+
+The barrier labels measure stops and targets in units of the label engine's
+point-in-time sigma, so before more strategies are judged on those labels, the
+audit checks that sigma is scaled correctly
+([#220](https://github.com/ibrahimjaved12/crypto-watcher/issues/220) slice A, SPEC-1
+sections 2 and 4). It is read-only: it does not change labels, the label engine or
+any existing result. The **Calibration audit** workflow
+(`.github/workflows/calibration-audit.yml`,
+`python/market_analysis/benchmark/calibration.py`) runs on the development or
+validation segment only; the hidden guard refuses the hidden segment. It covers the
+six symbols, horizons 15, 60 and 240 minutes, and EWMA half-lives of 1, 3 and 7 days,
+using the same label-step entries the label store uses:
+
+- `z = ln(open[e+h] / open[e]) / sigma_h`, where `sigma_h` is `horizon_sigma` at
+  signal time. The audit reports n, sd, mean |z|, quantiles (1 to 99%) and the
+  shares with |z| > 1, 2, 3, overall and by UTC hour.
+- The variance ratio `VR(q)` of valid, non-compromised 5-minute block returns,
+  for q = 3, 12 and 48.
+- A VR-corrected variant, `sigma_h * sqrt(VR(h/5))`, with VR estimated on an
+  expanding window (point in time).
+- At 240 m, the observed T/S/E/L/X shares from lb1 for k in {1, 2} and every rr.
+  These are shown next to the driftless Brownian theory (no-limit target-first
+  probability, and the expiry share at 4 x horizon, with continuous monitoring and
+  with Broadie-Glasserman-Kou widening), plus the realized/predicted sigma ratio
+  implied by the observed expiry share. Non-trade statuses are counted separately.
+
+**Pass criteria** per symbol x horizon x half-life: `sd_ok` (sd(z) in [0.9, 1.1])
+and, on every 240 m row, `barrier_ok`: each (k, rr) expiry share is within
+`max(10% x theory, 2 pp)` of the Brownian theory with Broadie-Glasserman-Kou
+discrete-monitoring widening for the 15-minute label step. The continuous theory
+is reported alongside. PASS requires both verdicts where `barrier_ok` applies.
+
+The full report (JSON + Markdown) is committed to `reports/calibration/` in the
+private research-data repo. The public log shows only symbol, horizon, half-life,
+n and the verdicts (`sd=PASS|FAIL barrier=PASS|FAIL|NA`, then the overall
+PASS/FAIL).
+
 ## Strategy specifications
 
 - [SPEC-0 master plan](strategy-specs/SPEC-0-master-plan.md)
