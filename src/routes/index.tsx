@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Activity, Bell, Clock, Database, LineChart, ShieldCheck } from "lucide-react";
+import { Activity, Bell, FlaskConical, NotebookPen, LineChart, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
@@ -10,13 +10,13 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Track crypto pairs, watch 5m to 24h price moves, and get threshold alerts saved to your private history. Monitoring keeps running when your browser is closed.",
+          "Market monitoring, technical snapshots, saved movement alerts and experimental strategy evaluation in one private workspace.",
       },
       { property: "og:title", content: "Crypto Watch — Personal Crypto Market Monitor" },
       {
         property: "og:description",
         content:
-          "Private watchlists, real exchange data, scheduled price monitoring and searchable alert history.",
+          "Private watchlists, real exchange data, technical snapshots and strategy forward evaluation.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -32,31 +32,31 @@ const FEATURES = [
     body: "Real public exchange prices and candles, with 5m, 15m, 1h, 4h and 24h changes per pair.",
   },
   {
-    icon: Clock,
-    title: "Runs without you",
-    body: "A scheduled backend check every 5 minutes — no browser tab required.",
+    icon: FlaskConical,
+    title: "A lab for your hypotheses",
+    body: "Follow strategy signals, paper trading and hypothetical daily portfolios. Experimental evaluation, with no validated trading edge.",
   },
   {
     icon: Bell,
     title: "Threshold alerts",
-    body: "Your own percentage threshold and time window, with a cooldown so you are not spammed.",
+    body: "Track rises and falls from a saved baseline, with your own threshold and a separate cooldown for each direction.",
   },
   {
-    icon: Database,
-    title: "Kept in a database",
-    body: "Watchlists, settings, alerts and notes are stored per account — not in your browser.",
+    icon: NotebookPen,
+    title: "Keep the context",
+    body: "Build a private record of market observations, with notes linked to the pairs you follow.",
   },
   {
     icon: ShieldCheck,
-    title: "Yours only",
-    body: "Every record is locked to your account. Manual trading only — nothing is ever executed.",
+    title: "Decisions stay with you",
+    body: "Review technical snapshots from completed candles. Rule scores describe market conditions; they are not win probabilities.",
   },
 ];
 
 function Landing() {
   return (
-    <div className="min-h-screen">
-      <header className="mx-auto flex max-w-6xl items-center px-4 py-5">
+    <div className="min-h-screen orbital-hero">
+      <header className="mx-auto flex max-w-7xl items-center px-4 py-5">
         <span className="flex items-center gap-2 font-display text-lg font-semibold">
           <Activity className="size-5 text-primary" aria-hidden />
           Crypto Watch
@@ -66,20 +66,21 @@ function Landing() {
         </Button>
       </header>
 
-      <section className="mx-auto max-w-6xl px-4 pb-16 pt-10 sm:pt-20">
-        <p className="num text-xs uppercase tracking-[0.2em] text-primary">
-          personal market monitoring
+      <section className="mx-auto max-w-7xl px-4 pb-16 pt-10 sm:pt-20">
+        <p className="text-xs font-medium uppercase tracking-[0.2em] text-primary">
+          Your market observatory
         </p>
         <h1 className="mt-4 max-w-3xl text-4xl font-semibold leading-tight sm:text-6xl">
-          Watch the market move. Decide the trades yourself.
+          A clearer view of the market. Space to think ahead.
         </h1>
         <p className="mt-5 max-w-2xl text-lg text-muted-foreground">
-          Crypto Watch follows your pairs on real exchange data, checks them on a schedule, and
-          records every threshold crossing with the exact rule and data source behind it.
+          Watch your markets, understand technical snapshots, and evaluate ideas as new data
+          arrives. Your watchlist, movement alerts, notes and Strategy Lab — in one focused
+          workspace.
         </p>
         <div className="mt-8 flex flex-wrap gap-3">
           <Button asChild size="lg">
-            <Link to="/auth">Get started</Link>
+            <Link to="/auth">Open your observatory</Link>
           </Button>
         </div>
 

@@ -1,3 +1,6 @@
+import { PageHeader, EmptyState, QueryNotice, TechnicalDetails } from "@/components/presentation";
+import { Badge } from "@/components/ui/badge";
+import { pairLabel, issueSummary } from "@/lib/presentation/labels";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -45,7 +48,7 @@ function NotesPage() {
       setSymbol("");
       queryClient.invalidateQueries({ queryKey: ["notes"] });
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(issueSummary(e.message)),
   });
 
   const remove = useMutation({
@@ -55,12 +58,12 @@ function NotesPage() {
 
   return (
     <AppShell>
-      <h1 className="text-2xl font-semibold">Notes</h1>
-      <p className="text-sm text-muted-foreground">
-        Analysis you want to keep. Stored with your account, never in the browser.
-      </p>
+      <PageHeader
+        title="Notes"
+        description="Keep a record of what you saw, what you expected, and what changed. Private to your account."
+      />
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-[380px_1fr]">
+      <div className="mt-5 grid items-start gap-6 lg:grid-cols-[340px_minmax(0,1fr)]">
         <form
           className="panel space-y-3 p-5"
           onSubmit={(e) => {
@@ -68,9 +71,11 @@ function NotesPage() {
             save.mutate();
           }}
         >
+          <h2 className="text-lg font-semibold">New observation</h2>
           <div className="space-y-2">
             <Label htmlFor="note-title">Title</Label>
             <Input
+              placeholder="What caught your attention?"
               id="note-title"
               required
               value={title}
@@ -95,6 +100,7 @@ function NotesPage() {
           <div className="space-y-2">
             <Label htmlFor="note-body">Note</Label>
             <Textarea
+              placeholder="Market context, a hypothesis, or a reminder for your next review…"
               id="note-body"
               rows={6}
               value={body}
@@ -102,18 +108,29 @@ function NotesPage() {
             />
           </div>
           <Button type="submit" className="w-full" disabled={save.isPending}>
-            Save note
+            {save.isPending ? "Saving…" : "Save note"}
           </Button>
         </form>
 
-        <div className="space-y-3">
+        <div className="space-y-4">
+          <QueryNotice pending={notes.isPending} error={notes.error} />
+          {(save.error || remove.error) && (
+            <div role="alert" className="text-sm text-destructive">
+              {issueSummary((save.error || remove.error)!.message)}
+              <TechnicalDetails>{(save.error || remove.error)!.message}</TechnicalDetails>
+            </div>
+          )}
           {(notes.data ?? []).map((n) => (
             <article key={n.id} className="panel p-5">
               <header className="flex items-start gap-3">
                 <div>
                   <h2 className="font-semibold">{n.title}</h2>
-                  <p className="num text-xs text-muted-foreground">
-                    {n.symbol ? `${n.symbol} · ` : ""}
+                  {n.symbol && (
+                    <Badge variant="outline" className="my-2">
+                      {pairLabel(n.symbol)}
+                    </Badge>
+                  )}
+                  <p className="text-xs text-muted-foreground">
                     {new Date(n.updated_at).toLocaleString()}
                   </p>
                 </div>
@@ -128,12 +145,17 @@ function NotesPage() {
                 </Button>
               </header>
               {n.body ? (
-                <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{n.body}</p>
+                <p className="mt-4 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground/85">
+                  {n.body}
+                </p>
               ) : null}
             </article>
           ))}
-          {notes.data?.length === 0 ? (
-            <p className="panel p-6 text-sm text-muted-foreground">No notes yet.</p>
+          {!notes.isPending && !notes.error && notes.data?.length === 0 ? (
+            <EmptyState title="Start your market journal">
+              Save your first observation, with an optional pair association, to revisit alongside
+              future market moves.
+            </EmptyState>
           ) : null}
         </div>
       </div>

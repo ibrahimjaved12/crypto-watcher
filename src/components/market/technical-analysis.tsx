@@ -1,3 +1,5 @@
+import { humanizeCode, sourceLabel, pairLabel, outcomeLabel } from "@/lib/presentation/labels";
+import { TechnicalDetails } from "@/components/presentation";
 import { useEffect, useState } from "react";
 import { automaticQueryOptions, logActivity } from "@/lib/activity-controls";
 import { useQuery } from "@tanstack/react-query";
@@ -40,7 +42,7 @@ export function TechnicalAnalysis() {
   return (
     <section className="mt-6 min-w-0 border-t border-border pt-5">
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-lg font-semibold">Technical analysis</h2>
+        <h2 className="text-lg font-semibold">Saved analysis history</h2>
         <div className="flex" role="group" aria-label="Timeframe">
           {[
             [0, "All"],
@@ -84,45 +86,48 @@ export function TechnicalAnalysis() {
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
         Completed candles only · 15m, 1h and 4h snapshots. Indicators describe price and volume;
-        agreement is not independent confirmation. Expand “Indicator explanations” for values and
-        rules. New v2 values appear after the next monitor check; older records retain their
-        original values.
+        agreement is not independent confirmation. Scores express rule-based bias, not win
+        probability. Expand a record for indicators and technical details.
       </p>
       {!automatic.enabled && (
         <p className="mt-2 text-xs text-muted-foreground">
-          Automatic TA refresh paused. Press Refresh after changing filters or pages.
+          Automatic history refresh paused. Press Refresh after changing filters or pages.
         </p>
       )}
       {history.isPending && !history.isFetching && !automatic.enabled ? (
         <p className="py-4 text-sm">Press Refresh to load analysis.</p>
       ) : history.isPending ? (
-        <p className="py-4 text-sm">Loading analysis...</p>
-      ) : history.error ? (
-        <p role="alert" className="py-4 text-sm text-destructive">
-          TA history unavailable: {history.error.message}
+        <p role="status" className="py-4 text-sm">
+          Loading analysis…
         </p>
+      ) : history.error ? (
+        <div role="alert" className="py-4 text-sm text-destructive">
+          Analysis history unavailable.<TechnicalDetails>{history.error.message}</TechnicalDetails>
+        </div>
       ) : !history.data?.length ? (
-        <p className="py-4 text-sm text-muted-foreground">No analysis recorded.</p>
+        <p className="py-4 text-sm text-muted-foreground">
+          No saved snapshots yet. A monitoring check can record completed-candle analysis when
+          enough history is available.
+        </p>
       ) : (
         <div
-          className="mt-3 max-h-96 overflow-auto"
+          className="mt-4 max-h-[34rem] overflow-auto"
+          role="region"
           tabIndex={0}
           aria-label="Technical analysis history"
         >
-          <table className="w-full min-w-[900px] text-left text-xs">
+          <table className="data-table">
             <thead className="sticky top-0 bg-background">
               <tr className="border-b border-border">
                 {[
-                  "Pair / exchange",
+                  "Pair / timeframe",
                   "Candle (local time)",
                   "Interpretation",
-                  "TA score",
-                  "EMA 20 / 50 / 200",
+                  "Rule score",
                   "RSI 14",
-                  "ATR 14 / %",
-                  "Volume change",
+                  "ATR volatility",
                   "Signals",
-                  "Forward return",
+                  "Outcome",
                 ].map((h) => (
                   <th className="p-2 font-medium" key={h}>
                     {h}
@@ -140,21 +145,16 @@ export function TechnicalAnalysis() {
                     ? (value as Record<string, unknown>)
                     : {};
                 };
-                const label = (value: unknown) =>
-                  typeof value === "string"
-                    ? value.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())
-                    : "Unavailable";
+                const label = humanizeCode;
                 const signed = (v: number | null) =>
                   v === null ? "Unavailable" : v > 0 ? `+${v}` : String(v);
                 return (
                   <tr key={row.id} className="border-b border-border/50 align-top">
                     <td className="p-2">
-                      {row.symbol}
+                      {pairLabel(row.symbol)}
+                      <div className="text-muted-foreground">{sourceLabel(row.source)}</div>
                       <div className="text-muted-foreground">
-                        {row.source} · {row.source_native_symbol}
-                      </div>
-                      <div className="text-muted-foreground">
-                        {row.timeframe === 15 ? "15m" : `${row.timeframe / 60}h`} · {row.version}
+                        {row.timeframe === 15 ? "15m" : `${row.timeframe / 60}h`}
                       </div>
                     </td>
                     <td className="p-2 whitespace-nowrap">
@@ -195,6 +195,31 @@ export function TechnicalAnalysis() {
                           ))}
                         </dl>
                       </details>
+                      <TechnicalDetails>
+                        <p>
+                          Source: {row.source} · {row.source_native_symbol}
+                        </p>
+                        <p>
+                          Versions: {row.version} · {row.strategy_version}
+                        </p>
+                        <p>
+                          EMA 20 / 50 / 200: {number(values["ema20"])} / {number(values["ema50"])} /{" "}
+                          {number(values["ema200"])}
+                        </p>
+                        <p>
+                          ATR 14: {number(values["atr14"])} · Volume change:{" "}
+                          {values["volume_change_pct"] == null
+                            ? "—"
+                            : `${number(values["volume_change_pct"])}%`}
+                        </p>
+                        <p>
+                          Classification: {row.classification} · outcome: {row.outcome_status}
+                        </p>
+                        <p>Reasons: {row.reasons.join(", ") || "none"}</p>
+                        <pre className="whitespace-pre-wrap">
+                          {JSON.stringify(row.factor_breakdown, null, 2)}
+                        </pre>
+                      </TechnicalDetails>
                     </td>
                     <td className="p-2 min-w-44">
                       <details>
@@ -213,9 +238,7 @@ export function TechnicalAnalysis() {
                                 : null;
                             return (
                               <div key={name} className="flex justify-between gap-3">
-                                <dt className="capitalize" title={label(value["reason"])}>
-                                  {name}
-                                </dt>
+                                <dt className="capitalize">{humanizeCode(name)}</dt>
                                 <dd>{signed(points)}</dd>
                               </div>
                             );
@@ -226,30 +249,21 @@ export function TechnicalAnalysis() {
                           volume only. MACD, EMA200, bands, ADX and range provide separate context
                           and add no points.
                         </p>
-                        <span className="text-muted-foreground">{row.strategy_version}</span>
                       </details>
-                    </td>
-                    <td className="p-2">
-                      {number(values["ema20"])} / {number(values["ema50"])} /{" "}
-                      {number(values["ema200"])}
                     </td>
                     <td className="p-2">{number(values["rsi14"])}</td>
                     <td className="p-2">
-                      {number(values["atr14"])}
                       <div className="text-muted-foreground">
                         {row.atr_pct === null ? "--" : `${row.atr_pct.toFixed(2)}%`}
                       </div>
                     </td>
-                    <td className="p-2">
-                      {values["volume_change_pct"] === null
-                        ? "--"
-                        : `${number(values["volume_change_pct"])}%`}
-                    </td>
                     <td className="p-2 max-w-52 break-words">
-                      {row.patterns.map((p) => p.replaceAll("_", " ")).join(", ") || "None"}
+                      {row.patterns.map(humanizeCode).join(", ") || "None"}
                     </td>
                     <td className="p-2">
-                      {row.return_pct === null ? row.outcome_status : `${number(row.return_pct)}%`}
+                      {row.return_pct === null
+                        ? outcomeLabel(row.outcome_status)
+                        : `${number(row.return_pct)}%`}
                     </td>
                   </tr>
                 );

@@ -1,3 +1,5 @@
+import { sourceLabel, issueSummary } from "@/lib/presentation/labels";
+import { TechnicalDetails } from "@/components/presentation";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, YAxis } from "recharts";
 import { AlertTriangle, Trash2 } from "lucide-react";
 
@@ -21,18 +23,12 @@ function changeClass(value: number | null | undefined): string {
   return "text-muted-foreground";
 }
 
-export function QuoteCard({
-  quote,
-  onRemove,
-}: {
-  quote: SymbolQuote;
-  onRemove?: () => void;
-}) {
+export function QuoteCard({ quote, onRemove }: { quote: SymbolQuote; onRemove?: () => void }) {
   const unavailable = !quote.ok || quote.price == null;
 
   return (
     <article className="panel flex flex-col gap-4 p-5">
-      <header className="flex items-start gap-3">
+      <header className="flex flex-wrap items-start gap-3">
         <div>
           <h3 className="font-display text-lg font-semibold">
             {baseAsset(quote.symbol)}
@@ -48,8 +44,8 @@ export function QuoteCard({
         </div>
         <div className="ml-auto flex items-center gap-2">
           {quote.source ? (
-            <Badge variant="secondary" className="num text-[10px]">
-              {quote.source}
+            <Badge variant="secondary" className="text-[10px]">
+              {sourceLabel(quote.source)}
             </Badge>
           ) : null}
           {onRemove ? (
@@ -66,17 +62,22 @@ export function QuoteCard({
       </header>
 
       {unavailable ? (
-        <p className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive-foreground">
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive-foreground"
+        >
           <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
-          <span>{quote.error ?? "No market data available."}</span>
-        </p>
+          <div className="min-w-0">
+            <p>{quote.error ? issueSummary(quote.error) : "No market data available."}</p>
+            {quote.error && <TechnicalDetails>{quote.error}</TechnicalDetails>}
+          </div>
+        </div>
       ) : (
         <>
           {quote.stale ? (
             <p className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn/10 p-2 text-xs text-warn">
               <AlertTriangle className="size-4" aria-hidden />
-              Data is stale — last candle{" "}
-              {new Date(quote.lastCandleAt!).toLocaleTimeString()}
+              Delayed data — last candle {new Date(quote.lastCandleAt!).toLocaleTimeString()}
             </p>
           ) : null}
 
@@ -127,7 +128,7 @@ export function QuoteCard({
               </AreaChart>
             </ResponsiveContainer>
           </div>
-          <p className="num text-[11px] text-muted-foreground">
+          <p className="text-[11px] text-muted-foreground">
             24h of 15m candles · updated {new Date(quote.fetchedAt).toLocaleTimeString()}
           </p>
         </>

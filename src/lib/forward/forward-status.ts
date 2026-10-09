@@ -1,26 +1,30 @@
+import { monitoringRunLabel, issueSummary, isStorageIssue } from "@/lib/presentation/labels";
 /** Plain-language reading of the forward job states for the dashboard header. */
 export type StatusLine = { level: "ok" | "wait" | "problem"; title: string; detail: string };
 
 type SignalRun = { status: string; reason: string | null; boundary_ms: number } | null | undefined;
 type TrendRun =
-  { status: string; reason: string | null; through_day_ms?: number | null } | null | undefined;
+  | { status: string; reason: string | null; through_day_ms?: number | null }
+  | null
+  | undefined;
 
 export function explainSignalEngine(run: SignalRun, now: number): StatusLine {
-  const title = "Signal engine (TA strategies, setups, paper wallet)";
+  const title = "Signal engine";
   if (!run) {
     return {
       level: "wait",
       title,
-      detail: "It has not run yet. Press “Run now”, or leave the local job running.",
+      detail: "No evaluation yet. Choose “Evaluate signals now” to check for setups.",
     };
   }
   const reason = run.reason ?? "";
-  if (/collector missing|no candles/i.test(reason)) {
+  if (isStorageIssue(reason)) return { level: "problem", title, detail: issueSummary(reason) };
+  if (/collector missing|no candles|insufficient_history/i.test(reason)) {
     return {
       level: "wait",
       title,
       detail:
-        "Waiting for market data: the Binance collector has not stored candles for these symbols yet, so no signals can be produced. This is normal right after a database reset or first start; start the app with the collector (npm run dev:local:all) and give it time to fill the history (each timeframe needs up to 260 completed candles).",
+        "Waiting for market history. The collector is still building enough completed-candle history for these strategies.",
     };
   }
   if (run.status === "ok") {
@@ -36,7 +40,7 @@ export function explainSignalEngine(run: SignalRun, now: number): StatusLine {
   return {
     level: "problem",
     title,
-    detail: `Last run ended “${run.status}”${reason ? `: ${reason}` : ""}.`,
+    detail: `${monitoringRunLabel(run.status)}. ${reason ? issueSummary(reason) : "Review technical details for this evaluation."}`,
   };
 }
 
@@ -45,31 +49,37 @@ export function explainTrendTrack(
   prospectiveDays: number,
   hasWeights: boolean,
 ): StatusLine {
-  const title = "Daily trend track (hypothetical portfolios)";
+  const title = "Daily portfolios";
   if (!run) {
-    return { level: "wait", title, detail: "It has not run yet. Press “Run trend now”." };
+    return {
+      level: "wait",
+      title,
+      detail: "No evaluation yet. Choose “Evaluate daily portfolios” to begin.",
+    };
   }
   const reason = run.reason ?? "";
+  if (isStorageIssue(reason)) return { level: "problem", title, detail: issueSummary(reason) };
   if (/funding/i.test(reason)) {
     return {
       level: "problem",
       title,
-      detail: `Recording daily positions${hasWeights ? " (today’s weights are saved)" : ""}, but the funding costs could not be fetched, so days cannot be scored yet. Cause: ${reason}`,
+      detail: `${hasWeights ? "Portfolio weights are saved, but funding" : "Funding"} costs could not be fetched, so days cannot be scored yet. Review the evaluation’s technical details.`,
     };
   }
   if (run.status !== "ok") {
     return {
       level: "problem",
       title,
-      detail: `Last run ended “${run.status}”${reason ? `: ${reason}` : ""}.`,
+      detail: `${monitoringRunLabel(run.status)}. ${reason ? issueSummary(reason) : "Review technical details for this evaluation."}`,
     };
   }
   return prospectiveDays === 0
     ? {
         level: "wait",
         title,
-        detail:
-          "Working. Today’s positions are recorded; the first scored day appears after the next daily close (00:00 UTC). Results stay empty until then.",
+        detail: hasWeights
+          ? "Weights are recorded. Waiting for the first scored day after a daily close (00:00 UTC)."
+          : "Waiting for portfolio observations. No current weights are available yet.",
       }
     : { level: "ok", title, detail: `Working. ${prospectiveDays} day(s) scored so far.` };
 }

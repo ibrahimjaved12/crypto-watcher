@@ -89,12 +89,16 @@ function AuthPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4 py-12">
-      <div className="panel w-full max-w-md p-6">
+    <div className="orbital-hero flex min-h-screen items-center justify-center px-4 py-12">
+      <div className="panel w-full max-w-md p-6 sm:p-8">
         <Link to="/" className="mb-6 flex items-center gap-2 font-display text-xl font-semibold">
           <Activity className="size-5 text-primary" aria-hidden />
           Crypto Watch
         </Link>
+        <h1 className="text-2xl font-semibold">Your market observatory</h1>
+        <p className="mb-6 mt-2 text-sm text-muted-foreground">
+          Sign in to your watchlist, saved alerts and Strategy Lab.
+        </p>
         <Tabs defaultValue="signin">
           <TabsList className="w-full">
             <TabsTrigger className="flex-1" value="signin">
@@ -132,7 +136,7 @@ function AuthPage() {
                   />
                 </div>
                 <Button type="submit" className="w-full" disabled={busy}>
-                  {tab === "signin" ? "Sign in" : "Create account"}
+                  {busy ? "Please wait…" : tab === "signin" ? "Sign in" : "Create account"}
                 </Button>
               </form>
             </TabsContent>

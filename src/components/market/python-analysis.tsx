@@ -1,3 +1,5 @@
+import { TechnicalDetails, EmptyState } from "@/components/presentation";
+import { humanizeCode, sourceLabel, pairLabel, issueSummary } from "@/lib/presentation/labels";
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
@@ -24,16 +26,11 @@ const at = (value: number | null) => (value === null ? "—" : new Date(value).t
 const duration = (ms: number) => (ms < 1_000 ? `${ms} ms` : `${(ms / 1_000).toFixed(1)}s`);
 const bytes = (value: number) =>
   value < 1_024 ? `${value} B` : `${(value / 1_024).toFixed(1)} KB`;
-const humanize = (value: string) => value.replaceAll("_", " ");
-const title = (value: string) => `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+const humanize = humanizeCode;
+const title = humanizeCode;
 const frame = (value: string) => (value === "15" ? "15m" : `${Number(value) / 60}h`);
 const signed = (value: number | null) =>
   value === null ? "—" : value > 0 ? `+${value}` : String(value);
-const sourceLabels: Record<string, string> = {
-  "binance-usdm": "Binance USDⓈ-M",
-  "kraken-futures": "Kraken Futures",
-  "okx-usdt-swap": "OKX USDT Swap",
-};
 const factorLabels: Record<string, string> = {
   trend: "Trend",
   momentum: "Momentum",
@@ -67,12 +64,12 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
   const metrics = result ? analysis.data?.metrics : undefined;
   return (
     <section
-      className="panel mt-5 space-y-3 p-4"
-      aria-label="Python analysis"
+      className="panel mt-8 space-y-4 p-5 sm:p-6"
+      aria-label="Pair Analysis"
       aria-busy={analysis.isPending}
     >
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="font-semibold">Python analysis</h2>
+        <h2 className="font-semibold">Pair Analysis</h2>
         <label className="sr-only" htmlFor="analysis-pair">
           Pair to analyze
         </label>
@@ -89,7 +86,7 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
           {!symbols.length && <option value="">No watched pairs</option>}
           {symbols.map((pair) => (
             <option key={pair} value={pair}>
-              {pair}
+              {pairLabel(pair)}
             </option>
           ))}
         </select>
@@ -98,41 +95,46 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
           disabled={!symbol || analysis.isPending}
           onClick={() => analysis.mutate(symbol)}
         >
-          {analysis.isPending ? "Analyzing…" : "Run Python analysis"}
+          {analysis.isPending ? "Analyzing…" : result ? "Refresh analysis" : "Analyze pair"}
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        Read-only snapshot using completed candles. This action does not save alerts or reset
-        baselines.
+        On-demand snapshot from completed market candles. This does not change your alerts or saved
+        baseline.
       </p>
+      {!result && !analysis.isPending && !analysis.isError && (
+        <EmptyState title={symbol ? "Ready to analyze" : "Add a pair to begin"}>
+          {symbol
+            ? "Choose a watched pair and analyze it for timeframe readings, rolling movement and your saved-baseline comparison."
+            : "Add a pair to your watchlist above to request a market snapshot."}
+        </EmptyState>
+      )}
       {analysis.isPending && (
         <p role="status" className="text-sm">
           Fetching candles and checking your saved baseline…
         </p>
       )}
       {analysis.isError && (
-        <p role="alert" className="text-sm text-destructive">
-          {analysis.error.message} Failure category:{" "}
-          {humanize(
-            String((analysis.error as Error & { category?: string }).category ?? "unknown"),
-          )}
-          .
-        </p>
+        <div role="alert" className="text-sm text-destructive">
+          {issueSummary(analysis.error.message)}
+          <TechnicalDetails>
+            {analysis.error.message} ·{" "}
+            {String((analysis.error as Error & { category?: string }).category ?? "unknown")}
+          </TechnicalDetails>
+        </div>
       )}
       {result && (
         <div className="space-y-4" aria-live="polite">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-muted/20 p-3">
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-lg font-semibold">{result.symbol}</span>
+                <span className="text-lg font-semibold">{pairLabel(result.symbol)}</span>
                 <Badge variant={result.status === "ok" ? "secondary" : "outline"}>
-                  {title(result.status)}
+                  {result.status === "ok" ? "Snapshot ready" : title(result.status)}
                 </Badge>
-                {result.source && (
-                  <Badge variant="outline">{sourceLabels[result.source] ?? result.source}</Badge>
-                )}
+                {result.source && <Badge variant="outline">{sourceLabel(result.source)}</Badge>}
               </div>
-              <p className="mt-1 text-sm">
+              <p className="num mt-2 text-2xl font-semibold">
                 {result.price === null ? "Price unavailable" : `${result.price} USDT`}
               </p>
               <p className="text-xs text-muted-foreground">Analyzed {at(result.as_of_ms)}</p>
@@ -144,12 +146,11 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
                   ? "unavailable"
                   : duration(Math.max(0, result.as_of_ms - result.observed_at_ms))}
               </p>
-              {metrics && <p>Request duration: {duration(metrics.duration_ms)}</p>}
             </div>
           </div>
           {result.failure_category && (
             <p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">
-              Failure category: {humanize(result.failure_category)}.
+              {issueSummary(result.failure_category)}
             </p>
           )}
           <div>
@@ -168,16 +169,16 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
                     <dl className="mt-2 divide-y divide-border/60">
                       {Object.entries(row.factor_breakdown).map(([name, factor]) => (
                         <div key={name} className="grid grid-cols-[1fr_auto_auto] gap-2 py-1">
-                          <dt className="text-muted-foreground">{factorLabels[name] ?? name}</dt>
+                          <dt className="text-muted-foreground">
+                            {factorLabels[name] ?? humanizeCode(name)}
+                          </dt>
                           <dd>{title(humanize(factor.classification))}</dd>
                           <dd className="num w-6 text-right">{signed(factor.contribution)}</dd>
                         </div>
                       ))}
                     </dl>
                   )}
-                  {row.reason && (
-                    <p className="mt-2 text-amber-400">{title(humanize(row.reason))}</p>
-                  )}
+                  {row.reason && <p className="mt-2 text-amber-400">{issueSummary(row.reason)}</p>}
                   <p className="mt-2 text-muted-foreground">
                     Candle closed {at(row.candle_close_time_ms)}
                   </p>
@@ -206,7 +207,9 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
                       ? row.threshold_met
                         ? "Threshold reached"
                         : "Below threshold"
-                      : row.reason && title(humanize(row.reason))}
+                      : row.reason
+                        ? issueSummary(row.reason)
+                        : "Unavailable"}
                   </p>
                   {row.status === "ok" && (
                     <p className="text-muted-foreground">
@@ -254,6 +257,20 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
             </summary>
             <div className="mt-3 space-y-2 break-words">
               <p>
+                Status: <code>{result.status}</code> · failure:{" "}
+                <code>{result.failure_category ?? "none"}</code> · source:{" "}
+                <code>{result.source ?? "none"}</code>
+              </p>
+              <p>
+                Observed {at(result.observed_at_ms)} · baseline status:{" "}
+                <code>{result.baseline.status}</code>
+              </p>
+              {Object.entries(result.rolling).map(([window, row]) => (
+                <p key={window}>
+                  {WINDOW_LABELS[Number(window)]}: {row.status} · {row.reason ?? "none"}
+                </p>
+              ))}
+              <p>
                 Requested instrument: <code>{result.instrument.id}</code>
               </p>
               <p>
@@ -266,8 +283,8 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
               </p>
               {metrics && (
                 <p>
-                  Payload: {bytes(metrics.request_bytes)} sent / {bytes(metrics.response_bytes)}{" "}
-                  received
+                  Request duration: {duration(metrics.duration_ms)} · Payload:{" "}
+                  {bytes(metrics.request_bytes)} sent / {bytes(metrics.response_bytes)} received
                 </p>
               )}
               {Object.entries(result.technical).map(([timeframe, row]) => (
@@ -294,7 +311,7 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
                 <p>
                   Provider attempts:{" "}
                   {result.attempts
-                    .map((attempt) => `${attempt.source}: ${humanize(attempt.reason)}`)
+                    .map((attempt) => `${attempt.source}: ${attempt.reason}`)
                     .join("; ")}
                 </p>
               )}
