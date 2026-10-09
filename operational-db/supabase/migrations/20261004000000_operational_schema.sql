@@ -247,6 +247,28 @@ CREATE INDEX sync_outbox_due
 
 CREATE INDEX sync_outbox_user ON public.sync_outbox(user_id, created_at DESC);
 
+-- A completed candle finalized from the live stream can differ from the REST candle for the same
+-- stable identity (for example after a disconnect, when trades were missed). The stored candle is
+-- never overwritten, and one conflicting row must not fail the whole batch (that took every symbol
+-- offline). The conflicting INCOMING candle is quarantined for inspection and the rest of the batch
+-- is written. The quarantine is a bounded diagnostic log, not a data source.
+CREATE TABLE public.collector_candle_quarantine (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  provider TEXT NOT NULL,
+  instrument_id TEXT NOT NULL,
+  price_type TEXT NOT NULL,
+  timeframe_minutes INTEGER NOT NULL,
+  open_time TIMESTAMPTZ NOT NULL,
+  stored JSONB NOT NULL,
+  incoming JSONB NOT NULL,
+  incoming_hash TEXT NOT NULL,
+  quarantined_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  -- A retried recovery re-submits the same conflicting candle; keep one row per distinct candle.
+  UNIQUE (provider, instrument_id, price_type, timeframe_minutes, open_time, incoming_hash)
+);
+CREATE INDEX collector_candle_quarantine_time
+  ON public.collector_candle_quarantine(quarantined_at DESC);
+
 CREATE INDEX collector_recent_candles_time
   ON public.collector_recent_candles(open_time DESC);
 
@@ -263,6 +285,7 @@ ALTER TABLE public.monitor_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.operational_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.sync_outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.collector_recent_candles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.collector_candle_quarantine ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.collector_health ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.collector_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.collector_leases ENABLE ROW LEVEL SECURITY;
@@ -613,36 +636,9 @@ BEGIN
     RAISE EXCEPTION 'Invalid collector candle batch';
   END IF;
 
-  IF EXISTS (
-    SELECT 1
-    FROM jsonb_to_recordset(p_rows) AS x(
-      provider TEXT, instrument_id TEXT, price_type TEXT, timeframe_minutes INTEGER,
-      open_time TIMESTAMPTZ, close_time TIMESTAMPTZ, open DOUBLE PRECISION,
-      high DOUBLE PRECISION, low DOUBLE PRECISION, close DOUBLE PRECISION,
-      volume DOUBLE PRECISION, quote_volume DOUBLE PRECISION,
-      source_event_at TIMESTAMPTZ
-    )
-    JOIN public.collector_recent_candles c USING (
-      provider, instrument_id, price_type, timeframe_minutes, open_time
-    )
-    WHERE c.close_time <> x.close_time OR c.open <> x.open OR c.high <> x.high
-      OR c.low <> x.low OR c.close <> x.close OR c.volume <> x.volume
-      OR c.quote_volume IS DISTINCT FROM x.quote_volume
-  ) THEN
-    RAISE EXCEPTION 'Conflicting collector candle for stable identity';
-  END IF;
-
   RETURN QUERY
-  WITH inserted AS (
-    INSERT INTO public.collector_recent_candles (
-      instrument_id, symbol, native_symbol, provider, endpoint, price_type,
-      timeframe_minutes, open_time, close_time, open, high, low, close, volume,
-      quote_volume, source_event_at, received_at, transport
-    )
-    SELECT x.instrument_id, x.symbol, x.native_symbol, x.provider, x.endpoint,
-      x.price_type, x.timeframe_minutes, x.open_time, x.close_time, x.open, x.high,
-      x.low, x.close, x.volume, x.quote_volume, x.source_event_at, x.received_at,
-      x.transport
+  WITH incoming AS (
+    SELECT x.*, to_jsonb(x) AS incoming_json
     FROM jsonb_to_recordset(p_rows) AS x(
       instrument_id TEXT, symbol TEXT, native_symbol TEXT, provider TEXT, endpoint TEXT,
       price_type TEXT, timeframe_minutes INTEGER, open_time TIMESTAMPTZ,
@@ -650,6 +646,45 @@ BEGIN
       low DOUBLE PRECISION, close DOUBLE PRECISION, volume DOUBLE PRECISION,
       quote_volume DOUBLE PRECISION, source_event_at TIMESTAMPTZ,
       received_at TIMESTAMPTZ, transport TEXT
+    )
+  ),
+  conflicting AS (
+    SELECT i.*, to_jsonb(c) - 'inserted_at' AS stored_json
+    FROM incoming i
+    JOIN public.collector_recent_candles c USING (
+      provider, instrument_id, price_type, timeframe_minutes, open_time
+    )
+    WHERE c.close_time <> i.close_time OR c.open <> i.open OR c.high <> i.high
+      OR c.low <> i.low OR c.close <> i.close OR c.volume <> i.volume
+      OR c.quote_volume IS DISTINCT FROM i.quote_volume
+  ),
+  quarantined AS (
+    INSERT INTO public.collector_candle_quarantine (
+      provider, instrument_id, price_type, timeframe_minutes, open_time,
+      stored, incoming, incoming_hash
+    )
+    SELECT k.provider, k.instrument_id, k.price_type, k.timeframe_minutes, k.open_time,
+      k.stored_json, k.incoming_json, md5(k.incoming_json::TEXT)
+    FROM conflicting k
+    ON CONFLICT DO NOTHING
+    RETURNING 1
+  ),
+  inserted AS (
+    INSERT INTO public.collector_recent_candles (
+      instrument_id, symbol, native_symbol, provider, endpoint, price_type,
+      timeframe_minutes, open_time, close_time, open, high, low, close, volume,
+      quote_volume, source_event_at, received_at, transport
+    )
+    SELECT i.instrument_id, i.symbol, i.native_symbol, i.provider, i.endpoint,
+      i.price_type, i.timeframe_minutes, i.open_time, i.close_time, i.open, i.high,
+      i.low, i.close, i.volume, i.quote_volume, i.source_event_at, i.received_at,
+      i.transport
+    FROM incoming i
+    WHERE NOT EXISTS (
+      SELECT 1 FROM conflicting k
+      WHERE k.provider = i.provider AND k.instrument_id = i.instrument_id
+        AND k.price_type = i.price_type AND k.timeframe_minutes = i.timeframe_minutes
+        AND k.open_time = i.open_time
     )
     ON CONFLICT (provider, instrument_id, price_type, timeframe_minutes, open_time)
       DO NOTHING
@@ -659,9 +694,10 @@ BEGIN
     || timeframe_minutes::TEXT || '|' || (extract(epoch FROM open_time) * 1000)::BIGINT::TEXT
   FROM inserted;
 
-  -- Keep the newest 260 completed candles per canonical series. That covers the TA
-  -- minimum history (200) and the bounded catch-up batch with margin, so a longer
-  -- frame (1h, 4h) keeps enough history even when it spans more than the day window.
+  DELETE FROM public.collector_candle_quarantine
+    WHERE quarantined_at < clock_timestamp() - INTERVAL '30 days';
+
+  -- Keep the newest 260 completed candles per canonical series (TA history and catch-up margin).
   DELETE FROM public.collector_recent_candles c
     WHERE c.close_time < clock_timestamp() - make_interval(days => CASE
             WHEN c.timeframe_minutes = 1 THEN p_minute_retention_days ELSE p_retention_days END)

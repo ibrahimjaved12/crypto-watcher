@@ -191,9 +191,16 @@ function fakeDeps({ fundingFails = false, reply = () => response() } = {}) {
         for (const bar of bars) {
           const key = `${bar.symbol}|${bar.day_ms}`;
           const stored = db.get(key);
-          if (stored && ["open", "high", "low", "close", "volume", "quote_volume"].some((k) => stored[k] !== bar[k])) {
+          if (
+            stored &&
+            ["open", "high", "low", "close", "volume", "quote_volume"].some(
+              (k) => stored[k] !== bar[k],
+            )
+          ) {
             // As the record RPC: a differing duplicate is an explicit conflict, never dropped silently.
-            throw new Error(`forward daily bar conflict: ${bar.symbol} ${new Date(bar.day_ms).toISOString().slice(0, 10)}`);
+            throw new Error(
+              `forward daily bar conflict: ${bar.symbol} ${new Date(bar.day_ms).toISOString().slice(0, 10)}`,
+            );
           }
         }
         for (const bar of bars) {
@@ -409,6 +416,78 @@ test("funding coverage requires all settlements through day-end, regardless of p
   );
 });
 
+test("funding settlement timestamps carry a few ms of jitter; a missed settlement is still caught", async () => {
+  const from = trend.TREND_TRACK_START_MS;
+  const step = trend.FUNDING_INTERVAL_MS; // 8h: 3 settlements cover one full day
+  // Real Binance fundingTime values observed a few ms off the exact 8h grid.
+  const jittered = [1, -2, 0].map((offsetMs, i) => ({
+    calc_time_ms: from + (i + 1) * step + offsetMs,
+    rate: "0",
+  }));
+  assert.equal(
+    (
+      await trend.fetchTrendFunding(
+        { fetchFunding: async () => jittered },
+        "BTCUSDT",
+        from,
+        from + DAY,
+      )
+    ).toMs,
+    from + DAY,
+  );
+  // The day-end settlement can land a few ms after the day boundary and must still count.
+  const lateEnd = jittered.map((e, i) =>
+    i === 2 ? { ...e, calc_time_ms: e.calc_time_ms + 4 } : e,
+  );
+  assert.equal(
+    (
+      await trend.fetchTrendFunding(
+        { fetchFunding: async () => lateEnd },
+        "BTCUSDT",
+        from,
+        from + DAY,
+      )
+    ).toMs,
+    from + DAY,
+  );
+  const snapped = await trend.fetchTrendFunding(
+    { fetchFunding: async () => jittered },
+    "BTCUSDT",
+    from,
+    from + DAY,
+  );
+  assert.deepEqual(
+    snapped.events.map((e) => e.calc_time_ms),
+    [1, 2, 3].map((i) => from + i * step),
+  );
+  // The previous boundary's settlement arriving 1 ms late must not shift the window.
+  const withBoundary = [{ calc_time_ms: from + 1, rate: "0" }, ...jittered];
+  assert.equal(
+    (
+      await trend.fetchTrendFunding(
+        { fetchFunding: async () => withBoundary },
+        "BTCUSDT",
+        from,
+        from + DAY,
+      )
+    ).toMs,
+    from + DAY,
+  );
+  // A genuinely missed settlement (off by a whole interval) must still be rejected.
+  const missed = [jittered[0], { calc_time_ms: jittered[1].calc_time_ms + step, rate: "0" }];
+  assert.equal(
+    (
+      await trend.fetchTrendFunding(
+        { fetchFunding: async () => missed },
+        "BTCUSDT",
+        from,
+        from + DAY,
+      )
+    ).toMs,
+    null,
+  );
+});
+
 test("adjusted funding intervals are validated; missing schedule metadata cannot finalize days", async () => {
   assert.deepEqual(
     contract.parseBinanceFundingIntervals([{ symbol: "BTCUSDT", fundingIntervalHours: 4 }]),
@@ -417,6 +496,15 @@ test("adjusted funding intervals are validated; missing schedule metadata cannot
   assert.throws(
     () => contract.parseBinanceFundingIntervals([{ symbol: "BTCUSDT", fundingIntervalHours: 0 }]),
     /Invalid/,
+  );
+  // The exchange-wide list contains non-ASCII and coin-margined rows; they are skipped.
+  assert.deepEqual(
+    contract.parseBinanceFundingIntervals([
+      { symbol: "币安人生USDT", fundingIntervalHours: 4 },
+      { symbol: "BCHUSD_PERP", fundingIntervalHours: 8 },
+      { symbol: "ETHUSDT", fundingIntervalHours: 8 },
+    ]),
+    { ETHUSDT: 8 * 3_600_000 },
   );
   const { deps, calls } = fakeDeps();
   deps.fetchFundingIntervals = async () => {
@@ -639,8 +727,16 @@ test("default user selection pages all accounts; UUID override remains optional"
 });
 
 test("the feed hands Python the committed candles; a differing duplicate is an explicit conflict", async () => {
-  const committed = { symbol: "BTCUSDT", day_ms: trend.TREND_HISTORY_START_MS, open: "100.0", high: "103.0",
-    low: "99.0", close: "101.5", volume: "10.5", quote_volume: "1050.25" };
+  const committed = {
+    symbol: "BTCUSDT",
+    day_ms: trend.TREND_HISTORY_START_MS,
+    open: "100.0",
+    high: "103.0",
+    low: "99.0",
+    close: "101.5",
+    volume: "10.5",
+    quote_volume: "1050.25",
+  };
   const db = new Map([[committed.day_ms, committed]]);
   const deps = {
     readDailyBars: async () => [...db.values()].sort((a, b) => a.day_ms - b.day_ms),
@@ -649,10 +745,19 @@ test("the feed hands Python the committed candles; a differing duplicate is an e
       return bars.length - 1;
     },
     fetchDailyKlines: async (symbol, startMs) =>
-      [startMs, startMs + DAY].map((day) => ({ ...committed, day_ms: day, close: day === startMs ? "999.0" : "101.5" })),
+      [startMs, startMs + DAY].map((day) => ({
+        ...committed,
+        day_ms: day,
+        close: day === startMs ? "999.0" : "101.5",
+      })),
   };
-  const feed = await trend.updateDailyFeed(deps, "BTCUSDT", trend.TREND_HISTORY_START_MS + DAY, NOW);
-  assert.equal(feed.bars[0].close, "101.5");  // the stored value, not the refetched copy
+  const feed = await trend.updateDailyFeed(
+    deps,
+    "BTCUSDT",
+    trend.TREND_HISTORY_START_MS + DAY,
+    NOW,
+  );
+  assert.equal(feed.bars[0].close, "101.5"); // the stored value, not the refetched copy
   assert.equal(feed.bars.length, 2);
   const { calls, deps: conflicting } = fakeDeps();
   const record = conflicting.recordDailyBars;
@@ -660,9 +765,16 @@ test("the feed hands Python the committed candles; a differing duplicate is an e
     await record(bars, at);
     throw new Error(`forward daily bar conflict: ${bars[0].symbol} 2025-08-07`);
   };
-  const summary = await trend.runForwardTrend(conflicting, { userId: USER, trigger: "daily", symbols: ["BTCUSDT"] });
+  const summary = await trend.runForwardTrend(conflicting, {
+    userId: USER,
+    trigger: "daily",
+    symbols: ["BTCUSDT"],
+  });
   assert.equal(summary.status, "partial");
-  assert.match(summary.reason, /forward daily bar conflict: BTCUSDT 2025-08-07 \(stored candle differs/);
+  assert.match(
+    summary.reason,
+    /forward daily bar conflict: BTCUSDT 2025-08-07 \(stored candle differs/,
+  );
   assert.equal(calls.python.length, 0);
 });
 

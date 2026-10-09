@@ -9,6 +9,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { summarizeOutcomes } from "@/lib/forward/forward-dashboard";
 import {
+  explainSignalEngine,
+  explainTrendTrack,
+  type StatusLine,
+} from "@/lib/forward/forward-status";
+import {
   getForwardDashboard,
   getTrendDashboard,
   runForwardNow,
@@ -61,6 +66,7 @@ function ForwardPage() {
         <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
           No strategy has a validated edge; this is a forward test.
         </div>
+        <StatusSummary signalRun={latest} />
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold">Forward test</h1>
           <Badge variant={fresh ? "default" : "destructive"}>
@@ -179,6 +185,36 @@ const pct = (value: number | null, digits = 3) =>
   value === null ? "—" : `${(value * 100).toFixed(digits)}%`;
 const day = (ms: number | null | undefined) =>
   ms === null || ms === undefined ? "—" : new Date(ms).toISOString().slice(0, 10);
+
+const dot = { ok: "bg-green-500", wait: "bg-amber-500", problem: "bg-red-500" } as const;
+
+function StatusSummary({ signalRun }: { signalRun: Parameters<typeof explainSignalEngine>[0] }) {
+  const load = useServerFn(getTrendDashboard);
+  const trend = useQuery({ queryKey: ["forward-trend-dashboard"], queryFn: () => load() });
+  const tracks = trend.data?.tracks ?? [];
+  const lines: StatusLine[] = [
+    explainSignalEngine(signalRun, Date.now()),
+    explainTrendTrack(
+      trend.data?.latestAttempt ?? trend.data?.latestRun,
+      Math.max(0, ...tracks.map((track) => track.prospectiveDays)),
+      tracks.some((track) => track.kind === "variant" && track.currentWeights),
+    ),
+  ];
+  return (
+    <div className="space-y-2 rounded-md border p-3 text-sm">
+      <div className="font-medium">Is it working?</div>
+      {lines.map((line) => (
+        <div key={line.title} className="flex gap-2">
+          <span className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${dot[line.level]}`} />
+          <div>
+            <div className="font-medium">{line.title}</div>
+            <div className="text-muted-foreground">{line.detail}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function TrendSection() {
   const queryClient = useQueryClient();
