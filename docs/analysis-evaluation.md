@@ -267,3 +267,8 @@ versioned low-volume conditions; test this specific minimum-volume rule.” The 
 becomes a new strategy version and is compared with the unchanged baseline on a
 later untouched period. Research includes successful trades, failures, expired
 setups, liquidations, and missed opportunities so it is not fitted only to losses.
+
+## Strategy specifications
+
+- [SPEC-0 master plan](strategy-specs/SPEC-0-master-plan.md)
+- [Strategy catalogue](strategy-catalogue.md)
