@@ -14,6 +14,7 @@ from .api_models import (
     AnalysisRequest,
     CompletedCandleSeriesRequest,
     ForwardEvaluateRequest,
+    ForwardTrendRequest,
     MovementBoundaryRequest,
     MovementClassificationRequest,
     MovementHistoryRegistrationRequest,
@@ -24,6 +25,7 @@ from .api_models import (
 )
 from .forward.bars_adapter import CollectorRowError
 from .forward.evaluate import evaluate as forward_evaluate
+from .forward.trend_track import evaluate as forward_trend
 from .movement_service import MovementBoundaryService
 from .service import analyze_request
 from .technical import calculate_technical_analysis
@@ -152,6 +154,14 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
             raise HTTPException(422, f"Invalid collector rows: {error.code}") from None
         except ValueError:
             raise HTTPException(409, "Forward evaluation could not be completed") from None
+
+    @app.post("/v1/forward/trend", dependencies=[Depends(authorize)])
+    async def forward_trend_route(body: ForwardTrendRequest):
+        # Daily trend portfolio track (#239 P14): stateless, bars and states in, rows and states out.
+        try:
+            return forward_trend(**body.evaluate_input())
+        except ValueError:
+            raise HTTPException(409, "Forward trend evaluation could not be completed") from None
 
     return app
 

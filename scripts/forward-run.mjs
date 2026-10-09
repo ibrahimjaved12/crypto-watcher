@@ -3,7 +3,8 @@ import { loadEnv, runnerImport } from "vite";
 
 // Local launcher for the forward-test job (#239). Same style as collector-worker.mjs: it loads
 // the TypeScript entrypoint through Vite's SSR module runner (local MVP only; production
-// scheduling is listed in docs/production-todo.md). Pass --once for a single evaluation.
+// scheduling is listed in docs/production-todo.md). Pass --once for a single evaluation, --trend for
+// the daily trend track job (#239 P14) instead of the hourly intraday harness.
 const root = resolve(import.meta.dirname, "..");
 
 function modeFromArgs() {
@@ -22,7 +23,8 @@ async function main() {
   for (const [name, value] of Object.entries(env)) {
     if (value !== undefined && process.env[name] === undefined) process.env[name] = value;
   }
-  await runnerImport("/src/worker/forward-run.ts", { root, mode, configFile: false, envDir: false });
+  const entry = process.argv.includes("--trend") ? "/src/worker/forward-trend-run.ts" : "/src/worker/forward-run.ts";
+  await runnerImport(entry, { root, mode, configFile: false, envDir: false });
 }
 
 try {

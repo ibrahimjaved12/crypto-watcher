@@ -7,6 +7,7 @@ import type {
   CollectorCandle,
   CollectorHealth,
   CollectorStorageDiagnostics,
+  ForwardDailyBar,
   ForwardMinuteRow,
   OperationalCheckpoint,
   OperationalMonitorRun,
@@ -99,6 +100,12 @@ const disabledStore: OperationalStore = {
   },
   async readForwardMinuteCandles() {
     return [];
+  },
+  async readForwardDailyBars() {
+    return [];
+  },
+  async recordForwardDailyBars() {
+    throw new Error("Operational forward daily bars are disabled");
   },
   async claimCollectorLease() {
     return false;
@@ -406,6 +413,38 @@ export function createOperationalStore(
           source_event_at_ms: sourceEventAt === null ? null : Number(sourceEventAt),
         } satisfies ForwardMinuteRow;
       });
+    },
+    async readForwardDailyBars(symbol, sinceMs) {
+      const { data, error } = await client.rpc("get_forward_daily_bars", {
+        p_symbol: symbol.toUpperCase(),
+        p_since: new Date(sinceMs).toISOString().slice(0, 10),
+      });
+      rpcError(error, "forward daily bar read");
+      if (!Array.isArray(data)) throw new Error("Invalid forward daily bar response");
+      return data.map((row: unknown) => {
+        if (!Array.isArray(row) || row.length !== 7 || row.slice(1).some((value) => typeof value !== "string")) {
+          throw new Error("Invalid forward daily bar row");
+        }
+        const [dayMs, open, high, low, close, volume, quoteVolume] = row as [number, ...string[]];
+        return { symbol: symbol.toUpperCase(), day_ms: Number(dayMs), open: open!, high: high!, low: low!,
+          close: close!, volume: volume!, quote_volume: quoteVolume! } satisfies ForwardDailyBar;
+      });
+    },
+    async recordForwardDailyBars(bars, receivedAtMs) {
+      if (bars.length === 0) return 0;
+      const receivedAt = new Date(receivedAtMs).toISOString();
+      let inserted = 0;
+      for (let i = 0; i < bars.length; i += 2000) {
+        const { data, error } = await client.rpc("record_forward_daily_bars", {
+          p_rows: bars.slice(i, i + 2000).map((bar) => ({
+            symbol: bar.symbol, day: new Date(bar.day_ms).toISOString().slice(0, 10), open: bar.open,
+            high: bar.high, low: bar.low, close: bar.close, volume: bar.volume, quote_volume: bar.quote_volume,
+            source: "binance-usdm:/fapi/v1/klines?interval=1d", received_at: receivedAt })),
+        });
+        rpcError(error, "forward daily bar insert");
+        inserted += Number(data ?? 0);
+      }
+      return inserted;
     },
     async readMovementCandleHistory(symbols, sinceMs, beforeBoundaryMs) {
       if (symbols.length === 0) return new Map<string, MovementCandle[]>();
