@@ -41,6 +41,8 @@ class ZStatisticsTests(unittest.TestCase):
         self.assertGreater(row["z"]["n"], 2000)
         self.assertEqual(sum(row["skipped"].values()), 0)
         self.assertTrue(0.9 <= row["z"]["sd"] <= 1.1, row["z"]["sd"])
+        self.assertTrue(row["sd_pass"])
+        self.assertIsNone(row["barrier_expiry_pass"])  # only the 240 m row at the labels' half-life has one
         self.assertTrue(row["pass"])
         self.assertEqual(len(row["z_by_hour"]), 24)
         self.assertEqual(sum(hour["n"] for hour in row["z_by_hour"]), row["z"]["n"])
@@ -127,7 +129,7 @@ class BarrierTheoryTests(unittest.TestCase):
         for geometry in cal.barrier_geometries("BTCUSDT", params):
             column = GeometryColumns(geometry)
             if geometry.k == 2 and geometry.rr_index == 1:
-                for outcome in "TTSEEEEX":
+                for outcome in "TTSEEEEEEX":
                     for name in column.data:
                         column[name].append(ord(outcome) if name == "outcome" else 0)
                 column.non_trades["signal_ms"].append(0)
@@ -136,13 +138,34 @@ class BarrierTheoryTests(unittest.TestCase):
         summary = cal.barrier_summary(columns, params)
         row = next(item for item in summary["geometries"] if item["k"] == "2" and item["rr"] == "3/2")
         both = row["sides"]["both"]
-        self.assertEqual(both["trades"], 16)
-        self.assertEqual(both["counts"]["E"], 8)
-        self.assertAlmostEqual(both["shares"]["E"], 0.5)
+        self.assertEqual(both["trades"], 20)
+        self.assertEqual(both["counts"]["E"], 12)
+        self.assertAlmostEqual(both["shares"]["E"], 0.6)
         self.assertEqual(both["non_trades"], {"V": 2})
         self.assertAlmostEqual(both["target_first_resolved"], 4 / 6)
-        self.assertTrue(row["expiry_within_tolerance"])  # 0.50 vs theory 0.55: within 10 % relative
+        self.assertTrue(row["expiry_within_tolerance"])  # 0.60 vs BGK-widened theory about 0.60
         self.assertFalse(summary["pass"])  # the other geometries have no trades
+
+
+    def test_tiny_theory_cell_tolerates_noise_level_deviations(self):
+        widening = cal.discrete_widening(15, 240)
+        theory = cal.expiry_probability(1 + widening, 1 + widening, 4)  # k 1, rr 1: about 3 %
+        self.assertLess(theory, 0.05)
+        # 1.5 pp off is 50 % relative: it failed the relative-only rule, the 2 pp floor accepts it.
+        self.assertGreater(0.015, cal.EXPIRY_TOLERANCE * theory)
+        for observed in (theory - 0.015, theory + 0.015, theory + 0.0199):
+            self.assertTrue(cal.expiry_within_tolerance(observed, theory), observed)
+        self.assertFalse(cal.expiry_within_tolerance(theory + 0.021, theory))
+
+    def test_headline_cell_large_deviation_fails(self):
+        widening = cal.discrete_widening(15, 240)
+        theory = cal.expiry_probability(3 + widening, 2 + widening, 4)  # k 2, rr 1.5: about 60 %
+        tolerance = max(cal.EXPIRY_TOLERANCE * theory, cal.EXPIRY_ABS_FLOOR)
+        self.assertAlmostEqual(tolerance, 0.060, delta=0.001)  # 10 % relative dominates the 2 pp floor here
+        # A 5 pp deviation is inside the 6.0 pp band; anything beyond it fails on either side.
+        self.assertTrue(cal.expiry_within_tolerance(theory + 0.05, theory))
+        for observed in (theory + 0.065, theory - 0.065, float("nan")):
+            self.assertFalse(cal.expiry_within_tolerance(observed, theory), observed)
 
 
 class ReportAndGuardTests(unittest.TestCase):

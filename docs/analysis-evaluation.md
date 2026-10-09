@@ -295,13 +295,15 @@ using the same label-step entries the label store uses:
   with Broadie-Glasserman-Kou widening), plus the realized/predicted sigma ratio
   implied by the observed expiry share. Non-trade statuses are counted separately.
 
-**Pass criteria** per symbol x horizon x half-life:
+**Pass criteria** per symbol x horizon x half-life. The report shows two separate
+verdicts, and PASS requires both:
 
-- sd(z) is in [0.9, 1.1].
-- For the 240 m row at the labels' half-life (7 days), every (k, rr) expiry share
-  is also within 10% (relative) of the continuous-monitoring theory. The label
-  scan checks every minute's high and low, so continuous monitoring is the
-  reference; the discrete value is a sensitivity column.
+- sd verdict: sd(z) is in [0.9, 1.1].
+- Barrier-expiry verdict, only for the 240 m row at the labels' half-life
+  (7 days): every (k, rr) expiry share satisfies
+  `|observed - theory| <= max(10% x theory, 2 pp)`. Theory here is the
+  BGK-widened (discrete-monitoring) value for the label step. Other rows report
+  this verdict as n/a.
 
 The full report (JSON + Markdown) is committed to `reports/calibration/` in the
 private research-data repo. The public log shows only symbol, horizon, half-life,

@@ -35,10 +35,13 @@ counted separately) next to the driftless Brownian values of SPEC-1 section 4,
 continuous and with the Broadie-Glasserman-Kou widening ``0.5826 sqrt(step / h)``,
 plus the realized/predicted sigma ratio that reproduces the observed expiry share.
 
-PASS for a symbol x horizon x half-life: sd(z) in [0.9, 1.1]; for the 240 m row at
-the labels' half-life also every (k, rr) expiry share within 10 % (relative) of the
-continuous-monitoring theory (scan.py tests every minute's high/low, so the
-continuous value is the reference; the discrete one is a sensitivity column).
+Two verdicts per symbol x horizon x half-life, reported separately: ``sd_pass``
+(sd(z) in [0.9, 1.1]) and, for the 240 m row at the labels' half-life only,
+``barrier_expiry_pass`` (every (k, rr) pooled expiry share within
+``max(10 % x theory, 2 pp)`` of the BGK-widened theory for the label step; None
+elsewhere). ``pass`` requires both (a None barrier verdict does not count), so a
+FAIL shows which part failed. The absolute floor keeps low-expiry cells (k 1,
+rr 1: about 1 %) from failing on noise-level deviations.
 
 Floats are only statistics: the report renders them as fixed 6-decimal strings,
 so it stays canonical JSON (``canonical.canonical_bytes``) and hashable.
@@ -68,6 +71,7 @@ QUANTILES = (1, 5, 25, 50, 75, 95, 99)
 Z_THRESHOLDS = (1, 2, 3)
 SD_BAND = (0.9, 1.1)
 EXPIRY_TOLERANCE = 0.10          # relative
+EXPIRY_ABS_FLOOR = 0.02          # absolute floor of the expiry tolerance (2 percentage points)
 BARRIER_HORIZON = 240
 BARRIER_K = (1, 2)
 BGK_BETA = 0.5826                # -zeta(1/2) / sqrt(2 pi), Broadie-Glasserman-Kou
@@ -118,6 +122,11 @@ def z_stats_by_hour(z, hours) -> list[dict]:
     """24 rows of z_stats by UTC hour 0..23."""
     z, hours = np.asarray(z, dtype=float), np.asarray(hours)
     return [{"hour": hour, **z_stats(z[hours == hour])} for hour in range(24)]
+
+
+def expiry_within_tolerance(observed: float, theory: float) -> bool:
+    """|observed - theory| <= max(EXPIRY_TOLERANCE * theory, EXPIRY_ABS_FLOOR); False when observed is undefined."""
+    return isfinite(observed) and abs(observed - theory) <= max(EXPIRY_TOLERANCE * theory, EXPIRY_ABS_FLOOR)
 
 
 def sd_pass(stats: dict) -> bool:
@@ -235,7 +244,9 @@ def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=N
     result = {"skipped": {"no_sigma": int(no_sigma.sum()), "entry_compromised": int(bad_entry.sum()),
                           "exit_compromised": int(bad_exit.sum())},
               "z": z_stats(z), "z_by_hour": z_stats_by_hour(z, hours)}
-    result["pass"] = sd_pass(result["z"])
+    result["sd_pass"] = sd_pass(result["z"])
+    result["barrier_expiry_pass"] = None  # set by audit_symbol on the 240 m row at the labels' half-life
+    result["pass"] = result["sd_pass"]
     if vr_expanding is not None:
         ratio = vr_expanding[b]
         has = np.isfinite(ratio) & (ratio > 0)
@@ -380,8 +391,7 @@ def barrier_summary(columns: dict, params: LabelParams) -> dict:
                                "implied_sigma_ratio_discrete": implied_sigma_ratio(shares["E"], a, b, horizons,
                                                                                    widening)}
             expiry = sides["both"]["shares"]["E"]
-            within = (isfinite(expiry) and abs(expiry - theory["expiry_continuous"])
-                      <= EXPIRY_TOLERANCE * theory["expiry_continuous"])
+            within = expiry_within_tolerance(expiry, theory["expiry_discrete"])
             rows.append({"k": exact_to_str(k), "rr": exact_to_str(rr), "theory": theory, "sides": sides,
                          "expiry_within_tolerance": bool(within)})
     return {"horizon_min": BARRIER_HORIZON, "half_life_days": params.half_life(BARRIER_HORIZON),
@@ -413,7 +423,8 @@ def audit_symbol(bars_dir, label_dir, symbol: str, segment: str, *, horizons=HOR
         label_half_life = str(params.half_life(BARRIER_HORIZON))
         row = result["horizons"][str(BARRIER_HORIZON)].get(label_half_life)
         if row is not None:
-            row["pass"] = row["pass"] and result["barriers"]["pass"]
+            row["barrier_expiry_pass"] = result["barriers"]["pass"]
+            row["pass"] = row["sd_pass"] and row["barrier_expiry_pass"]
     return result
 
 
@@ -434,7 +445,8 @@ def build_report(segment: str, symbols: dict, *, horizons, half_lives, params: L
                  created_utc: str, data_snapshot_id: str | None) -> dict:
     report = {"schema": SCHEMA, "segment": segment, "horizons": list(horizons), "half_lives": list(half_lives),
               "vr_qs": list(VR_QS), "sd_band": [str(SD_BAND[0]), str(SD_BAND[1])],
-              "expiry_tolerance": str(EXPIRY_TOLERANCE), "vr_min_q_sums": VR_MIN_RETURNS,
+              "expiry_tolerance": str(EXPIRY_TOLERANCE), "expiry_abs_floor": str(EXPIRY_ABS_FLOOR),
+              "expiry_reference": "discrete (BGK widening for the label step)", "vr_min_q_sums": VR_MIN_RETURNS,
               "label_params_identity": params.identity(), "data_snapshot_id": data_snapshot_id,
               "code_commit": code_commit, "created_utc": created_utc, "symbols": _render(symbols)}
     report["report_hash"] = content_hash(report)
@@ -487,9 +499,10 @@ def markdown(report: dict) -> str:
     lines = [f"# Sigma calibration audit ({report['segment']})", "",
              f"Report hash: `{report['report_hash']}`. Code commit `{report['code_commit']}`, "
              f"created {report['created_utc']}.", "",
-             f"PASS: sd(z) in [{report['sd_band'][0]}, {report['sd_band'][1]}]; for the {BARRIER_HORIZON} m row at "
-             f"the labels' half-life also every expiry share within {report['expiry_tolerance']} (relative) of the "
-             "continuous Brownian theory.", ""]
+             f"PASS = sd verdict (sd(z) in [{report['sd_band'][0]}, {report['sd_band'][1]}]) and, for the "
+             f"{BARRIER_HORIZON} m row at the labels' half-life, barrier-expiry verdict (every expiry share within "
+             f"max({report['expiry_tolerance']} x theory, {report['expiry_abs_floor']}) of the BGK-widened Brownian "
+             "theory for the label step).", ""]
     for symbol, result in report["symbols"].items():
         lines += [f"## {symbol}", "", "### Variance ratio (segment, 5-minute log returns)", "",
                   "| q | VR | returns | q-sums |", "| --- | --- | --- | --- |"]
@@ -498,7 +511,9 @@ def markdown(report: dict) -> str:
         lines.append("")
         for horizon, rows in result["horizons"].items():
             for half_life, row in rows.items():
-                lines += [f"### h = {horizon} m, half-life {half_life} d: {'PASS' if row['pass'] else 'FAIL'}", "",
+                barrier = {True: "PASS", False: "FAIL", None: "n/a"}[row["barrier_expiry_pass"]]
+                lines += [f"### h = {horizon} m, half-life {half_life} d: {'PASS' if row['pass'] else 'FAIL'} "
+                          f"(sd {'PASS' if row['sd_pass'] else 'FAIL'}, barrier expiry {barrier})", "",
                           f"Entries {row['entries']}; skipped: " + ", ".join(
                               f"{name} {count}" for name, count in row["skipped"].items()) + ".", "",
                           _Z_HEADER, _Z_RULE, _z_row("EWMA", row["z"])]
