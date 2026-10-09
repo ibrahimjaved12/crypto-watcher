@@ -425,6 +425,9 @@ class ForwardSymbolInput(InputModel):
     symbol: str = Field(min_length=5, max_length=16, pattern=r"^[A-Z0-9]+$")
     rows: Annotated[tuple[ForwardCollectorRow, ...], Field(min_length=1, max_length=100_000)]
     funding: Annotated[tuple[ForwardFundingEvent, ...], Field(max_length=1000)] = ()
+    # False when the caller could not fetch funding history: windows that contain a possible funding
+    # time are then left open instead of being finalised with zero funding.
+    funding_available: bool = True
 
 
 class ForwardOpenSetup(InputModel):
@@ -453,7 +456,8 @@ class ForwardEvaluateRequest(InputModel):
         return {
             "symbols": [{"symbol": item.symbol, "rows": [row.model_dump() for row in item.rows],
                          "funding": [{"calc_time_ms": f.calc_time_ms, "rate": str(f.rate),
-                                      "interval_hours": f.interval_hours} for f in item.funding]}
+                                      "interval_hours": f.interval_hours} for f in item.funding],
+                         "funding_available": item.funding_available}
                         for item in self.symbols],
             "strategy_ids": list(self.strategy_ids), "from_ms": self.from_ms, "to_ms": self.to_ms,
             "open_setups": [item.model_dump() for item in self.open_setups], "wallet_state": self.wallet_state,

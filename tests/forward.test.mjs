@@ -71,8 +71,8 @@ function minutes(symbol, count = 120, gapAt = -1) {
   return rows;
 }
 
-function fakeDeps({ status = "LIVE", gapAt = -1 } = {}) {
-  const calls = { python: [], runs: [], persisted: [] };
+function fakeDeps({ status = "LIVE", gapAt = -1, fundingFails = false } = {}) {
+  const calls = { python: [], runs: [], persisted: [], funding: [] };
   const runs = new Map();
   const repository = {
     async findRun(userId, runKey) { return runs.get(`${userId}|${runKey}`) ?? null; },
@@ -90,6 +90,11 @@ function fakeDeps({ status = "LIVE", gapAt = -1 } = {}) {
     readMinutes: async (symbol) => minutes(symbol, 120, gapAt),
     listHealth: async (symbols) => symbols.map((symbol) => ({ symbol, timeframe_minutes: 1, status })),
     callPython: async (body) => { calls.python.push(body); return response(); },
+    fetchFunding: async (symbol, startMs) => {
+      calls.funding.push({ symbol, startMs });
+      if (fundingFails) throw new Error("HTTP 429");
+      return [{ calc_time_ms: BOUNDARY - 8 * HOUR, rate: "0.0001" }];
+    },
     repository,
   } };
 }
@@ -155,4 +160,42 @@ test("outcome summary: sample size first and the placebo control beside each str
   assert.deepEqual([summary[0].n, summary[0].wins, summary[0].ambiguous, summary[0].meanNetR], [2, 1, 1, 0.5]);
   assert.deepEqual(summary[0].placebo, { n: 1, meanNetR: -1 });
   assert.equal(summary[1].placebo, null);
+});
+
+test("funding is fetched once per symbol per run and passed to Python", async () => {
+  const { calls, deps } = fakeDeps();
+  const summary = await run.runForward(deps, { userId: USER, trigger: "hourly", strategyIds: ["x"], symbols: ["BTCUSDT", "ETHUSDT"] });
+  assert.equal(summary.status, "ok");
+  assert.deepEqual(calls.funding.map((c) => c.symbol), ["BTCUSDT", "ETHUSDT"]);
+  assert.equal(calls.funding[0].startMs, BOUNDARY - 2 * HOUR);  // from_ms (boundary - 1 h) minus 1 h
+  const body = calls.python[0];
+  assert.deepEqual(body.symbols[0].funding, [{ calc_time_ms: BOUNDARY - 8 * HOUR, rate: "0.0001" }]);
+  assert.equal(body.symbols[0].funding_available, true);
+  const cache = new Map();
+  let fetched = 0;
+  const counting = { fetchFunding: async () => { fetched++; return []; } };
+  await run.fetchRunFunding(counting, ["BTCUSDT"], 0, cache);
+  await run.fetchRunFunding(counting, ["BTCUSDT"], 0, cache);
+  assert.equal(fetched, 1);  // the per-run cache answers the second request
+});
+
+test("a failed funding fetch never fills zeros and records funding_unavailable", async () => {
+  const { calls, deps } = fakeDeps({ fundingFails: true });
+  const summary = await run.runForward(deps, { userId: USER, trigger: "hourly", strategyIds: ["x"], symbols: ["BTCUSDT"] });
+  assert.equal(summary.status, "ok");
+  assert.match(summary.reason, /funding_unavailable: BTCUSDT/);
+  const body = calls.python[0];
+  assert.equal(body.symbols[0].funding_available, false);
+  assert.deepEqual(body.symbols[0].funding, []);
+  assert.match(calls.runs[0].reason, /funding_unavailable/);
+});
+
+test("Binance funding responses are validated", () => {
+  const rows = [{ symbol: "BTCUSDT", fundingTime: 1, fundingRate: "0.00010000", markPrice: "1" },
+    { symbol: "BTCUSDT", fundingTime: 2, fundingRate: "-1e-5" }];
+  assert.deepEqual(contract.parseBinanceFunding("BTCUSDT", rows),
+    [{ calc_time_ms: 1, rate: "0.00010000" }, { calc_time_ms: 2, rate: "-1e-5" }]);
+  assert.throws(() => contract.parseBinanceFunding("ETHUSDT", rows), /Invalid Binance funding/);
+  assert.throws(() => contract.parseBinanceFunding("BTCUSDT", [rows[1], rows[0]]), /Invalid Binance funding/);
+  assert.throws(() => contract.parseBinanceFunding("BTCUSDT", { code: -1 }), /Invalid Binance funding/);
 });

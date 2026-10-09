@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getOperationalStore } from "../operational/repository.server";
 import { pythonServiceConfig } from "../python-service.server";
+import { parseBinanceFunding } from "./forward-contract";
 import { createForwardRepository } from "./forward-repository.server";
 import type { ForwardDeps } from "./forward-run.server";
 
@@ -30,6 +31,19 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
       });
       if (!response.ok) throw new Error(`Forward evaluation failed with HTTP ${response.status}`);
       return response.json();
+    },
+    async fetchFunding(symbol, startMs) {
+      // Public, unauthenticated funding history (weight-limited by IP): one request per symbol per run.
+      const url = new URL("https://fapi.binance.com/fapi/v1/fundingRate");
+      url.searchParams.set("symbol", symbol);
+      url.searchParams.set("startTime", String(Math.max(0, Math.floor(startMs))));
+      url.searchParams.set("limit", "1000");
+      const response = await send(url.toString(), { signal: AbortSignal.timeout(10_000) });
+      if (response.status === 418 || response.status === 429) {
+        throw new Error(`Binance funding rate limited (HTTP ${response.status})`);
+      }
+      if (!response.ok) throw new Error(`Binance funding failed with HTTP ${response.status}`);
+      return parseBinanceFunding(symbol, await response.json());
     },
     repository: createForwardRepository(supabaseAdmin as unknown as SupabaseClient),
   };
