@@ -56,6 +56,8 @@ _MONTH = r"\d{4}-(?:0[1-9]|1[0-2])"
 _TAG = re.compile(rf"dk1-({_SYMBOLS})-({_MONTH})_({_MONTH})-r([1-9][0-9]{{0,2}})\Z")
 _RANGE_FILE = re.compile(rf"(daily|funding)__({_SYMBOLS})__({_MONTH})_({_MONTH})\.csv\.gz\Z")
 _INTEGER = re.compile(r"-?[0-9]+\Z")
+_INT64_MAX = 2 ** 63 - 1
+_INT64_MIN = -(2 ** 63)
 
 
 class DailyFormatError(ValueError):
@@ -336,7 +338,10 @@ def load_symbol_daily(daily_dir, symbol: str, first_month: str, last_month: str,
     for stamp, values in rows.items():
         i = (stamp - start) // DAY_MS
         for name, column in columns.items():
-            column[i] = data_lake.parse_published_scaled(values[index_of[name]])
+            value = data_lake.parse_published_scaled(values[index_of[name]])
+            # Daily base volumes of low-priced coins (DOGE, XRP) scaled by 10^8 can exceed int64:
+            # such a volume is stored as MISSING (prices always fit).
+            column[i] = value if _INT64_MIN < value <= _INT64_MAX else MISSING
     return DailySeries(symbol, start, days, **columns)
 
 
