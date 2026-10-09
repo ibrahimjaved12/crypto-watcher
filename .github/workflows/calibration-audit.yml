@@ -31,6 +31,10 @@ on:
         description: "rd data release revision"
         type: string
         default: "1"
+      symbols:
+        description: "Comma-separated symbols (subset of the six; each needs its lb label release when 240 is audited)"
+        type: string
+        default: "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT"
 
 permissions:
   contents: read
@@ -69,13 +73,14 @@ jobs:
           HALF_LIVES: ${{ inputs.half_lives }}
           LABEL_REVISION: ${{ inputs.label_revision }}
           DATA_REVISION: ${{ inputs.data_revision }}
+          SYMBOLS: ${{ inputs.symbols }}
           AUDIT_SUMMARY: ${{ runner.temp }}/calibration-summary.md
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: |
           python/.venv/bin/python scripts/research/calibration_audit.py --workdir calibration-audit-work \
             --summary "$AUDIT_SUMMARY" --segment "$SEGMENT" --horizons "$HORIZONS" --half-lives "$HALF_LIVES" \
-            --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION"
+            --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION" --symbols "$SYMBOLS"
       - name: Delete working files
         if: always()
         run: rm -rf calibration-audit-work

@@ -70,6 +70,10 @@ def _int_list(text: str, allowed: tuple, name: str) -> tuple:
 def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progress) -> list[str]:
     horizons = _int_list(args.horizons, cal.HORIZONS, "horizons")
     half_lives = _int_list(args.half_lives, cal.HALF_LIVES, "half_lives")
+    symbols = tuple(item.strip() for item in args.symbols.split(",") if item.strip())
+    if not symbols or len(set(symbols)) != len(symbols) or any(item not in lake.SYMBOLS for item in symbols):
+        raise PublicError(f"symbols must be a comma-separated subset of {','.join(lake.SYMBOLS)}")
+    symbols = tuple(item for item in lake.SYMBOLS if item in symbols)  # canonical order
     revisions = {"label_revision": args.label_revision, "data_revision": args.data_revision}
     bars_dir = workdir / "bars"
     bars_dir.mkdir(parents=True)
@@ -77,20 +81,34 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     if cal.BARRIER_HORIZON in horizons:
         label_dir = workdir / "labels"
         label_dir.mkdir(parents=True)
-        _quiet(xr.download_labels, repo, revisions, args.segment, label_dir, progress)
-    _quiet(xr.download_bars, repo, revisions, args.segment, bars_dir, label_dir, progress)
+        missing = [tag for tag in (xr.label_tag(symbol, er.LABEL_FIRST_MONTH, er.LABEL_LAST_MONTH, args.label_revision)
+                                   for symbol in symbols) if repo.published_release(tag) is None]
+        if missing:  # all at once, before any download; audit only symbols with labels via --symbols
+            raise PublicError("missing published label releases (build them with the label build workflow "
+                              "or narrow symbols): " + ", ".join(missing))
+        with progress.stage("label download", total=len(symbols)) as set_symbol:
+            for symbol_index, symbol in enumerate(symbols, 1):
+                set_symbol(symbol_index)
+                _quiet(xr._download_symbol_labels, repo, revisions, args.segment, label_dir, symbol)
+                progress.phase("label download", symbol_index=symbol_index, symbols=len(symbols))
+    months = lake.months_between(lake.FIRST_MONTH, segment_months(args.segment)[-1])
+    with progress.stage("bars download", total=len(symbols)) as set_symbol:
+        for symbol_index, symbol in enumerate(symbols, 1):
+            set_symbol(symbol_index)
+            _quiet(xr._download_symbol_bars, repo, revisions, bars_dir, label_dir, symbol, months)
+            progress.phase("bars download", symbol_index=symbol_index, symbols=len(symbols), months=len(months))
     snapshot = None
     if label_dir is not None:
-        progress.phase("snapshot", symbols=len(lake.SYMBOLS), months=len(segment_months(args.segment)))
-        snapshot = _quiet(er.data_snapshot, label_dir, segment_months(args.segment))
+        progress.phase("snapshot", symbols=len(symbols), months=len(segment_months(args.segment)))
+        snapshot = _quiet(er.data_snapshot, label_dir, segment_months(args.segment), symbols=symbols)
     params = LabelParams()
     results = {}
-    with progress.stage("audit", total=len(lake.SYMBOLS)) as set_symbol:
-        for symbol_index, symbol in enumerate(lake.SYMBOLS, 1):
+    with progress.stage("audit", total=len(symbols)) as set_symbol:
+        for symbol_index, symbol in enumerate(symbols, 1):
             set_symbol(symbol_index)
             results[symbol] = _quiet(cal.audit_symbol, bars_dir, label_dir, symbol, args.segment,
                                      horizons=horizons, half_lives=half_lives, params=params)
-            progress.phase("audit", symbol_index=symbol_index, symbols=len(lake.SYMBOLS))
+            progress.phase("audit", symbol_index=symbol_index, symbols=len(symbols))
     progress.phase("report write")
     report = cal.build_report(args.segment, results, horizons=horizons, half_lives=half_lives, params=params,
                               code_commit=os.environ.get("GITHUB_SHA", "local"), created_utc=NOW_UTC,
@@ -115,6 +133,7 @@ def parse_args(argv=None):
     parser.add_argument("--half-lives", default=",".join(map(str, cal.HALF_LIVES)))
     parser.add_argument("--label-revision", type=int, default=1)
     parser.add_argument("--data-revision", type=int, default=1)
+    parser.add_argument("--symbols", default=",".join(lake.SYMBOLS))
     return parser.parse_args(argv)
 
 
