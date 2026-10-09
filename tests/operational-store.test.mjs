@@ -1089,7 +1089,7 @@ test("collector retention preserves TA history and bounds the separate forward m
   const step1m = 60_000;
   const recent1m = Math.floor(Date.now() / step1m) * step1m - step1m;
   for (const [symbol, days, explicit] of [
-    ["ETHUSDT", 62, false],
+    ["ETHUSDT", 140, false],
     ["SOLUSDT", 31, true],
     ["BNBUSDT", 90, true],
   ]) {
@@ -1112,7 +1112,7 @@ test("collector retention preserves TA history and bounds the separate forward m
     assert.equal(new Date(kept1m.oldest).getTime(), cutoffOpen);
   }
 
-  for (const days of [30, 91]) {
+  for (const days of [30, 201]) {
     await assert.rejects(
       db.query("SELECT record_collector_candles($1,$2,$3)", [
         JSON.stringify(series("ETHUSDT", 1, 1, recent1m)),
