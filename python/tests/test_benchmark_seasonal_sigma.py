@@ -140,7 +140,11 @@ class CalibrationTests(unittest.TestCase):
         hours = [dict(normal, hour=h) for h in range(24)]
         self.assertTrue(cal.robust_ok(normal, hours))
         self.assertFalse(cal.robust_ok(stats, hours))
-        self.assertFalse(cal.robust_ok(normal, hours[:23] + [dict(stats, hour=23)]))
+        # t5's robust values (0.83, 0.92) fail the overall band but sit inside the per-hour band [0.8, 1.2];
+        # a quiet hour with z shrunk to 0.7 fails it.
+        self.assertTrue(cal.robust_ok(normal, hours[:23] + [dict(stats, hour=23)]))
+        quiet = cal.z_stats(0.7 * np.random.default_rng(3).standard_normal(5_000))
+        self.assertFalse(cal.robust_ok(normal, hours[:23] + [dict(quiet, hour=23)]))
 
 
 class LabelSchemaTests(unittest.TestCase):
