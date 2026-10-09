@@ -209,3 +209,8 @@ value here is a permanent guarantee.
 | Virtual-wallet automation, accounting, costs, and paper runs                               | [Futures paper-trading simulation](futures-simulation.md)                                                                                                                         |
 | Revised roadmap links to issues                                                            | [Ordered issue map](#ordered-issue-map), covering all 40 roadmap entries (orders 1–39 plus unnumbered #57)                                                                                                          |
 | Documentation-only change                                                                  | README and documentation updates only; no runtime, secret, schedule, or infrastructure changes                                                                                    |
+
+## Strategy specifications
+
+- [SPEC-0 master plan](strategy-specs/SPEC-0-master-plan.md)
+- [Strategy catalogue](strategy-catalogue.md)
