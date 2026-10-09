@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { History } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
@@ -9,23 +10,33 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import { Hint } from "@/components/hint";
+import { EmptyState, PageHeader, SectionTitle, StatusChip, TimeAgo } from "@/components/plain";
+import {
+  collectorLabel,
+  freshnessLabel,
+  humanizeReason,
+  humanizeToken,
+  relativeTime,
+  sourceLabel,
+  summarizeReasons,
+} from "@/lib/labels";
 import { fetchSettings, saveSettings } from "@/lib/db";
 import { timestampFreshness, type FreshnessState } from "@/lib/freshness";
 import { getOperationalState } from "@/lib/operational.functions";
 import type { CollectorHealthStatus } from "@/lib/operational/types";
-import type { MovementEngineStatus } from "@/lib/market/market-movement-state";
 import { useServerFn } from "@tanstack/react-start";
 
 export const Route = createFileRoute("/_authenticated/settings")({
   head: () => ({
     meta: [
-      { title: "Monitoring settings — Crypto Watch" },
+      { title: "Control room — Crypto Watch" },
       {
         name: "description",
         content:
           "Control market collection, movement alerts and technical analysis, and review recent checks.",
       },
-      { property: "og:title", content: "Monitoring settings — Crypto Watch" },
+      { property: "og:title", content: "Control room — Crypto Watch" },
       {
         property: "og:description",
         content: "Independent monitoring activities, cumulative alerts and run history.",
@@ -56,24 +67,6 @@ function collectorOverallStatus(
   if (health.some((entry) => entry.status === "STALE")) return "STALE";
   if (health.some((entry) => entry.status === "RECOVERING")) return "RECOVERING";
   return "LIVE";
-}
-
-function collectorBadgeVariant(status: CollectorHealthStatus) {
-  if (status === "UNAVAILABLE") return "destructive" as const;
-  if (status === "LIVE") return "secondary" as const;
-  return "outline" as const;
-}
-
-function movementBadgeVariant(status: MovementEngineStatus) {
-  if (status === "UNAVAILABLE") return "destructive" as const;
-  if (status === "LIVE") return "secondary" as const;
-  return "outline" as const;
-}
-
-function freshnessBadgeVariant(status: FreshnessState) {
-  if (status === "UNAVAILABLE") return "destructive" as const;
-  if (status === "FRESH") return "secondary" as const;
-  return "outline" as const;
 }
 
 function SettingsPage() {
@@ -127,401 +120,436 @@ function SettingsPage() {
 
   return (
     <AppShell>
-      <h1 className="text-2xl font-semibold">Monitoring settings</h1>
-      <p className="text-sm text-muted-foreground">
-        Control each monitoring activity separately. These settings apply to scheduled runs and Run
-        check now.
-      </p>
+      <PageHeader
+        eyebrow="Settings & health"
+        title="Control room"
+        subtitle="Choose when you get alerts and what is collected, and check that everything is running."
+      />
 
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <form
-          className="panel space-y-5 p-5"
+          className="space-y-4"
           onSubmit={(e) => {
             e.preventDefault();
             save.mutate();
           }}
         >
-          <div className="space-y-2">
-            <Label htmlFor="threshold">Alert threshold (%)</Label>
-            <Input
-              id="threshold"
-              type="number"
-              step="0.1"
-              min="0.1"
-              max="100"
-              required
-              value={threshold}
-              onChange={(e) => setThreshold(e.target.value)}
+          <section className="panel space-y-5 p-5">
+            <SectionTitle
+              title="Alerts"
+              hint="When a price move is big enough to be saved as an alert."
             />
-            <p className="text-xs text-muted-foreground">
-              Alert on a rise or fall of this percentage from the saved baseline, even when the move
-              takes longer than 15 minutes.
-            </p>
-          </div>
-
-          <div className="space-y-2 rounded-md border border-border p-3 text-sm">
-            <p className="font-medium">Comparison: saved baseline</p>
-            <p className="text-muted-foreground">
-              The first successful check sets a baseline for each pair. Each saved alert resets it
-              to the alert price. At 2%, a baseline of 100 USDT alerts at 102 or 98 USDT. Small
-              moves are retained between checks.
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Uses completed one-minute candles. Changing the threshold or data source starts a new
-              baseline on the next fresh check. Dashboard percentage windows are separate from this
-              alert rule.
-            </p>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="cooldown">Cooldown per pair and direction (minutes)</Label>
-            <Input
-              id="cooldown"
-              type="number"
-              min="1"
-              max="1440"
-              required
-              value={cooldown}
-              onChange={(e) => setCooldown(e.target.value)}
-            />
-            <p className="text-xs text-muted-foreground">
-              An upward alert does not block a downward alert. During cooldown the baseline stays
-              fixed; a further qualifying move can alert on a fresh check after cooldown.
-            </p>
-          </div>
-
-          <div className="flex items-center justify-between rounded-md border border-border p-3">
-            <div>
-              <Label htmlFor="enabled">Monitoring master switch</Label>
+            <div className="space-y-2">
+              <Label htmlFor="threshold">Alert threshold (%)</Label>
+              <Input
+                id="threshold"
+                type="number"
+                step="0.1"
+                min="0.1"
+                max="100"
+                required
+                value={threshold}
+                onChange={(e) => setThreshold(e.target.value)}
+              />
               <p className="text-xs text-muted-foreground">
-                Pause every activity below without losing its individual setting or saved state.
+                Alert when price rises or falls this much from its saved starting price, however long
+                the move takes.
+              </p>
+              <details className="text-xs text-muted-foreground">
+                <summary>How the starting price works</summary>
+                <div className="mt-2 space-y-2">
+                  <p>
+                    The first successful check saves a starting price (baseline) for each pair. Each saved
+                    alert resets it to the alert price. At 2%, a starting price of 100 USDT alerts at 102 or
+                    98 USDT. Small moves add up between checks.
+                  </p>
+                  <p>
+                    Uses completed one-minute candles. Changing the threshold or data source starts a new
+                    starting price on the next fresh check. The percentage moves on the Market page are
+                    separate from this rule.
+                  </p>
+                </div>
+              </details>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="cooldown">Quiet time per pair and direction (minutes)</Label>
+              <Input
+                id="cooldown"
+                type="number"
+                min="1"
+                max="1440"
+                required
+                value={cooldown}
+                onChange={(e) => setCooldown(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                After an alert, the same pair and direction stays quiet this long. An up alert never
+                blocks a down alert.
               </p>
             </div>
-            <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
-          </div>
-
-          <fieldset className="space-y-3 rounded-md border border-border p-3">
-            <legend className="px-1 text-sm font-medium">Current monitoring activities</legend>
-
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <Label htmlFor="market-data">Market-data collection</Label>
-                <p className="text-xs text-muted-foreground">
-                  Fetches and checkpoints the latest completed one-minute candle even if the two
-                  activities below are paused. Turning this off also pauses both of them.
-                </p>
-              </div>
-              <Switch
-                id="market-data"
-                checked={marketDataEnabled}
-                onCheckedChange={setMarketDataEnabled}
-              />
-            </div>
-
-            <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-3">
-              <div>
-                <Label htmlFor="movement-alerts">Movement-alert generation</Label>
-                <p className="text-xs text-muted-foreground">
-                  Applies the saved-baseline threshold and cooldown, then saves qualifying alerts.
-                </p>
-              </div>
-              <Switch
-                id="movement-alerts"
-                checked={movementAlertsEnabled}
-                onCheckedChange={setMovementAlertsEnabled}
-              />
-            </div>
-
-            <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-3">
-              <div>
-                <Label htmlFor="technical-analysis">Completed-candle technical analysis</Label>
-                <p className="text-xs text-muted-foreground">
-                  Saves 15m, 1h and 4h indicator snapshots and evaluates their pending outcomes.
-                </p>
-              </div>
-              <Switch
-                id="technical-analysis"
-                checked={technicalAnalysisEnabled}
-                onCheckedChange={setTechnicalAnalysisEnabled}
-              />
-            </div>
-          </fieldset>
-
-          <section className="space-y-3 rounded-md border border-dashed border-border p-3">
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-medium">Future activities</p>
-              <Badge variant="outline">Not available yet</Badge>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              These remain off until their roadmap features exist. They are status rows, not working
-              switches.
-            </p>
-            {[
-              "Developing-setup and strategy evaluation",
-              "Paper-trading execution",
-              "Email notification delivery",
-              "WhatsApp notification delivery",
-            ].map((label) => (
-              <div
-                key={label}
-                className="flex items-center justify-between gap-3 border-t border-border/70 pt-3 text-sm"
-              >
-                <span>{label}</span>
-                <Badge variant="secondary">Planned</Badge>
-              </div>
-            ))}
           </section>
 
-          <Button type="submit" disabled={save.isPending}>
-            Save settings
+          <section className="panel space-y-4 p-5">
+            <SectionTitle
+              title="Data collection"
+              hint="Each switch is independent; the master switch pauses all of them without losing their state."
+            />
+            <SwitchRow
+              id="enabled"
+              label="Monitoring master switch"
+              what="Turns every activity below on or off at once."
+              checked={enabled}
+              onChange={setEnabled}
+            />
+            <SwitchRow
+              id="market-data"
+              label="Market-data collection"
+              what="Fetches the latest completed one-minute candle for your pairs. Turning it off also pauses the two below."
+              checked={marketDataEnabled}
+              onChange={setMarketDataEnabled}
+            />
+            <SwitchRow
+              id="movement-alerts"
+              label="Movement alerts"
+              what="Compares each new price with your threshold and quiet time, and saves alerts that qualify."
+              checked={movementAlertsEnabled}
+              onChange={setMovementAlertsEnabled}
+            />
+            <SwitchRow
+              id="technical-analysis"
+              label="Technical analysis snapshots"
+              what="Saves 15m, 1h and 4h indicator readings (shown under Indicator history) and later fills in what happened next."
+              checked={technicalAnalysisEnabled}
+              onChange={setTechnicalAnalysisEnabled}
+            />
+            <details className="text-xs text-muted-foreground">
+              <summary>Planned activities (not available yet)</summary>
+              <ul className="mt-2 space-y-1">
+                {[
+                  "Developing-setup and strategy evaluation",
+                  "Paper-trading execution",
+                  "Email notification delivery",
+                  "WhatsApp notification delivery",
+                ].map((label) => (
+                  <li key={label} className="flex items-center justify-between gap-3">
+                    <span>{label}</span>
+                    <Badge variant="secondary">Planned</Badge>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          </section>
+
+          <Button type="submit" className="w-full sm:w-auto" disabled={save.isPending}>
+            {save.isPending ? "Saving…" : "Save settings"}
           </Button>
         </form>
 
-        <section className="panel p-5">
-          <h2 className="text-base font-semibold">Recent monitoring runs</h2>
-          <p className="text-xs text-muted-foreground">
-            Every scheduled and manual check, including failures.
-          </p>
-          {operational.data?.diagnostics ? (
-            <p className="num mt-1 text-xs text-muted-foreground">
-              Request-driven operational storage: {operational.data.diagnostics.recent_candle_rows}{" "}
-              completed candles · {operational.data.diagnostics.checkpoint_rows} checkpoints ·{" "}
-              {operational.data.diagnostics.monitor_run_rows} runs ·{" "}
-              {operational.data.diagnostics.pending_outbox_rows} pending sync ·{" "}
-              {operational.data.diagnostics.failed_outbox_rows} failed ·{" "}
-              {operational.data.diagnostics.dead_outbox_rows} dead-letter
-            </p>
-          ) : null}
-          {overallCollectorStatus ? (
-            <div className="mt-3 space-y-2 border-t border-border/60 pt-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-medium">Shared Binance collector</p>
-                  <p className="num text-xs text-muted-foreground">
-                    Collector-owned storage:{" "}
-                    {operational.data?.collectorDiagnostics?.candle_rows ?? 0} completed candles
-                  </p>
-                </div>
-                <Badge variant={collectorBadgeVariant(overallCollectorStatus)}>
-                  {overallCollectorStatus}
-                </Badge>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[760px] text-left text-xs">
+        <div className="min-w-0 space-y-4">
+          <section className="panel min-w-0 p-5">
+            <SectionTitle
+              title="Data health"
+              hint="Is live market data arriving? Lag is how far the newest stored data is behind now."
+              right={
+                overallCollectorStatus ? (
+                  <StatusChip level={collectorLabel(overallCollectorStatus).level}>
+                    {collectorLabel(overallCollectorStatus).short}
+                  </StatusChip>
+                ) : null
+              }
+            />
+            {collectorHealth.length ? (
+              <div className="-mx-1 overflow-x-auto px-1" tabIndex={0} aria-label="Data feed per pair">
+                <table className="w-full min-w-[460px] text-left text-xs">
                   <thead className="text-muted-foreground">
                     <tr className="border-b border-border/60">
-                      <th className="py-2 pr-3 font-medium">Symbol</th>
-                      <th className="py-2 pr-3 font-medium">Interval</th>
-                      <th className="py-2 pr-3 font-medium">Status</th>
-                      <th className="py-2 pr-3 font-medium">Latest source event</th>
-                      <th className="py-2 pr-3 font-medium">Latest completed</th>
+                      <th className="py-2 pr-3 font-medium">Pair</th>
+                      <th className="py-2 pr-3 font-medium">Candles</th>
+                      <th className="py-2 pr-3 font-medium">Feed</th>
                       <th className="py-2 pr-3 font-medium">Lag</th>
-                      <th className="py-2 font-medium">Reconnects</th>
+                      <th className="py-2 pr-3 font-medium">Last update</th>
+                      <th className="py-2 font-medium">
+                        <Hint text="How often the live connection had to reconnect. A few is normal.">
+                          Reconnects
+                        </Hint>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {collectorHealth.map((row) => (
-                      <tr
-                        key={`${row.instrument_id}:${row.timeframe_minutes}`}
-                        className="border-b border-border/40 last:border-0"
-                      >
-                        <td className="py-2 pr-3 font-medium">{row.symbol}</td>
-                        <td className="py-2 pr-3">{formatInterval(row.timeframe_minutes)}</td>
-                        <td className="py-2 pr-3">
-                          <Badge variant={collectorBadgeVariant(row.status)}>{row.status}</Badge>
-                        </td>
-                        <td className="num py-2 pr-3">
-                          {row.last_event_at ? new Date(row.last_event_at).toLocaleString() : "—"}
-                        </td>
-                        <td className="num py-2 pr-3">
-                          {row.last_completed_open_time
-                            ? new Date(row.last_completed_open_time).toLocaleString()
-                            : "—"}
-                        </td>
-                        <td className="num py-2 pr-3">{formatLag(row.lag_ms)}</td>
-                        <td className="num py-2">{row.reconnect_count}</td>
-                      </tr>
-                    ))}
+                    {collectorHealth.map((row) => {
+                      const state = collectorLabel(row.status);
+                      return (
+                        <tr
+                          key={`${row.instrument_id}:${row.timeframe_minutes}`}
+                          className="border-b border-border/40 last:border-0"
+                        >
+                          <td className="py-2 pr-3 font-medium">{row.symbol.replace(/USDT$/, "")}</td>
+                          <td className="py-2 pr-3">{formatInterval(row.timeframe_minutes)}</td>
+                          <td className="py-2 pr-3">
+                            <StatusChip level={state.level}>{state.short}</StatusChip>
+                          </td>
+                          <td className="num py-2 pr-3">{formatLag(row.lag_ms)}</td>
+                          <td className="py-2 pr-3">
+                            <TimeAgo
+                              at={row.last_event_at}
+                              text={relativeTime(row.last_event_at)}
+                            />
+                          </td>
+                          <td className="num py-2">{row.reconnect_count}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
-            </div>
-          ) : null}
-          {movementEngine ? (
-            <div className="mt-3 space-y-2 border-t border-border/60 pt-3 text-xs">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-medium">Market movement engine</p>
-                  <p className="num text-muted-foreground">
-                    {movementEngine.configuredSymbolCount} configured ·{" "}
-                    {movementEngine.eligibleSymbolCount} eligible
-                  </p>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                No live data feed is reporting yet. Rows appear once the collector starts storing candles
+                for your pairs.
+              </p>
+            )}
+
+            {movementEngine ? (
+              <div className="mt-4 space-y-1 border-t border-border/60 pt-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">Market movement detector</span>
+                  <StatusChip level={collectorLabel(movementEngine.status).level}>
+                    {collectorLabel(movementEngine.status).short}
+                  </StatusChip>
                 </div>
-                <Badge variant={movementBadgeVariant(movementEngine.status)}>
-                  {movementEngine.status}
-                </Badge>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Primary 5m</span>
-                <span className="num ml-auto">
-                  {movementEngine.primaryDirectionState} · {movementEngine.primaryPace}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Last evaluation boundary</span>
-                <span className="num ml-auto">
-                  {new Date(movementEngine.lastEvaluationBoundaryTime).toLocaleString()}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Most recent transition</span>
-                <span className="num ml-auto">
-                  {movementEngine.mostRecentTransition
-                    ? `${movementEngine.mostRecentTransition.transition} · ${movementEngine.mostRecentTransition.transitionReason}`
-                    : "—"}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Algorithm / config / universe</span>
-                <span className="num ml-auto">
-                  {movementEngine.movementAlgorithmVersion} · {movementEngine.movementConfigVersion}{" "}
-                  · {movementEngine.universeVersion}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Finalization config / grace</span>
-                <span className="num ml-auto">
-                  {movementEngine.finalizationConfigVersion ?? "—"}
-                  {movementEngine.finalizationGraceMs === null
-                    ? ""
-                    : ` · ${movementEngine.finalizationGraceMs}ms`}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-muted-foreground">Late after finalization</span>
-                <span className="num ml-auto">{movementEngine.lateAfterFinalizationCount}</span>
-              </div>
-            </div>
-          ) : null}
-          {activityFreshness ? (
-            <div className="mt-3 space-y-2 border-t border-border/60 pt-3 text-xs">
-              <p className="text-sm font-medium">Activity freshness</p>
-              {collectorHealth.length === 0
-                ? (() => {
-                    const status = timestampFreshness(
-                      activityFreshness.marketCheckpoint.observedAt,
-                      {
-                        available: activityFreshness.marketCheckpoint.available,
-                        now: freshnessNow,
-                        freshForMs: 10 * 60_000,
-                        delayedForMs: 30 * 60_000,
-                      },
-                    );
-                    return (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
-                        <span className="text-muted-foreground">Latest market checkpoint</span>
-                        <span className="num ml-auto">
-                          {activityFreshness.marketCheckpoint.observedAt
-                            ? new Date(
-                                activityFreshness.marketCheckpoint.observedAt,
-                              ).toLocaleString()
-                            : "—"}
-                        </span>
-                      </div>
-                    );
-                  })()
-                : null}
-              {(() => {
-                const status = timestampFreshness(activityFreshness.movement.evaluatedThrough, {
-                  available: activityFreshness.movement.available,
-                  now: freshnessNow,
-                  freshForMs: 10 * 60_000,
-                  delayedForMs: 30 * 60_000,
-                });
-                return (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
-                    <span className="text-muted-foreground">Movement evaluated through</span>
-                    <span className="num ml-auto">
-                      {activityFreshness.movement.evaluatedThrough
-                        ? new Date(activityFreshness.movement.evaluatedThrough).toLocaleString()
+                <p className="text-xs text-muted-foreground">
+                  Watching {movementEngine.eligibleSymbolCount} of {movementEngine.configuredSymbolCount}{" "}
+                  coins · 5m market: {humanizeToken(movementEngine.primaryDirectionState)},{" "}
+                  {humanizeToken(movementEngine.primaryPace).toLowerCase()} · checked{" "}
+                  {relativeTime(movementEngine.lastEvaluationBoundaryTime)}
+                </p>
+                <details className="text-xs text-muted-foreground">
+                  <summary>Technical details</summary>
+                  <dl className="num mt-2 space-y-1">
+                    <Row name="Most recent transition">
+                      {movementEngine.mostRecentTransition
+                        ? `${movementEngine.mostRecentTransition.transition} · ${movementEngine.mostRecentTransition.transitionReason}`
                         : "—"}
-                    </span>
-                  </div>
-                );
-              })()}
-              {activityFreshness.ta.map((entry) => {
-                const duration = entry.timeframeMinutes * 60_000;
-                const status = timestampFreshness(entry.evaluatedAt, {
-                  available: entry.available,
-                  now: freshnessNow,
-                  freshForMs: duration * 2,
-                  delayedForMs: duration * 3,
-                });
+                    </Row>
+                    <Row name="Algorithm / config / universe">
+                      {movementEngine.movementAlgorithmVersion} · {movementEngine.movementConfigVersion} ·{" "}
+                      {movementEngine.universeVersion}
+                    </Row>
+                    <Row name="Finalization config / grace">
+                      {movementEngine.finalizationConfigVersion ?? "—"}
+                      {movementEngine.finalizationGraceMs === null
+                        ? ""
+                        : ` · ${movementEngine.finalizationGraceMs}ms`}
+                    </Row>
+                    <Row name="Late after finalization">{movementEngine.lateAfterFinalizationCount}</Row>
+                    <Row name="Last evaluation boundary">
+                      {new Date(movementEngine.lastEvaluationBoundaryTime).toLocaleString()}
+                    </Row>
+                  </dl>
+                </details>
+              </div>
+            ) : null}
+
+            {activityFreshness ? (
+              <div className="mt-4 space-y-2 border-t border-border/60 pt-3 text-xs">
+                <p className="text-sm font-medium">Latest results</p>
+                {collectorHealth.length === 0
+                  ? (() => {
+                      const status = timestampFreshness(
+                        activityFreshness.marketCheckpoint.observedAt,
+                        {
+                          available: activityFreshness.marketCheckpoint.available,
+                          now: freshnessNow,
+                          freshForMs: 10 * 60_000,
+                          delayedForMs: 30 * 60_000,
+                        },
+                      );
+                      return (
+                        <FreshRow
+                          status={status}
+                          name="Latest market price saved"
+                          at={activityFreshness.marketCheckpoint.observedAt}
+                        />
+                      );
+                    })()
+                  : null}
+                {(() => {
+                  const status = timestampFreshness(activityFreshness.movement.evaluatedThrough, {
+                    available: activityFreshness.movement.available,
+                    now: freshnessNow,
+                    freshForMs: 10 * 60_000,
+                    delayedForMs: 30 * 60_000,
+                  });
+                  return (
+                    <FreshRow
+                      status={status}
+                      name="Movement checked up to"
+                      at={activityFreshness.movement.evaluatedThrough}
+                    />
+                  );
+                })()}
+                {activityFreshness.ta.map((entry) => {
+                  const duration = entry.timeframeMinutes * 60_000;
+                  const status = timestampFreshness(entry.evaluatedAt, {
+                    available: entry.available,
+                    now: freshnessNow,
+                    freshForMs: duration * 2,
+                    delayedForMs: duration * 3,
+                  });
+                  return (
+                    <FreshRow
+                      key={entry.timeframeMinutes}
+                      status={status}
+                      name={`Last ${formatInterval(entry.timeframeMinutes)} indicator snapshot`}
+                      at={entry.evaluatedAt}
+                      extra={
+                        entry.completedCandleAt
+                          ? `candle ${new Date(entry.completedCandleAt).toLocaleString()}`
+                          : undefined
+                      }
+                    />
+                  );
+                })}
+              </div>
+            ) : null}
+
+            {operational.data?.diagnostics || operational.data?.collectorDiagnostics ? (
+              <details className="mt-4 border-t border-border/60 pt-3 text-xs text-muted-foreground">
+                <summary>Storage details</summary>
+                <p className="num mt-2">
+                  {operational.data?.diagnostics
+                    ? `${operational.data.diagnostics.recent_candle_rows} completed candles · ${operational.data.diagnostics.checkpoint_rows} checkpoints · ${operational.data.diagnostics.monitor_run_rows} runs · ${operational.data.diagnostics.pending_outbox_rows} pending sync · ${operational.data.diagnostics.failed_outbox_rows} failed · ${operational.data.diagnostics.dead_outbox_rows} dead-letter`
+                    : null}
+                </p>
+                {operational.data?.collectorDiagnostics ? (
+                  <p className="num mt-1">
+                    Collector storage: {operational.data.collectorDiagnostics.candle_rows ?? 0} completed
+                    candles
+                  </p>
+                ) : null}
+              </details>
+            ) : null}
+          </section>
+
+          <section className="panel p-5">
+            <SectionTitle
+              title="Run history"
+              hint="Every scheduled and manual alert check, including failures."
+            />
+            <ul className="space-y-2">
+              {(runs.data ?? []).map((r) => {
+                const status = humanizeReason(r.status);
+                const error = r.error_message ? summarizeReasons(r.error_message) : null;
                 return (
-                  <div key={entry.timeframeMinutes} className="flex flex-wrap items-center gap-2">
-                    <Badge variant={freshnessBadgeVariant(status)}>{status}</Badge>
-                    <span className="text-muted-foreground">
-                      Last successful {formatInterval(entry.timeframeMinutes)} TA
-                    </span>
-                    <span className="num ml-auto">
-                      {entry.evaluatedAt ? new Date(entry.evaluatedAt).toLocaleString() : "—"}
-                      {entry.completedCandleAt
-                        ? ` · candle ${new Date(entry.completedCandleAt).toLocaleString()}`
-                        : ""}
-                    </span>
-                  </div>
+                  <li key={r.id} className="rounded-md border border-border/70 p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StatusChip level={status.level ?? "wait"}>{status.short}</StatusChip>
+                      <TimeAgo at={r.ran_at} text={relativeTime(r.ran_at)} />
+                      <span className="ml-auto text-xs text-muted-foreground">
+                        {r.symbols_checked} pairs checked, {r.alerts_created} alert
+                        {r.alerts_created === 1 ? "" : "s"}
+                        {r.data_source ? ` · ${sourceLabel(r.data_source)}` : ""}
+                      </span>
+                    </div>
+                    {error ? (
+                      <ul className="mt-2 space-y-0.5 text-xs text-bear">
+                        {error.items.slice(0, 4).map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                        {error.items.length > 4 ? (
+                          <li className="text-muted-foreground">…and {error.items.length - 4} more</li>
+                        ) : null}
+                      </ul>
+                    ) : null}
+                    <details className="mt-2 text-xs text-muted-foreground">
+                      <summary>Performance details</summary>
+                      <p className="num mt-1">
+                        {r.duration_ms ?? 0} ms · {r.metrics.exchangeRequests ?? 0} exchange requests ·{" "}
+                        {r.metrics.candleRows ?? 0} candle rows · {r.metrics.taCalculations ?? 0} TA
+                        calculations · {r.metrics.taSignalsSaved ?? 0} TA signals ·{" "}
+                        {r.metrics.taOutcomesUpdated ?? 0} outcomes · {r.metrics.databaseReads ?? 0} DB
+                        reads · {r.metrics.databaseWriteAttempts ?? 0} DB write attempts ·{" "}
+                        {r.metrics.databaseNoOps ?? 0} no-ops · {r.metrics.marketCacheHits ?? 0} shared
+                        inputs
+                      </p>
+                      {r.error_message ? (
+                        <code className="mt-2 block break-words rounded bg-muted/60 p-2 font-mono text-[11px]">
+                          {r.status} · {r.error_message}
+                        </code>
+                      ) : null}
+                    </details>
+                  </li>
                 );
               })}
-            </div>
-          ) : null}
-          <ul className="mt-4 space-y-2">
-            {(runs.data ?? []).map((r) => (
-              <li key={r.id} className="rounded-md border border-border/70 p-3 text-sm">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge
-                    variant={
-                      r.status === "success"
-                        ? "secondary"
-                        : r.status === "failed"
-                          ? "destructive"
-                          : "outline"
-                    }
-                  >
-                    {r.status}
-                  </Badge>
-                  <span className="num text-xs text-muted-foreground">
-                    {new Date(r.ran_at).toLocaleString()}
-                  </span>
-                  <span className="num ml-auto text-xs text-muted-foreground">
-                    {r.symbols_checked} pairs · {r.alerts_created} alerts
-                    {r.data_source ? ` · ${r.data_source}` : ""}
-                  </span>
-                </div>
-                <p className="num mt-2 text-xs text-muted-foreground">
-                  {r.duration_ms ?? 0} ms · {r.metrics.exchangeRequests ?? 0} exchange requests ·{" "}
-                  {r.metrics.candleRows ?? 0} candle rows · {r.metrics.taCalculations ?? 0} TA
-                  calculations · {r.metrics.taSignalsSaved ?? 0} TA signals ·{" "}
-                  {r.metrics.taOutcomesUpdated ?? 0} outcomes · {r.metrics.databaseReads ?? 0} DB
-                  reads · {r.metrics.databaseWriteAttempts ?? 0} DB write attempts ·{" "}
-                  {r.metrics.databaseNoOps ?? 0} no-ops · {r.metrics.marketCacheHits ?? 0} shared
-                  inputs
-                </p>
-                {r.error_message ? (
-                  <p className="mt-2 text-xs text-destructive">{r.error_message}</p>
-                ) : null}
-              </li>
-            ))}
+            </ul>
             {runs.data?.length === 0 ? (
-              <li className="text-sm text-muted-foreground">
-                No manual or scheduled monitoring runs recorded yet.
-              </li>
+              <EmptyState
+                icon={History}
+                title="No checks recorded yet"
+                body="Scheduled checks run every few minutes while monitoring is on; “Check for alerts now” on the Market page runs one immediately."
+                className="py-6"
+              />
             ) : null}
-          </ul>
-        </section>
+          </section>
+        </div>
       </div>
     </AppShell>
+  );
+}
+
+function SwitchRow({
+  id,
+  label,
+  what,
+  checked,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  what: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-t border-border/60 pt-3 first-of-type:border-0 first-of-type:pt-0">
+      <div>
+        <Label htmlFor={id}>{label}</Label>
+        <p className="mt-0.5 text-xs text-muted-foreground">{what}</p>
+      </div>
+      <Switch id={id} checked={checked} onCheckedChange={onChange} />
+    </div>
+  );
+}
+
+function Row({ name, children }: { name: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      <dt>{name}</dt>
+      <dd className="ml-auto text-right">{children}</dd>
+    </div>
+  );
+}
+
+function FreshRow({
+  status,
+  name,
+  at,
+  extra,
+}: {
+  status: FreshnessState;
+  name: string;
+  at: string | number | null | undefined;
+  extra?: string | undefined;
+}) {
+  const label = freshnessLabel(status);
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <StatusChip level={label.level}>{label.short}</StatusChip>
+      <span className="text-muted-foreground">{name}</span>
+      <span className="ml-auto" title={extra}>
+        {at ? <TimeAgo at={at} text={relativeTime(at)} /> : "—"}
+      </span>
+    </div>
   );
 }

@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Trash2 } from "lucide-react";
+import { NotebookPen, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { EmptyState, PageHeader, TimeAgo } from "@/components/plain";
+import { relativeTime } from "@/lib/labels";
 import { createNote, deleteNote, fetchNotes, fetchWatchlist } from "@/lib/db";
 
 export const Route = createFileRoute("/_authenticated/notes")({
@@ -55,12 +57,13 @@ function NotesPage() {
 
   return (
     <AppShell>
-      <h1 className="text-2xl font-semibold">Notes</h1>
-      <p className="text-sm text-muted-foreground">
-        Analysis you want to keep. Stored with your account, never in the browser.
-      </p>
+      <PageHeader
+        eyebrow="Logbook"
+        title="Notes"
+        subtitle="Your own trade ideas and observations, optionally tied to a pair. Stored with your account, never in the browser."
+      />
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-[380px_1fr]">
+      <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,380px)_1fr]">
         <form
           className="panel space-y-3 p-5"
           onSubmit={(e) => {
@@ -68,6 +71,7 @@ function NotesPage() {
             save.mutate();
           }}
         >
+          <h2 className="text-base font-semibold">New note</h2>
           <div className="space-y-2">
             <Label htmlFor="note-title">Title</Label>
             <Input
@@ -102,7 +106,7 @@ function NotesPage() {
             />
           </div>
           <Button type="submit" className="w-full" disabled={save.isPending}>
-            Save note
+            {save.isPending ? "Saving…" : "Save note"}
           </Button>
         </form>
 
@@ -112,15 +116,20 @@ function NotesPage() {
               <header className="flex items-start gap-3">
                 <div>
                   <h2 className="font-semibold">{n.title}</h2>
-                  <p className="num text-xs text-muted-foreground">
-                    {n.symbol ? `${n.symbol} · ` : ""}
-                    {new Date(n.updated_at).toLocaleString()}
+                  <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    {n.symbol ? (
+                      <span className="num rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-primary">
+                        {n.symbol.replace(/USDT$/, "")}
+                      </span>
+                    ) : null}
+                    <TimeAgo at={n.updated_at} text={`Edited ${relativeTime(n.updated_at)}`} />
                   </p>
                 </div>
                 <Button
                   variant="ghost"
                   size="icon"
                   className="ml-auto"
+                  title="Delete note"
                   aria-label="Delete note"
                   onClick={() => remove.mutate(n.id)}
                 >
@@ -128,12 +137,19 @@ function NotesPage() {
                 </Button>
               </header>
               {n.body ? (
-                <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{n.body}</p>
+                <p className="mt-3 whitespace-pre-wrap break-words text-sm text-muted-foreground">{n.body}</p>
               ) : null}
             </article>
           ))}
+          {notes.isPending ? (
+            <p className="text-sm text-muted-foreground">Loading notes…</p>
+          ) : null}
           {notes.data?.length === 0 ? (
-            <p className="panel p-6 text-sm text-muted-foreground">No notes yet.</p>
+            <EmptyState
+              icon={NotebookPen}
+              title="No notes yet"
+              body="Write your first note on the left: a trade idea, a level to watch, or why you skipped a setup. It appears here straight away."
+            />
           ) : null}
         </div>
       </div>

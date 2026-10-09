@@ -3,6 +3,7 @@ import { AlertTriangle, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { sourceLabel } from "@/lib/labels";
 import { CHANGE_WINDOWS, WINDOW_LABELS, baseAsset } from "@/lib/market/symbols";
 import type { SymbolQuote } from "@/lib/market/quotes.server";
 
@@ -31,7 +32,7 @@ export function QuoteCard({
   const unavailable = !quote.ok || quote.price == null;
 
   return (
-    <article className="panel flex flex-col gap-4 p-5">
+    <article className="panel flex flex-col gap-4 p-5 transition-colors hover:border-primary/40">
       <header className="flex items-start gap-3">
         <div>
           <h3 className="font-display text-lg font-semibold">
@@ -48,8 +49,8 @@ export function QuoteCard({
         </div>
         <div className="ml-auto flex items-center gap-2">
           {quote.source ? (
-            <Badge variant="secondary" className="num text-[10px]">
-              {quote.source}
+            <Badge variant="secondary" className="text-[10px]" title={quote.source}>
+              {sourceLabel(quote.source)}
             </Badge>
           ) : null}
           {onRemove ? (
@@ -75,7 +76,7 @@ export function QuoteCard({
           {quote.stale ? (
             <p className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn/10 p-2 text-xs text-warn">
               <AlertTriangle className="size-4" aria-hidden />
-              Data is stale — last candle{" "}
+              Prices may be out of date: last candle{" "}
               {new Date(quote.lastCandleAt!).toLocaleTimeString()}
             </p>
           ) : null}
@@ -89,7 +90,9 @@ export function QuoteCard({
                     {WINDOW_LABELS[w]}
                   </div>
                   <div className={`num text-xs font-semibold ${changeClass(value)}`}>
-                    {value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`}
+                    {value == null
+                      ? "—"
+                      : `${value > 0 ? "▲" : value < 0 ? "▼" : ""}${Math.abs(value).toFixed(2)}%`}
                   </div>
                 </div>
               );
@@ -128,7 +131,8 @@ export function QuoteCard({
             </ResponsiveContainer>
           </div>
           <p className="num text-[11px] text-muted-foreground">
-            24h of 15m candles · updated {new Date(quote.fetchedAt).toLocaleTimeString()}
+            Last 24 hours (15-minute candles) · updated{" "}
+            {new Date(quote.fetchedAt).toLocaleTimeString()}
           </p>
         </>
       )}

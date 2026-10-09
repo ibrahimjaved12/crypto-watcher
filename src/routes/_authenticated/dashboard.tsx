@@ -8,7 +8,7 @@ import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
 import { QuoteCard } from "@/components/market/quote-card";
-import { PythonAnalysisPanel } from "@/components/market/python-analysis";
+import { MarketRead } from "@/components/market/market-read";
 import { TechnicalAnalysis } from "@/components/market/technical-analysis";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,7 +18,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
+import { Hint } from "@/components/hint";
+import { EmptyState, PageHeader, StatusChip, TimeAgo } from "@/components/plain";
+import { humanizeReason, relativeTime, sourceLabel, summarizeReasons, type Level } from "@/lib/labels";
 import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db";
 import { getMarketSnapshot } from "@/lib/market.functions";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
@@ -28,12 +30,12 @@ import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/s
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
     meta: [
-      { title: "Dashboard — Crypto Watch" },
+      { title: "Market — Crypto Watch" },
       {
         name: "description",
         content: "Live prices, 5m to 24h changes and charts for the pairs on your watchlist.",
       },
-      { property: "og:title", content: "Dashboard — Crypto Watch" },
+      { property: "og:title", content: "Market — Crypto Watch" },
       { property: "og:description", content: "Your live crypto watchlist and price changes." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -96,9 +98,9 @@ function Dashboard() {
     mutationFn: () => runCheck({ data: undefined }),
     onSuccess: (result) => {
       toast.success(
-        `Check ${result.status}: ${result.symbolsChecked} pairs, ${result.alertsCreated} alert(s).`,
+        `Alert check ${humanizeReason(result.status).short.toLowerCase()}: ${result.symbolsChecked} pairs checked, ${result.alertsCreated} new alert(s).`,
       );
-      if (result.error) toast.warning(result.error);
+      if (result.error) toast.warning(summarizeReasons(result.error).items.join("; "));
       queryClient.invalidateQueries({ queryKey: ["operational-state"] });
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
       queryClient.invalidateQueries({ queryKey: ["ta"] });
@@ -109,90 +111,117 @@ function Dashboard() {
   const available = SUPPORTED_SYMBOLS.filter((s) => !symbols.includes(s));
   const quotes = market.data?.quotes ?? [];
   const sourcesDown = quotes.length > 0 && quotes.every((q) => !q.ok);
+  const source = quotes.find((q) => q.source)?.source ?? null;
+  const runStatus = lastRun ? humanizeReason(lastRun.status) : null;
+  const stripLevel: Level = sourcesDown
+    ? "problem"
+    : runStatus?.level === "problem"
+      ? "problem"
+      : !market.data || runStatus?.level === "wait"
+        ? "wait"
+        : "ok";
+  const stripDetails = [
+    `Data source: ${sourcesDown ? "no exchange reachable" : source ? sourceLabel(source) : "waiting for the first price load"}`,
+    `Last price update: ${market.data ? new Date(market.data.fetchedAt).toLocaleString() : "not loaded yet"}`,
+    `Last monitoring check: ${lastRun ? `${new Date(lastRun.ran_at).toLocaleString()} (${runStatus!.short})` : "none yet"}`,
+  ].join("\n");
 
   return (
     <AppShell>
-      <div className="flex flex-wrap items-end gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Market dashboard</h1>
-          <p className="text-sm text-muted-foreground">
-            {symbols.length}/{MAX_WATCHLIST_SIZE} pairs ·{" "}
+      <PageHeader
+        eyebrow="Live market"
+        title="Market"
+        subtitle={
+          <>
+            Your watched futures pairs, their recent moves and a plain-language market read.{" "}
+            <span className="num">
+              {symbols.length}/{MAX_WATCHLIST_SIZE}
+            </span>{" "}
+            pairs ·{" "}
             {automatic.enabled
-              ? "prices refresh every minute while this page is active."
-              : "Automatic price refresh paused. Press Refresh to load prices."}
-          </p>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-2">
-          <Select value={pending} onValueChange={(v) => add.mutate(v)}>
-            <SelectTrigger className="w-[180px]" disabled={available.length === 0}>
-              <SelectValue placeholder="Add a pair" />
-            </SelectTrigger>
-            <SelectContent>
-              {available.map((s) => (
-                <SelectItem key={s} value={s}>
-                  {baseAsset(s)}/USDT
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button
-            variant="secondary"
-            onClick={() => market.refetch()}
-            disabled={market.isFetching || symbols.length === 0}
-          >
-            <RefreshCw
-              className={`size-4 ${market.isFetching ? "animate-spin" : ""}`}
-              aria-hidden
-            />
-            Refresh
-          </Button>
-          <Button
-            onClick={() => check.mutate()}
-            disabled={check.isPending || settings.isPending || settings.isError || monitoringPaused}
-            title={
-              monitoringPaused
-                ? "Enable monitoring and market-data collection in Settings"
-                : undefined
-            }
-          >
-            <PlayCircle className="size-4" aria-hidden />
-            {monitoringPaused ? "Monitoring paused" : "Run check now"}
-          </Button>
-        </div>
-      </div>
+              ? "prices refresh every minute while this page is open."
+              : "automatic refresh is paused; press Refresh."}
+          </>
+        }
+        actions={
+          <>
+            <Select value={pending} onValueChange={(v) => add.mutate(v)}>
+              <SelectTrigger className="h-9 w-[160px]" disabled={available.length === 0} aria-label="Add a pair">
+                <SelectValue placeholder="Add a pair" />
+              </SelectTrigger>
+              <SelectContent>
+                {available.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {baseAsset(s)}/USDT
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              variant="secondary"
+              onClick={() => market.refetch()}
+              disabled={market.isFetching || symbols.length === 0}
+            >
+              <RefreshCw
+                className={`size-4 ${market.isFetching ? "animate-spin" : ""}`}
+                aria-hidden
+              />
+              Refresh
+            </Button>
+            <Button
+              onClick={() => check.mutate()}
+              disabled={check.isPending || settings.isPending || settings.isError || monitoringPaused}
+              title={
+                monitoringPaused
+                  ? "Turn on monitoring and market-data collection in the Control room"
+                  : "Check every watched pair against your alert rule right now"
+              }
+            >
+              <PlayCircle className="size-4" aria-hidden />
+              {monitoringPaused ? "Monitoring paused" : "Check for alerts now"}
+            </Button>
+          </>
+        }
+      />
 
-      <div className="panel mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 p-4 text-sm">
-        <span className="flex items-center gap-2">
-          <span className="text-muted-foreground">Data source:</span>
-          <Badge variant={sourcesDown ? "destructive" : "secondary"} className="num">
-            {sourcesDown
-              ? "No exchange reachable"
-              : (quotes.find((q) => q.source)?.source ?? "Waiting…")}
-          </Badge>
-        </span>
+      <div
+        className="panel mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-sm"
+        title={stripDetails}
+      >
+        <StatusChip level={stripLevel}>
+          {stripLevel === "ok" ? "Data flowing" : stripLevel === "wait" ? "Waiting" : "Data problem"}
+        </StatusChip>
         <span className="text-muted-foreground">
-          Last price update:{" "}
+          {sourcesDown ? (
+            "No exchange reachable"
+          ) : (
+            <>
+              Prices from <span className="text-foreground">{source ? sourceLabel(source) : "…"}</span>
+            </>
+          )}
+          {" · "}updated{" "}
           <span className="num text-foreground">
             {market.data ? new Date(market.data.fetchedAt).toLocaleTimeString() : "—"}
           </span>
+          {" · "}last check{" "}
+          {lastRun ? (
+            <>
+              <TimeAgo at={lastRun.ran_at} text={relativeTime(lastRun.ran_at)} />{" "}
+              <span className="text-foreground">({runStatus!.short.toLowerCase()})</span>
+            </>
+          ) : (
+            "none yet"
+          )}
         </span>
-        <span className="text-muted-foreground">
-          Last scheduled run:{" "}
-          <span className="num text-foreground">
-            {lastRun
-              ? `${new Date(lastRun.ran_at).toLocaleString()} (${lastRun.status})`
-              : "none yet"}
-          </span>
-        </span>
+        <Hint text={stripDetails}>
+          <span className="text-xs">Details</span>
+        </Hint>
       </div>
-
-      <PythonAnalysisPanel symbols={symbols} />
-      <TechnicalAnalysis />
 
       {sourcesDown ? (
         <p className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm">
           Public exchange data is not reachable from the server right now. No prices are shown and
-          no values are simulated. Details are recorded with each monitoring run.
+          no values are simulated. Details are recorded with each monitoring check.
         </p>
       ) : null}
 
@@ -216,10 +245,16 @@ function Dashboard() {
       </div>
 
       {symbols.length === 0 && !watchlist.isLoading ? (
-        <p className="panel mt-4 flex items-center gap-2 p-6 text-sm text-muted-foreground">
-          <Plus className="size-4" aria-hidden /> Add a trading pair to start monitoring.
-        </p>
+        <EmptyState
+          className="mt-4"
+          icon={Plus}
+          title="No pairs watched yet"
+          body="Add a pair with “Add a pair” above. Its price, recent moves and 24h chart appear here within a minute."
+        />
       ) : null}
+
+      <MarketRead symbols={symbols} />
+      <TechnicalAnalysis />
     </AppShell>
   );
 }
