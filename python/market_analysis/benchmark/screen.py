@@ -40,6 +40,22 @@ hypothesis per horizon): weighted least-squares slope of the drift-adjusted buck
 mean on the bucket index 0..3 (both signs pooled, weights = N) and the Spearman
 correlation of bucket index and bucket mean, with bootstrap intervals; no PASS/FAIL.
 
+Positioning family (#188, #224; ``POSITIONING_SERIES``): hourly decisions from the Binance metrics
+archive (``metrics_lake.load_symbol_metrics_range``), a row usable only from ``create_time + 5 min``
+(``metrics_lake.usable_from_ms``). At decision t the value uses the latest period usable at t; a
+missing period (or one of the periods a value needs) drops the decision (z None), never filled.
+``oi-chg-4h`` = ln(sum_open_interest[t] / sum_open_interest[t - 4 h]) (contract units, so the price
+move does not enter); ``toptrader-ls`` = sum_toptrader_long_short_ratio (position-weighted level);
+``global-ls`` = count_long_short_ratio (account-weighted level); ``taker-ls-1h`` = mean of
+sum_taker_long_short_vol_ratio over the last 12 periods. Positive = more long positioning / flow
+(for OI: more open positions). Robust z (``order_flow.robust_z``) against the same-phase history:
+the values at the previous hourly decisions of the trailing 30 days, at least 500 of them (the
+literal same hour of day would give at most 30 values, below that minimum). Horizons 60 and
+240 minutes; the screen reports the sign of beta (follow or fade) and never assumes it. For
+``oi-chg-4h`` a quadrant table adds OI up/down x 4 h price change up/down (|past240| below
+0.25 sigma240 is "flat" and excluded) with forward returns, drift adjustment, costs and the same
+cluster bootstrap. Multiplicity of the family: 4 series x 2 horizons + the quadrant table.
+
 Floats are fine here (descriptive statistics); the report renders them as strings.
 """
 from __future__ import annotations
@@ -55,13 +71,21 @@ from .calibration import _render, check_segment
 from .canonical import content_hash
 from .costs import COST_MODEL_V1
 from .funding import FundingSeries
+from ..metrics_lake import load_symbol_metrics_range
 from .market_data import load_symbol_bars, load_symbol_funding
 from .rng import u64_words
 from .segments import segment_bounds_ms
 from .volatility import BLOCK_MINUTES, VAR_SCALE, build_variance, horizon_sigma
 
 SCHEMA = "screen-v1"
-SERIES = ("of-cum240-z",)
+POSITIONING_SERIES = ("oi-chg-4h", "toptrader-ls", "global-ls", "taker-ls-1h")
+SERIES = ("of-cum240-z", *POSITIONING_SERIES)
+POSITIONING_HORIZONS = (60, 240)
+POSITIONING_HISTORY_DAYS = 30
+POSITIONING_MIN_HISTORY = 500
+QUADRANT_DEAD_ZONE_SIGMA = 0.25
+QUADRANT_HORIZONS = (60, 240)
+QUADRANTS = ("oi_up_price_up", "oi_up_price_down", "oi_down_price_up", "oi_down_price_down")
 HORIZONS = (60, 120, 240, 480, 960, 1440)
 BUCKET_EDGES = (2.0, 2.5, 3.0, 3.5)
 BUCKET_NAMES = ("[2,2.5)", "[2.5,3)", "[3,3.5)", "[3.5,inf)")
@@ -84,6 +108,52 @@ def _of_cum240_z(bars: BarSeries) -> list:
 
 
 SERIES_BUILDERS = {"of-cum240-z": _of_cum240_z}
+_PERIODS_4H = 48
+_PERIODS_1H = 12
+
+
+def series_horizons(series: str) -> tuple:
+    return POSITIONING_HORIZONS if series in POSITIONING_SERIES else HORIZONS
+
+
+def positioning_value(metrics, series: str, decision_ms: int):
+    """The raw positioning value at a decision (float) or None when a needed period is missing."""
+    i = metrics.index_at(decision_ms)
+    if i is None:
+        return None
+    c = metrics.columns
+    if series == "oi-chg-4h":
+        if i < _PERIODS_4H:
+            return None
+        now, before = c["sum_open_interest"][i], c["sum_open_interest"][i - _PERIODS_4H]
+        return None if np.isnan(now) or np.isnan(before) or now <= 0 or before <= 0 else float(np.log(now / before))
+    if series == "toptrader-ls":
+        value = c["sum_toptrader_long_short_ratio"][i]
+    elif series == "global-ls":
+        value = c["count_long_short_ratio"][i]
+    elif series == "taker-ls-1h":
+        if i < _PERIODS_1H - 1:
+            return None
+        window = c["sum_taker_long_short_vol_ratio"][i - _PERIODS_1H + 1:i + 1]
+        return None if np.isnan(window).any() else float(window.mean())
+    else:
+        raise ValueError(f"unknown positioning series {series!r}")
+    return None if np.isnan(value) else float(value)
+
+
+def positioning_z_series(bars: BarSeries, metrics, series: str) -> list:
+    """[(signal_ms, z or None, raw or None)] at every hourly decision of the bars (as cum240_z_series)."""
+    history, out = order_flow.TrailingHistory(POSITIONING_HISTORY_DAYS * _DAY), []
+    first = -bars.start_ms % _HOUR // _MINUTE
+    for e in range(first, bars.minutes + 1, 60):
+        signal_ms = bars.start_ms + e * _MINUTE
+        value = positioning_value(metrics, series, signal_ms)
+        z = None
+        if value is not None:
+            z = order_flow.robust_z(history.at(signal_ms), value, POSITIONING_MIN_HISTORY)
+            history.add(signal_ms, value)
+        out.append((signal_ms, None if z is None else float(z), value))
+    return out
 
 
 # ---------------------------------------------------------------- observations
@@ -127,9 +197,11 @@ def symbol_observations(bars: BarSeries, funding: FundingSeries, segment: str, s
     """Every decision time of the series inside the segment, with z, controls, returns and funding per horizon."""
     first_ms, end_ms = segment_bounds_ms(segment)
     zs = SERIES_BUILDERS[series](bars) if z_series is None else z_series
-    decisions = [(ms, z) for ms, z in zs if first_ms <= ms < end_ms]
-    signal_ms = np.array([ms for ms, _ in decisions], dtype=np.int64)
-    z = np.array([np.nan if value is None else float(value) for _, value in decisions], dtype=float)
+    decisions = [item for item in zs if first_ms <= item[0] < end_ms]
+    signal_ms = np.array([item[0] for item in decisions], dtype=np.int64)
+    z = np.array([np.nan if item[1] is None else float(item[1]) for item in decisions], dtype=float)
+    raw = np.array([np.nan if len(item) < 3 or item[2] is None else float(item[2]) for item in decisions],
+                   dtype=float)
     e = (signal_ms - bars.start_ms) // _MINUTE
     d = e - 1
     end_index = (end_ms - bars.start_ms) // _MINUTE
@@ -147,9 +219,9 @@ def symbol_observations(bars: BarSeries, funding: FundingSeries, segment: str, s
         if 0 <= block < len(variance) and variance[block] != MISSING and variance[block] > 0:
             sigma[i] = horizon_sigma(variance[block], 240) / VAR_SCALE
     out = {"symbol": bars.symbol, "signal_ms": signal_ms, "day": (signal_ms - first_ms) // _DAY,
-           "hour": (signal_ms // _HOUR) % 24, "z": z, "past240": past, "sigma240": sigma,
-           "returns": {}, "funding_bp": {}, "excluded": {}}
-    for h in HORIZONS:
+           "hour": (signal_ms // _HOUR) % 24, "z": z, "raw": raw, "past240": past, "sigma240": sigma,
+           "horizons": list(series_horizons(series)), "returns": {}, "funding_bp": {}, "excluded": {}}
+    for h in series_horizons(series):
         r, compromised, past_end = forward_returns(bars, e, h, end_index)
         fund = np.full(len(e), np.nan)
         for i in np.flatnonzero(~np.isnan(r)):
@@ -162,14 +234,22 @@ def symbol_observations(bars: BarSeries, funding: FundingSeries, segment: str, s
     return out
 
 
-def run_symbol(bars_dir, symbol: str, segment: str, series: str = "of-cum240-z") -> dict:
-    """Guarded: the hidden guard runs before any file is opened; bars and funding FIRST_MONTH..segment end."""
+def run_symbol(bars_dir, symbol: str, segment: str, series: str = "of-cum240-z", metrics_dir=None) -> dict:
+    """Guarded: the hidden guard runs before any file is opened; bars, funding (and metrics for the
+    positioning series) FIRST_MONTH..segment end."""
     months = check_segment(segment)
     if series not in SERIES:
         raise ValueError(f"series must be one of {SERIES}")
+    z_series = None
+    if series in POSITIONING_SERIES:
+        if metrics_dir is None:
+            raise ValueError("positioning series need the metrics directory")
+        metrics = load_symbol_metrics_range(metrics_dir, symbol, data_lake.FIRST_MONTH, months[-1])
     bars = load_symbol_bars(bars_dir, symbol, data_lake.FIRST_MONTH, months[-1])
     funding = load_symbol_funding(bars_dir, symbol, data_lake.FIRST_MONTH, months[-1])
-    return symbol_observations(bars, funding, segment, series)
+    if series in POSITIONING_SERIES:
+        z_series = positioning_z_series(bars, metrics, series)
+    return symbol_observations(bars, funding, segment, series, z_series)
 
 
 # ---------------------------------------------------------------- statistics
@@ -378,6 +458,48 @@ def screen_horizon(results: dict, horizon: int, n_days: int, B: int = BOOTSTRAP_
     return out
 
 
+def quadrant_index(oi_change, past240_bp, sigma240) -> np.ndarray:
+    """0..3 per QUADRANTS, -1 when excluded: OI change missing or zero, price "flat"
+    (|past240| < 0.25 sigma240) or the controls missing."""
+    oi = np.asarray(oi_change, dtype=float)
+    price = np.asarray(past240_bp, dtype=float) / 1e4
+    sigma = np.asarray(sigma240, dtype=float)
+    with np.errstate(invalid="ignore"):
+        valid = ~np.isnan(oi) & (oi != 0) & ~np.isnan(price) & ~np.isnan(sigma)
+        valid &= np.abs(price) >= QUADRANT_DEAD_ZONE_SIGMA * sigma
+        index = np.where(oi > 0, 0, 2) + np.where(price > 0, 0, 1)
+    return np.where(valid, index, -1)
+
+
+def quadrant_table(results: dict, horizon: int, n_days: int, B: int = BOOTSTRAP_B) -> dict:
+    """Forward returns per OI x price quadrant (long side gross; drift-adjusted; net long and net short)."""
+    columns = _pooled(results, horizon)
+    raw = np.concatenate([results[s]["raw"] for s in results])
+    symbols = len(results)
+    clusters_all = cluster_ids(columns["day"], horizon)
+    groups = int(cluster_ids(np.array([max(n_days - 1, 0)]), horizon)[0]) + 1
+    weights = cluster_weights(groups, B)
+    r = columns["r"]
+    has_r = ~np.isnan(r)
+    rbar = np.array([r[has_r & (columns["symbol"] == i)].mean() if (has_r & (columns["symbol"] == i)).any()
+                     else np.nan for i in range(symbols)])
+    quadrant = quadrant_index(raw, columns["past240"], columns["sigma240"])
+    adjusted = r - rbar[columns["symbol"]]
+    funding_bp = columns["funding_bp"]
+    rows = []
+    for index, name in enumerate(QUADRANTS):
+        cell = has_r & (quadrant == index)
+        c = clusters_all[cell]
+        rows.append({"quadrant": name, "n": int(cell.sum()), "n_clusters": int(np.unique(c).size),
+                     "gross_long_bp": _bootstrap_mean(r[cell], c, weights),
+                     "drift_adjusted_bp": _bootstrap_mean(adjusted[cell], c, weights),
+                     "cost_bp": ROUND_TRIP_COST_BP,
+                     "net_long_bp": _bootstrap_mean(r[cell] - ROUND_TRIP_COST_BP - funding_bp[cell], c, weights),
+                     "net_short_bp": _bootstrap_mean(-r[cell] - ROUND_TRIP_COST_BP + funding_bp[cell], c, weights)})
+    return {"horizon_min": horizon, "dead_zone_sigma240": QUADRANT_DEAD_ZONE_SIGMA,
+            "excluded": int((has_r & (quadrant < 0)).sum()), "quadrants": rows}
+
+
 # ---------------------------------------------------------------- report
 
 
@@ -390,15 +512,26 @@ def build_report(segment: str, results: dict, *, series: str = "of-cum240-z", co
                         "horizons": {str(h): {"n": int((~np.isnan(result["returns"][h])).sum()),
                                               "excluded_compromised": result["excluded"][h]["compromised"],
                                               "excluded_past_end": result["excluded"][h]["past_end"]}
-                                     for h in HORIZONS}}
+                                     for h in series_horizons(series)}}
                for symbol, result in results.items()}
-    horizons = [screen_horizon(results, h, n_days, B) for h in HORIZONS]
-    report = {"schema": SCHEMA, "segment": segment, "series": [series], "horizons_min": list(HORIZONS),
-              "series_x_horizons_examined": len([series]) * len(HORIZONS), "symbols": _render(symbols),
+    horizons = [screen_horizon(results, h, n_days, B) for h in series_horizons(series)]
+    positioning = series in POSITIONING_SERIES
+    quadrants = ([quadrant_table(results, h, n_days, B) for h in QUADRANT_HORIZONS]
+                 if series == "oi-chg-4h" else None)
+    family = (len(POSITIONING_SERIES) * len(POSITIONING_HORIZONS)) if positioning else len(HORIZONS)
+    report = {"schema": SCHEMA, "segment": segment, "series": [series], "horizons_min": list(series_horizons(series)),
+              "series_x_horizons_examined": family,
+              "multiplicity": (f"{len(POSITIONING_SERIES)} series x {len(POSITIONING_HORIZONS)} horizons + the "
+                               "oi-chg-4h quadrant table (positioning family)" if positioning
+                               else f"1 series x {len(HORIZONS)} horizons"),
+              "quadrants": _render(quadrants), "symbols": _render(symbols),
               "parameters": _render({"round_trip_cost_bp": ROUND_TRIP_COST_BP, "cost_model": COST_MODEL_V1.version,
                                      "bootstrap_B": B, "bootstrap_seed": BOOTSTRAP_SEED,
                                      "sigma_half_life_days": SIGMA_HALF_LIFE_DAYS, "bucket_edges": list(BUCKET_EDGES)}),
               "notes": ["Screening is exploratory: it never counts as a PASS and writes no ledger entry.",
+                        *(["Positioning series: metrics rows usable from create_time + 5 min; robust z against "
+                           "the previous 30 days of hourly values (min 500); the sign of beta says follow (+) or "
+                           "fade (-), it is not assumed."] if positioning else []),
                         "Funding bp uses the price as the mark (rate x 10^4).",
                         "Costs: taker fee and market slippage floor on entry and exit; no maker, no stop.",
                         "Without controls: symbol intercepts and z only; with controls: plus hour of day, past240 "
@@ -428,6 +561,9 @@ def public_lines(report: dict) -> list[str]:
             lines.append(f"{symbol} h={int(horizon)} segment={report['segment']} n={int(counts['n'])} "
                          f"excluded_compromised={int(counts['excluded_compromised'])} "
                          f"excluded_past_end={int(counts['excluded_past_end'])}")
+    for table in report.get("quadrants") or []:
+        for row in table["quadrants"]:
+            lines.append(f"quadrant {row['quadrant']} h={int(table['horizon_min'])} n={int(row['n'])}")
     lines.append(f"report hash {report['report_hash']}")
     return lines
 
@@ -440,7 +576,8 @@ def markdown(report: dict) -> str:
     check_report(report)
     lines = [f"# Screen {report['series'][0]} ({report['segment']})", "",
              f"Report hash: `{report['report_hash']}`. Series x horizons examined: "
-             f"{report['series_x_horizons_examined']} (exploratory; never a PASS). Round-trip cost "
+             f"{report['series_x_horizons_examined']} ({report.get('multiplicity', '')}; exploratory; never a "
+             f"PASS). Round-trip cost "
              f"{report['parameters']['round_trip_cost_bp']} bp.", ""]
     lines += [f"- {note}" for note in report["notes"]] + [""]
     for result in report["results"]:
@@ -466,4 +603,15 @@ def markdown(report: dict) -> str:
                       f"(95% {_cell(dose['slope_ci95'][0])} .. {_cell(dose['slope_ci95'][1])}), Spearman "
                       f"{_cell(dose['spearman'])} (95% {_cell(dose['spearman_ci95'][0])} .. "
                       f"{_cell(dose['spearman_ci95'][1])}).", ""]
+    for table in report.get("quadrants") or []:
+        lines += [f"## Quadrants (OI change x 4 h price change), h = {table['horizon_min']} m", "",
+                  f"Flat price (|past240| < {table['dead_zone_sigma240']} sigma240) excluded: {table['excluded']}.",
+                  "", "| quadrant | N | clusters | gross long bp | drift-adj bp | cost bp | net long bp (se) | "
+                  "net short bp (se) |", "|" + " --- |" * 8]
+        for row in table["quadrants"]:
+            lines.append(f"| {row['quadrant']} | {row['n']} | {row['n_clusters']} | "
+                         f"{_cell(row['gross_long_bp']['mean'])} | {_cell(row['drift_adjusted_bp']['mean'])} | "
+                         f"{row['cost_bp']} | {_cell(row['net_long_bp']['mean'])} ({_cell(row['net_long_bp']['se'])}) | "
+                         f"{_cell(row['net_short_bp']['mean'])} ({_cell(row['net_short_bp']['se'])}) |")
+        lines.append("")
     return "\n".join(lines) + "\n"

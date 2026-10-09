@@ -19,10 +19,14 @@ on:
         description: "rd data release revision"
         type: string
         default: "1"
+      metrics_revision:
+        description: "mx metrics release revision (positioning series only)"
+        type: string
+        default: "1"
       series:
         description: "State series to screen"
         type: choice
-        options: [of-cum240-z]
+        options: [of-cum240-z, oi-chg-4h, toptrader-ls, global-ls, taker-ls-1h]
         default: of-cum240-z
 
 permissions:
@@ -59,6 +63,7 @@ jobs:
         env:
           SEGMENT: ${{ inputs.segment }}
           DATA_REVISION: ${{ inputs.data_revision }}
+          METRICS_REVISION: ${{ inputs.metrics_revision }}
           SERIES: ${{ inputs.series }}
           SCREEN_SUMMARY: ${{ runner.temp }}/screen-summary.md
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
@@ -66,7 +71,7 @@ jobs:
         run: |
           python/.venv/bin/python scripts/research/screen.py --workdir screen-work \
             --summary "$SCREEN_SUMMARY" --segment "$SEGMENT" --data-revision "$DATA_REVISION" \
-            --series "$SERIES"
+            --metrics-revision "$METRICS_REVISION" --series "$SERIES"
       - name: Delete working files
         if: always()
         run: rm -rf screen-work
