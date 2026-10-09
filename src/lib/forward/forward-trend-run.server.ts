@@ -14,6 +14,8 @@ export const TREND_TRACK_START_MS = Date.UTC(2026, 9, 1);
 export const TREND_HISTORY_START_MS = Date.UTC(2020, 0, 1);
 const FUNDING_PAGE = 1000;
 export const FUNDING_INTERVAL_MS = 8 * 3_600_000;
+// Far smaller than the shortest allowed interval (1h), so it cannot mask a genuinely missed settlement.
+const FUNDING_JITTER_TOLERANCE_MS = 60_000;
 
 export type TrendSnapshot = {
   id: string;
@@ -109,11 +111,20 @@ export async function fetchTrendFunding(
   let cursor = fromMs + 1;
   while (cursor <= throughMs) {
     const page = await deps.fetchFunding(symbol, cursor);
+    // The window is (fromMs, throughMs] on the nominal grid: a settlement for the boundary itself
+    // can arrive a few ms late and must not shift the expected sequence.
     const fresh = page.filter(
-      (event) => event.calc_time_ms >= cursor && event.calc_time_ms <= throughMs,
+      (event) =>
+        event.calc_time_ms >= cursor &&
+        event.calc_time_ms > fromMs + FUNDING_JITTER_TOLERANCE_MS &&
+        event.calc_time_ms <= throughMs + FUNDING_JITTER_TOLERANCE_MS,
     );
     events.push(...fresh);
-    if (!fresh.length || fresh.at(-1)!.calc_time_ms >= throughMs || page.length < FUNDING_PAGE)
+    if (
+      !fresh.length ||
+      fresh.at(-1)!.calc_time_ms >= throughMs - FUNDING_JITTER_TOLERANCE_MS ||
+      page.length < FUNDING_PAGE
+    )
       break;
     cursor = fresh.at(-1)!.calc_time_ms + 1;
   }
@@ -125,14 +136,24 @@ export async function fetchTrendFunding(
   ) {
     throw new Error("Unverified funding interval");
   }
+  // Binance settlement timestamps carry a few ms of jitter around the exact interval boundary
+  // (observed: exact, +1ms, +2ms); a real missed settlement is off by a whole intervalMs, which
+  // this tolerance is far too small to mistake for jitter.
+  // Verified settlements are snapped to their nominal grid time, so downstream coverage checks
+  // (exact grid equality in Python) see the settlement schedule, not the exchange's ms jitter.
   let expected = fromMs + intervalMs;
+  const snapped: FundingEvent[] = [];
   for (const event of events) {
-    if (event.calc_time_ms !== expected) break;
+    if (Math.abs(event.calc_time_ms - expected) > FUNDING_JITTER_TOLERANCE_MS) break;
+    snapped.push({ ...event, calc_time_ms: expected });
     expected += intervalMs;
   }
   const lastVerified = expected - intervalMs;
   const toMs = lastVerified > fromMs ? Math.floor(lastVerified / DAY_MS) * DAY_MS : null;
-  return { events, toMs: toMs !== null && toMs > fromMs ? toMs : null };
+  return {
+    events: [...snapped, ...events.slice(snapped.length)],
+    toMs: toMs !== null && toMs > fromMs ? toMs : null,
+  };
 }
 
 export async function runForwardTrend(

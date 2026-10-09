@@ -12,6 +12,20 @@ type CollectionSettings = {
   market_data_collection_enabled?: boolean | null;
 };
 
+/**
+ * The frozen benchmark universe (CLAUDE.md; same six as FORWARD_SYMBOLS in forward-run.server.ts).
+ * The forward engine and daily trend track need their candles regardless of any watchlist, so
+ * they are always collected. Keep in sync with FORWARD_SYMBOLS.
+ */
+export const BENCHMARK_COLLECTOR_SYMBOLS = [
+  "BNBUSDT",
+  "BTCUSDT",
+  "DOGEUSDT",
+  "ETHUSDT",
+  "SOLUSDT",
+  "XRPUSDT",
+] as const;
+
 export type CollectorUniverseSync =
   | { status: "assigned"; symbols: string[] }
   | { status: "unchanged"; symbols: string[] }
@@ -83,7 +97,9 @@ export async function syncCollectorUniverse(
     (settingsRows ?? []).map((row) => [row.user_id, row as CollectionSettings]),
   );
 
-  const symbols = collectorUniverse(rows, byUser);
+  const symbols = [
+    ...new Set([...collectorUniverse(rows, byUser), ...BENCHMARK_COLLECTOR_SYMBOLS]),
+  ].sort();
   const current = await store.readCollectorSubscriptions();
   if (
     current.length === symbols.length &&

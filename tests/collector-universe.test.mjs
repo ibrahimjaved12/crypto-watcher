@@ -124,6 +124,9 @@ test("a symbol leaves the universe only when its last relevant subscriber does",
   assert.deepEqual(collectorUniverse([], new Map()), []);
 });
 
+// The frozen benchmark universe is always collected, whatever the watchlists hold.
+const BENCH = ["BNBUSDT", "BTCUSDT", "DOGEUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"];
+
 test("the universe sync assigns changes and no-ops while unchanged", async () => {
   const { syncCollectorUniverse } = await load();
   const env = { BINANCE_COLLECTOR_ENABLED: "true" };
@@ -135,8 +138,8 @@ test("the universe sync assigns changes and no-ops while unchanged", async () =>
     env,
   );
   assert.equal(assigned.status, "assigned");
-  assert.deepEqual(assigned.symbols, ["BTCUSDT"]);
-  assert.deepEqual(store.assigned, [["BTCUSDT"]]);
+  assert.deepEqual(assigned.symbols, BENCH);
+  assert.deepEqual(store.assigned, [BENCH]);
 
   const unchanged = await syncCollectorUniverse(
     admin({ watchers: [{ user_id: "a", symbol: "BTCUSDT" }] }),
@@ -146,10 +149,17 @@ test("the universe sync assigns changes and no-ops while unchanged", async () =>
   assert.equal(unchanged.status, "unchanged");
   assert.equal(store.assigned.length, 1);
 
+  // A non-benchmark watcher adds to the set and is removed again with its watchlist entry.
+  const extra = await syncCollectorUniverse(
+    admin({ watchers: [{ user_id: "a", symbol: "ADAUSDT" }] }),
+    store,
+    env,
+  );
+  assert.equal(extra.status, "assigned");
+  assert.deepEqual(extra.symbols, ["ADAUSDT", ...BENCH]);
   const removed = await syncCollectorUniverse(admin({ watchers: [] }), store, env);
   assert.equal(removed.status, "assigned");
-  assert.deepEqual(removed.symbols, []);
-  assert.deepEqual(store.assigned, [["BTCUSDT"], []]);
+  assert.deepEqual(removed.symbols, BENCH);
 });
 
 test("the universe sync runs while scheduled monitoring is disabled", async () => {
@@ -161,33 +171,47 @@ test("the universe sync runs while scheduled monitoring is disabled", async () =
     { BINANCE_COLLECTOR_ENABLED: "true", SCHEDULED_MONITOR_ENABLED: "false" },
   );
   assert.equal(result.status, "assigned");
-  assert.deepEqual(result.symbols, ["ETHUSDT"]);
+  assert.deepEqual(result.symbols, BENCH);
 });
 
-test("collection settings retain another watcher and assign empty when the last watcher pauses", async () => {
+test("collection settings retain another watcher and fall back to the benchmark set when the last watcher pauses", async () => {
   const { syncCollectorUniverse } = await load();
-  const store = fakeStore(["BTCUSDT"]);
+  const store = fakeStore(["ADAUSDT", ...BENCH]);
   const env = { BINANCE_COLLECTOR_ENABLED: "true" };
   const watchers = [
-    { user_id: "a", symbol: "BTCUSDT" },
-    { user_id: "b", symbol: "BTCUSDT" },
+    { user_id: "a", symbol: "ADAUSDT" },
+    { user_id: "b", symbol: "ADAUSDT" },
   ];
   const paused = { monitoring_enabled: true, market_data_collection_enabled: false };
-  const retained = await syncCollectorUniverse(admin({
-    watchers,
-    settings: [{ user_id: "a", ...paused }, { user_id: "b", ...enabled }],
-  }), store, env);
+  const retained = await syncCollectorUniverse(
+    admin({
+      watchers,
+      settings: [
+        { user_id: "a", ...paused },
+        { user_id: "b", ...enabled },
+      ],
+    }),
+    store,
+    env,
+  );
   assert.equal(retained.status, "unchanged");
-  assert.deepEqual(retained.symbols, ["BTCUSDT"]);
+  assert.deepEqual(retained.symbols, ["ADAUSDT", ...BENCH]);
   assert.deepEqual(store.assigned, []);
 
-  const removed = await syncCollectorUniverse(admin({
-    watchers,
-    settings: [{ user_id: "a", ...paused }, { user_id: "b", ...paused }],
-  }), store, env);
+  const removed = await syncCollectorUniverse(
+    admin({
+      watchers,
+      settings: [
+        { user_id: "a", ...paused },
+        { user_id: "b", ...paused },
+      ],
+    }),
+    store,
+    env,
+  );
   assert.equal(removed.status, "assigned");
-  assert.deepEqual(removed.symbols, []);
-  assert.deepEqual(store.assigned, [[]]);
+  assert.deepEqual(removed.symbols, BENCH);
+  assert.deepEqual(store.assigned, [BENCH]);
 });
 
 test("the universe sync skips without collector mode or an operational store", async () => {
