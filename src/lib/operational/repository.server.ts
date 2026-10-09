@@ -7,6 +7,7 @@ import type {
   CollectorCandle,
   CollectorHealth,
   CollectorStorageDiagnostics,
+  ForwardMinuteRow,
   OperationalCheckpoint,
   OperationalMonitorRun,
   OperationalStore,
@@ -96,6 +97,9 @@ const disabledStore: OperationalStore = {
   async readMovementCandleHistory() {
     return new Map<string, MovementCandle[]>();
   },
+  async readForwardMinuteCandles() {
+    return [];
+  },
   async claimCollectorLease() {
     return false;
   },
@@ -147,6 +151,8 @@ export function createOperationalStore(
   client: RpcClient,
   options: {
     candleRetentionDays: number;
+    /** 1m collector candle retention (#239 forward engine); default 62, enforced 31..90 in SQL. */
+    minuteCandleRetentionDays?: number;
     monitorRunRetentionDays: number;
     outboxMaxAttempts: number;
   },
@@ -272,6 +278,7 @@ export function createOperationalStore(
           transport: candle.transport,
         })),
         p_retention_days: options.candleRetentionDays,
+        p_minute_retention_days: options.minuteCandleRetentionDays ?? 62,
       });
       rpcError(error, "collector candle write");
       return ((data ?? []) as Array<{ candle_identity: string }>).map((row) => row.candle_identity);
@@ -375,6 +382,30 @@ export function createOperationalStore(
       } catch {
         throw new Error("Operational database returned an invalid collector completed candle row");
       }
+    },
+    async readForwardMinuteCandles(symbol, sinceMs, beforeMs) {
+      const { data, error } = await client.rpc("get_collector_forward_minutes", {
+        p_symbol: symbol.toUpperCase(),
+        p_since: new Date(sinceMs).toISOString(),
+        p_before: new Date(beforeMs).toISOString(),
+      });
+      rpcError(error, "forward minute candle read");
+      if (!Array.isArray(data)) throw new Error("Invalid forward minute candle response");
+      return data.map((row: unknown) => {
+        if (!Array.isArray(row) || row.length !== 8) throw new Error("Invalid forward minute candle row");
+        const [openTime, open, high, low, close, volume, transport, sourceEventAt] = row;
+        if (transport !== "rest" && transport !== "websocket") throw new Error("Invalid candle transport");
+        return {
+          open_time_ms: Number(openTime),
+          open: Number(open),
+          high: Number(high),
+          low: Number(low),
+          close: Number(close),
+          volume: Number(volume),
+          transport,
+          source_event_at_ms: sourceEventAt === null ? null : Number(sourceEventAt),
+        } satisfies ForwardMinuteRow;
+      });
     },
     async readMovementCandleHistory(symbols, sinceMs, beforeBoundaryMs) {
       if (symbols.length === 0) return new Map<string, MovementCandle[]>();

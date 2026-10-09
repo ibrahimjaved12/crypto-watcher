@@ -5,6 +5,7 @@ export type OperationalDbConfig =
       url: string;
       serviceRoleKey: string;
       candleRetentionDays: number;
+      minuteCandleRetentionDays: number;
       monitorRunRetentionDays: number;
       outboxMaxAttempts: number;
     };
@@ -65,6 +66,14 @@ export function operationalDbConfig(
     url: url.origin,
     serviceRoleKey,
     candleRetentionDays: boundedInteger(env["OPERATIONAL_CANDLE_RETENTION_DAYS"], 8, 1, 30),
+    // 1m collector candles feed the forward engine (#239): 28-day seasonal profile + EWMA
+    // warm-up + 30-day signal history. Enforced by record_collector_candles (31..90).
+    minuteCandleRetentionDays: boundedInteger(
+      env["OPERATIONAL_MINUTE_CANDLE_RETENTION_DAYS"],
+      62,
+      31,
+      90,
+    ),
     monitorRunRetentionDays: boundedInteger(
       env["OPERATIONAL_MONITOR_RUN_RETENTION_DAYS"],
       30,

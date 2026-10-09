@@ -597,15 +597,19 @@ $$;
 
 -- Day-based retention bounds the bulk of the store while each canonical series
 -- retains its newest 260 completed candles for TA minimum history and catch-up.
+-- One-minute candles keep p_minute_retention_days (default 62, bounded 31..90): the
+-- forward engine (#239) needs 28 days of seasonal profile plus the EWMA warm-up and
+-- 30 days of signal history per symbol.
 CREATE FUNCTION public.record_collector_candles(
-  p_rows JSONB, p_retention_days INTEGER DEFAULT 7
+  p_rows JSONB, p_retention_days INTEGER DEFAULT 7, p_minute_retention_days INTEGER DEFAULT 62
 ) RETURNS TABLE (candle_identity TEXT)
 LANGUAGE plpgsql SECURITY INVOKER SET search_path = public
 AS $$
 BEGIN
   IF jsonb_typeof(p_rows) <> 'array' OR jsonb_array_length(p_rows) < 1
      OR jsonb_array_length(p_rows) > 1000
-     OR p_retention_days < 1 OR p_retention_days > 30 THEN
+     OR p_retention_days < 1 OR p_retention_days > 30
+     OR p_minute_retention_days < 31 OR p_minute_retention_days > 90 THEN
     RAISE EXCEPTION 'Invalid collector candle batch';
   END IF;
 
@@ -659,7 +663,8 @@ BEGIN
   -- minimum history (200) and the bounded catch-up batch with margin, so a longer
   -- frame (1h, 4h) keeps enough history even when it spans more than the day window.
   DELETE FROM public.collector_recent_candles c
-    WHERE c.close_time < clock_timestamp() - make_interval(days => p_retention_days)
+    WHERE c.close_time < clock_timestamp() - make_interval(days => CASE
+            WHEN c.timeframe_minutes = 1 THEN p_minute_retention_days ELSE p_retention_days END)
       AND c.open_time < (
         SELECT min(keep.open_time)
         FROM (
@@ -1078,6 +1083,33 @@ AS $$
   ) grouped;
 $$;
 
+-- Forward engine input (#239): completed one-minute candles of one symbol in
+-- [p_since, p_before) as compact arrays with their provenance, at most 63 days.
+CREATE FUNCTION public.get_collector_forward_minutes(
+  p_symbol TEXT, p_since TIMESTAMPTZ, p_before TIMESTAMPTZ
+) RETURNS JSONB
+LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = public
+AS $$
+DECLARE
+  rows JSONB;
+BEGIN
+  IF p_symbol IS NULL OR btrim(p_symbol) = '' OR p_since IS NULL OR p_before IS NULL
+     OR p_before <= p_since OR p_before - p_since > interval '63 days' THEN
+    RAISE EXCEPTION 'Invalid forward minute candle request';
+  END IF;
+  SELECT coalesce(jsonb_agg(jsonb_build_array(
+      (extract(epoch FROM open_time) * 1000)::BIGINT, open, high, low, close, volume, transport,
+      CASE WHEN source_event_at IS NULL THEN NULL
+           ELSE (extract(epoch FROM source_event_at) * 1000)::BIGINT END
+    ) ORDER BY open_time), '[]'::jsonb)
+    INTO rows
+    FROM public.collector_recent_candles
+    WHERE provider = 'binance-usdm' AND price_type = 'trade' AND timeframe_minutes = 1
+      AND symbol = upper(btrim(p_symbol)) AND open_time >= p_since AND open_time < p_before;
+  RETURN rows;
+END;
+$$;
+
 -- Function access matches the current operational API. The episode RPCs retain
 -- default EXECUTE privileges; their underlying tables remain service-role-only.
 REVOKE ALL ON FUNCTION
@@ -1100,7 +1132,8 @@ REVOKE ALL ON FUNCTION
   public.get_collector_storage_diagnostics(),
   public.get_collector_completed_candles(TEXT, INTEGER, INTEGER),
   public.get_collector_movement_candles(TEXT[], TIMESTAMPTZ, TIMESTAMPTZ),
-  public.record_collector_candles(JSONB, INTEGER)
+  public.get_collector_forward_minutes(TEXT, TIMESTAMPTZ, TIMESTAMPTZ),
+  public.record_collector_candles(JSONB, INTEGER, INTEGER)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION
   public.record_recent_candles(UUID, JSONB, INTEGER),
@@ -1122,5 +1155,6 @@ GRANT EXECUTE ON FUNCTION
   public.get_collector_storage_diagnostics(),
   public.get_collector_completed_candles(TEXT, INTEGER, INTEGER),
   public.get_collector_movement_candles(TEXT[], TIMESTAMPTZ, TIMESTAMPTZ),
-  public.record_collector_candles(JSONB, INTEGER)
+  public.get_collector_forward_minutes(TEXT, TIMESTAMPTZ, TIMESTAMPTZ),
+  public.record_collector_candles(JSONB, INTEGER, INTEGER)
   TO service_role;

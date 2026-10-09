@@ -12,6 +12,7 @@
     "dev:local:all": "node scripts/dev-local.mjs --with-operational",
     "dev:local:stop": "node scripts/stop-local.mjs",
     "collector:worker": "node scripts/collector-worker.mjs",
+    "forward:run": "node scripts/forward-run.mjs",
     "collector:worker:build": "vite build --config vite.collector-worker.config.ts",
     "collector:worker:start": "node dist/collector-worker/collector-worker.mjs",
     "build": "vite build",

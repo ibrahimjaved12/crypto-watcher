@@ -30,6 +30,7 @@ from . import VERSIONS
 from .bars_adapter import MINUTE_MS
 from .signals import Signal
 
+BIG_FIELDS = ("var", "factor_weight", "sigma")
 FORWARD_PARAMS = LabelParams(sigma_model="ewma-seasonal", k_grid=(Fraction(2),),
                              rr_grid=(Fraction(3, 2), Fraction(2)))
 
@@ -63,14 +64,19 @@ class Setup:
     versions: tuple = ()
 
     def to_dict(self) -> dict:
+        """JSON form: var, factor_weight and sigma (above 2**53) as exact decimal text."""
         out = asdict(self)
         out["versions"] = dict(self.versions)
+        for name in BIG_FIELDS:
+            out[name] = None if out[name] is None else str(out[name])
         return out
 
     @staticmethod
     def from_dict(value: dict) -> "Setup":
         data = dict(value)
         data["versions"] = tuple(sorted(dict(data.get("versions") or {}).items()))
+        for name in BIG_FIELDS:
+            data[name] = None if data.get(name) is None else int(data[name])
         setup = Setup(**data)
         if setup.setup_id != setup_id(setup.signal_id, exact_from_str(setup.k), exact_from_str(setup.rr),
                                       setup.params_hash):
