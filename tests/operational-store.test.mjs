@@ -716,6 +716,38 @@ test("collector persistence binds transport, endpoint and source event without c
   assert.ok(stored.received_at_ms < stored.source_event_at_ms);
 });
 
+test("a conflicting completed candle is quarantined: never overwritten, never fails the batch", async () => {
+  await db.query("DELETE FROM collector_recent_candles");
+  await db.query("DELETE FROM collector_candle_quarantine");
+  const opening = Math.floor(Date.now() / 60_000) * 60_000 - 5 * 60_000;
+  const candle = (index, overrides = {}) => ({
+    provider: "binance-usdm", instrument_id: "binance-usdm:BTCUSDT", symbol: "BTCUSDT",
+    native_symbol: "BTCUSDT", price_type: "trade", timeframe_minutes: 1,
+    open_time: new Date(opening + index * 60_000).toISOString(),
+    close_time: new Date(opening + index * 60_000 + 59_999).toISOString(),
+    open: 100, high: 102, low: 99, close: 101, volume: 2, quote_volume: 202,
+    transport: "rest", endpoint: "/fapi/v1/klines", source_event_at: null,
+    received_at: new Date(opening + index * 60_000 + 60_100).toISOString(), ...overrides,
+  });
+  const count = async (table) =>
+    (await db.query(`SELECT count(*)::int AS count FROM ${table}`)).rows[0].count;
+  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([candle(0)])]);
+  // Same identity, different volume (stream candle that missed trades vs. the REST candle).
+  const conflicting = candle(0, { volume: 2.5, quote_volume: 252.5 });
+  const batch = JSON.stringify([conflicting, candle(1), candle(0)]);
+  const written = (await db.query("SELECT * FROM record_collector_candles($1,7)", [batch])).rows;
+  assert.equal(written.length, 1, "only the new, non-conflicting candle is written");
+  const rows = (await db.query("SELECT open_time, volume FROM collector_recent_candles ORDER BY open_time")).rows;
+  assert.deepEqual(rows.map((row) => row.volume), [2, 2], "the stored candle is never overwritten");
+  assert.equal(await count("collector_candle_quarantine"), 1);
+  const quarantined = (await db.query("SELECT stored, incoming FROM collector_candle_quarantine")).rows[0];
+  assert.equal(quarantined.stored.volume, 2);
+  assert.equal(quarantined.incoming.volume, 2.5);
+  // A retried recovery re-submits the same conflicting candle; it is not logged twice.
+  await db.query("SELECT record_collector_candles($1,7)", [batch]);
+  assert.equal(await count("collector_candle_quarantine"), 1);
+});
+
 test("collector TA candle RPC returns full ascending provenance for one frame", async () => {
   const duration = 15 * 60_000;
   const observed = Math.floor(Date.now() / duration) * duration - duration;
