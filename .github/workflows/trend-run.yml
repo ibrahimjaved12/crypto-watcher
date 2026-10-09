@@ -1,0 +1,81 @@
+name: Trend run
+run-name: "Trend run ${{ inputs.segment }}"
+
+# Multi-day trend, Mode B portfolio evaluation (#222; scripts/research/trend_run.py,
+# docs/trend-mode-b.md). Reads the dk1 daily releases (2020-01..2026-09) of the six symbols,
+# evaluates the K = 9 fixed variants, appends one ledger record per variant to
+# experiments/trend-v1.jsonl and writes the full report to reports/trend/ in the private
+# research-data repository. This public log and the job summary carry only variant name,
+# segment, T days, number of defined symbols, the report hash and allowlisted progress lines
+# (no returns, Sharpe, t or verdicts). The hidden segment is not offered here and is refused
+# by the hidden guard in the script and the library.
+on:
+  workflow_dispatch:
+    inputs:
+      segment:
+        description: "development | validation"
+        type: choice
+        options: [development, validation]
+        default: development
+      data_revision:
+        description: "rd data release revision (recorded in the report; the trend run reads dk1 only)"
+        type: string
+        default: "1"
+      daily_revision:
+        description: "dk1 daily history release revision"
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trend-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: Trend run
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            python/requirements.txt
+            python/requirements-research.txt
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+          .venv/bin/python -m pip install -r requirements-research.txt
+      - name: Run trend evaluation
+        env:
+          SEGMENT: ${{ inputs.segment }}
+          DATA_REVISION: ${{ inputs.data_revision }}
+          DAILY_REVISION: ${{ inputs.daily_revision }}
+          RUN_SUMMARY: ${{ runner.temp }}/trend-run-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: |
+          python/.venv/bin/python scripts/research/trend_run.py --workdir trend-run-work \
+            --summary "$RUN_SUMMARY" --segment "$SEGMENT" --data-revision "$DATA_REVISION" \
+            --daily-revision "$DAILY_REVISION"
+      - name: Delete working files
+        if: always()
+        run: rm -rf trend-run-work
+      - name: Summary
+        if: always()
+        env:
+          RUN_SUMMARY: ${{ runner.temp }}/trend-run-summary.md
+        run: |
+          if [ -f "$RUN_SUMMARY" ]; then
+            cat "$RUN_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
