@@ -151,7 +151,16 @@ export async function runTA(
                 endpoint: provenance.endpoint,
                 sourceEventTime: provenance.sourceKind === "websocket" ? provenance.sourceEventTime : null };
             });
-            validate(candles);
+            try {
+              validate(candles);
+            } catch (error) {
+              if (candles.length < TA_MINIMUM_HISTORY) {
+                throw new Error(
+                  `Collector history is still warming up (${candles.length}/${TA_MINIMUM_HISTORY} completed candles); retry shortly`,
+                );
+              }
+              throw error;
+            }
             return {
               market: {
                 source: history.identity.provider,

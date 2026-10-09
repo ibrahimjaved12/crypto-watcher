@@ -111,27 +111,34 @@ export async function syncCollectorUniverse(
   return { status: "assigned", symbols };
 }
 
-let bootstrap: Promise<void> | null = null;
+let bootstrap: Promise<boolean> | null = null;
 
 /**
  * Best-effort first-request reconciliation. This is only a safety net for a missed
  * scheduled run: the initial and ongoing reconciliation is the dedicated
- * authenticated hook the deployment schedules. It runs at most once per process and
- * never starts or hosts the collector itself (#82).
+ * authenticated hook the deployment schedules. A successful reconciliation runs at
+ * most once per process; a failed one (for example while the operational database
+ * is still starting) is retryable. Resolves false on failure so the caller can retry.
+ * It never starts or hosts the collector itself (#82).
  */
 export function bootstrapCollectorUniverse(
   env: Record<string, string | undefined> = process.env,
-): void {
-  if (bootstrap || env["BINANCE_COLLECTOR_ENABLED"] !== "true") return;
+): Promise<boolean> {
+  if (env["BINANCE_COLLECTOR_ENABLED"] !== "true") return Promise.resolve(true);
+  if (bootstrap) return bootstrap;
   bootstrap = (async () => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { getOperationalStore } = await import("../operational/repository.server");
     await syncCollectorUniverse(supabaseAdmin, getOperationalStore(), env);
+    return true;
   })().catch((error) => {
     console.error(
       `[collector-universe] bootstrap reconciliation failed: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
+    bootstrap = null;
+    return false;
   });
+  return bootstrap;
 }

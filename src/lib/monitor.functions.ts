@@ -11,6 +11,21 @@ export const runMyMonitorCheck = createServerFn({ method: "POST" })
       await import("@/lib/monitor/engine.server");
 
     const userId = context.userId;
+
+    // Safety net: make sure the collector is subscribed before checking, so a run right after
+    // start-up does not find an empty candle store. Best effort; a failure surfaces per symbol
+    // below as missing history.
+    try {
+      const { syncCollectorUniverse } = await import("@/lib/market/collector-subscriptions.server");
+      const { getOperationalStore } = await import("@/lib/operational/repository.server");
+      await syncCollectorUniverse(supabaseAdmin, getOperationalStore());
+    } catch (error) {
+      console.error(
+        `[collector-universe] sync before manual check failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     const { data: settings, error: settingsError } = await context.supabase
       .from("monitor_settings")
       .select(
