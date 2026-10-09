@@ -1,0 +1,84 @@
+name: Level study
+run-name: "Level study ${{ inputs.segment }}"
+
+# Level-reaction event study L0 (#185; scripts/research/level_study.py). Descriptive only:
+# no trades, labels or PASS/FAIL. The full report goes to reports/levels/ in the private
+# research-data repository; this public log and the job summary carry only symbol, level
+# set, segment, real and placebo event counts, the report hash, and allowlisted progress
+# lines (no rates or returns). The hidden segment is not offered here and is refused by the
+# hidden guard in the script and the library.
+on:
+  workflow_dispatch:
+    inputs:
+      segment:
+        description: "development | validation"
+        type: choice
+        options: [development, validation]
+        default: development
+      data_revision:
+        description: "rd data release revision"
+        type: string
+        default: "1"
+      level_sets:
+        description: "Comma-separated level sets (subset of round,prev_day,prev_week,swing4h)"
+        type: string
+        default: "round,prev_day,prev_week,swing4h"
+      symbols:
+        description: "Comma-separated symbols (subset of the six frozen symbols)"
+        type: string
+        default: "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: level-study-${{ inputs.segment }}
+  cancel-in-progress: false
+
+jobs:
+  study:
+    name: Level study
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            python/requirements.txt
+            python/requirements-research.txt
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+          .venv/bin/python -m pip install -r requirements-research.txt
+      - name: Run level study
+        env:
+          SEGMENT: ${{ inputs.segment }}
+          DATA_REVISION: ${{ inputs.data_revision }}
+          LEVEL_SETS: ${{ inputs.level_sets }}
+          SYMBOLS: ${{ inputs.symbols }}
+          STUDY_SUMMARY: ${{ runner.temp }}/level-study-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: |
+          python/.venv/bin/python scripts/research/level_study.py --workdir level-study-work \
+            --summary "$STUDY_SUMMARY" --segment "$SEGMENT" --data-revision "$DATA_REVISION" \
+            --level-sets "$LEVEL_SETS" --symbols "$SYMBOLS"
+      - name: Delete working files
+        if: always()
+        run: rm -rf level-study-work
+      - name: Summary
+        if: always()
+        env:
+          STUDY_SUMMARY: ${{ runner.temp }}/level-study-summary.md
+        run: |
+          if [ -f "$STUDY_SUMMARY" ]; then
+            cat "$STUDY_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi

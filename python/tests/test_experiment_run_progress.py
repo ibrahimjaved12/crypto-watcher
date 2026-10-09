@@ -10,7 +10,7 @@ import time
 import unittest
 
 from market_analysis import data_lake
-from market_analysis.benchmark import funding_basis, order_flow, ta_strategies
+from market_analysis.benchmark import funding_basis, order_flow, order_flow_v2, ta_strategies
 from market_analysis.benchmark.runner import NO_PROGRESS
 
 
@@ -68,7 +68,8 @@ class ProgressTests(unittest.TestCase):
         progress.phase("push", files=3)
         lines = stream.getvalue().splitlines()
         self.assertEqual(len(lines), 1 + 24 + 1 + 144 + 2 + 2)
-        names = {*ta_strategies.STRATEGIES, *order_flow.STRATEGIES, *funding_basis.STRATEGIES, *data_lake.SYMBOLS}
+        names = {*ta_strategies.STRATEGIES, *order_flow.STRATEGIES, *order_flow_v2.STRATEGIES, *funding_basis.STRATEGIES,
+                 *data_lake.SYMBOLS}
         for line in lines:
             self.assertRegex(line, LINE)
             lowered = line.lower()
