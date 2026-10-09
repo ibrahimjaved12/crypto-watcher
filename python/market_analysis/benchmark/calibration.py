@@ -71,6 +71,7 @@ from .hidden_guard import require_months
 from .label_store import Geometry, load_geometry_columns
 from .labels import LabelParams
 from .market_data import load_symbol_bars
+from .robust_sigma import ROBUST_MODELS, RobustSigma
 from .segments import SEGMENTS, segment_bounds_ms, segment_months
 from .volatility import (BLOCK_MINUTES, BLOCK_MS, BLOCKS_PER_DAY, DAY_MS, VAR_SCALE, build_variance,
                          build_variance_deseasonalised, horizon_sigma, horizon_sigma_seasonal, seasonal_factors)
@@ -87,8 +88,10 @@ ROBUST_BAND = (0.9, 1.1)
 ROBUST_HOUR_BAND = (0.8, 1.2)
 MAD_TO_SD = 1.4826
 MEAN_ABS_NORMAL = 0.797885       # E|Z| = sqrt(2 / pi)
-SIGMA_MODELS = ("ewma", "ewma-seasonal")
-MODEL_KEYS = {"ewma": ("horizons", "barriers"), "ewma-seasonal": ("horizons_seasonal", "barriers_seasonal")}
+SIGMA_MODELS = ("ewma", "ewma-seasonal", "ewma-robust", "ewma-robust-hcal")
+MODEL_KEYS = {"ewma": ("horizons", "barriers"), "ewma-seasonal": ("horizons_seasonal", "barriers_seasonal"),
+              "ewma-robust": ("horizons_robust", "barriers_robust"),
+              "ewma-robust-hcal": ("horizons_robust_hcal", "barriers_robust_hcal")}
 # Barrier expiry cell tolerance: |observed - theory| <= max(REL * theory, ABS). The 10 % relative band
 # alone is about 0.1-0.3 percentage points on low-expiry cells (k 1, rr 1), below sampling noise and
 # the discrete-monitoring effect; the 2 percentage point floor keeps a calibrated sigma from failing there.
@@ -259,11 +262,13 @@ def _bad_minutes(series: BarSeries) -> np.ndarray:
     return (opens == MISSING) | ((flags & COMPROMISED_FLAGS) != 0)
 
 
-def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=None, factors=None) -> dict:
+def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=None, factors=None,
+              sigma_fn=None) -> dict:
     """z (and VR-corrected z) of the given entries for one horizon and one variance series.
 
     ``factors`` (a ``volatility.SeasonalSeries``) selects the seasonal horizon sigma with the entry day's
-    factors; an entry without factors for its day counts as ``no_sigma``.
+    factors; an entry without factors for its day counts as ``no_sigma``. ``sigma_fn(entry_ms) -> int | None``
+    (the robust models) gives the horizon sigma directly; None counts as ``no_sigma``.
     """
     variance = np.frombuffer(variance, dtype=np.int64)
     opens = np.frombuffer(series.open, dtype=np.int64)
@@ -275,11 +280,17 @@ def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=N
     entry_ms = series.start_ms + entries * _MINUTE_MS
     if factors is not None:
         no_sigma |= np.array([factors.day_factors(int(ms) // DAY_MS) is None for ms in entry_ms], dtype=bool)
+    direct = None
+    if sigma_fn is not None:
+        direct = [None if missing else sigma_fn(int(ms)) for missing, ms in zip(no_sigma, entry_ms)]
+        no_sigma |= np.array([value is None for value in direct], dtype=bool)
     bad_entry = ~no_sigma & bad[entries]
     bad_exit = ~no_sigma & ~bad_entry & bad[entries + horizon]
     use = ~(no_sigma | bad_entry | bad_exit)
     e, b = entries[use], block[use]
-    if factors is None:
+    if direct is not None:
+        sigma = np.array([value for value, ok in zip(direct, use) if ok], dtype=float) / VAR_SCALE
+    elif factors is None:
         sigma = np.array([horizon_sigma(int(v), horizon) for v in var[use]], dtype=float) / VAR_SCALE
     else:
         sigma = np.array([horizon_sigma_seasonal(int(v), factors.day_factors(int(ms) // DAY_MS),
@@ -334,12 +345,20 @@ def audit_series(series: BarSeries, first_ms: int, end_ms: int, *, horizons=HORI
         key = MODEL_KEYS[model][0]
         out[key] = {}
         factors = seasonal_factors(series) if model == "ewma-seasonal" else None
+        robust = RobustSigma(series, hcal=model == "ewma-robust-hcal") if model in ROBUST_MODELS else None
         for half_life in half_lives:
-            variance = (build_variance(series, half_life) if factors is None
-                        else build_variance_deseasonalised(series, half_life, factors)).variance
+            if robust is not None:
+                variance = robust.levels(half_life)
+            else:
+                variance = (build_variance(series, half_life) if factors is None
+                            else build_variance_deseasonalised(series, half_life, factors)).variance
             for horizon in horizons:
                 entries = entry_indices(series, first_ms, end_ms, horizon, params)
-                row = horizon_z(series, variance, entries, horizon, expanding[horizon], factors)
+                sigma_fn = None
+                if robust is not None:
+                    def sigma_fn(entry_ms, robust=robust, horizon=horizon, half_life=half_life):
+                        return robust.sigma(horizon, half_life, params.step(horizon), entry_ms)
+                row = horizon_z(series, variance, entries, horizon, expanding[horizon], factors, sigma_fn)
                 row["entries"] = int(entries.size)
                 row["sigma_model"] = model
                 out[key].setdefault(str(horizon), {})[str(half_life)] = row
@@ -455,7 +474,14 @@ def barrier_summary(columns: dict, params: LabelParams) -> dict:
             within = expiry_within_tolerance(expiry, theory["expiry_widened"])  # judged on the widened theory
             rows.append({"k": exact_to_str(k), "rr": exact_to_str(rr), "theory": theory, "sides": sides,
                          "expiry_within_tolerance": bool(within)})
+    implied = sorted(value for value in (row["sides"]["both"]["implied_sigma_ratio_widened"] for row in rows)
+                     if value is not None and isfinite(value))
+    implied_median = (implied[len(implied) // 2] if len(implied) % 2 else
+                      (implied[len(implied) // 2 - 1] + implied[len(implied) // 2]) / 2) if implied else float("nan")
     return {"horizon_min": BARRIER_HORIZON, "half_life_days": params.half_life(BARRIER_HORIZON),
+            "sigma_model": params.sigma_model,
+            "implied_sigma_ratio_widened": {"median": implied_median, "min": implied[0] if implied else float("nan"),
+                                            "max": implied[-1] if implied else float("nan"), "cells": len(implied)},
             "time_limit_multiple": horizons, "monitoring_step_min": params.step(BARRIER_HORIZON),
             "discrete_widening_sigma_h": widening, "geometries": rows,
             "pass": bool(rows) and all(row["expiry_within_tolerance"] for row in rows)}
@@ -473,11 +499,12 @@ def set_barrier_verdict(result: dict, barrier_ok: bool, model: str = "ewma") -> 
 
 def audit_symbol(bars_dir, label_dir, symbol: str, segment: str, *, horizons=HORIZONS, half_lives=HALF_LIVES,
                  params: LabelParams | None = None, progress=None, sigma_models=("ewma",),
-                 seasonal_label_dir=None) -> dict:
+                 seasonal_label_dir=None, label_dirs: dict | None = None) -> dict:
     """One symbol: guarded bar load from FIRST_MONTH (the labels' variance history), z audit, barriers.
 
     The hidden guard runs before any file is opened. ``label_dir`` holds lb1 labels (ewma rows) and
-    ``seasonal_label_dir`` lb2 labels (ewma-seasonal rows); None skips that model's barrier part (NA).
+    ``seasonal_label_dir`` lb2 labels (ewma-seasonal rows); ``label_dirs`` maps any model to its label
+    directory (lb3 / lb3h for the robust models). None skips that model's barrier part (NA).
     """
     months = check_segment(segment)
     params = params or LabelParams()
@@ -487,7 +514,8 @@ def audit_symbol(bars_dir, label_dir, symbol: str, segment: str, *, horizons=HOR
     result = audit_series(bars, first_ms, end_ms, horizons=horizons, half_lives=half_lives, params=params,
                           progress=progress, sigma_models=models)
     del bars
-    for model, directory in (("ewma", label_dir), ("ewma-seasonal", seasonal_label_dir)):
+    directories = {"ewma": label_dir, "ewma-seasonal": seasonal_label_dir, **(label_dirs or {})}
+    for model, directory in directories.items():
         if model in models and directory is not None and BARRIER_HORIZON in tuple(horizons):
             model_params = params if params.sigma_model == model else replace(params, schema=None, sigma_model=model)
             columns = load_geometry_columns(directory, symbol, months, barrier_geometries(symbol, model_params),
@@ -636,5 +664,11 @@ def markdown(report: dict) -> str:
                             _cell(item["implied_sigma_ratio_continuous"]), _cell(item["implied_sigma_ratio_widened"]),
                             ", ".join(f"{code} {count}" for code, count in item["non_trades"].items()) or "none",
                             str(item["purged"])]) + " |")
+                ratio = barriers.get("implied_sigma_ratio_widened")
+                if ratio is not None:
+                    lines += [f"Implied sigma ratio ({barriers.get('sigma_model', model)}, widened theory, both sides): "
+                              f"median {_cell(ratio['median'])}, min {_cell(ratio['min'])}, max {_cell(ratio['max'])} "
+                              f"over {ratio['cells']} (k, rr) cells (1 = the barrier geometry matches the realized "
+                              "expiry share).", ""]
                 lines.append("")
     return "\n".join(lines) + "\n"

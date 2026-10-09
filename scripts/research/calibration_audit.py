@@ -115,7 +115,8 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     label_dirs = {model: {} for model in models}
     if cal.BARRIER_HORIZON in horizons:
         for model in models:
-            revision = args.label_revision if model == "ewma" else args.seasonal_label_revision
+            revision = {"ewma": args.label_revision, "ewma-seasonal": args.seasonal_label_revision}.get(
+                model, args.robust_label_revision)
             directory = workdir / f"labels-{model}"
             directory.mkdir(parents=True)
             tags = {symbol: xr.label_tag(symbol, er.LABEL_FIRST_MONTH, er.LABEL_LAST_MONTH, revision, model)
@@ -155,7 +156,9 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
             results[symbol] = _quiet(cal.audit_symbol, bars_dir, label_dirs.get("ewma", {}).get(symbol), symbol,
                                      args.segment, horizons=horizons, half_lives=half_lives, params=params,
                                      sigma_models=models,
-                                     seasonal_label_dir=label_dirs.get("ewma-seasonal", {}).get(symbol))
+                                     seasonal_label_dir=label_dirs.get("ewma-seasonal", {}).get(symbol),
+                                     label_dirs={model: label_dirs[model].get(symbol) for model in models
+                                                 if model not in ("ewma", "ewma-seasonal")})
             progress.phase("audit", symbol_index=symbol_index, symbols=len(symbols))
     progress.phase("report write")
     report = cal.build_report(args.segment, results, horizons=horizons, half_lives=half_lives, params=params,
@@ -184,6 +187,8 @@ def parse_args(argv=None):
     parser.add_argument("--symbols", default=",".join(lake.SYMBOLS))
     parser.add_argument("--sigma-models", default=",".join(cal.SIGMA_MODELS), help="subset of ewma,ewma-seasonal")
     parser.add_argument("--seasonal-label-revision", type=int, default=1, help="lb2 label release revision")
+    parser.add_argument("--robust-label-revision", type=int, default=1,
+                        help="lb3 (ewma-robust) and lb3h (ewma-robust-hcal) label release revision")
     return parser.parse_args(argv)
 
 

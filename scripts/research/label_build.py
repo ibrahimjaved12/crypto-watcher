@@ -29,7 +29,7 @@ from market_analysis.benchmark.canonical import exact_to_str
 
 BLOCK = 1 << 20
 _LABEL_TAG = re.compile(
-    r"lb[12]-(" + "|".join(lake.SYMBOLS) + r")-([0-9]{4}-[0-9]{2})_([0-9]{4}-[0-9]{2})-r([1-9][0-9]{0,2})\Z")
+    r"(?:lb1|lb2|lb3|lb3h)-(" + "|".join(lake.SYMBOLS) + r")-([0-9]{4}-[0-9]{2})_([0-9]{4}-[0-9]{2})-r([1-9][0-9]{0,2})\Z")
 
 
 def validate_symbols(raw: str) -> list[str]:
@@ -65,7 +65,9 @@ def validate_label_tag(tag: str) -> str:
     return tag
 
 
-LABEL_PREFIX = {"ewma": "lb1", "ewma-seasonal": "lb2"}  # sigma model -> release prefix (lb1 never changes)
+# sigma model -> release prefix (lb1/lb2 never change). Both labels-v3 models need their own tag, so
+# ewma-robust-hcal uses lb3h- beside lb3- (two models cannot share one release identity).
+LABEL_PREFIX = {"ewma": "lb1", "ewma-seasonal": "lb2", "ewma-robust": "lb3", "ewma-robust-hcal": "lb3h"}
 
 
 def label_tag(symbol: str, first: str, last: str, label_revision: int = 1, sigma_model: str = "ewma") -> str:

@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--summary", type=Path, help="append a markdown summary (aggregate counts only)")
     parser.add_argument("--sigma-model", choices=sorted(SIGMA_MODELS), default="ewma",
-                        help="ewma: labels-v1 (lb1); ewma-seasonal: labels-v2 (lb2)")
+                        help="ewma: labels-v1 (lb1); ewma-seasonal: labels-v2 (lb2); ewma-robust / ewma-robust-hcal: labels-v3 (lb3 / lb3h)")
     args = parser.parse_args(argv)
     try:
         manifest = run(args.symbol, args.bars_dir, args.first_month, args.last_month, args.out_dir,
