@@ -1,0 +1,129 @@
+name: Metrics build
+run-name: "Metrics build ${{ inputs.symbols }} ${{ inputs.start_month }}..${{ inputs.end_month }} publish=${{ inputs.publish }}"
+
+# Binance metrics archive for #224 phase 1 (scripts/research/metrics_build.py): for each
+# (symbol, finished month) download the daily metrics zips and their .CHECKSUM files
+# (404 = recorded gap), verify checksums, parse them header-driven and (only with
+# publish=true) publish one immutable release mx-SYMBOL-MONTH-r1 to the private
+# research-data repository, never marked Latest. Existing releases are never edited or
+# deleted. Logs and summaries carry only names, sizes, hashes, the observed header and
+# aggregate statistics: this repository is public. Run a dry run (publish=false) first.
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: Comma-separated subset of BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        type: string
+        default: BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        required: true
+      start_month:
+        description: First month (YYYY-MM, not before 2020-01)
+        type: string
+        default: "2024-01"
+        required: true
+      end_month:
+        description: Last month (YYYY-MM, must be fully finished in UTC)
+        type: string
+        default: "2026-09"
+        required: true
+      publish:
+        description: Publish releases (false = build and verify only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Validate inputs and plan the matrix
+        id: plan
+        env:
+          LAKE_SYMBOLS: ${{ inputs.symbols }}
+          LAKE_START: ${{ inputs.start_month }}
+          LAKE_END: ${{ inputs.end_month }}
+        shell: python
+        run: |
+          import calendar, json, os, re, sys, time
+
+          allowed = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT")
+          raw = os.environ["LAKE_SYMBOLS"]
+          if not re.fullmatch(r"[A-Z]+(,[A-Z]+)*", raw):
+              sys.exit("symbols must be a comma-separated list without spaces")
+          symbols = raw.split(",")
+          if len(set(symbols)) != len(symbols) or any(s not in allowed for s in symbols):
+              sys.exit(f"symbols must be distinct members of {','.join(allowed)}")
+          month = re.compile(r"(\d{4})-(0[1-9]|1[0-2])")
+          start, end = os.environ["LAKE_START"], os.environ["LAKE_END"]
+          if not month.fullmatch(start) or not month.fullmatch(end):
+              sys.exit("months must be YYYY-MM")
+          if start < "2020-01" or start > end:
+              sys.exit("start_month must be >= 2020-01 and <= end_month")
+          year, mon = int(end[:4]), int(end[5:])
+          end_ms = calendar.timegm((year, mon, calendar.monthrange(year, mon)[1], 0, 0, 0)) * 1000 + 86_400_000
+          if end_ms > time.time() * 1000:
+              sys.exit(f"{end} is not a fully finished UTC month")
+          months, year, mon = [], int(start[:4]), int(start[5:])
+          while f"{year:04d}-{mon:02d}" <= end:
+              months.append(f"{year:04d}-{mon:02d}")
+              year, mon = (year + 1, 1) if mon == 12 else (year, mon + 1)
+          include = [{"symbol": s, "month": m} for s in symbols for m in months]
+          if len(include) > 256:
+              sys.exit(f"{len(include)} symbol-months exceed the 256-job matrix limit")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("matrix=" + json.dumps({"include": include}, separators=(",", ":")) + "\n")
+          print(f"planned {len(include)} symbol-months")
+
+  build:
+    needs: plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    concurrency:
+      group: metrics-${{ matrix.symbol }}-${{ matrix.month }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Build metrics ${{ matrix.symbol }} ${{ matrix.month }}
+        env:
+          LAKE_SYMBOL: ${{ matrix.symbol }}
+          LAKE_MONTH: ${{ matrix.month }}
+          LAKE_PUBLISH: ${{ inputs.publish }}
+          LAKE_SUMMARY: ${{ runner.temp }}/metrics-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ inputs.publish && vars.RESEARCH_DATA_REPOSITORY || '' }}
+          RESEARCH_DATA_TOKEN: ${{ inputs.publish && secrets.RESEARCH_DATA_TOKEN || '' }}
+        run: |
+          args=(--symbol "$LAKE_SYMBOL" --month "$LAKE_MONTH" --workdir metrics-build-work --summary "$LAKE_SUMMARY")
+          if [ "$LAKE_PUBLISH" = "true" ]; then
+            args+=(--publish)
+          fi
+          python scripts/research/metrics_build.py "${args[@]}"
+      - name: Delete working files
+        if: always()
+        run: rm -rf metrics-build-work
+      - name: Summary
+        if: always()
+        env:
+          LAKE_SUMMARY: ${{ runner.temp }}/metrics-summary.md
+        run: |
+          if [ -f "$LAKE_SUMMARY" ]; then
+            cat "$LAKE_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
