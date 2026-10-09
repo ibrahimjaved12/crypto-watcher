@@ -78,36 +78,36 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     bars_dir = workdir / "bars"
     bars_dir.mkdir(parents=True)
     label_dir = None
+    labelled = ()
     if cal.BARRIER_HORIZON in horizons:
         label_dir = workdir / "labels"
         label_dir.mkdir(parents=True)
-        missing = [tag for tag in (xr.label_tag(symbol, er.LABEL_FIRST_MONTH, er.LABEL_LAST_MONTH, args.label_revision)
-                                   for symbol in symbols) if repo.published_release(tag) is None]
-        if missing:  # all at once, before any download; audit only symbols with labels via --symbols
-            raise PublicError("missing published label releases (build them with the label build workflow "
-                              "or narrow symbols): " + ", ".join(missing))
-        with progress.stage("label download", total=len(symbols)) as set_symbol:
-            for symbol_index, symbol in enumerate(symbols, 1):
+        # Symbols without a published label release get the sigma audit only (barrier part NA).
+        labelled = tuple(symbol for symbol in symbols if repo.published_release(
+            xr.label_tag(symbol, er.LABEL_FIRST_MONTH, er.LABEL_LAST_MONTH, args.label_revision)) is not None)
+        with progress.stage("label download", total=len(labelled)) as set_symbol:
+            for symbol_index, symbol in enumerate(labelled, 1):
                 set_symbol(symbol_index)
                 _quiet(xr._download_symbol_labels, repo, revisions, args.segment, label_dir, symbol)
-                progress.phase("label download", symbol_index=symbol_index, symbols=len(symbols))
+                progress.phase("label download", symbol_index=symbol_index, symbols=len(labelled))
     months = lake.months_between(lake.FIRST_MONTH, segment_months(args.segment)[-1])
     with progress.stage("bars download", total=len(symbols)) as set_symbol:
         for symbol_index, symbol in enumerate(symbols, 1):
             set_symbol(symbol_index)
-            _quiet(xr._download_symbol_bars, repo, revisions, bars_dir, label_dir, symbol, months)
+            _quiet(xr._download_symbol_bars, repo, revisions, bars_dir, label_dir if symbol in labelled else None,
+                   symbol, months)
             progress.phase("bars download", symbol_index=symbol_index, symbols=len(symbols), months=len(months))
     snapshot = None
-    if label_dir is not None:
-        progress.phase("snapshot", symbols=len(symbols), months=len(segment_months(args.segment)))
-        snapshot = _quiet(er.data_snapshot, label_dir, segment_months(args.segment), symbols=symbols)
+    if labelled:
+        progress.phase("snapshot", symbols=len(labelled), months=len(segment_months(args.segment)))
+        snapshot = _quiet(er.data_snapshot, label_dir, segment_months(args.segment), symbols=labelled)
     params = LabelParams()
     results = {}
     with progress.stage("audit", total=len(symbols)) as set_symbol:
         for symbol_index, symbol in enumerate(symbols, 1):
             set_symbol(symbol_index)
-            results[symbol] = _quiet(cal.audit_symbol, bars_dir, label_dir, symbol, args.segment,
-                                     horizons=horizons, half_lives=half_lives, params=params)
+            results[symbol] = _quiet(cal.audit_symbol, bars_dir, label_dir if symbol in labelled else None, symbol,
+                                     args.segment, horizons=horizons, half_lives=half_lives, params=params)
             progress.phase("audit", symbol_index=symbol_index, symbols=len(symbols))
     progress.phase("report write")
     report = cal.build_report(args.segment, results, horizons=horizons, half_lives=half_lives, params=params,

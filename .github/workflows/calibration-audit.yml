@@ -32,7 +32,7 @@ on:
         type: string
         default: "1"
       symbols:
-        description: "Comma-separated symbols (subset of the six; each needs its lb label release when 240 is audited)"
+        description: "Comma-separated symbols (subset of the six; symbols without an lb label release get barrier=NA)"
         type: string
         default: "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT"
 
