@@ -43,7 +43,9 @@ class ZStatisticsTests(unittest.TestCase):
         self.assertTrue(0.9 <= row["z"]["sd"] <= 1.1, row["z"]["sd"])
         self.assertTrue(row["sd_ok"])
         self.assertIsNone(row["barrier_ok"])  # only 240 m rows carry a barrier verdict
-        self.assertTrue(row["pass"])
+        self.assertEqual(row["pass"], row["sd_ok"] and row["robust_ok"])  # robust_ok needs every hour in band
+        self.assertAlmostEqual(row["z"]["robust_sd"], 1.0, delta=0.1)
+        self.assertAlmostEqual(row["z"]["mean_abs_ratio"], 1.0, delta=0.1)
         self.assertEqual(len(row["z_by_hour"]), 24)
         self.assertEqual(sum(hour["n"] for hour in row["z_by_hour"]), row["z"]["n"])
 
@@ -185,8 +187,8 @@ class ReportAndGuardTests(unittest.TestCase):
         self.assertEqual(lines[0], "calibration audit segment development")
         self.assertRegex(lines[-1], r"report hash [0-9a-f]{64}\Z")
         for line in lines[1:-1]:
-            self.assertRegex(line, r"[A-Z]+USDT h=(15|60|240) hl=[137] n=[0-9]+ sd=(PASS|FAIL) "
-                                   r"barrier=(PASS|FAIL|NA) (PASS|FAIL)\Z")
+            self.assertRegex(line, r"[A-Z]+USDT model=(ewma|ewma-seasonal) h=(15|60|240) hl=[137] n=[0-9]+ "
+                                   r"sd=(PASS|FAIL) robust=(PASS|FAIL) barrier=(PASS|FAIL|NA) (PASS|FAIL)\Z")
         self.assertIn(" barrier=NA ", lines[1])  # 15 m row: no barrier verdict
         json_name, md_name = cal.report_paths(report)
         self.assertTrue(json_name.startswith("reports/calibration/development__"))
@@ -196,7 +198,7 @@ class ReportAndGuardTests(unittest.TestCase):
             cal.public_lines(report)
 
     def test_verdicts_are_independent(self):
-        row = {"z": {"n": 10}, "sd_ok": True, "barrier_ok": None, "pass": True}
+        row = {"z": {"n": 10}, "sd_ok": True, "robust_ok": True, "barrier_ok": None, "pass": True}
         result = {"horizons": {"240": {"7": dict(row)}, "60": {"7": dict(row)}}}
         cal.set_barrier_verdict(result, False)
         failed = result["horizons"]["240"]["7"]
@@ -206,8 +208,8 @@ class ReportAndGuardTests(unittest.TestCase):
                                   params=LabelParams(), code_commit="local", created_utc="2026-10-09T00:00:00Z",
                                   data_snapshot_id=None)
         lines = cal.public_lines(report)
-        self.assertIn("BTCUSDT h=240 hl=7 n=10 sd=PASS barrier=FAIL FAIL", lines)
-        self.assertIn("BTCUSDT h=60 hl=7 n=10 sd=PASS barrier=NA PASS", lines)
+        self.assertIn("BTCUSDT model=ewma h=240 hl=7 n=10 sd=PASS robust=PASS barrier=FAIL FAIL", lines)
+        self.assertIn("BTCUSDT model=ewma h=60 hl=7 n=10 sd=PASS robust=PASS barrier=NA PASS", lines)
         cal.set_barrier_verdict(result, True)
         self.assertTrue(result["horizons"]["240"]["7"]["pass"])
 

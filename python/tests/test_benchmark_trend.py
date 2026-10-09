@@ -18,7 +18,11 @@ from market_analysis.benchmark.bars import MISSING
 from market_analysis.benchmark.experiment_log import ExperimentLog, TrialStatus
 from market_analysis.benchmark.funding import FundingSeries
 from market_analysis.benchmark.hidden_guard import HiddenStretchLocked
-from market_analysis.benchmark.segments import segment_bounds_ms
+from market_analysis.benchmark import calibration as cal
+from market_analysis.benchmark.label_store import load_geometry_columns
+from market_analysis.benchmark.labels import LabelParams
+from market_analysis.benchmark.segments import (SEGMENTS, daily_segment_bounds_ms, segment_bounds_ms,
+                                                segment_of)
 from market_analysis.daily_lake import DAY_MS, DailySeries
 
 NAN = float("nan")
@@ -308,6 +312,134 @@ class EvaluationTests(unittest.TestCase):
             with self.assertRaises(module.PublicError):
                 module.main(["--workdir", str(workdir), "--segment", "hidden"])
             self.assertFalse(workdir.exists())
+
+
+EXT_FIRST, EXT_END = daily_segment_bounds_ms("development-ext")
+EXT_START = data_lake.month_bounds_ms("2020-01")[0]
+SCRIPTS = Path(__file__).resolve().parents[2] / "scripts" / "research"
+
+
+def load_script(name: str):
+    definition = importlib.util.spec_from_file_location(f"test_ext_{name}", SCRIPTS / f"{name}.py")
+    module = importlib.util.module_from_spec(definition)
+    previous = sys.path[:]
+    try:
+        sys.path.insert(0, str(SCRIPTS))
+        definition.loader.exec_module(module)
+    finally:
+        sys.path[:] = previous
+    return module
+
+
+def ext_symbol(symbol="BTCUSDT", seed=1, start=EXT_START, missing=()):
+    days = (EXT_END - start) // DAY_MS
+    closes = list(random_walk(days, seed))
+    opens = [closes[0]] + closes[:-1]
+    for day in missing:
+        closes[day] = opens[day] = None
+        if day + 1 < days:
+            opens[day + 1] = None  # the open after a gap is unknown too in this fixture
+    series = daily(closes, opens, symbol, start)
+    return tr.prepare_symbol(series, funding(start, EXT_END), EXT_FIRST, EXT_END)
+
+
+class ExtendedWindowTests(unittest.TestCase):
+    def test_bounds_and_no_overlap_with_validation_or_hidden(self):
+        self.assertEqual((EXT_FIRST, EXT_END), (data_lake.month_bounds_ms("2021-01")[0],
+                                                data_lake.month_bounds_ms("2025-07")[0]))
+        self.assertEqual((EXT_END - EXT_FIRST) // DAY_MS, 1642)
+        for name in ("validation", "hidden"):
+            first, end = segment_bounds_ms(name)
+            self.assertTrue(EXT_END <= first or end <= EXT_FIRST, name)
+        self.assertNotIn("development-ext", SEGMENTS)
+        self.assertEqual(segment_of(EXT_FIRST), None)  # intraday segment lookup never sees the daily window
+        months = tr.check_daily_segment("development-ext")
+        self.assertEqual((months[0], months[-1], len(months)), ("2021-01", "2025-06", 54))
+
+    def test_intraday_paths_reject_development_ext(self):
+        with self.assertRaises(ValueError):
+            cal.check_segment("development-ext")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(KeyError):
+                load_geometry_columns(directory, "BTCUSDT", [], [], LabelParams(), segment="development-ext")
+            for name in ("calibration_audit", "level_study", "screen"):
+                module = load_script(name)
+                workdir = Path(directory) / name
+                with self.assertRaises(module.PublicError, msg=name):
+                    module.main(["--workdir", str(workdir), "--segment", "development-ext"])
+                self.assertFalse(workdir.exists())
+        runner = load_script("experiment_run")
+        with self.assertRaises(SystemExit):
+            runner.parse_args(["run", "--question-id", "q", "--segment", "development-ext"])
+
+    def test_late_listing_joins_when_all_components_are_defined(self):
+        listing = data_lake.month_bounds_ms("2020-09")[0] + 13 * DAY_MS  # 2020-09-14, like SOLUSDT
+        data = ext_symbol("SOLUSDT", 4, start=listing)
+        leg, inputs = tr.real_path(tr.VARIANTS[0], data)  # ens_ls_25: the 360-day channel decides
+        first_defined = int(np.argmax(leg.active))
+        self.assertFalse(leg.active[:first_defined].any())
+        self.assertEqual(EXT_FIRST + first_defined * DAY_MS, listing + 361 * DAY_MS)
+        self.assertTrue((leg.weight[:first_defined] == 0).all())
+
+    def test_missing_days_are_missing_and_flat_not_filled(self):
+        gap = (EXT_FIRST - EXT_START) // DAY_MS + 200
+        data = ext_symbol(missing=(gap,))
+        self.assertTrue(np.isnan(data.close[gap]))
+        segment_day = gap - (EXT_FIRST - EXT_START) // DAY_MS
+        self.assertFalse(data.evaluable[segment_day])
+        leg, _ = tr.real_path(tr.VARIANTS[4], data)  # tsmom_7: EWMA sigma restarts after the gap
+        # The gap day's own weight was set from closes before it; from the next day on the position is flat
+        # until the EWMA sigma has 120 returns again (nothing is filled across the gap).
+        self.assertTrue((leg.weight[segment_day + 1:segment_day + 1 + tr.EWMA_MIN_RETURNS] == 0).all())
+        self.assertFalse(leg.active[segment_day])
+        self.assertNotEqual(leg.weight[segment_day - 1], 0)
+
+    def test_funding_with_mixed_intervals_sums_every_payment(self):
+        start = EXT_FIRST
+        hours = (2, 4, 8, 16, 24, 26)
+        series = FundingSeries(tuple(start + h * HOUR for h in hours), (2, 2, 4, 8, 8, 2),
+                               tuple(Fraction(n, 100_000) for n in (1, 2, 3, 4, 5, 6)), start, start + 2 * DAY_MS)
+        self.assertAlmostEqual(tr.day_funding(series, start), 15 / 100_000)  # 02, 04, 08, 16 and next 00:00
+
+    def test_yearly_rows_sum_to_the_total_stream(self):
+        T = (EXT_END - EXT_FIRST) // DAY_MS
+        months = tr._month_labels(EXT_FIRST, T)
+        daily_values = [int(v) for v in np.random.default_rng(3).integers(-5000, 5000, T)]
+        actives = [np.ones(T, dtype=bool), np.arange(T) > 400]
+        rows = tr.descriptive_periods(daily_values, months, actives)
+        years = rows["descriptive_by_year"]
+        self.assertEqual([row["period"] for row in years], ["2021", "2022", "2023", "2024", "2025H1"])
+        self.assertEqual(sum(row["T_days"] for row in years), T)
+        total = sum(Fraction(row["sum"]) for row in years)
+        self.assertEqual(total, Fraction(sum(daily_values), tr.PPM))
+        self.assertEqual((years[0]["symbols_defined"], years[1]["symbols_defined"]), (1, 2))
+        self.assertEqual(rows["descriptive_pre_2024"]["period"], "pre-2024 (descriptive)")
+        self.assertEqual(Fraction(rows["descriptive_pre_2024"]["sum"]), sum(Fraction(r["sum"]) for r in years[:3]))
+        dev = tr.descriptive_periods(daily_values[:10], ["2024-01"] * 10, [np.ones(10, dtype=bool)])
+        self.assertIsNone(dev["descriptive_pre_2024"])
+
+    def test_extended_run_keeps_k_and_required_t(self):
+        symbols = {"BTCUSDT": ext_symbol()}
+        with tempfile.TemporaryDirectory() as directory:
+            log = ExperimentLog(Path(directory) / "trend-v1.jsonl")
+            kwargs = dict(code_commit="abc", now_utc="2026-10-09T00:00:00Z", B=40, n_shifts=20)
+            report = tr.evaluate_trend(symbols, "development-ext", log, data_snapshot_id="snap-a", **kwargs)
+            again = tr.evaluate_trend(symbols, "development-ext", log, data_snapshot_id="snap-b", **kwargs)
+            records = [record for _, record in log.read()]
+        self.assertEqual(len(records), 2 * tr.K)
+        self.assertTrue(all(r.split_id == "development-ext" and r.counts_toward_n for r in records))
+        self.assertEqual({r.result_summary["window"] for r in records}, {"2021-01..2025-06"})
+        self.assertEqual((report["n_trials"], again["n_trials"]), (tr.K, tr.K))
+        self.assertEqual(report["required_t"], again["required_t"])
+        entry = report["variants"][0]
+        self.assertEqual(entry["T_days"], 1642)
+        self.assertEqual([row["period"] for row in entry["descriptive_by_year"]],
+                         ["2021", "2022", "2023", "2024", "2025H1"])
+        self.assertEqual(sum(Fraction(row["sum"]) for row in entry["descriptive_by_year"]),
+                         Fraction(entry["net_1x"]["sum"]))
+        self.assertIn("pre-2024 (descriptive)", tr.markdown(report))
+        for line in tr.public_lines(report)[1:-1]:
+            self.assertRegex(line, r"^[a-z0-9_]+ segment=development-ext T=1642 symbols=1$")
 
 
 if __name__ == "__main__":

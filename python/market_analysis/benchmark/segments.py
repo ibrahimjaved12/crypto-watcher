@@ -9,6 +9,24 @@ SEGMENTS = {
     "hidden": ("2026-01", "2026-10"),
 }
 
+# Daily-frequency research only (owner decision D2, 2026-10-09; #222 P9). Kept OUT of SEGMENTS on
+# purpose: every intraday path (labels, experiments, calibration, level study, screen) looks segments
+# up in SEGMENTS and therefore refuses it. 2020 is the indicator warm-up year, never evaluated.
+DAILY_SEGMENTS = {
+    "development-ext": ("2021-01", "2025-07"),
+}
+
+
+def daily_segment_bounds_ms(name: str) -> tuple[int, int]:
+    """Bounds of a daily-research segment: the intraday segments plus DAILY_SEGMENTS."""
+    first, end = {**SEGMENTS, **DAILY_SEGMENTS}[name]
+    return month_bounds_ms(first)[0], month_bounds_ms(end)[0]
+
+
+def daily_segment_months(name: str) -> list[str]:
+    first, end = {**SEGMENTS, **DAILY_SEGMENTS}[name]
+    return months_between(first, end)[:-1]
+
 
 def _integer(value: int) -> None:
     if type(value) is not int:

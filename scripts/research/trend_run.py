@@ -28,7 +28,6 @@ from daily_download import DAILY_FIRST_MONTH, DAILY_LAST_MONTH, download_daily  
 from data_lake_build import ResearchDataRepo  # noqa: E402
 from market_analysis import data_lake as lake  # noqa: E402
 from market_analysis.benchmark import trend as tr  # noqa: E402
-from market_analysis.benchmark.calibration import AUDIT_SEGMENTS, check_segment  # noqa: E402
 from market_analysis.benchmark.canonical import canonical_bytes, content_hash  # noqa: E402
 from market_analysis.benchmark.experiment_log import ExperimentLog  # noqa: E402
 from market_analysis.benchmark.hidden_guard import HiddenStretchLocked  # noqa: E402
@@ -94,7 +93,8 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--workdir", type=Path, default=Path("trend-run-work"))
     parser.add_argument("--summary", type=Path, help="append the public output (markdown)")
-    parser.add_argument("--segment", required=True, help="development | validation (hidden is refused)")
+    parser.add_argument("--segment", required=True,
+                        help="development | validation | development-ext (daily only; hidden is refused)")
     parser.add_argument("--data-revision", type=int, default=1, help="rd revision (recorded; trend reads dk1 only)")
     parser.add_argument("--daily-revision", type=int, default=1, help="dk1 release revision")
     return parser.parse_args(argv)
@@ -103,12 +103,12 @@ def parse_args(argv=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
     try:
-        check_segment(args.segment)  # the hidden guard, before any network or file access
+        tr.check_daily_segment(args.segment)  # the hidden guard, before any network or file access
     except HiddenStretchLocked:
-        raise PublicError("the hidden segment is locked: the trend run evaluates development or validation "
-                          "only") from None
+        raise PublicError("the hidden segment is locked: the trend run evaluates development, validation or "
+                          "development-ext only") from None
     except ValueError:
-        raise PublicError(f"segment must be one of {', '.join(AUDIT_SEGMENTS)}") from None
+        raise PublicError(f"segment must be one of {', '.join(tr.TREND_SEGMENTS)}") from None
     # Never remove a pre-existing caller directory; own only this newly created one.
     args.workdir.mkdir(parents=True, exist_ok=False)
     progress = TrendProgress(sys.stdout)  # captured before any _quiet redirect
