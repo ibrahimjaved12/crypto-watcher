@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import { Activity, Bell, LineChart, LogOut, NotebookPen, Settings2 } from "lucide-react";
+import { Activity, Bell, FlaskConical, LineChart, LogOut, NotebookPen, Settings2 } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { supabase } from "@/integrations/supabase/client";
 
 const NAV = [
   { to: "/dashboard", label: "Dashboard", icon: LineChart },
+  { to: "/forward", label: "Forward test", icon: FlaskConical },
   { to: "/alerts", label: "Alerts", icon: Bell },
   { to: "/notes", label: "Notes", icon: NotebookPen },
   { to: "/settings", label: "Settings", icon: Settings2 },

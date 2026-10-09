@@ -13,6 +13,7 @@ import httpx
 from .api_models import (
     AnalysisRequest,
     CompletedCandleSeriesRequest,
+    ForwardEvaluateRequest,
     MovementBoundaryRequest,
     MovementClassificationRequest,
     MovementHistoryRegistrationRequest,
@@ -21,6 +22,8 @@ from .api_models import (
     TechnicalAnalysisBatchRequest,
     TechnicalAnalysisRequest,
 )
+from .forward.bars_adapter import CollectorRowError
+from .forward.evaluate import evaluate as forward_evaluate
 from .movement_service import MovementBoundaryService
 from .service import analyze_request
 from .technical import calculate_technical_analysis
@@ -139,6 +142,16 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
             return request.app.state.movement_boundary_service.calculate_lifecycle(body)
         except ValueError:
             raise HTTPException(409, "Movement lifecycle could not be calculated") from None
+
+    @app.post("/v1/forward/evaluate", dependencies=[Depends(authorize)])
+    async def forward_evaluate_route(body: ForwardEvaluateRequest):
+        # Pure and stateless (#239 P10): the application persists what it returns.
+        try:
+            return forward_evaluate(**body.evaluate_input())
+        except CollectorRowError as error:
+            raise HTTPException(422, f"Invalid collector rows: {error.code}") from None
+        except ValueError:
+            raise HTTPException(409, "Forward evaluation could not be completed") from None
 
     return app
 

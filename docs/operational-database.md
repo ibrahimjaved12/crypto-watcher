@@ -122,6 +122,14 @@ the 8-day whole-day setting for these inputs. Retention is a resource bound: inc
 identical canonical inputs is science-neutral; reducing required coverage can make history explicitly
 unavailable and is not equivalent.
 
+**One-minute collector candles** have their own retention, **62 days** by default
+(`OPERATIONAL_MINUTE_CANDLE_RETENTION_DAYS`, allowed range 31–90 days, #239). The forward engine
+needs 28 days of intraday seasonal profile plus the EWMA warm-up, and 30 days of signal history,
+for each symbol. The bound is enforced in two places: by `record_collector_candles`
+(`p_minute_retention_days`) in the operational baseline, and by `operationalDbConfig`. At 1440
+rows per symbol per day that is about 90,000 rows per symbol; 15m, 1h and 4h candles keep the
+general day window.
+
 Monitor runs default to 30 days (allowed range 1–90 days), and inactive checkpoints expire after
 30 days. Writes perform database-wide bounded cleanup. Age-based retention and the protected
 **newest-260 completed-candle floor per canonical collector series** are separate mechanisms:

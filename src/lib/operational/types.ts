@@ -54,6 +54,18 @@ export type CollectorCandle = {
   transport: "rest" | "websocket";
 };
 
+/** Completed 1m collector candle as sent to the forward engine (#239); doubles, provenance kept. */
+export type ForwardMinuteRow = {
+  open_time_ms: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  transport: "rest" | "websocket";
+  source_event_at_ms: number | null;
+};
+
 export type CollectorHealthStatus = "LIVE" | "RECOVERING" | "STALE" | "UNAVAILABLE";
 
 export type CollectorHealth = {
@@ -201,6 +213,8 @@ export interface OperationalStore {
     timeframeMinutes: T,
     limit?: number,
   ): Promise<CompletedCandleSeries<T>>;
+  /** Completed one-minute candles of one symbol in [sinceMs, beforeMs) for the forward engine (#239). */
+  readForwardMinuteCandles(symbol: string, sinceMs: number, beforeMs: number): Promise<ForwardMinuteRow[]>;
   /** Canonical completed one-minute candles used to derive #71 normalization history. */
   readMovementCandleHistory(
     symbols: string[],

@@ -902,9 +902,9 @@ test("repository collector TA read transports recorded provenance without fabric
   }
 });
 
-test("collector retention keeps enough canonical history for the longest TA frame", async (t) => {
+test("collector retention preserves TA history and bounds the separate forward minute window", async (t) => {
   // Keep fixture construction and SQL retention on the same clock even if the
-  // two one-minute batches would otherwise straddle a real minute boundary.
+  // one-minute batches would otherwise straddle a real minute boundary.
   const now = Date.parse("2026-10-04T12:00:30.000Z");
   t.mock.timers.enable({ apis: ["Date"], now });
   const databaseClock = await db.query(
@@ -955,23 +955,45 @@ test("collector retention keeps enough canonical history for the longest TA fram
   assert.equal(kept4h.count, 260);
   assert.equal(new Date(kept4h.oldest).getTime(), recent4h - 259 * step4h);
 
-  // The high-volume one-minute series is still bounded by the day window.
+  // Minute history uses its own window even when the general retention is one
+  // day. Straddle the cutoff to verify both retention and pruning, with enough
+  // recent rows that the 260-candle TA floor cannot mask an incorrect cutoff.
   const step1m = 60_000;
   const recent1m = Math.floor(Date.now() / step1m) * step1m - step1m;
-  await db.query("SELECT record_collector_candles($1,$2)", [
-    JSON.stringify(series("ETHUSDT", 1, 1000, recent1m - 1000 * step1m)),
-    1,
-  ]);
-  await db.query("SELECT record_collector_candles($1,$2)", [
-    JSON.stringify(series("ETHUSDT", 1, 1000, recent1m)),
-    1,
-  ]);
-  const kept1m = (
-    await db.query(
-      "SELECT count(*)::int AS count FROM collector_recent_candles WHERE timeframe_minutes = 1",
-    )
-  ).rows[0];
-  assert.equal(kept1m.count, 1440);
+  for (const [symbol, days, explicit] of [
+    ["ETHUSDT", 62, false],
+    ["SOLUSDT", 31, true],
+    ["BNBUSDT", 90, true],
+  ]) {
+    const cutoffOpen = Math.floor(Date.now() / step1m) * step1m - days * 24 * 60 * step1m;
+    const sql = explicit
+      ? "SELECT record_collector_candles($1,$2,$3)"
+      : "SELECT record_collector_candles($1,$2)";
+    for (const endOpen of [cutoffOpen + 499 * step1m, recent1m]) {
+      const args = [JSON.stringify(series(symbol, 1, 1000, endOpen)), 1];
+      if (explicit) args.push(days);
+      await db.query(sql, args);
+    }
+    const kept1m = (
+      await db.query(
+        "SELECT count(*)::int AS count, min(open_time) AS oldest FROM collector_recent_candles WHERE timeframe_minutes = 1 AND symbol = $1",
+        [symbol],
+      )
+    ).rows[0];
+    assert.equal(kept1m.count, 1500, `${days}-day minute retention`);
+    assert.equal(new Date(kept1m.oldest).getTime(), cutoffOpen);
+  }
+
+  for (const days of [30, 91]) {
+    await assert.rejects(
+      db.query("SELECT record_collector_candles($1,$2,$3)", [
+        JSON.stringify(series("ETHUSDT", 1, 1, recent1m)),
+        1,
+        days,
+      ]),
+      /Invalid collector candle batch/,
+    );
+  }
 });
 
 test("repository movement history read maps compact rows and skips malformed entries", async () => {

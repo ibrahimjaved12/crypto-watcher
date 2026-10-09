@@ -393,3 +393,68 @@ class CompletedCandleSeriesRequest(InputModel):
     def valid_domain(self):
         self.domain()
         return self
+
+
+# ---------------------------------------------------------------- forward engine (#239 P10)
+
+ForwardFloat = Annotated[float, Field(strict=False, ge=0, allow_inf_nan=False)]
+
+
+class ForwardCollectorRow(InputModel):
+    """One completed 1-minute ``collector_recent_candles`` row as read by the application."""
+    open_time_ms: Timestamp
+    close_time_ms: Timestamp | None = None
+    open: ForwardFloat
+    high: ForwardFloat
+    low: ForwardFloat
+    close: ForwardFloat
+    volume: ForwardFloat = 0.0
+    transport: Literal["rest", "websocket"]
+    endpoint: str | None = Field(default=None, max_length=128)
+    source_event_at_ms: Timestamp | None = None
+    timeframe_minutes: Literal[1] = 1
+
+
+class ForwardFundingEvent(InputModel):
+    calc_time_ms: Timestamp
+    rate: Decimal = Field(ge=Decimal("-1"), le=Decimal("1"))
+    interval_hours: Annotated[int, Field(strict=True, ge=1, le=24)] = 8
+
+
+class ForwardSymbolInput(InputModel):
+    symbol: str = Field(min_length=5, max_length=16, pattern=r"^[A-Z0-9]+$")
+    rows: Annotated[tuple[ForwardCollectorRow, ...], Field(min_length=1, max_length=100_000)]
+    funding: Annotated[tuple[ForwardFundingEvent, ...], Field(max_length=1000)] = ()
+
+
+class ForwardOpenSetup(InputModel):
+    setup: dict[str, Any]
+    resolution: dict[str, Any] | None = None
+
+
+class ForwardEvaluateRequest(InputModel):
+    schema_version: Literal[1]
+    symbols: Annotated[tuple[ForwardSymbolInput, ...], Field(min_length=1, max_length=20)]
+    strategy_ids: Annotated[tuple[str, ...], Field(min_length=1, max_length=200)]
+    from_ms: Timestamp
+    to_ms: Timestamp
+    open_setups: Annotated[tuple[ForwardOpenSetup, ...], Field(max_length=2000)] = ()
+    wallet_state: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def window(self):
+        if self.to_ms < self.from_ms:
+            raise ValueError("to_ms precedes from_ms")
+        if len({item.symbol for item in self.symbols}) != len(self.symbols):
+            raise ValueError("duplicate symbol")
+        return self
+
+    def evaluate_input(self) -> dict:
+        return {
+            "symbols": [{"symbol": item.symbol, "rows": [row.model_dump() for row in item.rows],
+                         "funding": [{"calc_time_ms": f.calc_time_ms, "rate": str(f.rate),
+                                      "interval_hours": f.interval_hours} for f in item.funding]}
+                        for item in self.symbols],
+            "strategy_ids": list(self.strategy_ids), "from_ms": self.from_ms, "to_ms": self.to_ms,
+            "open_setups": [item.model_dump() for item in self.open_setups], "wallet_state": self.wallet_state,
+        }
