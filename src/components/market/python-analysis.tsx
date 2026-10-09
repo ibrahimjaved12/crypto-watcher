@@ -1,4 +1,5 @@
-import { TechnicalDetails, EmptyState } from "@/components/presentation";
+import { TechnicalDetails, EmptyState, SignedBar } from "@/components/presentation";
+import { Hint } from "@/components/hint";
 import { humanizeCode, sourceLabel, pairLabel, issueSummary } from "@/lib/presentation/labels";
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
@@ -65,11 +66,16 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
   return (
     <section
       className="panel mt-8 space-y-4 p-5 sm:p-6"
-      aria-label="Pair Analysis"
+      aria-label="Market read"
       aria-busy={analysis.isPending}
     >
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="font-semibold">Pair Analysis</h2>
+        <div className="mr-auto">
+          <h2 className="text-lg font-semibold">Market read</h2>
+          <p className="text-xs text-muted-foreground">
+            An on-demand reading of one pair from completed candles. It does not change your alerts.
+          </p>
+        </div>
         <label className="sr-only" htmlFor="analysis-pair">
           Pair to analyze
         </label>
@@ -95,17 +101,15 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
           disabled={!symbol || analysis.isPending}
           onClick={() => analysis.mutate(symbol)}
         >
-          {analysis.isPending ? "Analyzing…" : result ? "Refresh analysis" : "Analyze pair"}
+          {analysis.isPending
+            ? "Analysing…"
+            : `${result ? "Re-analyse" : "Analyse"} ${symbol ? pairLabel(symbol) : "pair"}`}
         </Button>
       </div>
-      <p className="text-xs text-muted-foreground">
-        On-demand snapshot from completed market candles. This does not change your alerts or saved
-        baseline.
-      </p>
       {!result && !analysis.isPending && !analysis.isError && (
         <EmptyState title={symbol ? "Ready to analyze" : "Add a pair to begin"}>
           {symbol
-            ? "Choose a watched pair and analyze it for timeframe readings, rolling movement and your saved-baseline comparison."
+            ? "Pick a pair and press Analyse for a plain reading of the 15-minute, 1-hour and 4-hour trend, recent moves and your alert baseline."
             : "Add a pair to your watchlist above to request a market snapshot."}
         </EmptyState>
       )}
@@ -148,13 +152,47 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
               </p>
             </div>
           </div>
+          <ul className="space-y-1.5 text-sm" aria-label="Verdict">
+            {Object.entries(result.technical).map(([timeframe, row]) => (
+              <li key={timeframe} className="flex flex-wrap items-center gap-x-2">
+                <span className="num w-10 font-semibold">{frame(timeframe)}</span>
+                <span
+                  className="chip"
+                  data-tone={
+                    row.classification === "bullish"
+                      ? "bull"
+                      : row.classification === "bearish"
+                        ? "bear"
+                        : row.classification === "unavailable"
+                          ? "warn"
+                          : undefined
+                  }
+                >
+                  {row.classification === "bullish"
+                    ? "bullish lean"
+                    : row.classification === "bearish"
+                      ? "bearish lean"
+                      : row.classification === "neutral"
+                        ? "no clear lean"
+                        : "not enough data"}
+                </span>
+                {row.score !== null && (
+                  <span className="text-muted-foreground">
+                    <Hint term="score">score</Hint> <SignedBar value={row.score} max={100} />{" "}
+                    of ±100
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
           {result.failure_category && (
             <p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">
               {issueSummary(result.failure_category)}
             </p>
           )}
-          <div>
-            <h3 className="text-sm font-medium">Completed-candle technical analysis</h3>
+          <details className="technical-details">
+            <summary>Why: indicator breakdown per timeframe</summary>
+            <div className="mt-3">
             <div className="mt-2 grid gap-3 md:grid-cols-3">
               {Object.entries(result.technical).map(([timeframe, row]) => (
                 <div key={timeframe} className="rounded-md border border-border p-3 text-xs">
@@ -164,7 +202,7 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
                       {title(row.classification)}
                     </Badge>
                   </div>
-                  <p className="mt-2 text-sm font-medium">Rule score: {signed(row.score)}</p>
+                  <p className="mt-2 text-sm font-medium">Score: {signed(row.score)} of ±100</p>
                   {row.factor_breakdown && (
                     <dl className="mt-2 divide-y divide-border/60">
                       {Object.entries(row.factor_breakdown).map(([name, factor]) => (
@@ -189,12 +227,17 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
               )}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              Rule-based score, not a calibrated win probability.
+              The score ranks how bullish or bearish the indicators look. It is not a win
+              probability and not a prediction of profit.
             </p>
-          </div>
+            </div>
+          </details>
           <div>
             <h3 className="text-sm font-medium">
-              Rolling windows — threshold {result.threshold_pct}%
+              Recent moves{" "}
+              <span className="font-normal text-muted-foreground">
+                (your alert threshold: {result.threshold_pct}%)
+              </span>
             </h3>
             <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
               {Object.entries(result.rolling).map(([window, row]) => (
@@ -219,12 +262,12 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
                 </div>
               ))}
               {!Object.keys(result.rolling).length && (
-                <p className="text-sm">Rolling data unavailable.</p>
+                <p className="text-sm text-muted-foreground">Recent moves are not available right now.</p>
               )}
             </div>
           </div>
           <div className="space-y-1 rounded-md border border-border bg-muted/10 p-3 text-sm">
-            <h3 className="font-medium">Saved-baseline comparison</h3>
+            <h3 className="font-medium">Alert baseline (the price your alerts compare against)</h3>
             <p>{explanations[result.baseline.status]}</p>
             {result.baseline.baseline_price !== null && (
               <p className="num text-xs">
@@ -256,6 +299,7 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
               Technical details
             </summary>
             <div className="mt-3 space-y-2 break-words">
+              <p>Calculated by the analysis service from completed candles.</p>
               <p>
                 Status: <code>{result.status}</code> · failure:{" "}
                 <code>{result.failure_category ?? "none"}</code> · source:{" "}

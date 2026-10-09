@@ -1,4 +1,6 @@
-import { PageHeader, QueryNotice, TechnicalDetails } from "@/components/presentation";
+import { PageHeader, QueryNotice, RelativeTime, TechnicalDetails } from "@/components/presentation";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { humanizeReason } from "@/lib/labels";
 import { sourceLabel, monitoringRunLabel, issueSummary } from "@/lib/presentation/labels";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -165,36 +167,72 @@ function Dashboard() {
         pending={watchlist.isPending}
         error={watchlist.error || market.error || operational.error || settings.error}
       />
-      <div className="panel mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 p-4 text-sm">
-        <span className="flex items-center gap-2">
-          <span className="text-muted-foreground">Data source:</span>
-          <Badge variant={sourcesDown ? "destructive" : "secondary"}>
-            {sourcesDown
-              ? "No exchange reachable"
-              : quotes.find((q) => q.source)?.source
-                ? sourceLabel(quotes.find((q) => q.source)?.source)
-                : "Waiting for prices"}
-          </Badge>
-        </span>
-        <span className="text-muted-foreground">
-          Last price update:{" "}
-          <span className="num text-foreground">
-            {market.data ? new Date(market.data.fetchedAt).toLocaleTimeString() : "—"}
-          </span>
-        </span>
-        <span className="text-muted-foreground">
-          Last monitoring check:{" "}
-          <span className="text-foreground">
-            {lastRun
-              ? `${monitoringRunLabel(lastRun.status)} · ${new Date(lastRun.ran_at).toLocaleString()}`
-              : operational.isPending
-                ? "Loading…"
-                : operational.error
-                  ? "Unavailable"
+      {(() => {
+        const runLevel = lastRun ? humanizeReason(lastRun.status).level ?? "problem" : "wait";
+        const level = sourcesDown ? "problem" : lastRun?.error_message ? "wait" : runLevel;
+        const source = quotes.find((q) => q.source)?.source;
+        return (
+          <Popover>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                className="panel mt-4 flex w-full flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-left text-sm hover:border-primary/50"
+                aria-label="Data status details"
+              >
+                <span className="status-dot" data-level={level} aria-hidden />
+                <span>
+                  {sourcesDown
+                    ? "No exchange reachable"
+                    : source
+                      ? `Prices from ${sourceLabel(source)}`
+                      : "Waiting for prices"}
+                </span>
+                <span className="text-muted-foreground">
+                  updated{" "}
+                  {market.data ? <RelativeTime ms={market.data.fetchedAt} /> : "—"}
+                </span>
+                <span className="text-muted-foreground">
+                  last alert check:{" "}
+                  {lastRun ? (
+                    <>
+                      {monitoringRunLabel(lastRun.status).toLowerCase()},{" "}
+                      <RelativeTime ms={lastRun.ran_at} />
+                    </>
+                  ) : operational.isPending ? (
+                    "loading…"
+                  ) : operational.error ? (
+                    "unavailable"
+                  ) : (
+                    "none yet"
+                  )}
+                </span>
+                <span className="ml-auto text-xs text-primary">Details</span>
+              </button>
+            </PopoverTrigger>
+            <PopoverContent className="w-80 space-y-2 text-xs" align="start">
+              <p>
+                <span className="text-muted-foreground">Data source: </span>
+                {sourcesDown ? "No exchange reachable" : source ? sourceLabel(source) : "Waiting for prices"}
+              </p>
+              <p>
+                <span className="text-muted-foreground">Last price update: </span>
+                <span className="num">
+                  {market.data ? new Date(market.data.fetchedAt).toLocaleString() : "—"}
+                </span>
+              </p>
+              <p>
+                <span className="text-muted-foreground">Last alert check: </span>
+                {lastRun
+                  ? `${monitoringRunLabel(lastRun.status)} · ${new Date(lastRun.ran_at).toLocaleString()}`
                   : "No checks yet"}
-          </span>
-        </span>
-      </div>
+              </p>
+              {lastRun?.error_message && (
+                <p className="text-warn">{humanizeReason(lastRun.error_message).help ?? ""}</p>
+              )}
+            </PopoverContent>
+          </Popover>
+        );
+      })()}
 
       {lastRun?.error_message && (
         <p className="mt-3 text-sm text-warn">{issueSummary(lastRun.error_message)}</p>
@@ -211,7 +249,7 @@ function Dashboard() {
           Enable monitoring and market-data collection in Settings to check for alerts.
         </p>
       )}
-      <h2 className="mt-8 text-lg font-semibold">Watched markets</h2>
+      <h2 className="sr-only">Watched markets</h2>
 
       {sourcesDown ? (
         <p className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm">
@@ -220,7 +258,7 @@ function Dashboard() {
         </p>
       ) : null}
 
-      <div className="mt-3 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {watchlist.isLoading || (market.isLoading && symbols.length > 0)
           ? symbols.map((s) => (
               <div key={s} className="panel h-64 animate-pulse p-5">

@@ -1,8 +1,18 @@
-import { PageHeader, TechnicalDetails, EmptyState, QueryNotice } from "@/components/presentation";
+import {
+  PageHeader,
+  TechnicalDetails,
+  EmptyState,
+  QueryNotice,
+  SignedBar,
+  StatusCard,
+} from "@/components/presentation";
+import { Hint } from "@/components/hint";
+import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   monitoringRunLabel,
   strategyLabel,
+  strategyBlurb,
   trendVariantLabel,
   benchmarkLabel,
   sampleLabel,
@@ -37,8 +47,28 @@ export const Route = createFileRoute("/_authenticated/forward")({
 });
 
 const time = (ms: number | null | undefined) =>
-  ms ? new Date(ms).toISOString().slice(0, 16).replace("T", " ") : "—";
-const r = (value: number | null) => (value === null ? "—" : value.toFixed(3));
+  ms
+    ? new Date(ms).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "—";
+const r = (value: number | null) =>
+  value === null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)} R`;
+
+function Side({ side }: { side: number }) {
+  return side === 1 ? (
+    <span className="chip" data-tone="bull">
+      <ArrowUpRight className="size-3" aria-hidden /> Long
+    </span>
+  ) : (
+    <span className="chip" data-tone="bear">
+      <ArrowDownRight className="size-3" aria-hidden /> Short
+    </span>
+  );
+}
 
 function ForwardPage() {
   const queryClient = useQueryClient();
@@ -81,29 +111,31 @@ function ForwardPage() {
       <div className="space-y-6">
         <PageHeader
           title="Strategy Lab"
-          description="Follow experimental strategies as new market observations arrive."
+          description="Strategies are tested here with fake money and realistic fees, on market data that arrives after each decision."
         />
         <div className="rounded-xl border border-warn/40 bg-warn/10 p-4 text-sm text-warn">
-          Experimental forward evaluation. No strategy currently has a validated trading edge.
+          This is a forward test. No strategy has a validated edge yet, and paper results are not a
+          prediction of profit.
         </div>
         <StatusSummary signalRun={latest} signalPending={data.isPending} signalError={data.error} />
         <Tabs defaultValue="signals">
           <TabsList className="mb-5 h-auto flex-wrap">
-            <TabsTrigger value="signals">Signals &amp; paper trading</TabsTrigger>
-            <TabsTrigger value="portfolios">Daily portfolios</TabsTrigger>
+            <TabsTrigger value="signals">Signals &amp; Paper Trading</TabsTrigger>
+            <TabsTrigger value="portfolios">Daily Trend Portfolios</TabsTrigger>
           </TabsList>
           <TabsContent value="signals" className="space-y-6">
             <div className="flex flex-wrap items-center gap-3">
               <div>
-                <h2 className="text-xl font-semibold">Signals &amp; paper trading</h2>
+                <h2 className="text-xl font-semibold">Signals &amp; Paper Trading</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Completed-candle setups and a simulated wallet. Times shown in UTC.
+                  Every hour, each strategy may fire a signal; a fake-money wallet takes the trade
+                  with fees, funding and a stop.
                 </p>
               </div>
               <Badge variant={fresh ? "secondary" : "outline"}>
                 {latest
-                  ? `${fresh ? "Fresh" : "Delayed"} · ${monitoringRunLabel(latest.status)} · ${time(latest.boundary_ms)} UTC`
-                  : "No evaluations yet"}
+                  ? `${fresh ? "Up to date" : "Not recent"} · last check ${time(latest.boundary_ms)}`
+                  : "No checks yet"}
               </Badge>
               <Button
                 className="sm:ml-auto"
@@ -111,7 +143,7 @@ function ForwardPage() {
                 onClick={() => runNow.mutate()}
                 disabled={runNow.isPending}
               >
-                {runNow.isPending ? "Evaluating…" : "Evaluate signals now"}
+                {runNow.isPending ? "Checking…" : "Check for new signals now"}
               </Button>
             </div>
             <QueryNotice pending={data.isPending} error={data.error} />
@@ -122,7 +154,7 @@ function ForwardPage() {
               </p>
             )}
             {(latest || runNow.error || runNow.data) && (
-              <TechnicalDetails>
+              <TechnicalDetails title="Technical details (raw run record)">
                 <pre className="whitespace-pre-wrap">
                   {JSON.stringify(
                     {
@@ -139,7 +171,7 @@ function ForwardPage() {
 
             <section className="panel p-5">
               <div className="mb-2 flex flex-wrap items-center gap-2">
-                <h2 className="font-medium">Strategy outcome comparison</h2>
+                <h2 className="font-medium">Results by strategy</h2>
                 <select
                   aria-label="Outcome lookback period"
                   className="rounded border bg-background px-2 py-1 text-sm"
@@ -154,58 +186,80 @@ function ForwardPage() {
                 </select>
               </div>
               <p className="mb-4 text-xs text-muted-foreground">
-                R is the result relative to a trade’s initial risk. +1 R earns that amount; −1 R
-                loses it. Net R includes modeled costs. Controls provide a comparison, not evidence
-                of a validated edge.
+                Finished paper trades only. Each strategy is shown next to a random baseline that
+                trades equally often; beating it is the minimum bar, not proof of an edge.
               </p>
-              <div
-                className="overflow-x-auto"
-                tabIndex={0}
-                role="region"
-                aria-label="Strategy outcomes"
-              >
-                <table className="data-table">
-                  <thead>
-                    <tr className="text-left text-muted-foreground">
-                      <th>Trades</th>
-                      <th>Strategy</th>
-                      <th>Reward:risk</th>
-                      <th>Wins</th>
-                      <th>Ambiguous</th>
-                      <th>Average net R</th>
-                      <th>Control trades</th>
-                      <th>Control avg. R</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {summary.map((row) => (
-                      <tr key={`${row.strategyId}|${row.version}|${row.rr}`} className="border-t">
-                        <td>{row.n}</td>
-                        <td className="min-w-48">
-                          {strategyLabel(row.strategyId)}
-                          <TechnicalDetails>
-                            <p>
-                              {row.strategyId} · {row.version}
-                            </p>
-                            <p>Score band: unavailable (no score yet)</p>
-                          </TechnicalDetails>
-                        </td>
-                        <td>{row.rr}</td>
-                        <td>{row.wins}</td>
-                        <td>{row.ambiguous}</td>
-                        <td>{r(row.meanNetR)}</td>
-                        <td>{row.placebo?.n ?? 0}</td>
-                        <td>{r(row.placebo?.meanNetR ?? null)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              {!data.isPending && !data.error && summary.length === 0 && (
-                <EmptyState title="No completed trades in this period">
-                  Outcome comparisons appear as setups finish. Try a longer period to include
-                  earlier results.
+              {!data.isPending && !data.error && summary.length === 0 ? (
+                <EmptyState title="No finished trades yet">
+                  The first results appear after a signal fires and its time limit passes; this can
+                  take hours. Try a longer period to include earlier results.
                 </EmptyState>
+              ) : (
+                <div
+                  className="overflow-x-auto"
+                  tabIndex={0}
+                  role="region"
+                  aria-label="Strategy outcomes"
+                >
+                  <table className="data-table">
+                    <thead>
+                      <tr className="text-left text-muted-foreground">
+                        <th>Strategy</th>
+                        <th>Trades</th>
+                        <th>Wins</th>
+                        <th>
+                          <Hint text="Target and stop were both touched inside one candle, so the order is unknown. Counted with the worse result.">
+                            Unclear results
+                          </Hint>
+                        </th>
+                        <th>
+                          <Hint term="R">Average result / trade</Hint>
+                        </th>
+                        <th>
+                          <Hint term="placebo">Random baseline</Hint>
+                        </th>
+                        <th>
+                          <Hint term="rr">Reward : risk</Hint>
+                        </th>
+                        <th>
+                          <Hint term="scoreBand">Score band</Hint>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {summary.map((row) => (
+                        <tr key={`${row.strategyId}|${row.version}|${row.rr}`} className="border-t">
+                          <td className="min-w-56">
+                            <span className="font-medium">{strategyLabel(row.strategyId)}</span>
+                            <p className="mt-0.5 text-xs text-muted-foreground">
+                              {strategyBlurb(row.strategyId)}
+                            </p>
+                            <TechnicalDetails>
+                              <p>
+                                {row.strategyId} · {row.version}
+                              </p>
+                            </TechnicalDetails>
+                          </td>
+                          <td className="num">{row.n}</td>
+                          <td className="num">{row.wins}</td>
+                          <td className="num">{row.ambiguous}</td>
+                          <td
+                            className={`num ${(row.meanNetR ?? 0) > 0 ? "text-bull" : (row.meanNetR ?? 0) < 0 ? "text-bear" : ""}`}
+                          >
+                            {r(row.meanNetR)}
+                          </td>
+                          <td className="num text-muted-foreground">
+                            {row.placebo
+                              ? `${r(row.placebo.meanNetR)} over ${row.placebo.n} trades`
+                              : "—"}
+                          </td>
+                          <td className="num">{row.rr}</td>
+                          <td className="text-xs text-muted-foreground">not scored yet</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </section>
 
@@ -215,7 +269,7 @@ function ForwardPage() {
                 <ul className="space-y-1 text-sm">
                   {!data.isPending && !data.error && !data.data?.signals.length && (
                     <li className="text-muted-foreground">
-                      No signals recorded yet. Evaluate signals when market history is ready.
+                      No signals yet. They appear when a strategy's entry rule fires.
                     </li>
                   )}
                   {(data.data?.signals ?? []).slice(0, 20).map((signal) => (
@@ -223,8 +277,14 @@ function ForwardPage() {
                       className="border-b border-border/60 py-3 last:border-0"
                       key={signal.signal_id}
                     >
-                      {time(signal.signal_ms)} · {pairLabel(signal.symbol)} ·{" "}
-                      {signal.side === 1 ? "long" : "short"} · {strategyLabel(signal.strategy_id)}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Side side={signal.side} />
+                        <span className="font-medium">{pairLabel(signal.symbol)}</span>
+                        <span className="text-muted-foreground">{time(signal.signal_ms)}</span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {strategyLabel(signal.strategy_id)}
+                      </p>
                       <TechnicalDetails>
                         {signal.strategy_id} · {signal.version}
                       </TechnicalDetails>
@@ -233,11 +293,12 @@ function ForwardPage() {
                 </ul>
               </div>
               <div className="panel p-5">
-                <h2 className="mb-3 font-semibold">Open setups</h2>
+                <h2 className="mb-3 font-semibold">Open trades (waiting for a result)</h2>
                 <ul className="space-y-1 text-sm">
                   {!data.isPending && !data.error && !data.data?.openSetups.length && (
                     <li className="text-muted-foreground">
-                      No open setups. Qualifying signals will appear here.
+                      No open trades. A trade opens when a signal fires and closes at its target,
+                      stop or time limit.
                     </li>
                   )}
                   {(data.data?.openSetups ?? []).slice(0, 20).map((setup) => (
@@ -245,9 +306,15 @@ function ForwardPage() {
                       className="border-b border-border/60 py-3 last:border-0"
                       key={setup.setup_id}
                     >
-                      {time(setup.entry_ms)} · {pairLabel(setup.symbol)} ·{" "}
-                      {setup.side === 1 ? "long" : "short"} · {strategyLabel(setup.strategy_id)} ·
-                      Reward:risk {setup.rr}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Side side={setup.side} />
+                        <span className="font-medium">{pairLabel(setup.symbol)}</span>
+                        <span className="text-muted-foreground">entered {time(setup.entry_ms)}</span>
+                        <span className="num text-xs text-muted-foreground">reward:risk {setup.rr}</span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {strategyLabel(setup.strategy_id)}
+                      </p>
                       <TechnicalDetails>
                         {setup.strategy_id} · {setup.version}
                       </TechnicalDetails>
@@ -259,17 +326,22 @@ function ForwardPage() {
 
             <section className="grid gap-4 md:grid-cols-2">
               <div className="panel p-5">
-                <h2 className="mb-3 font-semibold">Paper wallet equity (USDT, realized)</h2>
+                <h2 className="mb-1 font-semibold">Paper wallet balance</h2>
+                <p className="mb-3 text-xs text-muted-foreground">
+                  Fake money (USDT), realised trades only, after fees and funding.
+                </p>
                 {!data.isPending && !data.error && <EquityCurve points={equity} />}
               </div>
               <div className="panel p-5">
                 <h2 className="mb-3 font-semibold">Open paper positions</h2>
                 <ul className="space-y-1 text-sm">
                   {positions.map(([id, position]) => (
-                    <li key={id}>
-                      {pairLabel(String(position["symbol"]))} ·{" "}
-                      {position["side"] === 1 ? "long" : "short"} · leverage{" "}
-                      {String(position["leverage"])}x
+                    <li key={id} className="flex flex-wrap items-center gap-2">
+                      <Side side={Number(position["side"])} />
+                      <span className="font-medium">{pairLabel(String(position["symbol"]))}</span>
+                      <span className="num text-muted-foreground">
+                        {String(position["leverage"])}× leverage
+                      </span>
                     </li>
                   ))}
                   {!data.isPending && !data.error && positions.length === 0 ? (
@@ -290,10 +362,11 @@ function ForwardPage() {
 
 const pct = (value: number | null, digits = 3) =>
   value === null ? "—" : `${(value * 100).toFixed(digits)}%`;
+const signedPct = (value: number | null) =>
+  value === null ? "—" : `${value > 0 ? "+" : ""}${(value * 100).toFixed(3)}%`;
 const day = (ms: number | null | undefined) =>
   ms === null || ms === undefined ? "—" : new Date(ms).toISOString().slice(0, 10);
 
-const dot = { ok: "bg-green-500", wait: "bg-amber-500", problem: "bg-red-500" } as const;
 
 function StatusSummary({
   signalRun,
@@ -311,20 +384,20 @@ function StatusSummary({
     signalError
       ? {
           level: "problem",
-          title: "Signal engine",
-          detail: "Status unavailable. Refresh to try again.",
+          title: "Signals & paper trading",
+          detail: "Status could not be loaded. Refresh to try again.",
         }
       : signalPending
-        ? { level: "wait", title: "Signal engine", detail: "Loading status…" }
+        ? { level: "wait", title: "Signals & paper trading", detail: "Loading status…" }
         : explainSignalEngine(signalRun, Date.now()),
     trend.error
       ? {
           level: "problem",
-          title: "Daily portfolios",
-          detail: "Status unavailable. Refresh to try again.",
+          title: "Daily trend portfolios",
+          detail: "Status could not be loaded. Refresh to try again.",
         }
       : trend.isPending
-        ? { level: "wait", title: "Daily portfolios", detail: "Loading status…" }
+        ? { level: "wait", title: "Daily trend portfolios", detail: "Loading status…" }
         : explainTrendTrack(
             trend.data?.latestAttempt ?? trend.data?.latestRun,
             Math.max(0, ...tracks.map((track) => track.prospectiveDays)),
@@ -332,41 +405,26 @@ function StatusSummary({
           ),
   ];
   return (
-    <div className="panel space-y-3 p-5 text-sm">
-      <div className="font-medium">System status</div>
+    <div className="grid gap-3 md:grid-cols-2">
       {lines.map((line) => (
-        <div key={line.title} className="flex gap-2">
-          <span className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${dot[line.level]}`} />
-          <div>
-            <div className="font-medium">
-              {line.title}{" "}
-              <span className="ml-2 text-xs text-muted-foreground">
-                {line.level === "ok"
-                  ? "Healthy"
-                  : line.level === "wait"
-                    ? "Waiting"
-                    : "Needs attention"}
-              </span>
-            </div>
-            <div className="text-muted-foreground">{line.detail}</div>
-          </div>
-        </div>
+        <StatusCard
+          key={line.title}
+          level={line.level}
+          title={line.title}
+          detail={line.detail}
+          action={line.action}
+          raw={line.raw}
+        >
+          {line.level !== "ok" && (
+            <p>
+              Signals need up to 260 completed candles per timeframe from the market-data
+              collector. When running locally, start everything with{" "}
+              <code>npm run dev:local:all</code>.
+            </p>
+          )}
+          {trend.error && line.title.startsWith("Daily") && <p>{trend.error.message}</p>}
+        </StatusCard>
       ))}
-      <TechnicalDetails title="Evaluation diagnostics">
-        <p>
-          Signal status: {signalRun?.status ?? "not run"} · {signalRun?.reason ?? "no reason"}
-        </p>
-        <p>
-          Portfolio status:{" "}
-          {trend.data?.latestAttempt?.status ?? trend.data?.latestRun?.status ?? "not run"} ·{" "}
-          {trend.data?.latestAttempt?.reason ?? trend.data?.latestRun?.reason ?? "no reason"}
-        </p>
-        <p>
-          Collector history may require up to 260 completed candles per timeframe. Local development
-          command: <code>npm run dev:local:all</code>.
-        </p>
-        {trend.error && <p>{trend.error.message}</p>}
-      </TechnicalDetails>
     </div>
   );
 }
@@ -403,17 +461,17 @@ function TrendSection() {
     chartVariants.find((track) => track.track === selectedVariant) ?? chartVariants[0];
   return (
     <section className="space-y-3">
-      <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
-        Hypothetical open-to-close portfolios, with 11 bp per unit turnover and funding but no
-        margin, liquidation or position limits. No variant has a validated edge. “Recorded before
-        daily close” can include decisions recorded after the open; it does not imply execution at
-        the opening price. Reconstructed results are not forward evidence.
-      </div>
+      <p className="text-sm text-muted-foreground">
+        Hypothetical daily portfolios across six coins: the position is decided from yesterday's
+        close and held for the day, with fees (11 bp per unit traded) and funding, but no margin or
+        liquidation model. No variant has a validated edge. Back-filled days are not forward
+        evidence.
+      </p>
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="font-medium">Daily Trend Portfolios</h2>
+        <h2 className="text-xl font-semibold">Daily Trend Portfolios</h2>
         <Badge variant={!latest ? "outline" : latest.status === "ok" ? "secondary" : "destructive"}>
           {latest
-            ? `${monitoringRunLabel(latest.status)} · through ${day(latest.through_day_ms)}`
+            ? `${monitoringRunLabel(latest.status)} · scored through ${day(latest.through_day_ms)} (UTC)`
             : data.isPending
               ? "Loading…"
               : data.error
@@ -424,7 +482,7 @@ function TrendSection() {
           <span className="text-xs text-warn">{issueSummary(latest.reason)}</span>
         ) : null}
         <Button size="sm" onClick={() => runNow.mutate()} disabled={runNow.isPending}>
-          {runNow.isPending ? "Evaluating…" : "Evaluate daily portfolios"}
+          {runNow.isPending ? "Updating…" : "Update trend portfolios now"}
         </Button>
         <select
           aria-label="Trend sample"
@@ -432,8 +490,8 @@ function TrendSection() {
           value={sample}
           onChange={(event) => setSample(event.target.value as typeof sample)}
         >
-          <option value="prospective">Recorded before daily close</option>
-          <option value="retrospective">Reconstructed after the close</option>
+          <option value="prospective">Live days (scored after they happened)</option>
+          <option value="retrospective">Back-filled days (replayed, less trustworthy)</option>
         </select>
       </div>
       {data.data?.latestAttempt?.reason ? (
@@ -448,7 +506,7 @@ function TrendSection() {
           {runNow.data.reason ? ` · ${issueSummary(runNow.data.reason)}` : ""}
         </p>
       )}
-      <TechnicalDetails>
+      <TechnicalDetails title="Technical details (raw run record)">
         <pre className="whitespace-pre-wrap">
           {JSON.stringify(
             {
@@ -468,8 +526,8 @@ function TrendSection() {
         </pre>
       </TechnicalDetails>
       <p className="text-xs text-muted-foreground">
-        Statistics use the selected sample. Exposure weights are multiples of portfolio value:
-        positive = long, negative = short, zero = flat. Weights can exceed 1×.
+        Statistics use the selected sample. Position bars show each coin's weight as a multiple of
+        the portfolio: right/green = long, left/red = short, empty = flat (up to ±2×).
       </p>
       <div
         className="overflow-x-auto"
@@ -480,15 +538,25 @@ function TrendSection() {
         <table className="data-table">
           <thead>
             <tr className="text-left text-muted-foreground">
-              <th>Variant</th>
-              <th>Days: before close / reconstructed</th>
-              <th>Average daily return</th>
-              <th>Buy &amp; hold benchmark</th>
-              <th>Equal-weight benchmark</th>
-              <th>Average daily turnover</th>
-              <th>Gross exposure</th>
-              <th>Latest recorded weights</th>
-              <th>Evidence / sample size</th>
+              <th>Portfolio</th>
+              <th>
+                <Hint term="live">Live</Hint> / <Hint term="backfilled">back-filled</Hint> days
+              </th>
+              <th>Average day</th>
+              <th>
+                <Hint term="volTarget">Buy &amp; hold</Hint>
+              </th>
+              <th>Equal-weight</th>
+              <th>
+                <Hint term="turnover">Traded / day</Hint>
+              </th>
+              <th>
+                <Hint term="gross">Exposure</Hint>
+              </th>
+              <th>Current positions</th>
+              <th>
+                <Hint term="mde">Enough data?</Hint>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -496,51 +564,64 @@ function TrendSection() {
               const control = track.control ? byName.get(track.control) : undefined;
               return (
                 <tr key={track.track} className="border-t align-top">
-                  <td className="min-w-64 font-medium">
-                    {trendVariantLabel(track.track)}
+                  <td className="min-w-64">
+                    <span className="font-medium">{trendVariantLabel(track.track)}</span>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {strategyBlurb(track.track)}
+                    </p>
                     <TechnicalDetails>
                       <p>Variant: {track.track}</p>
                       <p>Control: {track.control ?? "none"}</p>
                       <p>Sample: {track.sampleKind}</p>
                     </TechnicalDetails>
                   </td>
-                  <td>
+                  <td className="num">
                     {track.prospectiveDays} / {track.retrospectiveDays}
                   </td>
-                  <td>{pct(track.meanDaily)}</td>
-                  <td>
-                    {pct(control?.meanDaily ?? null)}
-                    <details className="mt-2 text-xs text-muted-foreground">
-                      <summary>Matched benchmark</summary>
-                      {track.control ? benchmarkLabel(track.control) : "Unavailable"}
-                    </details>
+                  <td
+                    className={`num ${(track.meanDaily ?? 0) > 0 ? "text-bull" : (track.meanDaily ?? 0) < 0 ? "text-bear" : ""}`}
+                  >
+                    {signedPct(track.meanDaily)}
                   </td>
-                  <td>{pct(equalWeight?.meanDaily ?? null)}</td>
-                  <td>{track.meanTurnover === null ? "—" : track.meanTurnover.toFixed(3)}</td>
-                  <td>{track.meanGross === null ? "—" : `${track.meanGross.toFixed(2)}×`}</td>
+                  <td>
+                    <span className="num" title={track.control ? benchmarkLabel(track.control) : undefined}>
+                      {signedPct(control?.meanDaily ?? null)}
+                    </span>
+                  </td>
+                  <td className="num">{signedPct(equalWeight?.meanDaily ?? null)}</td>
+                  <td className="num">
+                    {track.meanTurnover === null ? "—" : `${(track.meanTurnover * 100).toFixed(1)}%`}
+                  </td>
+                  <td className="num">
+                    {track.meanGross === null ? "—" : `${track.meanGross.toFixed(2)}×`}
+                  </td>
                   <td className="text-xs">
                     {track.currentWeights ? (
                       <>
-                        <p className="mb-2">{day(track.currentWeights.day_ms)}</p>
-                        <div className="flex min-w-48 flex-wrap gap-1.5">
+                        <p className="mb-2 text-muted-foreground">
+                          for {day(track.currentWeights.day_ms)} (UTC day)
+                        </p>
+                        <ul className="min-w-56 space-y-1">
                           {Object.entries(track.currentWeights.weights).map(([symbol, weight]) => (
-                            <span
-                              key={symbol}
-                              className={`num rounded-md border px-2 py-1 ${weight > 0 ? "text-bull" : weight < 0 ? "text-bear" : "text-muted-foreground"}`}
-                            >
-                              {symbol.replace(/USDT$/, "")} {weight > 0 ? "+" : ""}
-                              {weight.toFixed(2)}×{" "}
-                              <span className="font-sans">
-                                {weight > 0 ? "Long" : weight < 0 ? "Short" : "Flat"}
-                              </span>
-                            </span>
+                            <li key={symbol} className="grid grid-cols-[3rem_auto] items-center gap-2">
+                              <span>{symbol.replace(/USDT$/, "")}</span>
+                              <SignedBar
+                                value={weight}
+                                max={2}
+                                label={
+                                  weight === 0
+                                    ? "flat"
+                                    : `${weight > 0 ? "+" : ""}${weight.toFixed(2)}× ${weight > 0 ? "long" : "short"}`
+                                }
+                              />
+                            </li>
                           ))}
-                        </div>
-                        <div>
-                          Decided {time(track.currentWeights.decided_at_ms)} UTC; recorded{" "}
-                          {time(track.currentWeights.recorded_at_ms)} UTC (
+                        </ul>
+                        <TechnicalDetails>
+                          Decided {time(track.currentWeights.decided_at_ms)}; recorded{" "}
+                          {time(track.currentWeights.recorded_at_ms)} (
                           {sampleLabel(track.currentWeights.sample_kind)})
-                        </div>
+                        </TechnicalDetails>
                       </>
                     ) : (
                       "—"
@@ -550,15 +631,15 @@ function TrendSection() {
                     <p>
                       {track.muMinDaily === null
                         ? sample === "prospective"
-                          ? "Not enough forward observations yet"
-                          : "Not enough reconstructed observations yet"
-                        : `${track.days} observations · detectable daily edge ${pct(track.muMinDaily)}`}
+                          ? "Not yet: too few live days"
+                          : "Not yet: too few back-filled days"
+                        : `${track.days} days: only an average above ${pct(track.muMinDaily)}/day could be told apart from noise`}
                     </p>
                     <details className="mt-2">
-                      <summary>Statistical context</summary>
+                      <summary>What this means</summary>
                       <p className="mt-2 text-muted-foreground">
-                        {track.edgeLine}. This is a sample-size estimate, not a significance
-                        verdict.
+                        {track.edgeLine}. Minimum detectable edge is a power estimate (how big an
+                        effect this many days could reliably detect), not a significance test.
                       </p>
                     </details>
                   </td>
@@ -570,8 +651,8 @@ function TrendSection() {
       </div>
       {!data.isPending && !data.error && !variants.length && (
         <EmptyState title="No daily portfolio results yet">
-          Evaluate daily portfolios once completed market history is available. Scored returns
-          appear after the daily close.
+          Positions are recorded once full daily price history is available. The first scored day
+          appears after the next daily close (00:00 UTC).
         </EmptyState>
       )}
       {!data.isPending &&
@@ -579,7 +660,7 @@ function TrendSection() {
         (selected ? (
           <div className="panel space-y-4 p-5">
             <div className="flex flex-wrap items-center gap-3">
-              <h3 className="font-semibold">Compare cumulative equity</h3>
+              <h3 className="font-semibold">Growth of 1 unit (portfolio vs benchmarks)</h3>
               <select
                 aria-label="Portfolio variant to chart"
                 className="max-w-full rounded-md border bg-background p-2 text-sm"
@@ -659,9 +740,9 @@ function TrendSection() {
             </details>
           </div>
         ) : variants.length > 0 ? (
-          <EmptyState title="Equity comparison is waiting for observations">
-            At least two scored days in this sample are needed to draw a curve. Switch samples to
-            inspect reconstructed history separately.
+          <EmptyState title="The chart needs at least two scored days">
+            Curves appear after two days are scored in this sample. You can switch to back-filled
+            days to see the replayed history.
           </EmptyState>
         ) : null)}
     </section>

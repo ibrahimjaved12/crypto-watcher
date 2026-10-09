@@ -1,5 +1,6 @@
 import { humanizeCode, sourceLabel, pairLabel, outcomeLabel } from "@/lib/presentation/labels";
-import { TechnicalDetails } from "@/components/presentation";
+import { SignedBar, TechnicalDetails } from "@/components/presentation";
+import { Hint } from "@/components/hint";
 import { useEffect, useState } from "react";
 import { automaticQueryOptions, logActivity } from "@/lib/activity-controls";
 import { useQuery } from "@tanstack/react-query";
@@ -17,6 +18,7 @@ export function TechnicalAnalysis() {
   const [frame, setFrame] = useState(15);
   const [symbol, setSymbol] = useState("");
   const [page, setPage] = useState(0);
+  const [showAll, setShowAll] = useState(false);
   const history = useQuery({
     queryKey: ["ta", frame, symbol, page],
     queryFn: async () => {
@@ -40,9 +42,9 @@ export function TechnicalAnalysis() {
   const number = (v: unknown) =>
     typeof v === "number" ? v.toLocaleString(undefined, { maximumFractionDigits: 5 }) : "--";
   return (
-    <section className="mt-6 min-w-0 border-t border-border pt-5">
+    <section className="panel mt-8 min-w-0 p-5 sm:p-6">
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-lg font-semibold">Saved analysis history</h2>
+        <h2 className="mr-auto text-lg font-semibold">Indicator history</h2>
         <div className="flex" role="group" aria-label="Timeframe">
           {[
             [0, "All"],
@@ -85,9 +87,9 @@ export function TechnicalAnalysis() {
         </Button>
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
-        Completed candles only · 15m, 1h and 4h snapshots. Indicators describe price and volume;
-        agreement is not independent confirmation. Scores express rule-based bias, not win
-        probability. Expand a record for indicators and technical details.
+        A reading saved at every completed 15-minute, 1-hour and 4-hour candle. The score ranks how
+        bullish or bearish the indicators look; it is not a win probability. Tap a row's details for
+        the full indicator explanation.
       </p>
       {!automatic.enabled && (
         <p className="mt-2 text-xs text-muted-foreground">
@@ -119,24 +121,30 @@ export function TechnicalAnalysis() {
           <table className="data-table">
             <thead className="sticky top-0 bg-background">
               <tr className="border-b border-border">
-                {[
-                  "Pair / timeframe",
-                  "Candle (local time)",
-                  "Interpretation",
-                  "Rule score",
-                  "RSI 14",
-                  "ATR volatility",
-                  "Signals",
-                  "Outcome",
-                ].map((h) => (
+                {(
+                  [
+                    ["Pair", "The pair, exchange and candle length."],
+                    ["Candle closed", "When the candle finished, in your local time."],
+                    ["Trend lean", "Direction of the trend and momentum indicators at that candle."],
+                    ["Indicator score", "score"],
+                    ["RSI", "RSI"],
+                    ["Volatility", "ATR"],
+                    ["Patterns", "Candle patterns detected at that close, if any."],
+                    ["What happened next", "Price change after the candle, filled in once it is known."],
+                  ] as const
+                ).map(([h, help]) => (
                   <th className="p-2 font-medium" key={h}>
-                    {h}
+                    {help === "score" || help === "RSI" || help === "ATR" ? (
+                      <Hint term={help}>{h}</Hint>
+                    ) : (
+                      <Hint text={help}>{h}</Hint>
+                    )}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {history.data.slice(0, 25).map((row) => {
+              {history.data.slice(0, showAll ? 25 : 10).map((row) => {
                 const values = (row.indicators ?? {}) as Record<string, unknown>;
                 const factors = (row.factor_breakdown ?? {}) as Record<string, unknown>;
                 const factor = (name: string) => {
@@ -157,14 +165,11 @@ export function TechnicalAnalysis() {
                         {row.timeframe === 15 ? "15m" : `${row.timeframe / 60}h`}
                       </div>
                     </td>
-                    <td className="p-2 whitespace-nowrap">
-                      {new Date(row.candle_at).toLocaleString()}
-                      <div className="text-muted-foreground">
-                        Closed{" "}
-                        {new Date(
-                          Date.parse(row.candle_at) + row.timeframe * 60_000,
-                        ).toLocaleString()}
-                      </div>
+                    <td className="num p-2 whitespace-nowrap">
+                      {new Date(Date.parse(row.candle_at) + row.timeframe * 60_000).toLocaleString(
+                        undefined,
+                        { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" },
+                      )}
                     </td>
                     <td className="p-2 min-w-52">
                       <div
@@ -183,7 +188,7 @@ export function TechnicalAnalysis() {
                         {label(factor("patterns")["classification"])}
                       </div>
                       <details className="mt-2 max-w-md">
-                        <summary className="cursor-pointer">Indicator explanations</summary>
+                        <summary className="cursor-pointer text-xs text-primary">Why?</summary>
                         <dl className="mt-2 space-y-3">
                           {explainTA(row.price, row.indicators, row.patterns).map((item) => (
                             <div key={item.label}>
@@ -224,7 +229,7 @@ export function TechnicalAnalysis() {
                     <td className="p-2 min-w-44">
                       <details>
                         <summary className="cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-2">
-                          {signed(row.score)} <span className="text-muted-foreground">/ ±100</span>
+                          <SignedBar value={row.score} max={100} />
                         </summary>
                         <dl className="mt-2 space-y-1">
                           {Object.entries(factors).map(([name, raw]) => {
@@ -251,19 +256,21 @@ export function TechnicalAnalysis() {
                         </p>
                       </details>
                     </td>
-                    <td className="p-2">{number(values["rsi14"])}</td>
-                    <td className="p-2">
-                      <div className="text-muted-foreground">
-                        {row.atr_pct === null ? "--" : `${row.atr_pct.toFixed(2)}%`}
-                      </div>
+                    <td className="num p-2">
+                      {typeof values["rsi14"] === "number" ? (values["rsi14"] as number).toFixed(1) : "—"}
                     </td>
-                    <td className="p-2 max-w-52 break-words">
-                      {row.patterns.map(humanizeCode).join(", ") || "None"}
+                    <td className="num p-2">
+                      {row.atr_pct === null ? "—" : `${row.atr_pct.toFixed(2)}%`}
                     </td>
-                    <td className="p-2">
+                    <td className="p-2 max-w-52 break-words text-muted-foreground">
+                      {row.patterns.map(humanizeCode).join(", ") || "none"}
+                    </td>
+                    <td
+                      className={`num p-2 ${row.return_pct === null ? "text-muted-foreground" : row.return_pct > 0 ? "text-bull" : row.return_pct < 0 ? "text-bear" : ""}`}
+                    >
                       {row.return_pct === null
                         ? outcomeLabel(row.outcome_status)
-                        : `${number(row.return_pct)}%`}
+                        : `${row.return_pct > 0 ? "+" : ""}${number(row.return_pct)}%`}
                     </td>
                   </tr>
                 );
@@ -273,13 +280,21 @@ export function TechnicalAnalysis() {
         </div>
       )}
       <div className="mt-2 flex items-center justify-end gap-2 text-xs text-muted-foreground">
+        {(history.data?.length ?? 0) > 10 && (
+          <Button variant="ghost" size="sm" className="mr-auto" onClick={() => setShowAll(!showAll)}>
+            {showAll ? "Show fewer" : "Show all on this page"}
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="icon"
           title="Previous page"
           aria-label="Previous TA page"
           disabled={page === 0 || history.isFetching}
-          onClick={() => setPage(page - 1)}
+          onClick={() => {
+            setPage(page - 1);
+            setShowAll(false);
+          }}
         >
           <ChevronLeft className="size-4" />
         </Button>
@@ -290,7 +305,10 @@ export function TechnicalAnalysis() {
           title="Next page"
           aria-label="Next TA page"
           disabled={!history.data || history.data.length <= 25 || history.isFetching}
-          onClick={() => setPage(page + 1)}
+          onClick={() => {
+            setPage(page + 1);
+            setShowAll(false);
+          }}
         >
           <ChevronRight className="size-4" />
         </Button>

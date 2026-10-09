@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import { useQueryClient } from "@tanstack/react-query";
+import { skipToken, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   Bell,
@@ -12,15 +12,47 @@ import {
 import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { humanizeReason, type Level } from "@/lib/labels";
 import { supabase } from "@/integrations/supabase/client";
 
 const NAV = [
-  { to: "/dashboard", label: "Overview", icon: LineChart },
+  { to: "/dashboard", label: "Market", icon: LineChart },
   { to: "/forward", label: "Strategy Lab", icon: FlaskConical },
   { to: "/alerts", label: "Alerts", icon: Bell },
   { to: "/notes", label: "Notes", icon: NotebookPen },
-  { to: "/settings", label: "Settings", icon: Settings2 },
+  { to: "/settings", label: "Control room", icon: Settings2 },
 ] as const;
+
+const RANK: Record<Level, number> = { ok: 0, wait: 1, problem: 2 };
+const HEALTH_TEXT: Record<Level, string> = {
+  ok: "Systems normal",
+  wait: "Waiting for data",
+  problem: "Needs attention",
+};
+
+/**
+ * Header health dot. Reads only what the pages already cached (skipToken: never fetches or polls):
+ * the latest alert-check run and the latest signal check. Hidden until one of them is known.
+ */
+function HealthDot() {
+  const operational = useQuery({ queryKey: ["operational-state"], queryFn: skipToken });
+  const forward = useQuery({ queryKey: ["forward-dashboard"], queryFn: skipToken });
+  const runs = (operational.data as { runs?: { status: string; error_message?: string | null }[] } | undefined)?.runs;
+  const signal = (forward.data as { latestRun?: { status: string } | null } | undefined)?.latestRun;
+  const levels: Level[] = [];
+  const lastRun = runs?.[0];
+  if (lastRun) levels.push(lastRun.error_message ? "wait" : (humanizeReason(lastRun.status).level ?? "problem"));
+  if (signal) levels.push(humanizeReason(signal.status).level ?? "problem");
+  if (!levels.length) return null;
+  const level = levels.reduce((worst, item) => (RANK[item] > RANK[worst] ? item : worst));
+  return (
+    <span className="flex items-center gap-1.5 text-xs text-muted-foreground" title={HEALTH_TEXT[level]}>
+      <span className="status-dot" data-level={level} aria-hidden />
+      <span className="hidden md:inline">{HEALTH_TEXT[level]}</span>
+      <span className="sr-only md:hidden">{HEALTH_TEXT[level]}</span>
+    </span>
+  );
+}
 
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
@@ -38,7 +70,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <a href="#main-content" className="sr-only focus:not-sr-only focus:block focus:p-3">
         Skip to content
       </a>
-      <header className="sticky top-0 z-30 border-b border-border/70 bg-background/80 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-border/70 bg-background/85 backdrop-blur-md">
         <div className="mx-auto flex max-w-[1480px] flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3 sm:px-6">
           <Link
             to="/dashboard"
@@ -47,6 +79,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Activity className="size-5 text-primary" aria-hidden />
             Crypto Watch
           </Link>
+          <HealthDot />
           <nav
             aria-label="Main navigation"
             className="flex w-full items-center gap-1 overflow-x-auto sm:ml-auto sm:w-auto"

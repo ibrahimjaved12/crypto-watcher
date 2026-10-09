@@ -62,6 +62,7 @@
   --color-bull: var(--bull);
   --color-bear: var(--bear);
   --color-warn: var(--warn);
+  --color-aurora: var(--aurora);
   --font-display: var(--font-display);
   --font-sans: var(--font-body);
   --font-mono: var(--font-mono);
@@ -73,49 +74,54 @@
   --font-body: "DM Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 
-  --background: oklch(0.155 0.025 255);
-  --foreground: oklch(0.95 0.008 250);
-  --card: oklch(0.213 0.02 252);
-  --card-foreground: oklch(0.95 0.008 250);
-  --popover: oklch(0.213 0.02 252);
-  --popover-foreground: oklch(0.95 0.008 250);
-  --primary: oklch(0.78 0.15 178);
-  --primary-foreground: oklch(0.18 0.02 250);
-  --secondary: oklch(0.27 0.022 252);
-  --secondary-foreground: oklch(0.93 0.008 250);
-  --muted: oklch(0.25 0.02 252);
-  --muted-foreground: oklch(0.74 0.018 250);
-  --accent: oklch(0.3 0.03 252);
-  --accent-foreground: oklch(0.95 0.008 250);
-  --destructive: oklch(0.62 0.2 21);
-  --destructive-foreground: oklch(0.97 0.01 250);
-  --border: oklch(0.3 0.02 252);
-  --input: oklch(0.3 0.02 252);
-  --ring: oklch(0.78 0.15 178);
+  /* Deep-space palette: near-black blue-violet sky, a luminous violet accent, aurora cyan as a
+     secondary hue. Semantic bull / bear / warn keep their meaning. Text pairs meet WCAG AA. */
+  --background: oklch(0.13 0.03 280);
+  --foreground: oklch(0.95 0.012 280);
+  --card: oklch(0.18 0.035 280);
+  --card-foreground: oklch(0.95 0.012 280);
+  --popover: oklch(0.2 0.04 280);
+  --popover-foreground: oklch(0.95 0.012 280);
+  --primary: oklch(0.76 0.15 290);
+  --primary-foreground: oklch(0.16 0.04 285);
+  --secondary: oklch(0.25 0.04 282);
+  --secondary-foreground: oklch(0.94 0.012 280);
+  --muted: oklch(0.22 0.035 282);
+  --muted-foreground: oklch(0.76 0.03 280);
+  --accent: oklch(0.28 0.05 285);
+  --accent-foreground: oklch(0.96 0.012 280);
+  --destructive: oklch(0.64 0.2 18);
+  --destructive-foreground: oklch(0.98 0.01 280);
+  --border: oklch(0.32 0.045 282 / 0.75);
+  --input: oklch(0.32 0.045 282);
+  --ring: oklch(0.76 0.15 290);
+  --aurora: oklch(0.82 0.12 200);
 
-  --bull: oklch(0.78 0.17 155);
-  --bear: oklch(0.66 0.2 22);
-  --warn: oklch(0.82 0.16 82);
+  --bull: oklch(0.8 0.16 160);
+  --bear: oklch(0.69 0.19 18);
+  --warn: oklch(0.84 0.15 80);
 
-  --chart-1: oklch(0.78 0.15 178);
-  --chart-2: oklch(0.78 0.17 155);
-  --chart-3: oklch(0.82 0.16 82);
-  --chart-4: oklch(0.66 0.2 22);
-  --chart-5: oklch(0.7 0.14 280);
-  --sidebar: oklch(0.195 0.02 252);
-  --sidebar-foreground: oklch(0.95 0.008 250);
-  --sidebar-primary: oklch(0.78 0.15 178);
-  --sidebar-primary-foreground: oklch(0.18 0.02 250);
-  --sidebar-accent: oklch(0.27 0.022 252);
-  --sidebar-accent-foreground: oklch(0.95 0.008 250);
-  --sidebar-border: oklch(0.3 0.02 252);
-  --sidebar-ring: oklch(0.78 0.15 178);
+  --chart-1: oklch(0.76 0.15 290);
+  --chart-2: oklch(0.8 0.16 160);
+  --chart-3: oklch(0.84 0.15 80);
+  --chart-4: oklch(0.69 0.19 18);
+  --chart-5: oklch(0.82 0.12 200);
+  --sidebar: oklch(0.16 0.035 280);
+  --sidebar-foreground: oklch(0.95 0.012 280);
+  --sidebar-primary: oklch(0.76 0.15 290);
+  --sidebar-primary-foreground: oklch(0.16 0.04 285);
+  --sidebar-accent: oklch(0.25 0.04 282);
+  --sidebar-accent-foreground: oklch(0.95 0.012 280);
+  --sidebar-border: oklch(0.32 0.045 282);
+  --sidebar-ring: oklch(0.76 0.15 290);
 
+  /* Nebula: three soft colour clouds, painted once on a fixed layer (no filters, no animation). */
   --gradient-hero:
-    radial-gradient(70% 650px at 0% 0%, oklch(0.35 0.07 195 / 0.3), transparent 75%),
-    radial-gradient(55% 700px at 100% 15%, oklch(0.32 0.08 285 / 0.18), transparent 80%);
-  --gradient-panel: linear-gradient(160deg, oklch(0.24 0.025 252) 0%, oklch(0.2 0.02 252) 100%);
-  --shadow-panel: 0 1px 0 0 oklch(1 0 0 / 0.04) inset, 0 18px 40px -24px oklch(0 0 0 / 0.9);
+    radial-gradient(60% 55% at 12% 8%, oklch(0.42 0.14 300 / 0.28), transparent 70%),
+    radial-gradient(45% 50% at 92% 18%, oklch(0.45 0.12 210 / 0.18), transparent 72%),
+    radial-gradient(70% 60% at 60% 105%, oklch(0.38 0.13 330 / 0.18), transparent 70%);
+  --gradient-panel: linear-gradient(160deg, oklch(0.21 0.045 282 / 0.82) 0%, oklch(0.16 0.035 280 / 0.86) 100%);
+  --shadow-panel: 0 1px 0 0 oklch(1 0 0 / 0.05) inset, 0 20px 50px -28px oklch(0.05 0.05 290 / 0.95);
 }
 
 .dark {
@@ -132,12 +138,35 @@
   }
 
   body {
+    position: relative;
+    min-height: 100vh;
     background-color: var(--color-background);
-    background-image: var(--gradient-hero);
-    background-attachment: fixed;
     color: var(--color-foreground);
     font-family: var(--font-body);
     -webkit-font-smoothing: antialiased;
+  }
+
+  /* Fixed sky behind everything: nebula + three tiled star layers drawn with tiny radial
+     gradients. One composited layer, no images, no animation, so scrolling stays cheap. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      radial-gradient(1px 1px at 20px 30px, oklch(1 0 0 / 0.75), transparent),
+      radial-gradient(1px 1px at 140px 90px, oklch(0.95 0.05 250 / 0.6), transparent),
+      radial-gradient(1.5px 1.5px at 80px 160px, oklch(1 0 0 / 0.55), transparent),
+      radial-gradient(1px 1px at 190px 210px, oklch(0.95 0.06 300 / 0.5), transparent),
+      radial-gradient(1px 1px at 60px 260px, oklch(1 0 0 / 0.4), transparent),
+      radial-gradient(2px 2px at 300px 120px, oklch(0.98 0.03 220 / 0.55), transparent),
+      radial-gradient(1px 1px at 370px 300px, oklch(1 0 0 / 0.45), transparent),
+      var(--gradient-hero);
+    background-size:
+      240px 240px, 240px 240px, 240px 240px, 240px 240px, 240px 240px,
+      420px 420px, 420px 420px, 100% 100%;
+    background-repeat: repeat, repeat, repeat, repeat, repeat, repeat, repeat, no-repeat;
   }
 
   h1,
@@ -209,13 +238,14 @@
   }
   .data-table {
     width: 100%;
-    min-width: 880px;
+    min-width: 640px;
     text-align: left;
     font-size: 0.8125rem;
   }
   .data-table th {
     color: var(--muted-foreground);
-    background: var(--background);
+    background: oklch(0.16 0.035 280 / 0.96);
+    font-size: 0.75rem;
   }
   .data-table :is(th, td) {
     padding: 0.875rem 0.75rem;
@@ -238,12 +268,97 @@
     height: 38rem;
     top: 3rem;
     right: -20rem;
-    border: 1px solid oklch(0.78 0.15 178 / 0.18);
+    border: 1px solid oklch(0.76 0.15 290 / 0.22);
     border-radius: 50%;
     box-shadow:
-      0 0 0 4rem oklch(0.78 0.15 178 / 0.025),
-      0 0 0 8rem oklch(0.7 0.14 280 / 0.025);
+      0 0 0 4rem oklch(0.76 0.15 290 / 0.035),
+      0 0 0 8rem oklch(0.82 0.12 200 / 0.025),
+      0 0 120px 10px oklch(0.6 0.18 300 / 0.12) inset;
     pointer-events: none;
+  }
+}
+@layer components {
+  /* Status and data primitives shared by every page. */
+  .status-dot {
+    display: inline-block;
+    width: 0.6rem;
+    height: 0.6rem;
+    flex-shrink: 0;
+    border-radius: 9999px;
+  }
+  .status-dot[data-level="ok"] {
+    background: var(--bull);
+    box-shadow: 0 0 10px oklch(0.8 0.16 160 / 0.7);
+  }
+  .status-dot[data-level="wait"] {
+    background: var(--warn);
+    box-shadow: 0 0 10px oklch(0.84 0.15 80 / 0.6);
+  }
+  .status-dot[data-level="problem"] {
+    background: var(--bear);
+    box-shadow: 0 0 10px oklch(0.69 0.19 18 / 0.7);
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    border-radius: 9999px;
+    border: 1px solid var(--border);
+    padding: 0.125rem 0.6rem;
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+  .chip[data-tone="bull"] {
+    color: var(--bull);
+    border-color: oklch(0.8 0.16 160 / 0.4);
+    background: oklch(0.8 0.16 160 / 0.08);
+  }
+  .chip[data-tone="bear"] {
+    color: var(--bear);
+    border-color: oklch(0.69 0.19 18 / 0.45);
+    background: oklch(0.69 0.19 18 / 0.08);
+  }
+  .chip[data-tone="warn"] {
+    color: var(--warn);
+    border-color: oklch(0.84 0.15 80 / 0.4);
+    background: oklch(0.84 0.15 80 / 0.08);
+  }
+  .chip[data-tone="primary"] {
+    color: var(--primary);
+    border-color: oklch(0.76 0.15 290 / 0.45);
+    background: oklch(0.76 0.15 290 / 0.1);
+  }
+  /* Centre-zero bar for signed values (scores, weights). Width set inline as a percentage. */
+  .signed-bar {
+    position: relative;
+    display: inline-block;
+    width: 4.5rem;
+    height: 0.4rem;
+    border-radius: 9999px;
+    background: oklch(1 0 0 / 0.07);
+    overflow: hidden;
+    vertical-align: middle;
+  }
+  .signed-bar::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: -1px;
+    bottom: -1px;
+    width: 1px;
+    background: oklch(1 0 0 / 0.25);
+  }
+  .signed-bar > span {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-radius: 9999px;
+  }
+  .glow-text {
+    background: linear-gradient(100deg, var(--foreground) 10%, var(--primary) 55%, var(--aurora) 95%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 }
 @media (prefers-reduced-motion: reduce) {

@@ -1,9 +1,9 @@
-import { PageHeader, QueryNotice, TechnicalDetails } from "@/components/presentation";
+import { PageHeader, QueryNotice, RelativeTime, TechnicalDetails } from "@/components/presentation";
 import { alertRuleLabel, sourceLabel, pairLabel, issueSummary } from "@/lib/presentation/labels";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { Download, FlaskConical, Trash2 } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, Download, FlaskConical, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
@@ -148,13 +148,13 @@ function AlertsPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Symbol</TableHead>
-              <TableHead>Time</TableHead>
-              <TableHead>Change</TableHead>
-              <TableHead>Comparison</TableHead>
-              <TableHead>Rule</TableHead>
-              <TableHead>Price</TableHead>
-              <TableHead>Source</TableHead>
+              <TableHead>Pair</TableHead>
+              <TableHead>When</TableHead>
+              <TableHead>Move</TableHead>
+              <TableHead>Compared with</TableHead>
+              <TableHead>Why it fired</TableHead>
+              <TableHead>Price at alert</TableHead>
+              <TableHead>Exchange</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -165,18 +165,23 @@ function AlertsPage() {
                   {pairLabel(a.symbol)}
                   {a.is_test ? (
                     <Badge variant="outline" className="ml-2 border-warn/60 text-warn">
-                      TEST DATA
+                      Test
                     </Badge>
                   ) : null}
                 </TableCell>
-                <TableCell className="num text-xs">
-                  {new Date(a.triggered_at).toLocaleString()}
+                <TableCell className="text-xs whitespace-nowrap">
+                  <RelativeTime ms={a.triggered_at} />
                 </TableCell>
-                <TableCell
-                  className={`num ${Number(a.change_pct) >= 0 ? "text-bull" : "text-bear"}`}
-                >
-                  {Number(a.change_pct) > 0 ? "+" : ""}
-                  {Number(a.change_pct).toFixed(2)}%
+                <TableCell>
+                  <span className="chip num" data-tone={Number(a.change_pct) >= 0 ? "bull" : "bear"}>
+                    {Number(a.change_pct) >= 0 ? (
+                      <ArrowUpRight className="size-3" aria-hidden />
+                    ) : (
+                      <ArrowDownRight className="size-3" aria-hidden />
+                    )}
+                    {Number(a.change_pct) >= 0 ? "Up" : "Down"} {Number(a.change_pct) > 0 ? "+" : ""}
+                    {Number(a.change_pct).toFixed(2)}%
+                  </span>
                 </TableCell>
                 <TableCell className="num text-xs">
                   {a.comparison_mode === "baseline" ? (

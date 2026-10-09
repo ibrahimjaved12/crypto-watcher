@@ -23,6 +23,23 @@ import { getOperationalState } from "@/lib/operational.functions";
 import type { CollectorHealthStatus } from "@/lib/operational/types";
 import type { MovementEngineStatus } from "@/lib/market/market-movement-state";
 import { useServerFn } from "@tanstack/react-start";
+import { humanizeCode, humanizeReason } from "@/lib/labels";
+
+/** LIVE / RECOVERING / STALE / UNAVAILABLE -> a short chip with the lag, colour plus words. */
+function CollectorChip({ status, lagMs }: { status: CollectorHealthStatus; lagMs: number | null }) {
+  const [text, tone] =
+    status === "LIVE"
+      ? ["Live", "bull"]
+      : status === "UNAVAILABLE"
+        ? ["Offline", "bear"]
+        : ["Lagging", "warn"];
+  return (
+    <span className="chip" data-tone={tone} title={status}>
+      {text}
+      {lagMs !== null && status !== "UNAVAILABLE" ? ` · ${formatLag(lagMs)} behind` : ""}
+    </span>
+  );
+}
 
 export const Route = createFileRoute("/_authenticated/settings")({
   head: () => ({
@@ -150,9 +167,10 @@ function SettingsPage() {
             save.mutate();
           }}
         >
-          <h2 className="text-lg font-semibold">Monitoring preferences</h2>
+          <h2 className="text-lg font-semibold">Alerts</h2>
           <p className="text-sm text-muted-foreground">
-            Applies to manual checks and any configured scheduled runs.
+            When a watched pair moves enough, an alert is saved. Applies to manual and scheduled
+            checks.
           </p>
           <fieldset disabled={settings.isPending || settings.isError} className="min-w-0 space-y-5">
             <div className="space-y-2">
@@ -206,23 +224,24 @@ function SettingsPage() {
 
             <div className="flex items-center justify-between rounded-md border border-border p-3">
               <div>
-                <Label htmlFor="enabled">Monitoring master switch</Label>
+                <Label htmlFor="enabled">Monitoring on/off</Label>
                 <p className="text-xs text-muted-foreground">
-                  Pause every activity below without losing its individual setting or saved state.
+                  Pauses everything below at once. Your individual switches and saved state are
+                  kept.
                 </p>
               </div>
               <Switch id="enabled" checked={enabled} onCheckedChange={setEnabled} />
             </div>
 
             <fieldset className="space-y-3 rounded-md border border-border p-3">
-              <legend className="px-1 text-sm font-medium">Current monitoring activities</legend>
+              <legend className="px-1 text-sm font-medium">Data collection</legend>
 
               <div className="flex items-center justify-between gap-4">
                 <div>
-                  <Label htmlFor="market-data">Market-data collection</Label>
+                  <Label htmlFor="market-data">Collect market prices</Label>
                   <p className="text-xs text-muted-foreground">
-                    Fetches the latest completed one-minute candle even if the two activities below
-                    are paused. Turning this off also pauses both of them.
+                    Stores the latest finished one-minute candle for each pair. Everything else
+                    depends on it, so turning it off pauses the two switches below too.
                   </p>
                 </div>
                 <Switch
@@ -234,9 +253,9 @@ function SettingsPage() {
 
               <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-3">
                 <div>
-                  <Label htmlFor="movement-alerts">Movement alerts</Label>
+                  <Label htmlFor="movement-alerts">Price-move alerts</Label>
                   <p className="text-xs text-muted-foreground">
-                    Applies the saved-baseline threshold and cooldown, then saves qualifying alerts.
+                    Saves an alert when a pair moves past your threshold, respecting the cooldown.
                   </p>
                 </div>
                 <Switch
@@ -248,9 +267,10 @@ function SettingsPage() {
 
               <div className="flex items-center justify-between gap-4 border-t border-border/70 pt-3">
                 <div>
-                  <Label htmlFor="technical-analysis">Completed-candle technical analysis</Label>
+                  <Label htmlFor="technical-analysis">Indicator readings</Label>
                   <p className="text-xs text-muted-foreground">
-                    Saves 15m, 1h and 4h indicator snapshots and evaluates their pending outcomes.
+                    Saves the indicator history (15-minute, 1-hour and 4-hour) shown on the Market
+                    page, and fills in what happened next.
                   </p>
                 </div>
                 <Switch
@@ -293,9 +313,9 @@ function SettingsPage() {
         </form>
 
         <section className="panel p-5">
-          <h2 className="text-lg font-semibold">System health</h2>
+          <h2 className="text-lg font-semibold">Data health</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Data availability and the latest monitoring activity.
+            Is market data arriving on time, and did the latest checks work?
           </p>
           <QueryNotice pending={operational.isPending} error={operational.error} />
           {!operational.isPending && !operational.error && (
@@ -354,12 +374,11 @@ function SettingsPage() {
                   <table className="w-full min-w-[760px] text-left text-xs">
                     <thead className="text-muted-foreground">
                       <tr className="border-b border-border/60">
-                        <th className="py-2 pr-3 font-medium">Symbol</th>
-                        <th className="py-2 pr-3 font-medium">Interval</th>
+                        <th className="py-2 pr-3 font-medium">Pair</th>
+                        <th className="py-2 pr-3 font-medium">Candle</th>
                         <th className="py-2 pr-3 font-medium">Status</th>
-                        <th className="py-2 pr-3 font-medium">Latest source event</th>
-                        <th className="py-2 pr-3 font-medium">Latest completed</th>
-                        <th className="py-2 pr-3 font-medium">Lag</th>
+                        <th className="py-2 pr-3 font-medium">Last message from exchange</th>
+                        <th className="py-2 pr-3 font-medium">Last finished candle</th>
                         <th className="py-2 font-medium">Reconnects</th>
                       </tr>
                     </thead>
@@ -372,7 +391,7 @@ function SettingsPage() {
                           <td className="py-2 pr-3 font-medium">{row.symbol}</td>
                           <td className="py-2 pr-3">{formatInterval(row.timeframe_minutes)}</td>
                           <td className="py-2 pr-3">
-                            <Badge variant={collectorBadgeVariant(row.status)}>{row.status}</Badge>
+                            <CollectorChip status={row.status} lagMs={row.lag_ms} />
                           </td>
                           <td className="num py-2 pr-3">
                             {row.last_event_at ? new Date(row.last_event_at).toLocaleString() : "—"}
@@ -382,7 +401,6 @@ function SettingsPage() {
                               ? new Date(row.last_completed_open_time).toLocaleString()
                               : "—"}
                           </td>
-                          <td className="num py-2 pr-3">{formatLag(row.lag_ms)}</td>
                           <td className="num py-2">{row.reconnect_count}</td>
                         </tr>
                       ))}
@@ -401,14 +419,15 @@ function SettingsPage() {
                       {movementEngine.eligibleSymbolCount} eligible
                     </p>
                   </div>
-                  <Badge variant={movementBadgeVariant(movementEngine.status)}>
-                    {movementEngine.status}
+                  <Badge variant={movementBadgeVariant(movementEngine.status)} title={movementEngine.status}>
+                    {collectorStatusLabel(movementEngine.status)}
                   </Badge>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-muted-foreground">Primary 5m</span>
                   <span className="num ml-auto">
-                    {movementEngine.primaryDirectionState} · {movementEngine.primaryPace}
+                    {humanizeCode(movementEngine.primaryDirectionState)} ·{" "}
+                    {humanizeCode(movementEngine.primaryPace)}
                   </span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -526,9 +545,9 @@ function SettingsPage() {
           {!operational.isPending && !operational.error && !activityFreshness && (
             <p className="mt-4 text-sm text-muted-foreground">Analysis freshness is unavailable.</p>
           )}
-          <h3 className="mt-6 font-semibold">Recent monitoring runs</h3>
+          <h3 className="mt-6 font-semibold">Run history</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Manual and scheduled checks, including failures.
+            Every manual and scheduled alert check, including the ones that failed.
           </p>
           <ul className="mt-4 space-y-3">
             {(runs.data ?? []).map((r) => (
@@ -548,16 +567,23 @@ function SettingsPage() {
                   <span className="num text-xs text-muted-foreground">
                     {new Date(r.ran_at).toLocaleString()}
                   </span>
-                  <span className="num ml-auto text-xs text-muted-foreground">
-                    {r.symbols_checked} pairs · {r.alerts_created} alerts
-                    {r.data_source ? ` · ${sourceLabel(r.data_source)}` : ""} ·{" "}
-                    {r.duration_ms === null ? "Duration unavailable" : `${r.duration_ms} ms`}
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    {r.symbols_checked} pairs checked, {r.alerts_created} alert
+                    {r.alerts_created === 1 ? "" : "s"}
+                    {r.data_source ? ` · ${sourceLabel(r.data_source)}` : ""}
                   </span>
                 </div>
                 {r.error_message && (
-                  <p className="mt-2 text-xs text-destructive">{issueSummary(r.error_message)}</p>
+                  <div className="mt-2 text-xs">
+                    <p className="text-warn">{humanizeReason(r.error_message).short}.</p>
+                    {humanizeReason(r.error_message).help && (
+                      <p className="mt-0.5 text-muted-foreground">
+                        {humanizeReason(r.error_message).help}
+                      </p>
+                    )}
+                  </div>
                 )}
-                <TechnicalDetails>
+                <TechnicalDetails title="Performance and raw details">
                   <p>
                     Raw status: {r.status} · source: {r.data_source ?? "none"}
                   </p>
