@@ -29,29 +29,33 @@ const binanceKlineSchema = z
   .rest(z.unknown());
 export const binanceKlinesResponseSchema = z.array(binanceKlineSchema).max(1500);
 
-/** Binance lists adjusted intervals; unlisted symbols retain its standard 8-hour schedule. */
+/**
+ * Binance lists adjusted intervals; unlisted symbols retain its standard 8-hour schedule. The list
+ * is exchange-wide and includes rows that are not USDⓈ-M ASCII symbols (non-ASCII names, `_PERP`
+ * coin-margined contracts), so rows whose symbol does not match are skipped rather than failing the
+ * whole response. A row with a valid symbol and an invalid interval still fails.
+ */
 export function parseBinanceFundingIntervals(value: unknown): Record<string, number> {
-  const parsed = z
-    .array(
-      z.object({
-        symbol,
-        fundingIntervalHours: z
-          .number()
-          .int()
-          .positive()
-          .refine((hours) => hours <= 24 && 24 % hours === 0),
-      }),
-    )
-    .safeParse(value);
-  if (
-    !parsed.success ||
-    new Set(parsed.data.map((row) => row.symbol)).size !== parsed.data.length
-  ) {
-    throw new Error("Invalid Binance funding interval response");
+  if (!Array.isArray(value)) throw new Error("Invalid Binance funding interval response");
+  const row = z.object({
+    symbol,
+    fundingIntervalHours: z
+      .number()
+      .int()
+      .positive()
+      .refine((hours) => hours <= 24 && 24 % hours === 0),
+  });
+  const intervals: Record<string, number> = {};
+  for (const candidate of value) {
+    const name = (candidate as { symbol?: unknown } | null)?.symbol;
+    if (typeof name !== "string" || !symbol.safeParse(name).success) continue;
+    const parsed = row.safeParse(candidate);
+    if (!parsed.success || name in intervals) {
+      throw new Error("Invalid Binance funding interval response");
+    }
+    intervals[name] = parsed.data.fundingIntervalHours * 3_600_000;
   }
-  return Object.fromEntries(
-    parsed.data.map((row) => [row.symbol, row.fundingIntervalHours * 3_600_000]),
-  );
+  return intervals;
 }
 
 export type DailyBar = {

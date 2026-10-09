@@ -418,6 +418,15 @@ test("adjusted funding intervals are validated; missing schedule metadata cannot
     () => contract.parseBinanceFundingIntervals([{ symbol: "BTCUSDT", fundingIntervalHours: 0 }]),
     /Invalid/,
   );
+  // The exchange-wide list contains non-ASCII and coin-margined rows; they are skipped.
+  assert.deepEqual(
+    contract.parseBinanceFundingIntervals([
+      { symbol: "币安人生USDT", fundingIntervalHours: 4 },
+      { symbol: "BCHUSD_PERP", fundingIntervalHours: 8 },
+      { symbol: "ETHUSDT", fundingIntervalHours: 8 },
+    ]),
+    { ETHUSDT: 8 * 3_600_000 },
+  );
   const { deps, calls } = fakeDeps();
   deps.fetchFundingIntervals = async () => {
     throw new Error("metadata failed");

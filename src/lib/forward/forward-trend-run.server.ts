@@ -169,8 +169,11 @@ export async function runForwardTrend(
       bars.set(symbol, await deps.readDailyBars(symbol, TREND_HISTORY_START_MS));
       const message = error instanceof Error ? error.message : "";
       const conflict = /forward daily bar conflict: [A-Z0-9]+ \d{4}-\d{2}-\d{2}/.exec(message)?.[0];
-      reasons.push(conflict ? `${symbol}: ${conflict} (stored candle differs from Binance; not overwritten)`
-        : `${symbol}: daily kline fetch failed or history incomplete`);
+      reasons.push(
+        conflict
+          ? `${symbol}: ${conflict} (stored candle differs from Binance; not overwritten)`
+          : `${symbol}: daily kline fetch failed or history incomplete`,
+      );
       if (!snapshot) startupIncomplete = true;
     }
     const series = bars.get(symbol)!;
@@ -218,8 +221,10 @@ export async function runForwardTrend(
   let intervals: Record<string, number> | null = null;
   try {
     intervals = await deps.fetchFundingIntervals();
-  } catch {
-    reasons.push("funding settlement schedule unavailable");
+  } catch (error) {
+    reasons.push(
+      `funding settlement schedule unavailable (${error instanceof Error ? error.message : "unknown error"})`,
+    );
   }
   const funding = new Map<
     string,
@@ -240,7 +245,7 @@ export async function runForwardTrend(
   const response = validateTrendResponse(
     await deps.callPython({
       schema_version: 1,
-      evaluated_at_ms: now,  // the orchestration's clock; Python never reads one
+      evaluated_at_ms: now, // the orchestration's clock; Python never reads one
       symbols: symbols.map((symbol) => {
         const coverage = funding.get(symbol)!;
         return {
