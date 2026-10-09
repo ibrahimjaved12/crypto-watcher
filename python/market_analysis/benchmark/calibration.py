@@ -42,11 +42,24 @@ theory for the label step; set on every 240 m row from the lb1 labels, None for
 other horizons or when no labels were read). ``pass`` requires ``sd_ok`` and, where
 ``barrier_ok`` is not None, ``barrier_ok``, so a FAIL shows which part failed.
 
+Sigma models (#220 P8): every (horizon, half-life) row exists per sigma model, ``ewma`` (rows under
+``horizons``, the lb1 engine) and ``ewma-seasonal`` (rows under ``horizons_seasonal``: variance from
+``build_variance_deseasonalised`` and horizon sigma from ``horizon_sigma_seasonal`` with the entry
+day's factors, the lb2 engine; an entry whose day has no factors counts as ``no_sigma``). The 240 m
+barrier check of a model reads labels built with that model (lb1 / lb2) and is NA when they are
+absent.
+
+Robust statistics in every z block: ``robust_sd = 1.4826 * MAD(z)`` and ``mean_abs_ratio =
+mean|z| / 0.797885`` (both 1 for a standard normal). ``robust_ok``: both in ROBUST_BAND overall
+and in ROBUST_HOUR_BAND in every one of the 24 UTC hours (an empty hour fails). ``pass`` =
+``sd_ok`` and ``robust_ok`` and, where set, ``barrier_ok``.
+
 Floats are only statistics: the report renders them as fixed 6-decimal strings,
 so it stays canonical JSON (``canonical.canonical_bytes``) and hashable.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from math import exp, isfinite, log, pi, sin, sqrt
 
 import numpy as np
@@ -59,7 +72,8 @@ from .label_store import Geometry, load_geometry_columns
 from .labels import LabelParams
 from .market_data import load_symbol_bars
 from .segments import SEGMENTS, segment_bounds_ms, segment_months
-from .volatility import BLOCK_MINUTES, BLOCKS_PER_DAY, VAR_SCALE, build_variance, horizon_sigma
+from .volatility import (BLOCK_MINUTES, BLOCK_MS, BLOCKS_PER_DAY, DAY_MS, VAR_SCALE, build_variance,
+                         build_variance_deseasonalised, horizon_sigma, horizon_sigma_seasonal, seasonal_factors)
 
 SCHEMA = "calibration-v1"
 AUDIT_SEGMENTS = ("development", "validation")
@@ -69,6 +83,12 @@ VR_QS = (3, 12, 48)
 QUANTILES = (1, 5, 25, 50, 75, 95, 99)
 Z_THRESHOLDS = (1, 2, 3)
 SD_BAND = (0.9, 1.1)
+ROBUST_BAND = (0.9, 1.1)
+ROBUST_HOUR_BAND = (0.8, 1.2)
+MAD_TO_SD = 1.4826
+MEAN_ABS_NORMAL = 0.797885       # E|Z| = sqrt(2 / pi)
+SIGMA_MODELS = ("ewma", "ewma-seasonal")
+MODEL_KEYS = {"ewma": ("horizons", "barriers"), "ewma-seasonal": ("horizons_seasonal", "barriers_seasonal")}
 # Barrier expiry cell tolerance: |observed - theory| <= max(REL * theory, ABS). The 10 % relative band
 # alone is about 0.1-0.3 percentage points on low-expiry cells (k 1, rr 1), below sampling noise and
 # the discrete-monitoring effect; the 2 percentage point floor keeps a calibrated sigma from failing there.
@@ -111,11 +131,13 @@ def z_stats(z) -> dict:
     n = int(z.size)
     nan = float("nan")
     if n == 0:
-        return {"n": 0, "mean": nan, "sd": nan, "mean_abs": nan,
+        return {"n": 0, "mean": nan, "sd": nan, "mean_abs": nan, "robust_sd": nan, "mean_abs_ratio": nan,
                 "quantiles": {str(p): nan for p in QUANTILES}, "share_abs_gt": {str(t): nan for t in Z_THRESHOLDS}}
     magnitude = np.abs(z)
     return {"n": n, "mean": float(z.mean()), "sd": float(z.std(ddof=1)) if n > 1 else nan,
             "mean_abs": float(magnitude.mean()),
+            "robust_sd": MAD_TO_SD * float(np.median(np.abs(z - np.median(z)))),
+            "mean_abs_ratio": float(magnitude.mean()) / MEAN_ABS_NORMAL,
             "quantiles": {str(p): float(q) for p, q in zip(QUANTILES, np.quantile(z, [p / 100 for p in QUANTILES]))},
             "share_abs_gt": {str(t): float((magnitude > t).mean()) for t in Z_THRESHOLDS}}
 
@@ -134,6 +156,16 @@ def expiry_within_tolerance(observed: float, theory: float) -> bool:
 
 def sd_ok(stats: dict) -> bool:
     return isfinite(stats["sd"]) and SD_BAND[0] <= stats["sd"] <= SD_BAND[1]
+
+
+def _robust_within(stats: dict, band) -> bool:
+    return all(isfinite(stats[name]) and band[0] <= stats[name] <= band[1] for name in ("robust_sd", "mean_abs_ratio"))
+
+
+def robust_ok(z: dict, by_hour) -> bool:
+    """Robust sd and mean|z|/0.7979 in ROBUST_BAND overall and in ROBUST_HOUR_BAND in every UTC hour."""
+    return _robust_within(z, ROBUST_BAND) and len(by_hour) == 24 and all(
+        _robust_within(hour, ROBUST_HOUR_BAND) for hour in by_hour)
 
 
 # ---------------------------------------------------------------- variance ratio
@@ -227,8 +259,12 @@ def _bad_minutes(series: BarSeries) -> np.ndarray:
     return (opens == MISSING) | ((flags & COMPROMISED_FLAGS) != 0)
 
 
-def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=None) -> dict:
-    """z (and VR-corrected z) of the given entries for one horizon and one variance series."""
+def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=None, factors=None) -> dict:
+    """z (and VR-corrected z) of the given entries for one horizon and one variance series.
+
+    ``factors`` (a ``volatility.SeasonalSeries``) selects the seasonal horizon sigma with the entry day's
+    factors; an entry without factors for its day counts as ``no_sigma``.
+    """
     variance = np.frombuffer(variance, dtype=np.int64)
     opens = np.frombuffer(series.open, dtype=np.int64)
     bad = _bad_minutes(series)
@@ -236,11 +272,19 @@ def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=N
     block = entries // BLOCK_MINUTES - 1  # the 5-minute block ending at minute e - 1
     var = np.where(block >= 0, variance[np.maximum(block, 0)], MISSING)
     no_sigma = (var == MISSING) | (var <= 0)
+    entry_ms = series.start_ms + entries * _MINUTE_MS
+    if factors is not None:
+        no_sigma |= np.array([factors.day_factors(int(ms) // DAY_MS) is None for ms in entry_ms], dtype=bool)
     bad_entry = ~no_sigma & bad[entries]
     bad_exit = ~no_sigma & ~bad_entry & bad[entries + horizon]
     use = ~(no_sigma | bad_entry | bad_exit)
     e, b = entries[use], block[use]
-    sigma = np.array([horizon_sigma(int(v), horizon) for v in var[use]], dtype=float) / VAR_SCALE
+    if factors is None:
+        sigma = np.array([horizon_sigma(int(v), horizon) for v in var[use]], dtype=float) / VAR_SCALE
+    else:
+        sigma = np.array([horizon_sigma_seasonal(int(v), factors.day_factors(int(ms) // DAY_MS),
+                                                 int(ms % DAY_MS) // BLOCK_MS, horizon)
+                          for v, ms in zip(var[use], entry_ms[use])], dtype=float) / VAR_SCALE
     r = np.log(opens[e + horizon].astype(float) / opens[e].astype(float))
     z = r / sigma
     hours = ((series.start_ms + e * _MINUTE_MS) // _HOUR_MS) % 24
@@ -248,8 +292,9 @@ def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=N
                           "exit_compromised": int(bad_exit.sum())},
               "z": z_stats(z), "z_by_hour": z_stats_by_hour(z, hours)}
     result["sd_ok"] = sd_ok(result["z"])
+    result["robust_ok"] = robust_ok(result["z"], result["z_by_hour"])
     result["barrier_ok"] = None  # set by set_barrier_verdict on 240 m rows
-    result["pass"] = result["sd_ok"]
+    result["pass"] = result["sd_ok"] and result["robust_ok"]
     if vr_expanding is not None:
         ratio = vr_expanding[b]
         has = np.isfinite(ratio) & (ratio > 0)
@@ -260,9 +305,16 @@ def horizon_z(series: BarSeries, variance, entries, horizon: int, vr_expanding=N
     return result
 
 
+def _models(values) -> tuple:
+    values = tuple(values)
+    if not values or len(set(values)) != len(values) or any(v not in SIGMA_MODELS for v in values):
+        raise ValueError(f"sigma_models must be distinct values from {SIGMA_MODELS}")
+    return tuple(model for model in SIGMA_MODELS if model in values)
+
+
 def audit_series(series: BarSeries, first_ms: int, end_ms: int, *, horizons=HORIZONS, half_lives=HALF_LIVES,
-                 params: LabelParams | None = None, progress=None) -> dict:
-    """z audit and variance ratios of one symbol's bars on [first_ms, end_ms) (raw floats)."""
+                 params: LabelParams | None = None, progress=None, sigma_models=("ewma",)) -> dict:
+    """z audit and variance ratios of one symbol's bars on [first_ms, end_ms) (raw floats), per sigma model."""
     params = params or LabelParams()
     horizons = _subset(horizons, HORIZONS, "horizons")
     half_lives = _subset(half_lives, HALF_LIVES, "half_lives")
@@ -277,16 +329,22 @@ def audit_series(series: BarSeries, first_ms: int, end_ms: int, *, horizons=HORI
         segment_returns[first_inside] = np.nan  # its return starts before the segment
     vr = {str(q): variance_ratio(segment_returns, q) for q in VR_QS}
     expanding = {h: expanding_variance_ratio(returns, h // BLOCK_MINUTES) for h in horizons}
-    out = {"variance_ratio": vr, "horizons": {}}
-    for half_life in half_lives:
-        variance = build_variance(series, half_life).variance
-        for horizon in horizons:
-            entries = entry_indices(series, first_ms, end_ms, horizon, params)
-            row = horizon_z(series, variance, entries, horizon, expanding[horizon])
-            row["entries"] = int(entries.size)
-            out["horizons"].setdefault(str(horizon), {})[str(half_life)] = row
-            if progress is not None:
-                progress()
+    out = {"variance_ratio": vr}
+    for model in _models(sigma_models):
+        key = MODEL_KEYS[model][0]
+        out[key] = {}
+        factors = seasonal_factors(series) if model == "ewma-seasonal" else None
+        for half_life in half_lives:
+            variance = (build_variance(series, half_life) if factors is None
+                        else build_variance_deseasonalised(series, half_life, factors)).variance
+            for horizon in horizons:
+                entries = entry_indices(series, first_ms, end_ms, horizon, params)
+                row = horizon_z(series, variance, entries, horizon, expanding[horizon], factors)
+                row["entries"] = int(entries.size)
+                row["sigma_model"] = model
+                out[key].setdefault(str(horizon), {})[str(half_life)] = row
+                if progress is not None:
+                    progress()
     return out
 
 
@@ -406,31 +464,37 @@ def barrier_summary(columns: dict, params: LabelParams) -> dict:
 # ---------------------------------------------------------------- per symbol / report
 
 
-def set_barrier_verdict(result: dict, barrier_ok: bool) -> None:
-    """Attach the barrier verdict to every 240 m row of a symbol result; pass = sd_ok and barrier_ok."""
-    for row in result["horizons"].get(str(BARRIER_HORIZON), {}).values():
+def set_barrier_verdict(result: dict, barrier_ok: bool, model: str = "ewma") -> None:
+    """Attach the barrier verdict to every 240 m row of one sigma model; pass = sd_ok, robust_ok and barrier_ok."""
+    for row in result.get(MODEL_KEYS[model][0], {}).get(str(BARRIER_HORIZON), {}).values():
         row["barrier_ok"] = bool(barrier_ok)
-        row["pass"] = bool(row["sd_ok"]) and row["barrier_ok"]
+        row["pass"] = bool(row["sd_ok"]) and bool(row["robust_ok"]) and row["barrier_ok"]
 
 
 def audit_symbol(bars_dir, label_dir, symbol: str, segment: str, *, horizons=HORIZONS, half_lives=HALF_LIVES,
-                 params: LabelParams | None = None, progress=None) -> dict:
+                 params: LabelParams | None = None, progress=None, sigma_models=("ewma",),
+                 seasonal_label_dir=None) -> dict:
     """One symbol: guarded bar load from FIRST_MONTH (the labels' variance history), z audit, barriers.
 
-    The hidden guard runs before any file is opened. ``label_dir=None`` skips the barrier part.
+    The hidden guard runs before any file is opened. ``label_dir`` holds lb1 labels (ewma rows) and
+    ``seasonal_label_dir`` lb2 labels (ewma-seasonal rows); None skips that model's barrier part (NA).
     """
     months = check_segment(segment)
     params = params or LabelParams()
     first_ms, end_ms = segment_bounds_ms(segment)
     bars = load_symbol_bars(bars_dir, symbol, data_lake.FIRST_MONTH, months[-1])
+    models = _models(sigma_models)
     result = audit_series(bars, first_ms, end_ms, horizons=horizons, half_lives=half_lives, params=params,
-                          progress=progress)
+                          progress=progress, sigma_models=models)
     del bars
-    if label_dir is not None and BARRIER_HORIZON in tuple(horizons):
-        columns = load_geometry_columns(label_dir, symbol, months, barrier_geometries(symbol, params), params,
-                                        segment=segment)
-        result["barriers"] = barrier_summary(columns, params)
-        set_barrier_verdict(result, result["barriers"]["pass"])
+    for model, directory in (("ewma", label_dir), ("ewma-seasonal", seasonal_label_dir)):
+        if model in models and directory is not None and BARRIER_HORIZON in tuple(horizons):
+            model_params = params if params.sigma_model == model else replace(params, schema=None, sigma_model=model)
+            columns = load_geometry_columns(directory, symbol, months, barrier_geometries(symbol, model_params),
+                                            model_params, segment=segment)
+            key = MODEL_KEYS[model][1]
+            result[key] = barrier_summary(columns, model_params)
+            set_barrier_verdict(result, result[key]["pass"], model)
     return result
 
 
@@ -451,6 +515,8 @@ def build_report(segment: str, symbols: dict, *, horizons, half_lives, params: L
                  created_utc: str, data_snapshot_id: str | None) -> dict:
     report = {"schema": SCHEMA, "segment": segment, "horizons": list(horizons), "half_lives": list(half_lives),
               "vr_qs": list(VR_QS), "sd_band": [str(SD_BAND[0]), str(SD_BAND[1])],
+              "robust_band": [str(ROBUST_BAND[0]), str(ROBUST_BAND[1])],
+              "robust_hour_band": [str(ROBUST_HOUR_BAND[0]), str(ROBUST_HOUR_BAND[1])],
               "expiry_tolerance_rel": str(EXPIRY_TOLERANCE_REL), "expiry_tolerance_abs": str(EXPIRY_TOLERANCE_ABS),
               "expiry_reference": "discrete (BGK widening for the label step)", "vr_min_q_sums": VR_MIN_RETURNS,
               "label_params_identity": params.identity(), "data_snapshot_id": data_snapshot_id,
@@ -473,16 +539,18 @@ def report_paths(report: dict) -> tuple[str, str]:
 def public_lines(report: dict) -> list[str]:
     """Public log: symbol, horizon, half-life, n and verdicts only (n = entries with a z value).
 
-    ``SYMBOL h=H hl=D n=N sd=PASS|FAIL barrier=PASS|FAIL|NA PASS|FAIL`` (the last token is the overall verdict).
+    ``SYMBOL model=M h=H hl=D n=N sd=PASS|FAIL robust=PASS|FAIL barrier=PASS|FAIL|NA PASS|FAIL`` (the
+    last token is the overall verdict).
     """
     check_report(report)
     lines = [f"calibration audit segment {report['segment']}"]
     for symbol, result in report["symbols"].items():
-        for horizon, rows in result["horizons"].items():
-            for half_life, row in rows.items():
-                lines.append(f"{symbol} h={int(horizon)} hl={int(half_life)} n={int(row['z']['n'])} "
-                             f"sd={_verdict(row['sd_ok'])} barrier={_verdict(row['barrier_ok'])} "
-                             f"{_verdict(row['pass'])}")
+        for model in SIGMA_MODELS:
+            for horizon, rows in result.get(MODEL_KEYS[model][0], {}).items():
+                for half_life, row in rows.items():
+                    lines.append(f"{symbol} model={model} h={int(horizon)} hl={int(half_life)} n={int(row['z']['n'])} "
+                                 f"sd={_verdict(row['sd_ok'])} robust={_verdict(row['robust_ok'])} "
+                                 f"barrier={_verdict(row['barrier_ok'])} {_verdict(row['pass'])}")
     lines.append(f"report hash {report['report_hash']}")
     return lines
 
@@ -498,14 +566,15 @@ def _cell(value) -> str:
 def _z_row(label: str, stats: dict) -> str:
     q = stats["quantiles"]
     s = stats["share_abs_gt"]
-    return " | ".join([f"| {label}", str(stats["n"]), _cell(stats["sd"]), _cell(stats["mean"]),
+    return " | ".join([f"| {label}", str(stats["n"]), _cell(stats["sd"]), _cell(stats.get("robust_sd")),
+                       _cell(stats.get("mean_abs_ratio")), _cell(stats["mean"]),
                        _cell(stats["mean_abs"]), *(_cell(q[str(p)]) for p in QUANTILES),
                        *(_cell(s[str(t)]) for t in Z_THRESHOLDS)]) + " |"
 
 
-_Z_HEADER = ("| row | n | sd | mean | mean abs | " + " | ".join(f"q{p}" for p in QUANTILES) + " | "
+_Z_HEADER = ("| row | n | sd | robust sd | mean abs / 0.7979 | mean | mean abs | " + " | ".join(f"q{p}" for p in QUANTILES) + " | "
              + " | ".join(f"abs>{t}" for t in Z_THRESHOLDS) + " |")
-_Z_RULE = "|" + " --- |" * (5 + len(QUANTILES) + len(Z_THRESHOLDS))
+_Z_RULE = "|" + " --- |" * (7 + len(QUANTILES) + len(Z_THRESHOLDS))
 
 
 def markdown(report: dict) -> str:
@@ -516,51 +585,56 @@ def markdown(report: dict) -> str:
              f"PASS = sd verdict (sd(z) in [{report['sd_band'][0]}, {report['sd_band'][1]}]) and, on "
              f"{BARRIER_HORIZON} m rows, barrier verdict (every expiry share within "
              f"max({report['expiry_tolerance_rel']} x theory, {report['expiry_tolerance_abs']}) of the BGK-widened "
-             "Brownian theory for the label step).", ""]
+             "Brownian theory for the label step); robust verdict: robust sd = 1.4826 MAD(z) and mean|z| / 0.7979 "
+             f"in [{report['robust_band'][0]}, {report['robust_band'][1]}] overall and in "
+             f"[{report['robust_hour_band'][0]}, {report['robust_hour_band'][1]}] in every UTC hour.", ""]
     for symbol, result in report["symbols"].items():
         lines += [f"## {symbol}", "", "### Variance ratio (segment, 5-minute log returns)", "",
                   "| q | VR | returns | q-sums |", "| --- | --- | --- | --- |"]
         for q, row in result["variance_ratio"].items():
             lines.append(f"| {q} | {_cell(row['vr'])} | {row['n_returns']} | {row['n_q_sums']} |")
         lines.append("")
-        for horizon, rows in result["horizons"].items():
-            for half_life, row in rows.items():
-                lines += [f"### h = {horizon} m, half-life {half_life} d: {_verdict(row['pass'])} "
-                          f"(sd {_verdict(row['sd_ok'])}, barrier {_verdict(row['barrier_ok'])})", "",
-                          f"Entries {row['entries']}; skipped: " + ", ".join(
-                              f"{name} {count}" for name, count in row["skipped"].items()) + ".", "",
-                          _Z_HEADER, _Z_RULE, _z_row("EWMA", row["z"])]
-                corrected = row.get("vr_corrected")
-                if corrected is not None:
-                    lines.append(_z_row(f"VR-corrected (q={corrected['q']})", corrected["z"]))
-                lines += ["", f"By UTC hour (EWMA; VR-corrected: no estimate for "
-                              f"{corrected['no_vr_estimate'] if corrected else 'n/a'} entries):", "",
-                          _Z_HEADER, _Z_RULE]
-                lines += [_z_row(f"{hour['hour']:02d}h", hour) for hour in row["z_by_hour"]]
-                if corrected is not None:
-                    lines += ["", "By UTC hour (VR-corrected):", "", _Z_HEADER, _Z_RULE]
-                    lines += [_z_row(f"{hour['hour']:02d}h", hour) for hour in corrected["z_by_hour"]]
+        for model in SIGMA_MODELS:
+            rows_key, barrier_key = MODEL_KEYS[model]
+            for horizon, rows in result.get(rows_key, {}).items():
+                for half_life, row in rows.items():
+                    lines += [f"### {model}, h = {horizon} m, half-life {half_life} d: {_verdict(row['pass'])} "
+                              f"(sd {_verdict(row['sd_ok'])}, robust {_verdict(row['robust_ok'])}, "
+                              f"barrier {_verdict(row['barrier_ok'])})", "",
+                              f"Entries {row['entries']}; skipped: " + ", ".join(
+                                  f"{name} {count}" for name, count in row["skipped"].items()) + ".", "",
+                              _Z_HEADER, _Z_RULE, _z_row(model, row["z"])]
+                    corrected = row.get("vr_corrected")
+                    if corrected is not None:
+                        lines.append(_z_row(f"VR-corrected (q={corrected['q']})", corrected["z"]))
+                    lines += ["", f"By UTC hour (EWMA; VR-corrected: no estimate for "
+                                  f"{corrected['no_vr_estimate'] if corrected else 'n/a'} entries):", "",
+                              _Z_HEADER, _Z_RULE]
+                    lines += [_z_row(f"{hour['hour']:02d}h", hour) for hour in row["z_by_hour"]]
+                    if corrected is not None:
+                        lines += ["", "By UTC hour (VR-corrected):", "", _Z_HEADER, _Z_RULE]
+                        lines += [_z_row(f"{hour['hour']:02d}h", hour) for hour in corrected["z_by_hour"]]
+                    lines.append("")
+            barriers = result.get(barrier_key)
+            if barriers is not None:
+                lines += [f"### Barriers ({model}) at {barriers['horizon_min']} m (labels' half-life {barriers['half_life_days']} d, "
+                          f"limit {barriers['time_limit_multiple']} x h, BGK widening {barriers['discrete_widening_sigma_h']} "
+                          f"sigma_h): "
+                          f"{'PASS' if barriers['pass'] else 'FAIL'}", "",
+                          "| k | rr | side | trades | T | S | E | L | X | amb | T/(T+S+L) | theory b/(a+b) | "
+                          "theory E cont. | theory E widened | implied ratio cont. | implied ratio widened | non-trades | "
+                          "purged |", "|" + " --- |" * 18]
+                for row in barriers["geometries"]:
+                    theory = row["theory"]
+                    for side, item in row["sides"].items():
+                        shares = item["shares"]
+                        lines.append(" | ".join([
+                            f"| {row['k']}", row["rr"], side, str(item["trades"]),
+                            *(_cell(shares[code]) for code in OUTCOME_CODES), str(item["ambiguous"]),
+                            _cell(item["target_first_resolved"]), _cell(theory["target_first_no_limit"]),
+                            _cell(theory["expiry_continuous"]), _cell(theory["expiry_widened"]),
+                            _cell(item["implied_sigma_ratio_continuous"]), _cell(item["implied_sigma_ratio_widened"]),
+                            ", ".join(f"{code} {count}" for code, count in item["non_trades"].items()) or "none",
+                            str(item["purged"])]) + " |")
                 lines.append("")
-        barriers = result.get("barriers")
-        if barriers is not None:
-            lines += [f"### Barriers at {barriers['horizon_min']} m (labels' half-life {barriers['half_life_days']} d, "
-                      f"limit {barriers['time_limit_multiple']} x h, BGK widening {barriers['discrete_widening_sigma_h']} "
-                      f"sigma_h): "
-                      f"{'PASS' if barriers['pass'] else 'FAIL'}", "",
-                      "| k | rr | side | trades | T | S | E | L | X | amb | T/(T+S+L) | theory b/(a+b) | "
-                      "theory E cont. | theory E widened | implied ratio cont. | implied ratio widened | non-trades | "
-                      "purged |", "|" + " --- |" * 18]
-            for row in barriers["geometries"]:
-                theory = row["theory"]
-                for side, item in row["sides"].items():
-                    shares = item["shares"]
-                    lines.append(" | ".join([
-                        f"| {row['k']}", row["rr"], side, str(item["trades"]),
-                        *(_cell(shares[code]) for code in OUTCOME_CODES), str(item["ambiguous"]),
-                        _cell(item["target_first_resolved"]), _cell(theory["target_first_no_limit"]),
-                        _cell(theory["expiry_continuous"]), _cell(theory["expiry_widened"]),
-                        _cell(item["implied_sigma_ratio_continuous"]), _cell(item["implied_sigma_ratio_widened"]),
-                        ", ".join(f"{code} {count}" for code, count in item["non_trades"].items()) or "none",
-                        str(item["purged"])]) + " |")
-            lines.append("")
     return "\n".join(lines) + "\n"

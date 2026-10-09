@@ -1,4 +1,4 @@
-"""Dense stop-aware label table for the #182 benchmark (schema ``labels-v1``).
+"""Dense stop-aware label table for the #182 benchmark (schemas ``labels-v1`` and ``labels-v2``).
 
 For every decision time on each horizon's grid, both sides and every stop
 multiple ``k``, the trade is labelled by ``scan.label_trade`` against every
@@ -32,6 +32,14 @@ CSV ``labels__SYMBOL__YYYY-MM.csv.gz`` (ASCII, deterministic gzip): header
 one ``c`` column per ``rr_grid`` entry and ``k`` in canonical exact text. A cell
 token is ``O:exit:net:cost:fund`` (amounts empty for 'X'); an ambiguous cell is
 ``pessimistic|optimistic``.
+
+Sigma models (``LabelParams.sigma_model``, #220): ``ewma`` (default, schema ``labels-v1``, lb1
+releases, unchanged) uses ``build_variance`` + ``horizon_sigma``. ``ewma-seasonal`` (schema
+``labels-v2``, lb2 releases) uses the point-in-time intraday factors
+(``volatility.seasonal_factors``): the variance level comes from
+``build_variance_deseasonalised`` and the horizon sigma from ``horizon_sigma_seasonal`` with the
+entry day's factors; a decision without factors for its entry day is V. The v2 header names the
+model in its sigma column (``sigma_ewma_seasonal``); every other column is identical.
 """
 from __future__ import annotations
 
@@ -49,9 +57,13 @@ from .canonical import content_hash, exact_from_str, exact_to_str
 from .costs import COST_MODEL_V1, CostModel
 from .funding import FundingSeries
 from .scan import NON_TRADE_STATUSES, OUTCOMES, Cell, CellPair, label_trade, next_compromised
-from .volatility import BLOCK_MINUTES, LAMBDA_NUM, VAR_SCALE, build_variance, horizon_sigma
+from .volatility import (BLOCK_MINUTES, BLOCK_MS, DAY_MS, LAMBDA_NUM, SEASONAL_WINDOW_DAYS, VAR_SCALE,
+                         build_variance, build_variance_deseasonalised, horizon_sigma, horizon_sigma_seasonal,
+                         seasonal_factors)
 
 SCHEMA = "labels-v1"
+SCHEMA_V2 = "labels-v2"
+SIGMA_MODELS = {"ewma": SCHEMA, "ewma-seasonal": SCHEMA_V2}
 LABEL_NON_TRADE_STATUSES = (*NON_TRADE_STATUSES, "P")
 FIXED_COLUMNS = ("signal_ms", "horizon_min", "side", "k", "status", "p0", "sigma", "d_ticks", "leverage",
                  "wallet_ur")
@@ -86,7 +98,8 @@ class LabelParams:
     time_limit_multiple: int = 4
     min_stop_ticks: int = 4
     cost_model: CostModel = COST_MODEL_V1
-    schema: str = SCHEMA
+    schema: str | None = None  # derived from sigma_model when omitted
+    sigma_model: str = "ewma"
 
     def __post_init__(self):
         horizons = tuple(self.horizons)
@@ -114,8 +127,17 @@ class LabelParams:
             raise ValueError("cost_model must be a CostModel")
         if self.cost_model.cost_multiplier != 1 or self.cost_model.funding_multiplier != 1:
             raise ValueError("labels are built at cost_multiplier = funding_multiplier = 1 (the grid is applied later)")
-        if self.schema != SCHEMA:
-            raise ValueError(f"unsupported label schema {self.schema!r}")
+        if self.sigma_model not in SIGMA_MODELS:
+            raise ValueError(f"sigma_model must be one of {sorted(SIGMA_MODELS)}, got {self.sigma_model!r}")
+        expected = SIGMA_MODELS[self.sigma_model]
+        if self.schema is None:
+            object.__setattr__(self, "schema", expected)
+        elif self.schema != expected:
+            raise ValueError(f"unsupported label schema {self.schema!r} for sigma model {self.sigma_model!r}")
+
+    @property
+    def seasonal(self) -> bool:
+        return self.sigma_model == "ewma-seasonal"
 
     def half_life(self, horizon: int) -> int:
         return dict(self.half_life_days)[horizon]
@@ -128,10 +150,11 @@ class LabelParams:
 
     @property
     def header(self) -> tuple:
-        return (*FIXED_COLUMNS, *(f"c{index}" for index in range(len(self.rr_grid))))
+        fixed = tuple("sigma_ewma_seasonal" if name == "sigma" and self.seasonal else name for name in FIXED_COLUMNS)
+        return (*fixed, *(f"c{index}" for index in range(len(self.rr_grid))))
 
     def to_record(self) -> dict:
-        return {
+        record = {
             "schema": self.schema,
             "horizons": list(self.horizons),
             "half_life_days": {str(h): days for h, days in self.half_life_days},
@@ -143,6 +166,10 @@ class LabelParams:
             "cost_model": self.cost_model.to_record(),
             "cost_model_identity": self.cost_model.identity(),
         }
+        if self.seasonal:  # lb1 records (and identities) stay exactly as before
+            record["sigma_model"] = self.sigma_model
+            record["seasonal_window_days"] = SEASONAL_WINDOW_DAYS
+        return record
 
     def identity(self) -> str:
         return content_hash(self.to_record())
@@ -182,7 +209,21 @@ def build_labels(symbol: str, bars: BarSeries, funding: FundingSeries, params: L
     if missing:
         raise ValueError(f"no tick for months {missing}")
     month_starts = [data_lake.month_bounds_ms(month)[0] for month in months]
-    variances = {days: build_variance(bars, days).variance for days in {params.half_life(h) for h in params.horizons}}
+    half_lives = {params.half_life(h) for h in params.horizons}
+    if params.seasonal:
+        factors = seasonal_factors(bars, SEASONAL_WINDOW_DAYS)
+        variances = {days: build_variance_deseasonalised(bars, days, factors).variance for days in half_lives}
+
+        def sigma_of(var: int, horizon: int, signal_ms: int):
+            day = factors.day_factors(signal_ms // DAY_MS)  # entry day's factors (known at entry)
+            if day is None:
+                return None
+            return lambda: horizon_sigma_seasonal(var, day, (signal_ms % DAY_MS) // BLOCK_MS, horizon)
+    else:
+        variances = {days: build_variance(bars, days).variance for days in half_lives}
+
+        def sigma_of(var: int, horizon: int, signal_ms: int):
+            return lambda: horizon_sigma(var, horizon)
     next_comp = next_compromised(bars)
 
     def tick_at(index: int) -> int:
@@ -204,11 +245,11 @@ def build_labels(symbol: str, bars: BarSeries, funding: FundingSeries, params: L
                 for side in (1, -1):
                     for k in params.k_grid:
                         rows.append(_row(bars, funding, params, signal_ms, d, horizon, side, k, variance,
-                                         next_comp, tick_at))
+                                         next_comp, tick_at, sigma_of))
         yield month, rows
 
 
-def _row(bars, funding, params, signal_ms, d, horizon, side, k, variance, next_comp, tick_at) -> LabelRow:
+def _row(bars, funding, params, signal_ms, d, horizon, side, k, variance, next_comp, tick_at, sigma_of) -> LabelRow:
     base = (signal_ms, horizon, side, k)
     e = d + 1
     window = params.window(horizon)
@@ -216,7 +257,8 @@ def _row(bars, funding, params, signal_ms, d, horizon, side, k, variance, next_c
         return LabelRow(*base, "I")
     block = (d + 1) // BLOCK_MINUTES - 1  # the 5-minute block ending at minute d
     var = variance[block] if block >= 0 else MISSING
-    if var == MISSING:
+    sigma_fn = sigma_of(var, horizon, signal_ms) if var != MISSING else None
+    if sigma_fn is None:
         return LabelRow(*base, "V")
     if next_comp[e] == e:
         return LabelRow(*base, "C")
@@ -224,7 +266,7 @@ def _row(bars, funding, params, signal_ms, d, horizon, side, k, variance, next_c
     tick = tick_at(e)
     if p0 % tick:
         return LabelRow(*base, "P")
-    sigma = horizon_sigma(var, horizon)
+    sigma = sigma_fn()
     d_ticks = _ceil_div(k.numerator * sigma * p0, k.denominator * VAR_SCALE * tick)
     if d_ticks < params.min_stop_ticks:
         return LabelRow(*base, "G")

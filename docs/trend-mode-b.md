@@ -125,8 +125,9 @@ All of this reuses the #182 harness:
 - **Across the nine:**
   - The (T, 9) integer matrix goes through `spa.spa_test`, `stepm.stepm`, `stepm_p_values`
     and `best_trial.best_trial_dsr`.
-  - The threshold is `runner.required_t(n_trials)`. n_trials counts the whole question:
-    the ledger history plus this run.
+  - The threshold is `runner.required_t(n_trials)`. n_trials counts the distinct variants
+    (strategy id and version) ever counted for the question, plus this run's nine. The same
+    variant on another segment or window is the same hypothesis, so n_trials stays 9.
 
 ### Verdict (trend-specific)
 
@@ -145,6 +146,37 @@ The verdicts are:
 - **FRAGILE:** the core conditions hold and the 1x mean is positive. Only the 2x cost or the
   removal of the best month fails.
 - **FAIL:** anything else.
+
+## Extended development window (`development-ext`, P9)
+
+Owner decision D2 (2026-10-09) lets 2020-2023 daily data serve as extra **development** data,
+for daily-frequency strategies only.
+
+- **Window:** `development-ext` runs 2021-01-01..2025-06-30, T = 1,642 days. 2020 is the
+  indicator warm-up year and is never evaluated. Loads cover 2020-01..2025-06.
+- **Daily paths only:** the segment lives in `segments.DAILY_SEGMENTS`, outside `SEGMENTS`, so
+  every intraday path refuses it: labels, experiments, calibration, level study and screen.
+  Only `trend_run.py` accepts it. `regime_build.py` has no segment input; its table already
+  covers 2020-01..2025-12.
+- **Unchanged:**
+  - Validation (2025-07..2025-12) and the sealed hidden stretch.
+  - The K = 9 variants, all parameters, the cost model, the controls and the verdict rule.
+  - n_trials and required_t, which stay those of 9 variants.
+- **Late listings:** a late-listed symbol (DOGE 2020-07-10, SOL 2020-09-14) joins the
+  portfolio on the first day all its components are defined.
+- **Missing days:** a missing day (SOL and XRP have five each) is MISSING. It is never
+  evaluated, never filled, and leaves the affected components flat while their window contains
+  it.
+- **Funding:** sums every settlement in the day, whatever its interval (SOL uses 2, 4 and 8
+  hours).
+- **Ledger:** one record per variant with split `development-ext`. Its result summary carries
+  `window: 2021-01..2025-06`.
+- **Report additions (descriptive, never a verdict):**
+  - per calendar year (2021, 2022, 2023, 2024, 2025H1): each variant's mean/day, Sharpe, max
+    drawdown, symbols defined, and mean symbols per day; the yearly sums add up to the whole
+    stream;
+  - a `pre-2024 (descriptive)` row for 2021-2023.
+  - The power table is still printed first.
 
 ## Ledger and outputs
 

@@ -13,9 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       segment:
-        description: "development | validation"
+        description: "development | validation | development-ext (2021-01..2025-06, daily only, owner decision D2)"
         type: choice
-        options: [development, validation]
+        options: [development, validation, development-ext]
         default: development
       data_revision:
         description: "rd data release revision (recorded in the report; the trend run reads dk1 only)"

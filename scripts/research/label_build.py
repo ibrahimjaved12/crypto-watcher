@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build immutable labels-v1 releases from verified private data-lake assets.
+"""Build immutable label releases (lb1 labels-v1 / lb2 labels-v2) from verified private data-lake assets.
 
 Run as a script so data_lake_build is importable beside this module. Credentials
 are required even for dry runs: both modes read private published rd releases.
@@ -29,7 +29,7 @@ from market_analysis.benchmark.canonical import exact_to_str
 
 BLOCK = 1 << 20
 _LABEL_TAG = re.compile(
-    r"lb1-(" + "|".join(lake.SYMBOLS) + r")-([0-9]{4}-[0-9]{2})_([0-9]{4}-[0-9]{2})-r([1-9][0-9]{0,2})\Z")
+    r"lb[12]-(" + "|".join(lake.SYMBOLS) + r")-([0-9]{4}-[0-9]{2})_([0-9]{4}-[0-9]{2})-r([1-9][0-9]{0,2})\Z")
 
 
 def validate_symbols(raw: str) -> list[str]:
@@ -59,15 +59,20 @@ def plan_months(first: str, last: str, *, now_ms: int | None = None) -> list[str
 def validate_label_tag(tag: str) -> str:
     match = _LABEL_TAG.fullmatch(tag)
     if match is None:
-        raise ValueError("invalid labels-v1 release tag")
+        raise ValueError("invalid label release tag")
     _, first, last, _ = match.groups()
     plan_months(first, last)
     return tag
 
 
-def label_tag(symbol: str, first: str, last: str, label_revision: int = 1) -> str:
+LABEL_PREFIX = {"ewma": "lb1", "ewma-seasonal": "lb2"}  # sigma model -> release prefix (lb1 never changes)
+
+
+def label_tag(symbol: str, first: str, last: str, label_revision: int = 1, sigma_model: str = "ewma") -> str:
     lake.validate_symbol(symbol)
-    return validate_label_tag(f"lb1-{symbol}-{first}_{last}-r{label_revision}")
+    if sigma_model not in LABEL_PREFIX:
+        raise ValueError(f"sigma_model must be one of {sorted(LABEL_PREFIX)}")
+    return validate_label_tag(f"{LABEL_PREFIX[sigma_model]}-{symbol}-{first}_{last}-r{label_revision}")
 
 
 def parse_args(argv=None, *, now_ms: int | None = None):
@@ -80,6 +85,8 @@ def parse_args(argv=None, *, now_ms: int | None = None):
     parser.add_argument("--workdir", type=Path, default=Path("label-build-work"))
     parser.add_argument("--summary", type=Path)
     parser.add_argument("--publish", action="store_true")
+    parser.add_argument("--sigma-model", choices=sorted(LABEL_PREFIX), default="ewma",
+                        help="ewma: lb1 labels-v1 (default); ewma-seasonal: lb2 labels-v2 (#220)")
     args = parser.parse_args(argv)
     try:
         lake.validate_symbol(args.symbol)
@@ -115,7 +122,7 @@ def delete_label_drafts(repo: ResearchDataRepo, tag: str) -> None:
         url = f"{repo.prefix}/releases/{int(draft['id'])}"
         current = repo.json("GET", url)
         if current.get("draft") is not True or current.get("tag_name") != tag:
-            raise GitHubError("refusing to delete a release that is not the requested lb1 draft")
+            raise GitHubError("refusing to delete a release that is not the requested label draft")
         with repo.request("DELETE", url):
             pass
         print(f"{tag}: deleted leftover draft", flush=True)
@@ -190,12 +197,12 @@ def download_inputs(repo: ResearchDataRepo, symbol: str, releases: dict, workdir
     return provenance
 
 
-def build(symbol: str, first: str, last: str, workdir: Path, provenance: dict) -> dict:
+def build(symbol: str, first: str, last: str, workdir: Path, provenance: dict, sigma_model: str = "ewma") -> dict:
     out_dir = workdir / "labels"
     # label_cli logs no tick values, but parser exceptions can carry individual input values;
     # keep all of its output out of the public workflow log.
     with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
-        manifest = label_cli.run(symbol, workdir, first, last, out_dir)
+        manifest = label_cli.run(symbol, workdir, first, last, out_dir, label_cli.LabelParams(sigma_model=sigma_model))
     for month, inputs in manifest["inputs"].items():
         verified = provenance[month]
         for kind in ("bars", "funding"):
@@ -281,7 +288,7 @@ def publish_release(repo: ResearchDataRepo, tag: str, manifest: dict, out_dir: P
 
 def main(argv=None) -> int:
     args = parse_args(argv, now_ms=time.time_ns() // 1_000_000)
-    tag = label_tag(args.symbol, args.first_month, args.last_month, args.label_revision)
+    tag = label_tag(args.symbol, args.first_month, args.last_month, args.label_revision, args.sigma_model)
     repo = ResearchDataRepo(os.environ.get("RESEARCH_DATA_REPOSITORY"), os.environ.get("RESEARCH_DATA_TOKEN"))
     if args.publish and repo.published_release(tag) is not None:
         report(tag, "exists (immutable)", args.summary, {})
@@ -294,7 +301,7 @@ def main(argv=None) -> int:
     started = time.monotonic_ns()
     try:
         provenance = download_inputs(repo, args.symbol, releases, args.workdir)
-        manifest = build(args.symbol, args.first_month, args.last_month, args.workdir, provenance)
+        manifest = build(args.symbol, args.first_month, args.last_month, args.workdir, provenance, args.sigma_model)
         status = "dry run (not published)"
         if args.publish:
             status = publish_release(repo, tag, manifest, args.workdir / "labels")

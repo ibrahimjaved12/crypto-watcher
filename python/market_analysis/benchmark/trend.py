@@ -43,7 +43,7 @@ from .. import data_lake
 from ..daily_lake import DAY_MS, DailySeries, load_symbol_daily, load_symbol_funding_range
 from .bars import MISSING
 from .best_trial import best_trial_dsr
-from .calibration import check_segment
+from .hidden_guard import require_months
 from .canonical import content_hash
 from .evaluate import bootstrap_ci, decimal_text, drawdown
 from .experiment_log import TrialRecord, TrialStatus
@@ -51,7 +51,7 @@ from .funding import FundingSeries
 from .power import min_detectable_edge_per_day
 from .rng import u64_words
 from .runner import NO_PROGRESS, required_t
-from .segments import segment_bounds_ms
+from .segments import SEGMENTS, daily_segment_bounds_ms, daily_segment_months
 from .spa import spa_test
 from .stepm import stepm, stepm_p_values
 
@@ -83,6 +83,10 @@ N_SHIFTS = 1000
 MIN_SHIFT = 30
 SEED = 20261009
 PPM = 1_000_000
+# development and validation as everywhere; development-ext (2021-01..2025-06, owner decision D2) is
+# accepted by the daily trend only and refused by every intraday path.
+TREND_SEGMENTS = ("development", "validation", "development-ext")
+PRE_2024_MS = 1_704_067_200_000  # 2024-01-01 00:00 UTC
 _COST = COST_BP_PER_UNIT_TURNOVER / 10_000
 _NAN = float("nan")
 
@@ -521,6 +525,39 @@ def without_best_month(daily: list[int], months: list[str]) -> dict:
             "T_days": len(rest), "mean_daily": decimal_text(mean)}
 
 
+def _period_label(year: str, months_in_year: list[str]) -> str:
+    covered = sorted({month[5:] for month in months_in_year})
+    if covered == [f"{m:02d}" for m in range(1, 13)]:
+        return year
+    if covered == [f"{m:02d}" for m in range(1, 7)]:
+        return f"{year}H1"
+    if covered == [f"{m:02d}" for m in range(7, 13)]:
+        return f"{year}H2"
+    return f"{year} ({covered[0]}..{covered[-1]})"
+
+
+def descriptive_periods(daily: list[int], months: list[str], actives) -> dict:
+    """DESCRIPTIVE rows (never a verdict): per calendar year and, when present, the pre-2024 stream.
+
+    Each row: stream_stats of the days of that period (their sums add up to the whole stream), the
+    number of symbols defined on at least one of its days and the mean number defined per day.
+    """
+    count = sum(np.asarray(active, dtype=np.int64) for active in actives)
+
+    def row(label: str, mask) -> dict:
+        mask = np.asarray(mask, dtype=bool)
+        return {"period": label, **stream_stats([value for value, keep in zip(daily, mask) if keep]),
+                "symbols_defined": int(sum(bool(np.asarray(active)[mask].any()) for active in actives)),
+                "mean_symbols_per_day": float(count[mask].mean()) if mask.any() else None}
+
+    years = sorted({month[:4] for month in months})
+    out = {"descriptive_by_year": [row(_period_label(year, [m for m in months if m[:4] == year]),
+                                       [m[:4] == year for m in months]) for year in years]}
+    pre = [m[:4] < "2024" for m in months]
+    out["descriptive_pre_2024"] = row("pre-2024 (descriptive)", pre) if any(pre) else None
+    return out
+
+
 def verdict(*, stepm_rejected: bool, ci_lower, t_statistic, required_t, mean_1x, mean_2x, mean_ex_best,
             p_placebo, alpha_t) -> str:
     """Trend Mode B verdict (documented in docs/trend-mode-b.md).
@@ -546,10 +583,21 @@ def verdict(*, stepm_rejected: bool, ci_lower, t_statistic, required_t, mean_1x,
 # ---------------------------------------------------------------- loading and evaluation
 
 
+def check_daily_segment(segment: str) -> list[str]:
+    """The segment's months after the hidden guard (no token: hidden is refused); TREND_SEGMENTS only."""
+    if segment not in SEGMENTS and segment not in TREND_SEGMENTS:
+        raise ValueError(f"segment must be one of {TREND_SEGMENTS}")
+    months = daily_segment_months(segment)
+    require_months(months, None, None)  # raises HiddenStretchLocked for the hidden stretch
+    if segment not in TREND_SEGMENTS:
+        raise ValueError(f"segment must be one of {TREND_SEGMENTS}")
+    return months
+
+
 def load_inputs(daily_dir, segment: str, symbols=data_lake.SYMBOLS) -> dict:
     """Guarded loader: the hidden guard runs before any file is opened; dk1 2020-01..segment end only."""
-    months = check_segment(segment)
-    first_ms, end_ms = segment_bounds_ms(segment)
+    months = check_daily_segment(segment)
+    first_ms, end_ms = daily_segment_bounds_ms(segment)
     out = {}
     for symbol in symbols:
         series = load_symbol_daily(daily_dir, symbol, WARMUP_FIRST_MONTH, months[-1])
@@ -598,6 +646,7 @@ def evaluate_variant(variant: TrendVariant, symbols: dict, months: list[str], of
     turnover = portfolio([np.abs(legs[s].weight - legs[s].previous) for s in symbols], actives)
     paid = portfolio([np.where(legs[s].active, legs[s].weight * np.nan_to_num(symbols[s].funding), 0.0)
                       for s in symbols], actives)
+    descriptive = descriptive_periods(daily, months, [legs[s].active for s in symbols])
     per_symbol = {}
     for symbol, data in symbols.items():
         mask = legs[symbol].active
@@ -620,7 +669,7 @@ def evaluate_variant(variant: TrendVariant, symbols: dict, months: list[str], of
                      "long_leg": stream_stats(stream_of(part="long")),
                      "short_leg": stream_stats(stream_of(part="short")),
                      "without_best_month": without_best_month(daily, months)},
-        "per_symbol": per_symbol}
+        "per_symbol": per_symbol, **descriptive}
     return entry, daily
 
 
@@ -628,10 +677,10 @@ def evaluate_trend(symbols: dict, segment: str, log, *, code_commit: str, data_s
                    B: int = B_STATS, n_shifts: int = N_SHIFTS, seed: int = SEED, extra: dict | None = None,
                    progress=NO_PROGRESS) -> dict:
     """Evaluate the K = 9 variants on one segment, append one ledger record per variant, return the report."""
-    check_segment(segment)  # hidden refused even when inputs were built elsewhere
+    check_daily_segment(segment)  # hidden refused even when inputs were built elsewhere
     if not symbols:
         raise ValueError("need at least one symbol")
-    first_ms, end_ms = segment_bounds_ms(segment)
+    first_ms, end_ms = daily_segment_bounds_ms(segment)
     T = (end_ms - first_ms) // DAY_MS
     if any(len(data.index) != T for data in symbols.values()):
         raise ValueError("symbol data was prepared for another segment")
@@ -645,7 +694,12 @@ def evaluate_trend(symbols: dict, segment: str, log, *, code_commit: str, data_s
             data_snapshot_id=data_snapshot_id, code_commit=code_commit, status=TrialStatus.OK, counts_toward_n=True,
             count_reason="variant evaluated", result_hash=None, result_summary={}, created_utc=now_utc))
     ids = [record.trial_id for record in templates]
-    n_trials = max(K, len(set(log.counted_trial_ids(question_id=QUESTION_ID)) | set(ids)))
+    # Question-wide trials = distinct variants (strategy id and version) ever counted for the question:
+    # the same variant evaluated on another segment or window is the same hypothesis, not a new trial.
+    counted = {(record.strategy_id, record.strategy_version) for _, record in log.read()
+               if record.question_id == QUESTION_ID and record.counts_toward_n
+               and record.status is not TrialStatus.REPLAY}
+    n_trials = max(K, len(counted | {(variant.name, STRATEGY_VERSION) for variant in VARIANTS}))
     threshold = required_t(n_trials)
     entries, columns, controls = [], [], {}
     with progress.stage("evaluate", total=K) as set_variant:
@@ -688,7 +742,8 @@ def evaluate_trend(symbols: dict, segment: str, log, *, code_commit: str, data_s
                    "t_stat": rendered["bootstrap_ci"]["t_statistic"] or "undefined",
                    "required_t": repr(threshold), "p_placebo": rendered["controls"]["placebo"]["p"] or "undefined",
                    "alpha_t": rendered["controls"]["alpha_vs_buy_and_hold"]["t_alpha"] or "undefined",
-                   "B_stats": B, "n_shifts": len(offsets), "verdict": rendered["verdict"]}
+                   "B_stats": B, "n_shifts": len(offsets), "verdict": rendered["verdict"],
+                   "window": f"{months[0]}..{months[-1]}"}
         records.append(replace(template, result_summary=summary, result_hash=content_hash(rendered)))
     log.append_many(records)
     for index, entry in enumerate(entries):
@@ -774,6 +829,17 @@ def markdown(report: dict) -> str:
             f"| {_cell(c['alpha_vs_buy_and_hold']['t_alpha'])} | {_cell(c['without_best_month']['mean_daily'])} "
             f"({_cell(c['without_best_month']['best_month'])} removed) | {_cell(entry['stepm_p_value'])} "
             f"| **{entry['verdict']}** |")
+    lines += ["", "## By calendar year (descriptive, never a verdict)", "",
+              "| variant | period | days | mean/day | Sharpe ann. | max DD | symbols defined | mean symbols/day |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for entry in report["variants"]:
+        rows = list(entry.get("descriptive_by_year") or [])
+        if entry.get("descriptive_pre_2024"):
+            rows.append(entry["descriptive_pre_2024"])
+        for row in rows:
+            lines.append(f"| {entry['variant']} | {row['period']} | {row['T_days']} | {_cell(row['mean_daily'])} | "
+                         f"{_cell(row['sharpe_annualized'])} | {_cell(row['max_drawdown'])} | "
+                         f"{row['symbols_defined']} | {_cell(row['mean_symbols_per_day'])} |")
     lines += ["", "## Controls", "", "| variant | buy-and-hold mean/day | B&H Sharpe | long leg mean/day | "
               "short leg mean/day |", "| --- | --- | --- | --- | --- |"]
     for entry in report["variants"]:

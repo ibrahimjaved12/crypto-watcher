@@ -20,7 +20,7 @@ import sys
 from .. import data_lake
 from .bars import TICK_RULE, BarSeries, infer_tick, off_tick_count, read_bars_csv
 from .funding import FundingSeries, read_funding_csv
-from .labels import SCHEMA, LabelParams, build_labels, write_label_csv
+from .labels import SIGMA_MODELS, LabelParams, build_labels, write_label_csv
 
 _BLOCK = 1 << 20
 
@@ -99,7 +99,8 @@ def run(symbol: str, bars_dir: Path, first_month: str, last_month: str, out_dir:
         })
         print(f"wrote {path.name}: {count} rows, statuses {dict(sorted(statuses.items()))}", flush=True)
     manifest = {
-        "schema": SCHEMA,
+        "schema": params.schema,
+        "sigma_model": params.sigma_model,
         "symbol": symbol,
         "first_month": first_month,
         "last_month": last_month,
@@ -137,9 +138,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--last-month", required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--summary", type=Path, help="append a markdown summary (aggregate counts only)")
+    parser.add_argument("--sigma-model", choices=sorted(SIGMA_MODELS), default="ewma",
+                        help="ewma: labels-v1 (lb1); ewma-seasonal: labels-v2 (lb2)")
     args = parser.parse_args(argv)
     try:
-        manifest = run(args.symbol, args.bars_dir, args.first_month, args.last_month, args.out_dir)
+        manifest = run(args.symbol, args.bars_dir, args.first_month, args.last_month, args.out_dir,
+                       LabelParams(sigma_model=args.sigma_model))
     except (OSError, ValueError) as error:
         parser.error(str(error))
     if args.summary:

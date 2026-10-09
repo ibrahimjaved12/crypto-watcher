@@ -1,5 +1,5 @@
 name: Label build
-run-name: "Label build ${{ inputs.symbols }} ${{ inputs.first_month }}..${{ inputs.last_month }} publish=${{ inputs.publish }}"
+run-name: "Label build ${{ inputs.sigma_model }} ${{ inputs.symbols }} ${{ inputs.first_month }}..${{ inputs.last_month }} publish=${{ inputs.publish }}"
 
 # Public logs: names, sizes, hashes and aggregate counts only. Private rd inputs
 # are read in BOTH modes; publish=false disables all release mutations.
@@ -31,6 +31,11 @@ on:
         type: string
         default: "1"
         required: true
+      sigma_model:
+        description: "Sigma model: ewma (lb1, labels-v1) or ewma-seasonal (lb2, labels-v2, #220)"
+        type: choice
+        options: [ewma, ewma-seasonal]
+        default: ewma
       publish:
         description: Publish releases (false = read private inputs and build only)
         type: boolean
@@ -107,6 +112,7 @@ jobs:
           LABEL_DATA_REVISION: ${{ inputs.data_revision }}
           LABEL_REVISION: ${{ inputs.label_revision }}
           LABEL_PUBLISH: ${{ inputs.publish }}
+          LABEL_SIGMA_MODEL: ${{ inputs.sigma_model }}
           LABEL_SUMMARY: ${{ runner.temp }}/label-build-summary.md
           # Unlike data-lake-build, dry runs also need authenticated private reads.
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
@@ -114,7 +120,7 @@ jobs:
         run: |
           args=(--symbol "$LABEL_SYMBOL" --first-month "$LABEL_FIRST" --last-month "$LABEL_LAST"
                 --data-revision "$LABEL_DATA_REVISION" --label-revision "$LABEL_REVISION"
-                --workdir label-build-work --summary "$LABEL_SUMMARY")
+                --workdir label-build-work --summary "$LABEL_SUMMARY" --sigma-model "$LABEL_SIGMA_MODEL")
           if [ "$LABEL_PUBLISH" = "true" ]; then
             args+=(--publish)
           fi
