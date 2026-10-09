@@ -110,3 +110,79 @@ taker fees on both sides, so its PnL is not the label's micro-R.
     MVP prompt said five; the code has six, so six are registered.
 11. **Request coverage:** saved setups whose entry precedes the request's first bar are skipped.
     The caller must send bars from the earliest open setup's entry.
+
+## Daily trend track (portfolio mode, #239 P14, #222)
+
+The daily trend Mode B variants (`benchmark/trend.py`, K = 9) are a daily weight stream, not
+discrete trades. They are tracked forward as **hypothetical vol-targeted portfolios**, one per
+variant. There is no margin, liquidation or position-limit model. No variant has a validated edge:
+development-ext gives t of about 2, and validation is underpowered.
+
+### Feed
+
+- **Table:** the operational `forward_daily_bars` (symbol, UTC day, OHLC, volume, quote volume,
+  source, received_at).
+- **Write rules:** append-only, unique per symbol and day, and completed days only. A row must be
+  received after its day ended (a CHECK constraint); `parseBinanceDailyKlines` also drops the
+  running day.
+- **Source:** the public `GET /fapi/v1/klines?interval=1d` (limit 1500).
+  - The first run backfills from a **fixed** start, 2025-08-07: 420 days before the track start,
+    enough for the 360-day lookback and the rvfilter's 395 closes.
+  - Every later run appends only the days completed since the last stored one.
+  - The start is fixed so that the band-dependent weight paths are identical from run to run.
+- **Gaps** stay MISSING. Days are finalised only through the last day **every** symbol has stored,
+  so a lagging fetch never turns into a permanently flat day.
+- **Funding:** the public `/fapi/v1/fundingRate`, fetched once per symbol per run from the first
+  day not yet finalised.
+
+### Python (`forward/trend_track.py`, `POST /v1/forward/trend`, stateless)
+
+- **Reuse:** it calls `trend.signal_inputs`, `trend.size`, `trend.apply_band` and the nine
+  `trend.VARIANTS` directly; nothing is copied.
+- **`target_weights`:** the weight held on day d+1 uses closes through day d (the backtest's
+  one-day shift).
+- **`step_portfolio`:** one day, using the same float operations in the same order as `trend.net`
+  and `trend.portfolio`:
+  - `w * (close/open - 1) - 11 bp * |w - w_prev| - w * funding`
+  - The equal-weight mean over the active symbols, in integer ppm.
+  - The equity curve, turnover, gross exposure, n, sum and sum of squares, and
+    `mu_min = power.min_detectable_edge_per_day(n, sd)`.
+- **Parity:** the daily stream is tested byte-equal, in ppm and day by day, to
+  `trend.evaluate_variant` (the per-variant body of `evaluate_trend`) and to its buy-and-hold
+  controls on a fixture with gaps and funding.
+- **Funding unknown:** if a fetch failed, or a day is not covered (a full 1000-row page covers
+  only up to its last event), **nothing is finalised**. The run records `funding_unavailable`, is
+  `partial`, and a later run continues. Weights are still decided and stored.
+
+### Controls (from day one)
+
+- **`bh_vt_<sizing>_<target>`:** the vol-targeted buy-and-hold of each (sizing, sigma target)
+  pair. This is the benchmark of the backtest's alpha test.
+- **`ew_long`:** a long-only equal-weight portfolio (w = 1 per symbol).
+- The circular-shift placebo needs the whole sample and is not computable forward.
+
+### Persistence and schedule
+
+- **Tables:** `forward_trend_weights`, `forward_trend_ledger` and `forward_trend_state`.
+  - They are append-only and account-scoped (RLS), and every row stores the version and
+    parameter hash.
+  - Weights and ledger rows are unique per (track, day). They are written before the run's state
+    row, so a state never claims a missing day.
+- **Runs:** once a day at 00:05 UTC (`npm run forward:trend`; `--once` for one run) and on demand
+  from the forward page.
+  - A finished day has run key `day:<last completed day>`. A repeat is `already_done`.
+- **Track start:** the track starts on 2026-10-01 (forward live from 2026-10). Closes from the
+  hidden months 2026-01..09 are used only as indicator warm-up, from the live API rather than the
+  lake. No result of a hidden day is computed or shown.
+
+### Dashboard
+
+For each variant, the forward page shows:
+
+- days tracked and the mean daily return, against its buy-and-hold control and `ew_long`;
+- turnover, gross exposure and the current weights;
+- equity curves (variant, control and `ew_long`);
+- the line "n days, not significant: mean < mu_min (about N days needed)", with
+  `mu_min = 2.8016 * sd / sqrt(n)` from the live sample.
+
+A banner says this is a hypothetical track with no margin or liquidation model.

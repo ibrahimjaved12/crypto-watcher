@@ -1158,3 +1158,93 @@ GRANT EXECUTE ON FUNCTION
   public.get_collector_forward_minutes(TEXT, TIMESTAMPTZ, TIMESTAMPTZ),
   public.record_collector_candles(JSONB, INTEGER, INTEGER)
   TO service_role;
+
+-- Forward trend daily feed (#239 P14): completed UTC-day Binance USD-M klines for the daily trend
+-- track. Append-only (a stored day is never changed or deleted), one row per symbol and day, and only
+-- completed days: a row must be received after its day ended. Gaps stay missing, never filled.
+CREATE TABLE public.forward_daily_bars (
+  symbol TEXT NOT NULL CHECK (symbol ~ '^[A-Z0-9]{5,16}$'),
+  day DATE NOT NULL,
+  open NUMERIC NOT NULL CHECK (open > 0),
+  high NUMERIC NOT NULL CHECK (high > 0),
+  low NUMERIC NOT NULL CHECK (low > 0),
+  close NUMERIC NOT NULL CHECK (close > 0),
+  volume NUMERIC NOT NULL CHECK (volume >= 0),
+  quote_volume NUMERIC NOT NULL CHECK (quote_volume >= 0),
+  source TEXT NOT NULL CHECK (source = 'binance-usdm:/fapi/v1/klines?interval=1d'),
+  received_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (symbol, day),
+  CHECK (low <= least(open, close) AND greatest(open, close) <= high),
+  CHECK (received_at >= (day + 1)::timestamp AT TIME ZONE 'UTC')
+);
+
+CREATE FUNCTION public.reject_forward_daily_bar_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  RAISE EXCEPTION 'forward daily bars are append-only'
+    USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER forward_daily_bars_append_only BEFORE UPDATE OR DELETE ON public.forward_daily_bars
+  FOR EACH ROW EXECUTE FUNCTION public.reject_forward_daily_bar_mutation();
+ALTER TABLE public.forward_daily_bars ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.forward_daily_bars FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT ON public.forward_daily_bars TO service_role;
+
+-- Inserts completed daily bars; an existing (symbol, day) is left untouched. Returns rows inserted.
+CREATE FUNCTION public.record_forward_daily_bars(p_rows JSONB)
+RETURNS INTEGER
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = public
+AS $$
+DECLARE
+  inserted INTEGER;
+BEGIN
+  IF p_rows IS NULL OR jsonb_typeof(p_rows) <> 'array' OR jsonb_array_length(p_rows) > 2000 THEN
+    RAISE EXCEPTION 'Invalid forward daily bar batch';
+  END IF;
+  INSERT INTO public.forward_daily_bars
+    (symbol, day, open, high, low, close, volume, quote_volume, source, received_at)
+  SELECT r.symbol, r.day, r.open, r.high, r.low, r.close, r.volume, r.quote_volume, r.source, r.received_at
+    FROM jsonb_to_recordset(p_rows) AS r(symbol TEXT, day DATE, open NUMERIC, high NUMERIC, low NUMERIC,
+      close NUMERIC, volume NUMERIC, quote_volume NUMERIC, source TEXT, received_at TIMESTAMPTZ)
+  ON CONFLICT (symbol, day) DO NOTHING;
+  GET DIAGNOSTICS inserted = ROW_COUNT;
+  RETURN inserted;
+END;
+$$;
+
+-- Stored daily bars of one symbol from p_since (inclusive), oldest first, as compact arrays with the
+-- prices as exact decimal text: [day_ms, open, high, low, close, volume, quote_volume].
+CREATE FUNCTION public.get_forward_daily_bars(p_symbol TEXT, p_since DATE)
+RETURNS JSONB
+LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = public
+AS $$
+DECLARE
+  rows JSONB;
+BEGIN
+  IF p_symbol IS NULL OR btrim(p_symbol) = '' OR p_since IS NULL THEN
+    RAISE EXCEPTION 'Invalid forward daily bar request';
+  END IF;
+  SELECT coalesce(jsonb_agg(jsonb_build_array(
+      (extract(epoch FROM day::timestamp AT TIME ZONE 'UTC') * 1000)::BIGINT,
+      open::TEXT, high::TEXT, low::TEXT, close::TEXT, volume::TEXT, quote_volume::TEXT
+    ) ORDER BY day), '[]'::jsonb)
+    INTO rows
+    FROM public.forward_daily_bars
+    WHERE symbol = upper(btrim(p_symbol)) AND day >= p_since;
+  RETURN rows;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION
+  public.record_forward_daily_bars(JSONB),
+  public.get_forward_daily_bars(TEXT, DATE)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION
+  public.record_forward_daily_bars(JSONB),
+  public.get_forward_daily_bars(TEXT, DATE)
+  TO service_role;

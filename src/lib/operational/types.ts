@@ -66,6 +66,18 @@ export type ForwardMinuteRow = {
   source_event_at_ms: number | null;
 };
 
+/** One completed UTC-day kline of the forward trend feed (#239 P14); prices are exact decimal text. */
+export type ForwardDailyBar = {
+  symbol: string;
+  day_ms: number;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string;
+  quote_volume: string;
+};
+
 export type CollectorHealthStatus = "LIVE" | "RECOVERING" | "STALE" | "UNAVAILABLE";
 
 export type CollectorHealth = {
@@ -215,6 +227,10 @@ export interface OperationalStore {
   ): Promise<CompletedCandleSeries<T>>;
   /** Completed one-minute candles of one symbol in [sinceMs, beforeMs) for the forward engine (#239). */
   readForwardMinuteCandles(symbol: string, sinceMs: number, beforeMs: number): Promise<ForwardMinuteRow[]>;
+  /** Stored completed daily bars of one symbol from `sinceMs` (a UTC day start), oldest first (#239 P14). */
+  readForwardDailyBars(symbol: string, sinceMs: number): Promise<ForwardDailyBar[]>;
+  /** Append completed daily bars; an existing (symbol, day) is never changed. Returns rows inserted. */
+  recordForwardDailyBars(bars: ForwardDailyBar[], receivedAtMs: number): Promise<number>;
   /** Canonical completed one-minute candles used to derive #71 normalization history. */
   readMovementCandleHistory(
     symbols: string[],

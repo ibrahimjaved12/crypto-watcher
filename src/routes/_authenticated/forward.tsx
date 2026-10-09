@@ -8,7 +8,7 @@ import { AppShell } from "@/components/app-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { summarizeOutcomes } from "@/lib/forward/forward-dashboard";
-import { getForwardDashboard, runForwardNow } from "@/lib/forward.functions";
+import { getForwardDashboard, getTrendDashboard, runForwardNow, runForwardTrendNow } from "@/lib/forward.functions";
 
 export const Route = createFileRoute("/_authenticated/forward")({
   head: () => ({ meta: [{ title: "Forward test — Crypto Watch" }] }),
@@ -125,8 +125,105 @@ function ForwardPage() {
             </ul>
           </div>
         </section>
+
+        <TrendSection />
       </div>
     </AppShell>
+  );
+}
+
+const pct = (value: number | null, digits = 3) => (value === null ? "—" : `${(value * 100).toFixed(digits)}%`);
+const day = (ms: number | null | undefined) => (ms === null || ms === undefined ? "—" : new Date(ms).toISOString().slice(0, 10));
+
+function TrendSection() {
+  const queryClient = useQueryClient();
+  const load = useServerFn(getTrendDashboard);
+  const run = useServerFn(runForwardTrendNow);
+  const data = useQuery({ queryKey: ["forward-trend-dashboard"], queryFn: () => load() });
+  const runNow = useMutation({
+    mutationFn: () => run(),
+    onSuccess: (summary) => {
+      toast(`Trend track run ${summary.status}${summary.reason ? `: ${summary.reason}` : ""}`);
+      void queryClient.invalidateQueries({ queryKey: ["forward-trend-dashboard"] });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Trend track run failed"),
+  });
+  const tracks = data.data?.tracks ?? [];
+  const byName = new Map(tracks.map((track) => [track.track, track]));
+  const variants = tracks.filter((track) => track.kind === "variant");
+  const equalWeight = byName.get("ew_long") ?? null;
+  const latest = data.data?.latestRun ?? null;
+  return (
+    <section className="space-y-3">
+      <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+        Daily trend (Mode B) forward track: a hypothetical vol-targeted portfolio per variant, with 11 bp per unit
+        turnover and funding but no margin, liquidation or position limits. No variant has a validated edge.
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="font-medium">Daily trend track (portfolio mode)</h2>
+        <Badge variant={latest?.status === "ok" ? "default" : "destructive"}>
+          {latest ? `${latest.status} · through ${day(latest.through_day_ms)}` : "no runs yet"}
+        </Badge>
+        {latest?.reason ? <span className="text-xs text-muted-foreground">{latest.reason}</span> : null}
+        <Button size="sm" onClick={() => runNow.mutate()} disabled={runNow.isPending}>Run trend now</Button>
+      </div>
+      <table className="w-full text-sm">
+        <thead><tr className="text-left text-muted-foreground">
+          <th>variant</th><th>days</th><th>mean/day</th><th>vol-target B&amp;H mean/day</th><th>equal-weight mean/day</th>
+          <th>turnover/day</th><th>gross</th><th>current weights</th><th>significance</th>
+        </tr></thead>
+        <tbody>
+          {variants.map((track) => {
+            const control = track.control ? byName.get(track.control) : undefined;
+            return (
+              <tr key={track.track} className="border-t align-top">
+                <td>{track.track}</td><td>{track.days}</td><td>{pct(track.meanDaily)}</td>
+                <td>{pct(control?.meanDaily ?? null)}</td><td>{pct(equalWeight?.meanDaily ?? null)}</td>
+                <td>{track.meanTurnover === null ? "—" : track.meanTurnover.toFixed(3)}</td>
+                <td>{track.meanGross === null ? "—" : track.meanGross.toFixed(2)}</td>
+                <td className="text-xs">
+                  {track.currentWeights
+                    ? `${day(track.currentWeights.day_ms)}: ` + Object.entries(track.currentWeights.weights)
+                      .map(([symbol, weight]) => `${symbol.replace("USDT", "")} ${weight.toFixed(2)}`).join(", ")
+                    : "—"}
+                </td>
+                <td className="text-xs">{track.significanceLine}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className="grid gap-4 md:grid-cols-3">
+        {variants.map((track) => (
+          <div key={track.track}>
+            <h3 className="text-sm">{track.track} vs {track.control ?? "control"} and ew_long (equity)</h3>
+            <MultiCurve series={[track.equity, (track.control ? byName.get(track.control)?.equity : undefined) ?? [],
+              equalWeight?.equity ?? []]} />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MultiCurve({ series }: { series: { day_ms: number; equity: number }[][] }) {
+  const points = series.flat();
+  if (series[0]!.length < 2) return <p className="text-sm text-muted-foreground">Not enough days yet.</p>;
+  const width = 300;
+  const height = 100;
+  const xs = points.map((p) => p.day_ms);
+  const ys = points.map((p) => p.equity);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const path = (line: { day_ms: number; equity: number }[]) => line
+    .map((p, i) => `${i ? "L" : "M"}${((p.day_ms - x0) / (x1 - x0 || 1)) * width},${height - ((p.equity - y0) / (y1 - y0 || 1)) * height}`)
+    .join(" ");
+  const styles = ["text-primary", "text-muted-foreground", "text-amber-500"];
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="h-24 w-full" role="img" aria-label="Trend track equity">
+      {series.map((line, index) => line.length > 1
+        ? <path key={index} d={path(line)} fill="none" stroke="currentColor" strokeWidth="1.2" className={styles[index]} />
+        : null)}
+    </svg>
   );
 }
 
