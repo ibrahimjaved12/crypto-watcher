@@ -1,6 +1,7 @@
 import { Area, AreaChart, ResponsiveContainer, Tooltip, YAxis } from "recharts";
 import { AlertTriangle, Trash2 } from "lucide-react";
 
+import { humanizeReason } from "@/lib/labels";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { CHANGE_WINDOWS, WINDOW_LABELS, baseAsset } from "@/lib/market/symbols";
@@ -8,7 +9,7 @@ import type { SymbolQuote } from "@/lib/market/quotes.server";
 
 function formatPrice(value: number): string {
   const digits = value >= 1000 ? 2 : value >= 1 ? 4 : 6;
-  return value.toLocaleString("en-US", {
+  return value.toLocaleString(undefined, {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
@@ -21,35 +22,29 @@ function changeClass(value: number | null | undefined): string {
   return "text-muted-foreground";
 }
 
-export function QuoteCard({
-  quote,
-  onRemove,
-}: {
-  quote: SymbolQuote;
-  onRemove?: () => void;
-}) {
+export function QuoteCard({ quote, onRemove }: { quote: SymbolQuote; onRemove?: () => void }) {
   const unavailable = !quote.ok || quote.price == null;
 
   return (
-    <article className="panel flex flex-col gap-4 p-5">
+    <article className="panel flex min-w-0 flex-col gap-4 p-4 sm:p-5">
       <header className="flex items-start gap-3">
         <div>
           <h3 className="font-display text-lg font-semibold">
             {baseAsset(quote.symbol)}
             <span className="text-muted-foreground">/USDT</span>
           </h3>
-          <p className="num mt-1 text-2xl font-semibold">
+          <p className="num mt-1 text-xl font-semibold">
             {unavailable ? (
               <span className="text-base text-muted-foreground">Price unavailable</span>
             ) : (
-              `$${formatPrice(quote.price!)}`
+              `${formatPrice(quote.price!)} USDT`
             )}
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">
           {quote.source ? (
             <Badge variant="secondary" className="num text-[10px]">
-              {quote.source}
+              {humanizeReason(quote.source).short}
             </Badge>
           ) : null}
           {onRemove ? (
@@ -66,16 +61,24 @@ export function QuoteCard({
       </header>
 
       {unavailable ? (
-        <p className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive-foreground">
+        <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive-foreground">
           <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
-          <span>{quote.error ?? "No market data available."}</span>
-        </p>
+          <div className="min-w-0">
+            Price data could not be loaded. Try Refresh after the exchange is reachable.
+            {quote.error && (
+              <details className="mt-1 break-words">
+                <summary>Details</summary>
+                {quote.error}
+              </details>
+            )}
+          </div>
+        </div>
       ) : (
         <>
           {quote.stale ? (
             <p className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn/10 p-2 text-xs text-warn">
               <AlertTriangle className="size-4" aria-hidden />
-              Data is stale — last candle{" "}
+              Waiting for fresh prices · last candle{" "}
               {new Date(quote.lastCandleAt!).toLocaleTimeString()}
             </p>
           ) : null}
@@ -114,7 +117,7 @@ export function QuoteCard({
                     fontSize: 12,
                   }}
                   labelFormatter={(t) => new Date(Number(t)).toLocaleString()}
-                  formatter={(v: number) => [`$${formatPrice(v)}`, "Close"]}
+                  formatter={(v: number) => [`${formatPrice(v)} USDT`, "Price"]}
                 />
                 <Area
                   type="monotone"
@@ -128,7 +131,8 @@ export function QuoteCard({
             </ResponsiveContainer>
           </div>
           <p className="num text-[11px] text-muted-foreground">
-            24h of 15m candles · updated {new Date(quote.fetchedAt).toLocaleTimeString()}
+            Past 24 hours · 15-minute prices · updated{" "}
+            {new Date(quote.fetchedAt).toLocaleTimeString()}
           </p>
         </>
       )}

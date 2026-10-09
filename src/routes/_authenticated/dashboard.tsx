@@ -18,7 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
+import { humanizeReason } from "@/lib/labels";
 import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db";
 import { getMarketSnapshot } from "@/lib/market.functions";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
@@ -28,12 +28,12 @@ import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/s
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
     meta: [
-      { title: "Dashboard — Crypto Watch" },
+      { title: "Market — Crypto Watch" },
       {
         name: "description",
         content: "Live prices, 5m to 24h changes and charts for the pairs on your watchlist.",
       },
-      { property: "og:title", content: "Dashboard — Crypto Watch" },
+      { property: "og:title", content: "Market — Crypto Watch" },
       { property: "og:description", content: "Your live crypto watchlist and price changes." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -83,27 +83,27 @@ function Dashboard() {
       setPending("");
       queryClient.invalidateQueries({ queryKey: ["watchlist"] });
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(humanizeReason(e.message).short),
   });
 
   const remove = useMutation({
     mutationFn: removeSymbol,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watchlist"] }),
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(humanizeReason(e.message).short),
   });
 
   const check = useMutation({
     mutationFn: () => runCheck({ data: undefined }),
     onSuccess: (result) => {
       toast.success(
-        `Check ${result.status}: ${result.symbolsChecked} pairs, ${result.alertsCreated} alert(s).`,
+        `${humanizeReason(result.status).short}: ${result.symbolsChecked} pairs checked, ${result.alertsCreated} alerts.`,
       );
-      if (result.error) toast.warning(result.error);
+      if (result.error) toast.warning(humanizeReason(result.error).short);
       queryClient.invalidateQueries({ queryKey: ["operational-state"] });
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
       queryClient.invalidateQueries({ queryKey: ["ta"] });
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(humanizeReason(e.message).short),
   });
 
   const available = SUPPORTED_SYMBOLS.filter((s) => !symbols.includes(s));
@@ -114,7 +114,7 @@ function Dashboard() {
     <AppShell>
       <div className="flex flex-wrap items-end gap-3">
         <div>
-          <h1 className="text-2xl font-semibold">Market dashboard</h1>
+          <h1 className="text-2xl font-semibold">Market</h1>
           <p className="text-sm text-muted-foreground">
             {symbols.length}/{MAX_WATCHLIST_SIZE} pairs ·{" "}
             {automatic.enabled
@@ -151,7 +151,7 @@ function Dashboard() {
             disabled={check.isPending || settings.isPending || settings.isError || monitoringPaused}
             title={
               monitoringPaused
-                ? "Enable monitoring and market-data collection in Settings"
+                ? "Enable monitoring and market-data collection in Control room"
                 : undefined
             }
           >
@@ -161,33 +161,28 @@ function Dashboard() {
         </div>
       </div>
 
-      <div className="panel mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 p-4 text-sm">
-        <span className="flex items-center gap-2">
-          <span className="text-muted-foreground">Data source:</span>
-          <Badge variant={sourcesDown ? "destructive" : "secondary"} className="num">
+      <details className="panel mt-5 px-4 py-1 text-xs">
+        <summary className="text-muted-foreground">
+          <span className="text-foreground">
             {sourcesDown
-              ? "No exchange reachable"
-              : (quotes.find((q) => q.source)?.source ?? "Waiting…")}
-          </Badge>
-        </span>
-        <span className="text-muted-foreground">
-          Last price update:{" "}
-          <span className="num text-foreground">
-            {market.data ? new Date(market.data.fetchedAt).toLocaleTimeString() : "—"}
+              ? "Exchange unavailable"
+              : humanizeReason(quotes.find((q) => q.source)?.source ?? "Waiting for prices").short}
           </span>
-        </span>
-        <span className="text-muted-foreground">
-          Last scheduled run:{" "}
-          <span className="num text-foreground">
-            {lastRun
-              ? `${new Date(lastRun.ran_at).toLocaleString()} (${lastRun.status})`
-              : "none yet"}
+          <span className="mx-2">·</span>
+          Prices updated{" "}
+          <span className="num">
+            {market.data ? new Date(market.data.fetchedAt).toLocaleTimeString() : "not yet"}
           </span>
-        </span>
-      </div>
-
-      <PythonAnalysisPanel symbols={symbols} />
-      <TechnicalAnalysis />
+          <span className="mx-2">·</span>
+          Last check: {lastRun ? humanizeReason(lastRun.status).short.toLowerCase() : "not run yet"}
+        </summary>
+        <p className="pb-2 text-muted-foreground">
+          Last monitoring run: {lastRun ? new Date(lastRun.ran_at).toLocaleString() : "none yet"}.
+          {lastRun
+            ? ` ${humanizeReason(lastRun.status).help ?? "Open Control room for run history."}`
+            : "Run a check to start recording alerts and indicator history."}
+        </p>
+      </details>
 
       {sourcesDown ? (
         <p className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm">
@@ -196,7 +191,7 @@ function Dashboard() {
         </p>
       ) : null}
 
-      <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="mt-5 grid min-w-0 gap-4 md:grid-cols-2">
         {watchlist.isLoading || (market.isLoading && symbols.length > 0)
           ? symbols.map((s) => (
               <div key={s} className="panel h-64 animate-pulse p-5">
@@ -215,11 +210,18 @@ function Dashboard() {
             ))}
       </div>
 
+      {symbols.length > 0 && quotes.length === 0 && !market.isFetching && !market.isLoading && (
+        <p className="panel mt-4 p-5 text-sm text-muted-foreground">
+          Your watched pairs are ready. Press Refresh to load prices and 24-hour charts.
+        </p>
+      )}
       {symbols.length === 0 && !watchlist.isLoading ? (
         <p className="panel mt-4 flex items-center gap-2 p-6 text-sm text-muted-foreground">
           <Plus className="size-4" aria-hidden /> Add a trading pair to start monitoring.
         </p>
       ) : null}
+      <PythonAnalysisPanel symbols={symbols} />
+      <TechnicalAnalysis />
     </AppShell>
   );
 }

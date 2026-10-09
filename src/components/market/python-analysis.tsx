@@ -5,34 +5,39 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { runPythonAnalysis } from "@/lib/analysis.functions";
 import type { PythonAnalysis } from "@/lib/analysis.contract";
+import { Hint } from "@/components/hint";
+import { humanizeReason } from "@/lib/labels";
 import { WINDOW_LABELS } from "@/lib/market/symbols";
 
 const explanations: Record<PythonAnalysis["baseline"]["status"], string> = {
   eligible: "Eligible at this snapshot. Only the monitor can save an alert.",
   cooldown: "Threshold reached, but this direction is on cooldown.",
-  below_threshold: "The net move from the baseline is below your threshold.",
+  below_threshold: "The net move from the reference price is below your threshold.",
   already_processed: "The monitor has already processed this candle (or a newer one).",
   disabled: "Monitoring is paused; this observation is not eligible for an alert.",
-  baseline_required: "No saved baseline yet. The next successful monitor check can establish one.",
+  baseline_required:
+    "No saved reference price yet. The next successful monitor check can establish one.",
   baseline_reset_required:
-    "The source or threshold changed. The monitor must establish a new baseline before comparing.",
+    "The source or threshold changed. The monitor must establish a new reference price before comparing.",
   unavailable: "Fresh completed market data is unavailable; eligibility was not evaluated.",
-  invalid_state: "The saved baseline has inconsistent timestamps; eligibility was not evaluated.",
+  invalid_state:
+    "The saved reference price has inconsistent timestamps; eligibility was not evaluated.",
 };
-const percent = (value: string | null) => (value === null ? "—" : `${Number(value).toFixed(4)}%`);
+const percent = (value: string | null) =>
+  value === null ? "—" : `${Number(value) > 0 ? "+" : ""}${Number(value).toFixed(2)}%`;
 const at = (value: number | null) => (value === null ? "—" : new Date(value).toLocaleString());
 const duration = (ms: number) => (ms < 1_000 ? `${ms} ms` : `${(ms / 1_000).toFixed(1)}s`);
 const bytes = (value: number) =>
   value < 1_024 ? `${value} B` : `${(value / 1_024).toFixed(1)} KB`;
-const humanize = (value: string) => value.replaceAll("_", " ");
+const humanize = (value: string) => humanizeReason(value).short;
 const title = (value: string) => `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 const frame = (value: string) => (value === "15" ? "15m" : `${Number(value) / 60}h`);
 const signed = (value: number | null) =>
   value === null ? "—" : value > 0 ? `+${value}` : String(value);
 const sourceLabels: Record<string, string> = {
-  "binance-usdm": "Binance USDⓈ-M",
+  "binance-usdm": "Binance futures",
   "kraken-futures": "Kraken Futures",
-  "okx-usdt-swap": "OKX USDT Swap",
+  "okx-usdt-swap": "OKX futures",
 };
 const factorLabels: Record<string, string> = {
   trend: "Trend",
@@ -68,11 +73,11 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
   return (
     <section
       className="panel mt-5 space-y-3 p-4"
-      aria-label="Python analysis"
+      aria-label="Market read"
       aria-busy={analysis.isPending}
     >
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="font-semibold">Python analysis</h2>
+        <h2 className="font-semibold">Market read</h2>
         <label className="sr-only" htmlFor="analysis-pair">
           Pair to analyze
         </label>
@@ -98,12 +103,12 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
           disabled={!symbol || analysis.isPending}
           onClick={() => analysis.mutate(symbol)}
         >
-          {analysis.isPending ? "Analyzing…" : "Run Python analysis"}
+          {analysis.isPending ? "Analysing…" : `Analyse ${symbol}`}
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        Read-only snapshot using completed candles. This action does not save alerts or reset
-        baselines.
+        A snapshot of trend, momentum and price movement, using completed candles. Your alert rules
+        and saved reference price stay unchanged.
       </p>
       {analysis.isPending && (
         <p role="status" className="text-sm">
@@ -111,12 +116,26 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
         </p>
       )}
       {analysis.isError && (
-        <p role="alert" className="text-sm text-destructive">
-          {analysis.error.message} Failure category:{" "}
-          {humanize(
-            String((analysis.error as Error & { category?: string }).category ?? "unknown"),
-          )}
-          .
+        <div role="alert" className="text-sm text-bear">
+          <p>
+            {
+              humanizeReason(
+                (analysis.error as Error & { category?: string }).category ??
+                  analysis.error.message,
+              ).short
+            }
+          </p>
+          <details className="mt-1 break-words text-xs text-muted-foreground">
+            <summary>Details</summary>
+            {analysis.error.message}
+          </details>
+        </div>
+      )}
+      {!result && !analysis.isPending && !analysis.isError && (
+        <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+          {symbols.length
+            ? "Choose a pair and select Analyse to see its current market read."
+            : "Add a pair above to start reading the market."}
         </p>
       )}
       {result && (
@@ -126,10 +145,12 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-lg font-semibold">{result.symbol}</span>
                 <Badge variant={result.status === "ok" ? "secondary" : "outline"}>
-                  {title(result.status)}
+                  {humanizeReason(result.status).short}
                 </Badge>
                 {result.source && (
-                  <Badge variant="outline">{sourceLabels[result.source] ?? result.source}</Badge>
+                  <Badge variant="outline">
+                    {sourceLabels[result.source] ?? humanize(result.source)}
+                  </Badge>
                 )}
               </div>
               <p className="mt-1 text-sm">
@@ -149,11 +170,11 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
           </div>
           {result.failure_category && (
             <p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-300">
-              Failure category: {humanize(result.failure_category)}.
+              {humanize(result.failure_category)}.
             </p>
           )}
           <div>
-            <h3 className="text-sm font-medium">Completed-candle technical analysis</h3>
+            <h3 className="text-sm font-medium">What the indicators say</h3>
             <div className="mt-2 grid gap-3 md:grid-cols-3">
               {Object.entries(result.technical).map(([timeframe, row]) => (
                 <div key={timeframe} className="rounded-md border border-border p-3 text-xs">
@@ -163,18 +184,28 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
                       {title(row.classification)}
                     </Badge>
                   </div>
-                  <p className="mt-2 text-sm font-medium">Rule score: {signed(row.score)}</p>
-                  {row.factor_breakdown && (
-                    <dl className="mt-2 divide-y divide-border/60">
-                      {Object.entries(row.factor_breakdown).map(([name, factor]) => (
-                        <div key={name} className="grid grid-cols-[1fr_auto_auto] gap-2 py-1">
-                          <dt className="text-muted-foreground">{factorLabels[name] ?? name}</dt>
-                          <dd>{title(humanize(factor.classification))}</dd>
-                          <dd className="num w-6 text-right">{signed(factor.contribution)}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  )}
+                  <p className="mt-2 text-sm leading-relaxed">
+                    {frame(timeframe)}: {humanize(row.classification).toLowerCase()}, score{" "}
+                    <span className="num">{signed(row.score)}</span> of ±100, volatility{" "}
+                    <span className="num">
+                      {row.atr_pct === null ? "unavailable" : `${row.atr_pct.toFixed(2)}%`}
+                    </span>
+                    .
+                  </p>
+                  <details className="mt-2">
+                    <summary className="text-muted-foreground">Why this lean?</summary>
+                    {row.factor_breakdown && (
+                      <dl className="mt-2 divide-y divide-border/60">
+                        {Object.entries(row.factor_breakdown).map(([name, factor]) => (
+                          <div key={name} className="grid grid-cols-[1fr_auto_auto] gap-2 py-1">
+                            <dt className="text-muted-foreground">{factorLabels[name] ?? name}</dt>
+                            <dd>{title(humanize(factor.classification))}</dd>
+                            <dd className="num w-6 text-right">{signed(factor.contribution)}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    )}
+                  </details>
                   {row.reason && (
                     <p className="mt-2 text-amber-400">{title(humanize(row.reason))}</p>
                   )}
@@ -188,12 +219,13 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
               )}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              Rule-based score, not a calibrated win probability.
+              <Hint term="indicator score" /> ranks bearish to bullish indicators (−100 to +100). It
+              is not a win probability or a forecast of profit.
             </p>
           </div>
           <div>
             <h3 className="text-sm font-medium">
-              Rolling windows — threshold {result.threshold_pct}%
+              Recent price changes · your threshold {result.threshold_pct}%
             </h3>
             <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
               {Object.entries(result.rolling).map(([window, row]) => (
@@ -206,53 +238,59 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
                       ? row.threshold_met
                         ? "Threshold reached"
                         : "Below threshold"
-                      : row.reason && title(humanize(row.reason))}
+                      : humanize(row.reason ?? row.status)}
                   </p>
-                  {row.status === "ok" && (
-                    <p className="text-muted-foreground">
-                      {at(row.start_close_ms)} → {at(row.end_close_ms)}
-                    </p>
-                  )}
                 </div>
               ))}
               {!Object.keys(result.rolling).length && (
-                <p className="text-sm">Rolling data unavailable.</p>
+                <p className="text-sm">
+                  Recent price changes will appear when enough fresh candles are available.
+                </p>
               )}
             </div>
           </div>
           <div className="space-y-1 rounded-md border border-border bg-muted/10 p-3 text-sm">
-            <h3 className="font-medium">Saved-baseline comparison</h3>
+            <h3 className="font-medium">
+              Your alert rule · <Hint term="baseline" />
+            </h3>
             <p>{explanations[result.baseline.status]}</p>
             {result.baseline.baseline_price !== null && (
               <p className="num text-xs">
-                Baseline: {result.baseline.baseline_price} USDT at{" "}
+                Reference: {result.baseline.baseline_price} USDT at{" "}
                 {at(result.baseline.baseline_at_ms)} · net change{" "}
                 {percent(result.baseline.change_pct)}
               </p>
             )}
-            <p className="text-xs text-muted-foreground">
-              Directional cooldown:{" "}
-              {result.baseline.cooldown_evaluated ? "evaluated" : "not evaluated"}.
-              {result.baseline.cooldown_until_ms !== null &&
-                ` Relevant cooldown ends ${at(result.baseline.cooldown_until_ms)}.`}{" "}
-              Alert eligibility:{" "}
-              {result.baseline.eligibility_evaluated
-                ? result.baseline.alert_eligible
-                  ? "eligible"
-                  : "not eligible"
-                : "not evaluated"}
-              .
-            </p>
-            <p className="text-xs text-muted-foreground">
-              The monitor may update settings or state after this snapshot; this is not a reserved
-              alert.
-            </p>
+            <details className="text-xs text-muted-foreground">
+              <summary>Alert timing details</summary>
+              <p>
+                Wait between alerts:{" "}
+                {result.baseline.cooldown_evaluated ? "evaluated" : "not evaluated"}.
+                {result.baseline.cooldown_until_ms !== null &&
+                  ` Relevant cooldown ends ${at(result.baseline.cooldown_until_ms)}.`}{" "}
+                Alert eligibility:{" "}
+                {result.baseline.eligibility_evaluated
+                  ? result.baseline.alert_eligible
+                    ? "eligible"
+                    : "not eligible"
+                  : "not evaluated"}
+                .
+              </p>
+              <p className="text-xs text-muted-foreground">
+                The monitor may update settings or state after this snapshot; this is not a reserved
+                alert.
+              </p>
+            </details>
           </div>
           <details className="rounded-md border border-border p-3 text-xs text-muted-foreground">
             <summary className="cursor-pointer font-medium text-foreground">
               Technical details
             </summary>
             <div className="mt-3 space-y-2 break-words">
+              <p>
+                Raw status: {result.status} · failure category: {result.failure_category ?? "none"}{" "}
+                · baseline: {result.baseline.status}
+              </p>
               <p>
                 Requested instrument: <code>{result.instrument.id}</code>
               </p>
@@ -274,6 +312,15 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
                 <div key={timeframe}>
                   <p className="font-medium text-foreground">{frame(timeframe)}</p>
                   <p>
+                    Price type: {row.provenance.price_type} · instrument:{" "}
+                    {row.provenance.instrument_id}
+                  </p>
+                  <p>
+                    Candles: {row.provenance.candle_count} · warmup:{" "}
+                    {row.provenance.warmup_candle_count} · missing open times:{" "}
+                    {row.provenance.missing_open_times_ms.map(at).join(", ") || "none"}
+                  </p>
+                  <p>
                     Source event {at(row.source_event_time_ms)} · {row.ta_version} ·{" "}
                     {row.strategy_version}
                   </p>
@@ -290,11 +337,17 @@ export function PythonAnalysisPanel({ symbols }: { symbols: string[] }) {
                   )}
                 </div>
               ))}
+              {Object.entries(result.rolling).map(([window, row]) => (
+                <p key={window}>
+                  {WINDOW_LABELS[Number(window)]}: {row.status} · {row.reason ?? "no issue"} ·{" "}
+                  {at(row.start_close_ms)} → {at(row.end_close_ms)}
+                </p>
+              ))}
               {!!result.attempts.length && (
                 <p>
                   Provider attempts:{" "}
                   {result.attempts
-                    .map((attempt) => `${attempt.source}: ${humanize(attempt.reason)}`)
+                    .map((attempt) => `${attempt.source}: ${attempt.reason}`)
                     .join("; ")}
                 </p>
               )}
