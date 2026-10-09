@@ -88,3 +88,46 @@ The verdicts are:
 - **Barrier check:** it reads labels built with the same model, lb1 for `ewma` and lb2 for
   `ewma-seasonal`. When a symbol's release is missing it is NA, and only the sigma/z audit
   runs.
+
+## Robust and horizon-calibrated sigma (labels-v3, P12)
+
+The development audit (label r3 / lb2 r1) shows the seasonal model fixed time of day. z sd by
+UTC hour is now about 0.86-1.05. Every row still fails the robust check, though:
+
+- At 60 m and 240 m, robust sd is about 0.65-0.68 and mean|z|/0.7979 about 0.83-0.84, while sd
+  is about 0.98.
+- The 240 m barrier check still fails.
+
+z is heavy-tailed, so a squared-return EWMA overstates the typical scale. Two models are added in
+`volatility.py` and `benchmark/robust_sigma.py`. Neither has a variance-ratio term.
+
+### `ewma-robust`
+
+- **Scale:** an EWMA of |r5| instead of r5²: same half-lives, warm-up, integer fixed point
+  (`ABS_SCALE = 10^10`) and int64 guards.
+- **Deseasonalisation:** by slot factors computed on |r5| (`seasonal_factors_abs`), with the same
+  28-day point-in-time recipe, normalised to mean 1.
+- **Block scale:** `s = EWMA(|r| / g_slot) / 0.797885`.
+- **Horizon variance:** `sum over the horizon's 5-minute blocks of (s * g_slot)^2`, i.e.
+  independent increments.
+
+### `ewma-robust-hcal`
+
+`ewma-robust` times a horizon multiplier `c_h`, estimated point in time and expanding:
+
+- **Definition:** at entry t, `c_h` is the median of `|ln(open[e+h]/open[e])| / sigma_robust_h(e)`
+  over every past window on the label-step grid whose exit is at or before t, divided by
+  0.674490.
+- **Clipping:** `c_h` is clipped to [0.5, 2].
+- **Availability:** it is undefined (V / no_sigma) until the first counted window is 60 days old.
+- **Cost:** a streaming median with two heaps keeps it near-linear.
+
+### Labels and audit
+
+- **Labels:** both models produce schema `labels-v3`, under `lb3-` (ewma-robust) and `lb3h-`
+  (ewma-robust-hcal). Two models cannot share one release identity, so the hcal model gets its own
+  prefix. The sigma column is `sigma_ewma_robust` / `sigma_ewma_robust_hcal`. lb1 and lb2 are
+  byte-identical (pinned in tests).
+- **Audit:** reports all four models. The PASS definition and the thresholds are unchanged. Each
+  model's barrier block adds the median, min and max implied sigma ratio (widened theory, both
+  sides), so the residual can be read.

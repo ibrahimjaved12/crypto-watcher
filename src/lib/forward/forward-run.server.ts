@@ -1,6 +1,7 @@
 import type { CollectorHealth, ForwardMinuteRow } from "../operational/types";
 import {
   FINAL_STATUSES,
+  type FundingEvent,
   validateForwardResponse,
   type ForwardEvaluateResponse,
   type ForwardResolution,
@@ -38,6 +39,8 @@ export type ForwardDeps = {
   readMinutes(symbol: string, sinceMs: number, beforeMs: number): Promise<ForwardMinuteRow[]>;
   listHealth(symbols: string[]): Promise<CollectorHealth[]>;
   callPython(body: unknown): Promise<unknown>;
+  /** Public funding history from `startMs` (Binance `/fapi/v1/fundingRate`, limit 1000). */
+  fetchFunding(symbol: string, startMs: number): Promise<FundingEvent[]>;
   repository: ForwardRepository;
 };
 
@@ -54,6 +57,25 @@ export type ForwardRunSummary = {
   reason?: string;
   counts?: Record<string, number>;
 };
+
+/**
+ * Funding events per symbol, fetched once per run (the cache is per run, never across runs). A
+ * failed fetch yields `null`: Python then leaves every window containing a possible funding time
+ * open instead of finalising it with zero funding.
+ */
+export async function fetchRunFunding(
+  deps: Pick<ForwardDeps, "fetchFunding">,
+  symbols: readonly string[],
+  startMs: number,
+  cache: Map<string, Promise<FundingEvent[] | null>> = new Map(),
+): Promise<Map<string, FundingEvent[] | null>> {
+  const out = new Map<string, FundingEvent[] | null>();
+  for (const symbol of symbols) {
+    if (!cache.has(symbol)) cache.set(symbol, deps.fetchFunding(symbol, startMs).catch(() => null));
+    out.set(symbol, await cache.get(symbol)!);
+  }
+  return out;
+}
 
 /** Stale reasons per symbol; empty when every symbol is fresh. */
 export function staleness(
@@ -112,9 +134,17 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
     : boundaryMs - HOUR_MS;
   const fromMs = Math.min(previousTo, boundaryMs - MINUTE_MS);
   const open = await repository.openSetups(input.userId);
+  const oldestEntry = Math.min(fromMs, ...open.map((item) => Number(item.setup["entry_ms"])).filter(Number.isFinite));
+  const funding = await fetchRunFunding(deps, symbols, oldestEntry - HOUR_MS);
+  const fundingUnavailable = symbols.filter((symbol) => funding.get(symbol) === null);
   const response = validateForwardResponse(await deps.callPython({
     schema_version: 1,
-    symbols: symbols.map((symbol) => ({ symbol, rows: rows.get(symbol) })),
+    symbols: symbols.map((symbol) => ({
+      symbol,
+      rows: rows.get(symbol),
+      funding: funding.get(symbol) ?? [],
+      funding_available: funding.get(symbol) !== null,
+    })),
     strategy_ids: input.strategyIds,
     from_ms: fromMs,
     to_ms: boundaryMs - MINUTE_MS,
@@ -126,12 +156,15 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
   );
   const runId = await repository.insertRun(input.userId, {
     run_key: runKey, trigger: input.trigger, status: "ok", boundary_ms: boundaryMs, from_ms: fromMs,
+    reason: fundingUnavailable.length ? `funding_unavailable: ${fundingUnavailable.join(",")}` : null,
     processed_to_ms: response.processed_to_ms, versions: response.versions, params_hash: response.params_hash,
     wallet_config: response.wallet_config, wallet_state: response.wallet_state,
     assumptions: response.assumptions, reasons: response.reasons, freshness,
   });
   const counts = await repository.persistEvaluation(input.userId, runId, response, previous);
-  return { runKey, status: "ok", counts };
+  return fundingUnavailable.length
+    ? { runKey, status: "ok", counts, reason: `funding_unavailable: ${fundingUnavailable.join(",")}` }
+    : { runKey, status: "ok", counts };
 }
 
 /** Outcome rows worth appending: a status not recorded before for that setup. */

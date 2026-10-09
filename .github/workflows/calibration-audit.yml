@@ -32,9 +32,13 @@ on:
         type: string
         default: "1"
       sigma_models:
-        description: "Comma-separated sigma models (subset of ewma,ewma-seasonal; each row is reported per model)"
+        description: "Comma-separated sigma models (subset of ewma,ewma-seasonal,ewma-robust,ewma-robust-hcal)"
         type: string
-        default: "ewma,ewma-seasonal"
+        default: "ewma,ewma-seasonal,ewma-robust,ewma-robust-hcal"
+      robust_label_revision:
+        description: "lb3 / lb3h (labels-v3, ewma-robust / ewma-robust-hcal) release revision"
+        type: string
+        default: "1"
       seasonal_label_revision:
         description: "lb2 (labels-v2, ewma-seasonal) release revision for the seasonal barrier comparison"
         type: string
@@ -84,6 +88,7 @@ jobs:
           SYMBOLS: ${{ inputs.symbols }}
           SIGMA_MODELS: ${{ inputs.sigma_models }}
           SEASONAL_LABEL_REVISION: ${{ inputs.seasonal_label_revision }}
+          ROBUST_LABEL_REVISION: ${{ inputs.robust_label_revision }}
           AUDIT_SUMMARY: ${{ runner.temp }}/calibration-summary.md
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
@@ -91,7 +96,8 @@ jobs:
           python/.venv/bin/python scripts/research/calibration_audit.py --workdir calibration-audit-work \
             --summary "$AUDIT_SUMMARY" --segment "$SEGMENT" --horizons "$HORIZONS" --half-lives "$HALF_LIVES" \
             --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION" --symbols "$SYMBOLS" \
-            --sigma-models "$SIGMA_MODELS" --seasonal-label-revision "$SEASONAL_LABEL_REVISION"
+            --sigma-models "$SIGMA_MODELS" --seasonal-label-revision "$SEASONAL_LABEL_REVISION" \
+            --robust-label-revision "$ROBUST_LABEL_REVISION"
       - name: Delete working files
         if: always()
         run: rm -rf calibration-audit-work

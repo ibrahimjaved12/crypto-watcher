@@ -57,13 +57,16 @@ from .canonical import content_hash, exact_from_str, exact_to_str
 from .costs import COST_MODEL_V1, CostModel
 from .funding import FundingSeries
 from .scan import NON_TRADE_STATUSES, OUTCOMES, Cell, CellPair, label_trade, next_compromised
-from .volatility import (BLOCK_MINUTES, BLOCK_MS, DAY_MS, LAMBDA_NUM, SEASONAL_WINDOW_DAYS, VAR_SCALE,
+from .robust_sigma import ROBUST_MODELS, RobustSigma
+from .volatility import (HCAL_CLIP, HCAL_MIN_DAYS, BLOCK_MINUTES, BLOCK_MS, DAY_MS, LAMBDA_NUM, SEASONAL_WINDOW_DAYS, VAR_SCALE,
                          build_variance, build_variance_deseasonalised, horizon_sigma, horizon_sigma_seasonal,
                          seasonal_factors)
 
 SCHEMA = "labels-v1"
 SCHEMA_V2 = "labels-v2"
-SIGMA_MODELS = {"ewma": SCHEMA, "ewma-seasonal": SCHEMA_V2}
+SCHEMA_V3 = "labels-v3"
+SIGMA_MODELS = {"ewma": SCHEMA, "ewma-seasonal": SCHEMA_V2, "ewma-robust": SCHEMA_V3,
+                "ewma-robust-hcal": SCHEMA_V3}
 LABEL_NON_TRADE_STATUSES = (*NON_TRADE_STATUSES, "P")
 FIXED_COLUMNS = ("signal_ms", "horizon_min", "side", "k", "status", "p0", "sigma", "d_ticks", "leverage",
                  "wallet_ur")
@@ -150,7 +153,8 @@ class LabelParams:
 
     @property
     def header(self) -> tuple:
-        fixed = tuple("sigma_ewma_seasonal" if name == "sigma" and self.seasonal else name for name in FIXED_COLUMNS)
+        model = "sigma_" + self.sigma_model.replace("-", "_")
+        fixed = tuple(model if name == "sigma" and self.sigma_model != "ewma" else name for name in FIXED_COLUMNS)
         return (*fixed, *(f"c{index}" for index in range(len(self.rr_grid))))
 
     def to_record(self) -> dict:
@@ -166,9 +170,16 @@ class LabelParams:
             "cost_model": self.cost_model.to_record(),
             "cost_model_identity": self.cost_model.identity(),
         }
-        if self.seasonal:  # lb1 records (and identities) stay exactly as before
+        if self.sigma_model != "ewma":  # lb1 records (and identities) stay exactly as before
             record["sigma_model"] = self.sigma_model
             record["seasonal_window_days"] = SEASONAL_WINDOW_DAYS
+        if self.sigma_model in ROBUST_MODELS:  # labels-v3 only: lb2 records stay exactly as before
+            record["robust"] = {"statistic": "EWMA of |r5| / 0.797885", "seasonal_on": "|r5|",
+                                "aggregation": "sum of (s * g)^2 over the horizon's blocks"}
+            if self.sigma_model == "ewma-robust-hcal":
+                record["robust"]["hcal"] = {"statistic": "median |ln(open[e+h]/open[e])| / sigma / 0.674490",
+                                            "grid": "label step", "min_days": HCAL_MIN_DAYS,
+                                            "clip": [str(HCAL_CLIP[0]), str(HCAL_CLIP[1])]}
         return record
 
     def identity(self) -> str:
@@ -219,6 +230,13 @@ def build_labels(symbol: str, bars: BarSeries, funding: FundingSeries, params: L
             if day is None:
                 return None
             return lambda: horizon_sigma_seasonal(var, day, (signal_ms % DAY_MS) // BLOCK_MS, horizon)
+    elif params.sigma_model in ROBUST_MODELS:
+        robust = RobustSigma(bars, hcal=params.sigma_model == "ewma-robust-hcal")
+        variances = {days: robust.levels(days) for days in half_lives}
+
+        def sigma_of(var: int, horizon: int, signal_ms: int):
+            value = robust.sigma(horizon, params.half_life(horizon), params.step(horizon), signal_ms)
+            return None if value is None else (lambda: value)
     else:
         variances = {days: build_variance(bars, days).variance for days in half_lives}
 

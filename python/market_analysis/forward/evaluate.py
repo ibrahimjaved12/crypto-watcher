@@ -6,6 +6,11 @@ fields, and the wallet state. Output: new signals and setups, resolutions of eve
 tradeable setup, wallet ledger entries and the new wallet state, plus versions, assumptions and
 ``processed_to_ms`` (the last decision time whose entry minute existed; pass it as the next
 ``from_ms``). Nothing is read from or written to any store.
+
+Funding: with ``funding_available: false`` for a symbol (the caller's funding fetch failed), a
+resolution whose window ``(entry, exit]`` contains a possible funding time (every UTC hour
+boundary: Binance settles on 1, 2, 4 or 8-hour boundaries) is reported as ``open`` and not
+finalised; funding is never filled with zeros. Such symbols are listed in ``funding_unavailable``.
 """
 from __future__ import annotations
 
@@ -18,6 +23,13 @@ from ..benchmark.volatility import build_variance_deseasonalised, seasonal_facto
 from . import VERSIONS
 from .bars_adapter import ASSUMPTIONS, MINUTE_MS, bars_from_collector_rows
 from .outcomes import Resolution, resolve_setup
+
+HOUR_MS = 3_600_000
+
+
+def crosses_funding_time(entry_ms: int, exit_ms: int) -> bool:
+    """True when (entry_ms, exit_ms] contains a UTC hour boundary (a possible funding settlement)."""
+    return exit_ms // HOUR_MS * HOUR_MS > entry_ms
 from .setups import FORWARD_PARAMS, Setup, build_setup
 from .signals import generate_signals
 from .wallet import WalletConfig, initial_state, liquidation_events, step
@@ -38,11 +50,15 @@ def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setu
     state = wallet_state or initial_state(wallet_config)
     out_signals, out_setups, out_resolutions, reasons, wallet_events = [], [], [], {}, []
     processed_to = {}
+    funding_unavailable = []
     liquidation_inputs = []
     for item in symbols:
         symbol = item["symbol"]
         bars = bars_from_collector_rows(symbol, item["rows"])
         funding = _funding(bars, item.get("funding"))
+        funding_ok = item.get("funding_available", True)
+        if not funding_ok:
+            funding_unavailable.append(symbol)
         signals, symbol_reasons = generate_signals(symbol, bars, from_ms, to_ms, strategy_ids)
         reasons[symbol] = symbol_reasons
         processed_to[symbol] = min(to_ms, bars.end_ms - MINUTE_MS)
@@ -65,6 +81,10 @@ def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setu
             if setup.entry_ms < bars.start_ms:
                 continue  # its bars are not in this request; keep the previous resolution
             resolution = resolve_setup(setup, bars, funding, previous)
+            if (not funding_ok and resolution.final and not (previous is not None and previous.final)
+                    and crosses_funding_time(setup.entry_ms, resolution.exit_ms)):
+                resolution = Resolution(setup.setup_id, "open", resolved_through_ms=resolution.resolved_through_ms,
+                                        label_leverage=resolution.label_leverage, wallet_ur=resolution.wallet_ur)
             out_resolutions.append(resolution.to_dict())
             resolutions[setup.setup_id] = resolution.to_dict()
             if resolution.final and not (previous is not None and previous.final):
@@ -85,5 +105,5 @@ def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setu
     new_state, ledger = step(state, wallet_events, wallet_config)
     return {"schema_version": 1, "versions": dict(VERSIONS), "params_hash": FORWARD_PARAMS.identity(),
             "wallet_config": wallet_config.to_record(), "assumptions": [*ASSUMPTIONS, *wallet_config.assumptions],
-            "processed_to_ms": processed_to, "signals": out_signals, "setups": out_setups,
+            "processed_to_ms": processed_to, "funding_unavailable": funding_unavailable, "signals": out_signals, "setups": out_setups,
             "resolutions": out_resolutions, "reasons": reasons, "ledger": ledger, "wallet_state": new_state}

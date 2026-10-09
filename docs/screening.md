@@ -91,3 +91,29 @@ Each comes with a bootstrap interval. There is no PASS/FAIL flag.
 The report states how many series x horizons were examined (currently 1 x 6). Each
 regression, bucket and dose-response line is exploratory. A screen points at where a
 benchmark question might be worth registering; it never replaces one.
+
+## Positioning series (#188, #224)
+
+Four series from the Binance metrics archive (`mx-SYMBOL-MONTH-rN`, `docs/metrics-archive.md`),
+screened at hourly decisions with forward returns at 60 m and 240 m:
+
+| Series | Raw value at decision t |
+| --- | --- |
+| `oi-chg-4h` | `ln(OI[t] / OI[t - 4h])` (positive = open interest rose; not a direction) |
+| `toptrader-ls` | top-trader long/short position ratio |
+| `global-ls` | all-account long/short ratio |
+| `taker-ls-1h` | mean taker buy/sell volume ratio of the last 12 periods |
+
+- **Point in time:** a row stamped T is usable from T + 5 min. A row stamped t - 4 min is not used
+  at t; one stamped t - 5 min is.
+- **Gaps:** a missing period or an empty value stays MISSING. The decision gets no value (z NaN,
+  dropped) and nothing is added to the history.
+- **z:** robust z against the previous 30 days of hourly values (`[t - 30d, t)`, at least 500).
+  The ask was same-hour-of-day history, but 30 days give only 30 same-hour values, so all hours of
+  the window are used.
+- **Quadrant table (`oi-chg-4h` only):** OI up/down x 4 h price up/down, with a dead zone of
+  0.25 sigma_240 on the price move. It reports forward returns at 60/240 m, drift-adjusted, net long
+  and net short.
+- **Multiplicity:** 4 series x 2 horizons plus the quadrant table, reported as one family.
+- **Public lines:** names and counts only, plus the report hash.
+- **Workflow:** `screen.yml` with `series` set to one of the four, and `metrics_revision` (default 1).

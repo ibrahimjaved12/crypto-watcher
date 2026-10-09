@@ -112,6 +112,16 @@ class WalletTests(unittest.TestCase):
         reconcile(self, state, [first, ledger])
 
 
+class FundingAvailabilityTests(unittest.TestCase):
+    def test_windows_containing_a_possible_funding_time(self):
+        from market_analysis.forward.evaluate import crosses_funding_time
+        hour = 3_600_000
+        self.assertFalse(crosses_funding_time(START + 5 * MINUTE, START + 50 * MINUTE))
+        self.assertTrue(crosses_funding_time(START + 50 * MINUTE, START + hour))        # exit at the settlement
+        self.assertTrue(crosses_funding_time(START + 50 * MINUTE, START + hour + MINUTE))
+        self.assertFalse(crosses_funding_time(START + hour, START + hour + 30 * MINUTE))  # entry at it: not inside
+
+
 class ApiTests(unittest.TestCase):
     def test_forward_evaluate_endpoint(self):
         try:

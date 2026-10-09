@@ -93,6 +93,7 @@ export const forwardEvaluateResponseSchema = z.object({
   wallet_config: z.record(z.string(), z.unknown()),
   assumptions: z.array(z.string()),
   processed_to_ms: z.record(z.string(), ms),
+  funding_unavailable: z.array(z.string()).default([]),
   signals: z.array(forwardSignalSchema),
   setups: z.array(forwardSetupSchema),
   resolutions: z.array(forwardResolutionSchema),
@@ -100,6 +101,29 @@ export const forwardEvaluateResponseSchema = z.object({
   ledger: z.array(ledgerEntrySchema),
   wallet_state: walletStateSchema,
 });
+
+/** One public Binance `GET /fapi/v1/fundingRate` row (unauthenticated history). */
+export const binanceFundingRowSchema = z.object({
+  symbol: z.string().regex(/^[A-Z0-9]{5,16}$/),
+  fundingTime: z.number().int().nonnegative(),
+  fundingRate: z.string().regex(/^-?\d+(\.\d+)?(e-?\d+)?$/i),
+  markPrice: z.string().optional(),
+});
+export const binanceFundingResponseSchema = z.array(binanceFundingRowSchema).max(1000);
+
+export type FundingEvent = { calc_time_ms: number; rate: string };
+
+/** Typed, value-free validation of a Binance funding history response for one symbol. */
+export function parseBinanceFunding(symbol: string, value: unknown): FundingEvent[] {
+  const parsed = binanceFundingResponseSchema.safeParse(value);
+  if (!parsed.success) throw new Error("Invalid Binance funding response");
+  let previous = -1;
+  return parsed.data.map((row) => {
+    if (row.symbol !== symbol || row.fundingTime <= previous) throw new Error("Invalid Binance funding response");
+    previous = row.fundingTime;
+    return { calc_time_ms: row.fundingTime, rate: row.fundingRate };
+  });
+}
 
 export type ForwardEvaluateResponse = z.infer<typeof forwardEvaluateResponseSchema>;
 export type ForwardSetup = z.infer<typeof forwardSetupSchema>;

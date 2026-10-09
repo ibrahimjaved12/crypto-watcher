@@ -368,3 +368,53 @@ def load_symbol_metrics(metrics_dir, symbol: str, first_month: str, last_month: 
         with (Path(metrics_dir) / csv_asset_name(symbol, month)).open("rb") as stream:
             rows.extend(read_metrics_csv(stream, symbol, month))
     return rows
+
+
+# ---------------------------------------------------------------- range loader (positioning screen, #188)
+
+
+@dataclass(frozen=True)
+class MetricsSeries:
+    """5-minute metrics on a contiguous grid indexed by ``usable_from_ms``.
+
+    Index ``i`` holds the row with ``usable_from_ms == start_ms + i * PERIOD_MS``; a period without a
+    row, or an empty published value, is NaN (the float MISSING) in that column, never filled.
+    ``index_at(t)`` is the latest period usable at decision time ``t`` (``usable_from <= t``).
+    """
+
+    symbol: str
+    start_ms: int
+    periods: int
+    columns: dict  # VALUE_COLUMNS name -> numpy float array
+
+    def index_at(self, time_ms: int) -> int | None:
+        index = (time_ms - self.start_ms) // PERIOD_MS
+        return index if 0 <= index < self.periods else None
+
+
+def load_symbol_metrics_range(metrics_dir, symbol: str, first_month: str, last_month: str, *, token=None,
+                              gate=None) -> MetricsSeries:
+    """Guarded loader (hidden months need a verified token before any file is opened) -> ``MetricsSeries``.
+
+    The grid starts at the first month's start + one period (the usable time of a row stamped at
+    00:00) and ends at the usable time of a row stamped at the end of the last month. A row whose
+    usable time is off the 5-minute grid raises ``MetricsFormatError``.
+    """
+    import numpy as np
+
+    rows = load_symbol_metrics(metrics_dir, symbol, first_month, last_month, token=token, gate=gate)
+    start = data_lake.month_bounds_ms(first_month)[0] + POINT_IN_TIME_LAG_PERIODS * PERIOD_MS
+    end = data_lake.month_bounds_ms(last_month)[1] + POINT_IN_TIME_LAG_PERIODS * PERIOD_MS
+    periods = (end - start) // PERIOD_MS + 1
+    columns = {name: np.full(periods, np.nan) for name in VALUE_COLUMNS}
+    for row in rows:
+        offset = usable_from_ms(row.create_time_ms) - start
+        if offset % PERIOD_MS:
+            raise MetricsFormatError(f"{symbol} metrics row at {row.create_time_ms} is off the 5-minute grid")
+        index = offset // PERIOD_MS
+        if not 0 <= index < periods:
+            continue
+        for name, text in zip(VALUE_COLUMNS, row.values):
+            if text != "":
+                columns[name][index] = float(data_lake.exact_decimal(text))
+    return MetricsSeries(symbol, start, periods, columns)

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Screening mode (#220 slice B) against the private research-data repo. Descriptive only, never a PASS.
 
-Downloads the rd bars and funding (FIRST_MONTH..segment end) of the six symbols, runs
+Downloads the rd bars and funding (FIRST_MONTH..segment end) of the six symbols (and, for the
+positioning series of #188, the ``mx-SYMBOL-MONTH-rN`` metrics releases of the same months), runs
 ``market_analysis.benchmark.screen`` one symbol at a time and commits the full report
 (JSON + Markdown) to reports/screens/ in the private repo. Labels, the experiment
 ledger and existing reports are never read or written.
@@ -15,6 +16,7 @@ print their type name only.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
@@ -24,7 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
 
 import experiment_run as xr  # noqa: E402  (scripts/research: Checkout, Progress, downloads)
 from data_lake_build import ResearchDataRepo  # noqa: E402
+from label_build import download  # noqa: E402
 from market_analysis import data_lake as lake  # noqa: E402
+from market_analysis import metrics_lake as mx  # noqa: E402
 from market_analysis.benchmark import screen as sc  # noqa: E402
 from market_analysis.benchmark.calibration import AUDIT_SEGMENTS, check_segment  # noqa: E402
 from market_analysis.benchmark.canonical import canonical_bytes  # noqa: E402
@@ -34,7 +38,7 @@ from market_analysis.benchmark.segments import segment_months  # noqa: E402
 NOW_UTC = xr.NOW_UTC  # the only wall-clock read (at import of experiment_run)
 PublicError, GitError, Checkout, emit, _quiet = xr.PublicError, xr.GitError, xr.Checkout, xr.emit, xr._quiet
 
-PHASES = frozenset({"checkout", "bars download", "screen", "statistics", "report write", "push"})
+PHASES = frozenset({"checkout", "bars download", "metrics download", "screen", "statistics", "report write", "push"})
 COUNT_KEYS = xr.COUNT_KEYS
 
 
@@ -55,6 +59,39 @@ class ScreenProgress(xr.Progress):
         return lines
 
 
+_MANIFEST_LIMIT = 16 << 20
+
+
+def download_metrics(repo, symbol: str, month: str, revision: int, dest: Path) -> str:
+    """Download one ``mx-SYMBOL-MONTH-rN`` csv.gz into ``dest``, sha256-verified (asset digest, else the
+    release manifest's sha256, as ``daily_download``); returns its sha256."""
+    tag = mx.release_tag(symbol, month, revision)
+    release = repo.published_release(tag)
+    if release is None or release.get("tag_name") != tag or release.get("draft") is not False:
+        raise PublicError(f"missing published release: {tag}")
+    assets = repo.assets(release["id"])
+    name = mx.csv_asset_name(symbol, month)
+    if name not in assets:
+        raise PublicError(f"{tag}: missing asset {name}")
+    expected = None
+    if not assets[name].get("digest"):
+        manifest_name = mx.manifest_asset_name(symbol, month)
+        if manifest_name not in assets:
+            raise PublicError(f"{tag}: missing {manifest_name} for checksum fallback")
+        manifest_path = Path(dest) / manifest_name
+        download(repo, assets[manifest_name], manifest_path, limit=_MANIFEST_LIMIT)
+        manifest = json.loads(manifest_path.read_bytes())
+        if (manifest.get("release_tag") != tag or manifest.get("symbol") != symbol
+                or manifest.get("month") != month):
+            raise PublicError(f"{tag}: manifest identity mismatch")
+        matches = [item["sha256"] for item in manifest.get("assets", []) if item.get("name") == name]
+        if len(matches) != 1:
+            raise PublicError(f"{tag}: no unique sha256 for {name}")
+        expected = matches[0]
+    sha, _ = download(repo, assets[name], Path(dest) / name, expected)
+    return sha
+
+
 def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progress) -> list[str]:
     if args.series not in sc.SERIES:
         raise PublicError(f"series must be one of {', '.join(sc.SERIES)}")
@@ -68,11 +105,22 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
             set_symbol(symbol_index)
             _quiet(xr._download_symbol_bars, repo, revisions, bars_dir, None, symbol, months)
             progress.phase("bars download", symbol_index=symbol_index, symbols=len(symbols), months=len(months))
+    metrics_dir = None
+    if args.series in sc.POSITIONING_SERIES:
+        metrics_dir = workdir / "metrics"
+        metrics_dir.mkdir(parents=True)
+        with progress.stage("metrics download", total=len(symbols)) as set_symbol:
+            for symbol_index, symbol in enumerate(symbols, 1):
+                set_symbol(symbol_index)
+                for month in months:
+                    _quiet(download_metrics, repo, symbol, month, args.metrics_revision, metrics_dir)
+                progress.phase("metrics download", symbol_index=symbol_index, symbols=len(symbols),
+                               months=len(months))
     results = {}
     with progress.stage("screen", total=len(symbols)) as set_symbol:
         for symbol_index, symbol in enumerate(symbols, 1):
             set_symbol(symbol_index)
-            results[symbol] = _quiet(sc.run_symbol, bars_dir, symbol, args.segment, args.series)
+            results[symbol] = _quiet(sc.run_symbol, bars_dir, symbol, args.segment, args.series, metrics_dir)
             progress.phase("screen", symbol_index=symbol_index, symbols=len(symbols))
     with progress.stage("statistics"):
         report = _quiet(sc.build_report, args.segment, results, series=args.series,
@@ -95,7 +143,8 @@ def parse_args(argv=None):
     parser.add_argument("--summary", type=Path, help="append the public output (markdown)")
     parser.add_argument("--segment", required=True, help="development | validation (hidden is refused)")
     parser.add_argument("--data-revision", type=int, default=1)
-    parser.add_argument("--series", default=sc.SERIES[0], help="state series to screen (of-cum240-z)")
+    parser.add_argument("--metrics-revision", type=int, default=1, help="mx metrics release revision")
+    parser.add_argument("--series", default=sc.SERIES[0], help=f"state series to screen ({', '.join(sc.SERIES)})")
     return parser.parse_args(argv)
 
 
