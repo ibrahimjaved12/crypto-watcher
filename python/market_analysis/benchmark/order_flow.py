@@ -190,10 +190,9 @@ def toh1m(bars: BarSeries, funding: FundingSeries, *, theta: Fraction, decision_
     return signals
 
 
-def cum240(bars: BarSeries, funding: FundingSeries, *, theta: Fraction, rearm_below: Fraction, window_min: int,
-           decision_step_min: int, history_days: int, min_history: int, cooldown_min: int) -> list:
-    """[(signal_ms, side)] for crossings of the rolling-window imbalance z (re-armed below rearm_below)."""
-    del funding  # same builder signature as toh1m; the cumulative window ignores funding hours
+def cum240_z_series(bars: BarSeries, *, window_min: int, decision_step_min: int, history_days: int,
+                    min_history: int) -> list:
+    """[(signal_ms, z or None)] of the rolling-window imbalance at every decision time (the cum240 z series)."""
     compromised = CompromisedIndex(bars)
     history, zs = TrailingHistory(history_days * _DAY), []
     step = decision_step_min * _MINUTE
@@ -209,6 +208,15 @@ def cum240(bars: BarSeries, funding: FundingSeries, *, theta: Fraction, rearm_be
         if value is not None:
             history.add(signal_ms, value)
         zs.append((signal_ms, z))  # None restarts the crossing, as indicators do after an invalid candle
+    return zs
+
+
+def cum240(bars: BarSeries, funding: FundingSeries, *, theta: Fraction, rearm_below: Fraction, window_min: int,
+           decision_step_min: int, history_days: int, min_history: int, cooldown_min: int) -> list:
+    """[(signal_ms, side)] for crossings of the rolling-window imbalance z (re-armed below rearm_below)."""
+    del funding  # same builder signature as toh1m; the cumulative window ignores funding hours
+    zs = cum240_z_series(bars, window_min=window_min, decision_step_min=decision_step_min,
+                         history_days=history_days, min_history=min_history)
     return [(signal_ms, sign(z)) for signal_ms, z in crossing_signals(
         zs, theta=theta, rearm_below=rearm_below, cooldown_ms=cooldown_min * _MINUTE)]
 

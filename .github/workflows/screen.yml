@@ -1,0 +1,80 @@
+name: Screen
+run-name: "Screen ${{ inputs.series }} ${{ inputs.segment }}"
+
+# Screening mode (#220 slice B; scripts/research/screen.py). Descriptive only: no trades,
+# labels, ledger entries or PASS/FAIL. The full report goes to reports/screens/ in the
+# private research-data repository; this public log and the job summary carry only symbol,
+# horizon, segment, N and excluded counts, the report hash, and allowlisted progress lines
+# (no coefficients or returns). The hidden segment is not offered here and is refused by the
+# hidden guard in the script and the library.
+on:
+  workflow_dispatch:
+    inputs:
+      segment:
+        description: "development | validation"
+        type: choice
+        options: [development, validation]
+        default: development
+      data_revision:
+        description: "rd data release revision"
+        type: string
+        default: "1"
+      series:
+        description: "State series to screen"
+        type: choice
+        options: [of-cum240-z]
+        default: of-cum240-z
+
+permissions:
+  contents: read
+
+concurrency:
+  group: screen-${{ inputs.series }}-${{ inputs.segment }}
+  cancel-in-progress: false
+
+jobs:
+  screen:
+    name: Screen
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            python/requirements.txt
+            python/requirements-research.txt
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+          .venv/bin/python -m pip install -r requirements-research.txt
+      - name: Run screen
+        env:
+          SEGMENT: ${{ inputs.segment }}
+          DATA_REVISION: ${{ inputs.data_revision }}
+          SERIES: ${{ inputs.series }}
+          SCREEN_SUMMARY: ${{ runner.temp }}/screen-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: |
+          python/.venv/bin/python scripts/research/screen.py --workdir screen-work \
+            --summary "$SCREEN_SUMMARY" --segment "$SEGMENT" --data-revision "$DATA_REVISION" \
+            --series "$SERIES"
+      - name: Delete working files
+        if: always()
+        run: rm -rf screen-work
+      - name: Summary
+        if: always()
+        env:
+          SCREEN_SUMMARY: ${{ runner.temp }}/screen-summary.md
+        run: |
+          if [ -f "$SCREEN_SUMMARY" ]; then
+            cat "$SCREEN_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
