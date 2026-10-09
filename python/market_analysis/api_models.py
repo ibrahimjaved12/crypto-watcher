@@ -505,7 +505,7 @@ class ForwardTrendRequest(InputModel):
     expected_symbols: tuple[str, ...] | None = None
     saved_params_hash: str | None = None
     decisions: list[dict[str, Any]] = Field(default_factory=list)
-    evaluated_at_ms: Timestamp | None = None
+    evaluated_at_ms: Timestamp  # supplied by the caller: the evaluator is pure (no wall clock)
 
     @model_validator(mode="after")
     def unique(self):

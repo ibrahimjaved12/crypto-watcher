@@ -33,7 +33,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_EVEN
 from fractions import Fraction
-import time
 
 import numpy as np
 
@@ -303,7 +302,7 @@ def symbol_history(item: dict, through_day_ms: int, history_start_ms: int = HIST
 def evaluate(symbols: list, through_day_ms: int, states: dict | None = None,
              track_start_ms: int = TRACK_START_MS, history_start_ms: int = HISTORY_START_MS,
              expected_symbols=None, saved_params_hash: str | None = None,
-             decisions: list | None = None, evaluated_at_ms: int | None = None) -> dict:
+             decisions: list | None = None, *, evaluated_at_ms: int) -> dict:
     """Finalise every completed day after each track's state, through ``through_day_ms``.
 
     Returns new ledger rows, the weight rows of the evaluated days and of the next day (decided from
@@ -355,7 +354,7 @@ def evaluate(symbols: list, through_day_ms: int, states: dict | None = None,
             row = {"track": track.name, "day_ms": day_ms, "decided_from_close_ms": day_ms - DAY_MS,
                    "weights": {symbol: w for symbol, (w, _) in weights.items()},
                    "defined": {symbol: d for symbol, (_, d) in weights.items()},
-                   "decided_at_ms": int(time.time() * 1000) if evaluated_at_ms is None else evaluated_at_ms}
+                   "decided_at_ms": evaluated_at_ms}
             prior = recorded.get((track.name, day_ms))
             if prior:
                 if any(prior[key] != row[key] for key in ("weights", "defined", "decided_from_close_ms")):

@@ -76,15 +76,19 @@ export async function updateDailyFeed(
     ? TREND_HISTORY_START_MS
     : (stored.at(-1)?.day_ms ?? TREND_HISTORY_START_MS - DAY_MS) + DAY_MS;
   let inserted = 0;
+  let fetchedAny = false;
   while (cursor <= lastCompleteMs) {
+    fetchedAny = true;
     const fetched = await deps.fetchDailyKlines(symbol, cursor, nowMs);
     const fresh = fetched.filter((bar) => bar.day_ms >= cursor && bar.day_ms <= lastCompleteMs);
     if (!fresh.length) throw new Error("Daily history does not reach the required boundary");
+    // Throws on a stored day whose payload differs (explicit conflict, never a silent replacement).
     inserted += await deps.recordDailyBars(fresh, nowMs);
-    for (const bar of fresh) bars.set(bar.day_ms, bar);
     cursor = fresh.at(-1)!.day_ms + DAY_MS;
   }
-  return { bars: [...bars.values()].sort((a, b) => a.day_ms - b.day_ms), inserted };
+  if (!fetchedAny) return { bars: [...bars.values()], inserted };
+  // Python must see the committed values: read them back instead of using the fetched copies.
+  return { bars: await deps.readDailyBars(symbol, TREND_HISTORY_START_MS), inserted };
 }
 
 /** Paginate until closing midnight is observed. A short page is never evidence of coverage.
@@ -161,9 +165,12 @@ export async function runForwardTrend(
       const feed = await updateDailyFeed(deps, symbol, lastCompleteMs, now, !snapshot);
       bars.set(symbol, feed.bars);
       inserted += feed.inserted;
-    } catch {
+    } catch (error) {
       bars.set(symbol, await deps.readDailyBars(symbol, TREND_HISTORY_START_MS));
-      reasons.push(`${symbol}: daily kline fetch failed or history incomplete`);
+      const message = error instanceof Error ? error.message : "";
+      const conflict = /forward daily bar conflict: [A-Z0-9]+ \d{4}-\d{2}-\d{2}/.exec(message)?.[0];
+      reasons.push(conflict ? `${symbol}: ${conflict} (stored candle differs from Binance; not overwritten)`
+        : `${symbol}: daily kline fetch failed or history incomplete`);
       if (!snapshot) startupIncomplete = true;
     }
     const series = bars.get(symbol)!;
@@ -233,6 +240,7 @@ export async function runForwardTrend(
   const response = validateTrendResponse(
     await deps.callPython({
       schema_version: 1,
+      evaluated_at_ms: now,  // the orchestration's clock; Python never reads one
       symbols: symbols.map((symbol) => {
         const coverage = funding.get(symbol)!;
         return {

@@ -209,6 +209,15 @@ class ApiTests(unittest.TestCase):
                                      "saved_params_hash": "0" * 64}, headers))
         self.assertEqual(mismatched.status_code, 409)
         self.assertEqual(asyncio.run(send(body, {})).status_code, 401)
+        no_clock = {key: value for key, value in body.items() if key != "evaluated_at_ms"}
+        self.assertEqual(asyncio.run(send(no_clock, headers)).status_code, 422)  # the caller supplies the time
+
+    def test_evaluator_is_pure(self):
+        data = fixture()
+        with self.assertRaises(TypeError):  # no wall-clock fallback
+            tt.evaluate(forward_symbols(data), S0 + 505 * DAY, track_start_ms=S0 + 500 * DAY)
+        first = evaluate(forward_symbols(data), S0 + 505 * DAY, track_start_ms=S0 + 500 * DAY)
+        self.assertEqual(evaluate(forward_symbols(data), S0 + 505 * DAY, track_start_ms=S0 + 500 * DAY), first)
 
 class RecoveryTests(unittest.TestCase):
     def test_incomplete_universe_never_emits_initial_state_or_decisions(self):

@@ -208,3 +208,17 @@ Python owns all moments and the power calculation, using `benchmark.power`:
 formats the saved values. **Minimum detectable edge** uses a normal approximation, independent
 daily returns, two-sided alpha 0.05 and 80% power. It is a sample-size/power estimate, not a
 significance test or a verdict on the strategy. See the [NIST sample-size discussion](https://itl.nist.gov/div898/handbook/prc/section2/prc222.htm).
+
+### Committed candles and a pure evaluator
+
+- **Committed candles:** `record_forward_daily_bars` compares each incoming row with a stored
+  (symbol, day).
+  - A differing payload raises `forward daily bar conflict: SYMBOL DAY`. It is never silently
+    dropped, and the stored row is never overwritten.
+  - The run records that day as a diagnostic (`partial`).
+  - After writing, the feed reads the rows back, so Python always computes from the committed
+    values.
+- **No clock in Python:** the request requires `evaluated_at_ms`, which the orchestration supplies
+  from its own clock. `trend_track.evaluate` never reads a wall clock, so identical requests give
+  identical responses. The Postgres recording time (`created_at`) remains the authoritative record
+  time.

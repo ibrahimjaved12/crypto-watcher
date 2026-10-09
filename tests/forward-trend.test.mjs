@@ -190,6 +190,14 @@ function fakeDeps({ fundingFails = false, reply = () => response() } = {}) {
         let changed = 0;
         for (const bar of bars) {
           const key = `${bar.symbol}|${bar.day_ms}`;
+          const stored = db.get(key);
+          if (stored && ["open", "high", "low", "close", "volume", "quote_volume"].some((k) => stored[k] !== bar[k])) {
+            // As the record RPC: a differing duplicate is an explicit conflict, never dropped silently.
+            throw new Error(`forward daily bar conflict: ${bar.symbol} ${new Date(bar.day_ms).toISOString().slice(0, 10)}`);
+          }
+        }
+        for (const bar of bars) {
+          const key = `${bar.symbol}|${bar.day_ms}`;
           if (!db.has(key)) {
             db.set(key, bar);
             changed++;
@@ -628,6 +636,40 @@ test("default user selection pages all accounts; UUID override remains optional"
   assert.deepEqual(await listForwardUsers(client, USER), [USER]);
   assert.equal(pages.length, 3);
   await assert.rejects(() => listForwardUsers(client, "invalid"), /UUID/);
+});
+
+test("the feed hands Python the committed candles; a differing duplicate is an explicit conflict", async () => {
+  const committed = { symbol: "BTCUSDT", day_ms: trend.TREND_HISTORY_START_MS, open: "100.0", high: "103.0",
+    low: "99.0", close: "101.5", volume: "10.5", quote_volume: "1050.25" };
+  const db = new Map([[committed.day_ms, committed]]);
+  const deps = {
+    readDailyBars: async () => [...db.values()].sort((a, b) => a.day_ms - b.day_ms),
+    recordDailyBars: async (bars) => {
+      for (const bar of bars) if (!db.has(bar.day_ms)) db.set(bar.day_ms, { ...bar });
+      return bars.length - 1;
+    },
+    fetchDailyKlines: async (symbol, startMs) =>
+      [startMs, startMs + DAY].map((day) => ({ ...committed, day_ms: day, close: day === startMs ? "999.0" : "101.5" })),
+  };
+  const feed = await trend.updateDailyFeed(deps, "BTCUSDT", trend.TREND_HISTORY_START_MS + DAY, NOW);
+  assert.equal(feed.bars[0].close, "101.5");  // the stored value, not the refetched copy
+  assert.equal(feed.bars.length, 2);
+  const { calls, deps: conflicting } = fakeDeps();
+  const record = conflicting.recordDailyBars;
+  conflicting.recordDailyBars = async (bars, at) => {
+    await record(bars, at);
+    throw new Error(`forward daily bar conflict: ${bars[0].symbol} 2025-08-07`);
+  };
+  const summary = await trend.runForwardTrend(conflicting, { userId: USER, trigger: "daily", symbols: ["BTCUSDT"] });
+  assert.equal(summary.status, "partial");
+  assert.match(summary.reason, /forward daily bar conflict: BTCUSDT 2025-08-07 \(stored candle differs/);
+  assert.equal(calls.python.length, 0);
+});
+
+test("the Python request carries the orchestration's clock", async () => {
+  const { calls, deps } = fakeDeps();
+  await trend.runForwardTrend(deps, { userId: USER, trigger: "daily", symbols: ["BTCUSDT"] });
+  for (const body of calls.python) assert.equal(body.evaluated_at_ms, NOW);
 });
 
 test("daily schedule is 00:05 UTC", () => {

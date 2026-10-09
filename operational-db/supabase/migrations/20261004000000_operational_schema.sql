@@ -1202,9 +1202,23 @@ LANGUAGE plpgsql SECURITY INVOKER SET search_path = public
 AS $$
 DECLARE
   inserted INTEGER;
+  conflict RECORD;
 BEGIN
   IF p_rows IS NULL OR jsonb_typeof(p_rows) <> 'array' OR jsonb_array_length(p_rows) > 2000 THEN
     RAISE EXCEPTION 'Invalid forward daily bar batch';
+  END IF;
+  -- A day already stored must arrive with the same payload: a differing duplicate is never silently
+  -- dropped (the caller would compute from values that are not the committed ones).
+  SELECT r.symbol, r.day INTO conflict
+    FROM jsonb_to_recordset(p_rows) AS r(symbol TEXT, day DATE, open NUMERIC, high NUMERIC, low NUMERIC,
+      close NUMERIC, volume NUMERIC, quote_volume NUMERIC)
+    JOIN public.forward_daily_bars b ON b.symbol = r.symbol AND b.day = r.day
+    WHERE (b.open, b.high, b.low, b.close, b.volume, b.quote_volume)
+      IS DISTINCT FROM (r.open, r.high, r.low, r.close, r.volume, r.quote_volume)
+    ORDER BY r.day LIMIT 1;
+  IF FOUND THEN
+    RAISE EXCEPTION 'forward daily bar conflict: % %', conflict.symbol, conflict.day
+      USING ERRCODE = '23505';
   END IF;
   INSERT INTO public.forward_daily_bars
     (symbol, day, open, high, low, close, volume, quote_volume, source, received_at)
