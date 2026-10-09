@@ -200,16 +200,21 @@ export async function runTA(
             });
           }
           const last = candles.at(-1)!;
+          // A candle is analysable only with TA_MINIMUM_HISTORY completed candles up to and
+          // including it. When the saved checkpoint is older than the available history (or falls in
+          // its first candles), the candles before that point cannot be analysed and get no signal
+          // (never an invented one); catch-up resumes from the first analysable candle instead of
+          // failing forever on the oldest.
           let candidates =
             latestAt === null
               ? [last]
-              : candles.filter((candle) => candle.time > latestAt && candle.time <= expected);
+              : candles.filter(
+                  (candle, index) =>
+                    candle.time > latestAt &&
+                    candle.time <= expected &&
+                    index + 1 >= TA_MINIMUM_HISTORY,
+                );
 
-          if (latestAt !== null && latestAt < candles[0]!.time) {
-            throw new Error(
-              `TA catch-up gap exceeds the available ${candles.length}-candle history`,
-            );
-          }
           if (candidates.length === 0) {
             throw new Error("Expected completed TA candle is not available");
           }
