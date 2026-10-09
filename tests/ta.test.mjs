@@ -897,7 +897,7 @@ test("collector mode reads canonical completed candles and never a second live s
     };
     const missing = await runTA(db, "owner", "BTCUSDT", context, pythonResults, emptyStore);
     assert.equal(missing.length, 3);
-    assert.ok(missing.every((error) => /At least 200 completed candles required/.test(error)));
+    assert.ok(missing.every((error) => /Collector history is still warming up \(\d+\/200 completed candles\)/.test(error)));
     assert.equal(restCalls, 0);
 
     // Stale canonical history also fails visibly.

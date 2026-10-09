@@ -16,12 +16,23 @@ let serverEntryPromise: Promise<ServerEntry> | undefined;
 // schedules. It is loaded lazily so the server entry stays light, runs at most once
 // per process, and never starts or hosts the collector itself (#82).
 let collectorUniverseReconciled = false;
+let collectorUniverseRetryAt = 0;
 function reconcileCollectorUniverseOnFirstRequest(): void {
-  if (collectorUniverseReconciled) return;
+  if (collectorUniverseReconciled || Date.now() < collectorUniverseRetryAt) return;
   collectorUniverseReconciled = true;
   void import("./lib/market/collector-subscriptions.server")
     .then((module) => module.bootstrapCollectorUniverse())
+    .then((reconciled) => {
+      // A failed attempt (e.g. the operational database was still starting) is retried on a
+      // later request, at most every 10 s, instead of leaving the collector unsubscribed.
+      if (!reconciled) {
+        collectorUniverseReconciled = false;
+        collectorUniverseRetryAt = Date.now() + 10_000;
+      }
+    })
     .catch((error) => {
+      collectorUniverseReconciled = false;
+      collectorUniverseRetryAt = Date.now() + 10_000;
       console.error(
         `[collector-universe] bootstrap unavailable: ${
           error instanceof Error ? error.message : String(error)
