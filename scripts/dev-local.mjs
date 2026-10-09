@@ -115,6 +115,10 @@ async function main() {
   run("supabase", ["start"], "Could not start local Supabase. Ensure Docker is running.", {
     quiet: true,
   });
+  // The local DB restores from a backup, so migrations added since it was created are missing.
+  run("supabase", ["migration", "up", "--local"], "Could not apply pending local migrations.", {
+    quiet: true,
+  });
   console.log("[local-dev] Supabase is ready.");
   if (withOperational) {
     console.log("[local-dev] Starting the separate operational Supabase if needed…");
@@ -122,6 +126,12 @@ async function main() {
       "supabase",
       ["start", "--workdir", "operational-db"],
       "Could not start local operational Supabase. Ensure Docker is running.",
+      { quiet: true },
+    );
+    run(
+      "supabase",
+      ["migration", "up", "--local", "--workdir", "operational-db"],
+      "Could not apply pending operational migrations. If the operational schema was edited in place, reset it: supabase db reset --local --workdir operational-db",
       { quiet: true },
     );
     console.log("[local-dev] Operational Supabase is ready.");
