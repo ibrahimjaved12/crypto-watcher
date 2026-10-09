@@ -1,0 +1,127 @@
+name: Daily build
+run-name: "Daily build ${{ inputs.symbols }} ${{ inputs.start_month }}..${{ inputs.end_month }} publish=${{ inputs.publish }}"
+
+# Daily bars and funding history (dk1) for #222/#223 (scripts/research/daily_build.py): for
+# each symbol, download the Binance monthly 1d kline and fundingRate zips of the whole month
+# range with their .CHECKSUM files (404 = recorded gap), verify checksums, build the daily
+# and funding csv.gz files, a tar of the original zips and the manifest, and (only with
+# publish=true) publish one immutable release dk1-SYMBOL-FIRST_LAST-r1 to the private
+# research-data repository, never marked Latest. Indicator warm-up and context only:
+# evaluation segments are unchanged. Existing releases are never edited or deleted. Logs and
+# summaries carry only names, sizes, hashes and aggregate statistics: this repository is
+# public. Run a dry run (publish=false) first.
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: Comma-separated subset of BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        type: string
+        default: BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        required: true
+      start_month:
+        description: First month (YYYY-MM, not before 2019-09)
+        type: string
+        default: "2020-01"
+        required: true
+      end_month:
+        description: Last month (YYYY-MM, must be fully finished in UTC)
+        type: string
+        default: "2026-09"
+        required: true
+      publish:
+        description: Publish releases (false = build and verify only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Validate inputs and plan the matrix
+        id: plan
+        env:
+          DAILY_SYMBOLS: ${{ inputs.symbols }}
+          DAILY_START: ${{ inputs.start_month }}
+          DAILY_END: ${{ inputs.end_month }}
+        shell: python
+        run: |
+          import calendar, json, os, re, sys, time
+
+          allowed = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT")
+          raw = os.environ["DAILY_SYMBOLS"]
+          if not re.fullmatch(r"[A-Z]+(,[A-Z]+)*", raw):
+              sys.exit("symbols must be a comma-separated list without spaces")
+          symbols = raw.split(",")
+          if len(set(symbols)) != len(symbols) or any(s not in allowed for s in symbols):
+              sys.exit(f"symbols must be distinct members of {','.join(allowed)}")
+          month = re.compile(r"(\d{4})-(0[1-9]|1[0-2])")
+          start, end = os.environ["DAILY_START"], os.environ["DAILY_END"]
+          if not month.fullmatch(start) or not month.fullmatch(end):
+              sys.exit("months must be YYYY-MM")
+          if start < "2019-09" or start > end:
+              sys.exit("start_month must be >= 2019-09 and <= end_month")
+          year, mon = int(end[:4]), int(end[5:])
+          end_ms = calendar.timegm((year, mon, calendar.monthrange(year, mon)[1], 0, 0, 0)) * 1000 + 86_400_000
+          if end_ms > time.time() * 1000:
+              sys.exit(f"{end} is not a fully finished UTC month")
+          include = [{"symbol": s, "start": start, "end": end} for s in symbols]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("matrix=" + json.dumps({"include": include}, separators=(",", ":")) + "\n")
+          print(f"planned {len(include)} symbols for {start}..{end}")
+
+  build:
+    needs: plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    concurrency:
+      group: daily-${{ matrix.symbol }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Build daily history ${{ matrix.symbol }}
+        env:
+          DAILY_SYMBOL: ${{ matrix.symbol }}
+          DAILY_START: ${{ matrix.start }}
+          DAILY_END: ${{ matrix.end }}
+          DAILY_PUBLISH: ${{ inputs.publish }}
+          DAILY_SUMMARY: ${{ runner.temp }}/daily-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ inputs.publish && vars.RESEARCH_DATA_REPOSITORY || '' }}
+          RESEARCH_DATA_TOKEN: ${{ inputs.publish && secrets.RESEARCH_DATA_TOKEN || '' }}
+        run: |
+          args=(--symbol "$DAILY_SYMBOL" --first-month "$DAILY_START" --last-month "$DAILY_END"
+                --workdir daily-build-work --summary "$DAILY_SUMMARY")
+          if [ "$DAILY_PUBLISH" = "true" ]; then
+            args+=(--publish)
+          fi
+          python scripts/research/daily_build.py "${args[@]}"
+      - name: Delete working files
+        if: always()
+        run: rm -rf daily-build-work
+      - name: Summary
+        if: always()
+        env:
+          DAILY_SUMMARY: ${{ runner.temp }}/daily-summary.md
+        run: |
+          if [ -f "$DAILY_SUMMARY" ]; then
+            cat "$DAILY_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
