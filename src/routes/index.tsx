@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Activity, Bell, Clock, Database, LineChart, ShieldCheck } from "lucide-react";
+import { Activity, Bell, Clock, FlaskConical, LineChart, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
@@ -10,13 +10,13 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Track crypto pairs, watch 5m to 24h price moves, and get threshold alerts saved to your private history. Monitoring keeps running when your browser is closed.",
+          "A personal crypto futures watcher with alerts and a cost-realistic paper-trading lab. Place real orders manually.",
       },
       { property: "og:title", content: "Crypto Watch — Personal Crypto Market Monitor" },
       {
         property: "og:description",
         content:
-          "Private watchlists, real exchange data, scheduled price monitoring and searchable alert history.",
+          "Follow crypto futures, save alerts and test strategies with fake money and realistic fees.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -29,12 +29,12 @@ const FEATURES = [
   {
     icon: LineChart,
     title: "Live market view",
-    body: "Real public exchange prices and candles, with 5m, 15m, 1h, 4h and 24h changes per pair.",
+    body: "See prices, a 24-hour chart and moves from five minutes to a day, all in one place.",
   },
   {
     icon: Clock,
     title: "Runs without you",
-    body: "A scheduled backend check every 5 minutes — no browser tab required.",
+    body: "Scheduled checks keep watching your pairs even when this tab is closed.",
   },
   {
     icon: Bell,
@@ -42,14 +42,14 @@ const FEATURES = [
     body: "Your own percentage threshold and time window, with a cooldown so you are not spammed.",
   },
   {
-    icon: Database,
-    title: "Kept in a database",
-    body: "Watchlists, settings, alerts and notes are stored per account — not in your browser.",
+    icon: FlaskConical,
+    title: "Test before you trust",
+    body: "A paper-trading lab includes fees and funding costs. No strategy has a validated edge yet.",
   },
   {
     icon: ShieldCheck,
     title: "Yours only",
-    body: "Every record is locked to your account. Manual trading only — nothing is ever executed.",
+    body: "Your alerts and notes belong to your account. You place every real order manually.",
   },
 ];
 
@@ -68,22 +68,25 @@ function Landing() {
 
       <section className="mx-auto max-w-6xl px-4 pb-16 pt-10 sm:pt-20">
         <p className="num text-xs uppercase tracking-[0.2em] text-primary">
-          personal market monitoring
+          Your personal crypto futures watcher
         </p>
-        <h1 className="mt-4 max-w-3xl text-4xl font-semibold leading-tight sm:text-6xl">
-          Watch the market move. Decide the trades yourself.
+        <h1 className="mt-4 max-w-3xl text-4xl font-semibold leading-tight sm:text-5xl">
+          See the moves. Understand the signals.
         </h1>
         <p className="mt-5 max-w-2xl text-lg text-muted-foreground">
-          Crypto Watch follows your pairs on real exchange data, checks them on a schedule, and
-          records every threshold crossing with the exact rule and data source behind it.
+          Follow crypto futures with clear alerts and a cost-realistic paper-trading lab. You decide
+          what to trade and place real orders manually.
         </p>
         <div className="mt-8 flex flex-wrap gap-3">
           <Button asChild size="lg">
-            <Link to="/auth">Get started</Link>
+            <Link to="/auth">Open your watchlist</Link>
           </Button>
         </div>
 
-        <div className="mt-16 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <p className="mt-5 max-w-xl text-sm text-muted-foreground">
+          The lab uses fake money. Scores describe indicators; they do not predict profit.
+        </p>
+        <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {FEATURES.map(({ icon: Icon, title, body }) => (
             <div key={title} className="panel p-5">
               <Icon className="size-5 text-primary" aria-hidden />
