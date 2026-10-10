@@ -10,7 +10,9 @@ import { Hint } from "@/components/hint";
 import { EmptyState, PageHeader, SectionTitle, StatusCard, levelStyle } from "@/components/plain";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { summarizeOutcomes } from "@/lib/forward/forward-dashboard";
+import { FiltersBar, LogsPanel, ResultsPanel } from "@/components/forward-lab";
+import { parseSearch, withDefaultRange, type ForwardFilters } from "@/lib/forward/forward-filters";
+import { maxDrawdown } from "@/lib/forward/forward-report";
 import {
   explainSignalEngine,
   explainTrendTrack,
@@ -27,13 +29,12 @@ import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_authenticated/forward")({
   head: () => ({ meta: [{ title: "Strategy Lab — Crypto Watch" }] }),
+  validateSearch: (search: Record<string, unknown>): ForwardFilters => parseSearch(search),
   component: ForwardPage,
 });
 
 const time = (ms: number | null | undefined) =>
   ms ? new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—";
-const r = (value: number | null) =>
-  value === null ? "—" : `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toFixed(2)} R`;
 const coin = (symbol: unknown) => String(symbol ?? "").replace(/USDT$/, "");
 const frame = (minutes: number) => (minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`);
 
@@ -65,6 +66,11 @@ function Side({ side }: { side: unknown }) {
 }
 
 function ForwardPage() {
+  const search = Route.useSearch();
+  const navigate = Route.useNavigate();
+  const filters = useMemo(() => withDefaultRange(search), [search]);
+  const setFilters = (patch: Partial<ForwardFilters>) =>
+    void navigate({ search: (previous) => ({ ...previous, ...patch }), replace: true });
   const loadTrend = useServerFn(getTrendDashboard);
   // Same query (and key) the trend tab uses; loaded on mount as before so both statuses show.
   const trend = useQuery({ queryKey: ["forward-trend-dashboard"], queryFn: () => loadTrend() });
@@ -106,7 +112,7 @@ function ForwardPage() {
             <LabTab value="trend" line={trendLine} icon={Satellite} label="Daily trend portfolios" />
           </TabsList>
           <TabsContent value="signals" className="mt-4">
-            <SignalsSection data={data} line={signalLine} />
+            <SignalsSection data={data} line={signalLine} filters={filters} onFilters={setFilters} />
           </TabsContent>
           <TabsContent value="trend" className="mt-4">
             <TrendSection data={trend} line={trendLine} />
@@ -145,13 +151,16 @@ function LabTab({
 function SignalsSection({
   data,
   line,
+  filters,
+  onFilters,
 }: {
   data: UseQueryResult<Awaited<ReturnType<typeof getForwardDashboard>>>;
   line: StatusLine;
+  filters: ForwardFilters;
+  onFilters: (patch: Partial<ForwardFilters>) => void;
 }) {
   const queryClient = useQueryClient();
   const run = useServerFn(runForwardNow);
-  const [sinceDays, setSinceDays] = useState(30);
   const runNow = useMutation({
     mutationFn: () => run(),
     onSuccess: (summary) => {
@@ -160,10 +169,6 @@ function SignalsSection({
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Signal check failed"),
   });
-  const summary = useMemo(
-    () => summarizeOutcomes(data.data?.outcomeRows ?? [], Date.now() - sinceDays * 86_400_000),
-    [data.data, sinceDays],
-  );
   const latest = data.data?.latestRun as SignalRun | null | undefined;
   const equity = data.data?.equity ?? [];
   const positions = Object.entries(latest?.wallet_state?.positions ?? {});
@@ -193,113 +198,8 @@ function SignalsSection({
         </div>
       </StatusCard>
 
-      <section className="panel p-4 sm:p-5">
-        <SectionTitle
-          title="Results by strategy"
-          hint="Finished paper trades only, after fees and funding. Each strategy is shown next to a random baseline with the same exits."
-          right={
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
-              Sample
-              <select
-                className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground"
-                value={sinceDays}
-                onChange={(event) => setSinceDays(Number(event.target.value))}
-              >
-                {[7, 30, 90, 365].map((days) => (
-                  <option key={days} value={days}>
-                    last {days} days
-                  </option>
-                ))}
-              </select>
-            </label>
-          }
-        />
-        {data.isPending ? (
-          <p className="py-6 text-sm text-muted-foreground">Loading results…</p>
-        ) : data.error ? (
-          <p role="alert" className="py-6 text-sm text-destructive">
-            Results could not be loaded: {data.error.message}
-          </p>
-        ) : summary.length === 0 ? (
-          <EmptyState
-            icon={FlaskConical}
-            title="No finished trades yet"
-            body="The first results appear after a signal fires and its time limit passes; this can take hours."
-          />
-        ) : (
-          <div className="-mx-1 overflow-x-auto px-1" tabIndex={0} aria-label="Results by strategy">
-            <table className="w-full min-w-[760px] text-left text-sm">
-              <thead className="text-xs text-muted-foreground">
-                <tr className="border-b border-border">
-                  <th className="py-2 pr-3 font-medium">Strategy</th>
-                  <th className="py-2 pr-3 text-right font-medium">Trades</th>
-                  <th className="py-2 pr-3 text-right font-medium">Wins</th>
-                  <th className="py-2 pr-3 text-right font-medium">
-                    <Hint text="Target and stop were both touched inside the same candle. Counted with the worse result, never the better one.">
-                      Unclear
-                    </Hint>
-                  </th>
-                  <th className="py-2 pr-3 text-right font-medium">
-                    <Hint term="R">Avg result / trade</Hint>
-                  </th>
-                  <th className="py-2 pr-3 text-right font-medium">
-                    <Hint term="placebo">Random baseline</Hint>
-                  </th>
-                  <th className="py-2 pr-3 font-medium">
-                    <Hint term="rr">Reward : risk</Hint>
-                  </th>
-                  <th className="py-2 font-medium">
-                    <Hint term="scoreBand">Score band</Hint>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {summary.map((row) => {
-                  const label = strategyLabel(row.strategyId);
-                  return (
-                    <tr key={`${row.strategyId}|${row.rr}`} className="border-b border-border/50 align-top">
-                      <td className="py-2 pr-3">
-                        <Hint text={`${label.blurb} (id ${row.strategyId}, ${row.version})`}>
-                          <span className="font-medium">{label.name}</span>
-                        </Hint>
-                      </td>
-                      <td className="num py-2 pr-3 text-right">{row.n}</td>
-                      <td className="num py-2 pr-3 text-right">
-                        {row.wins}
-                        <span className="text-muted-foreground"> ({Math.round((row.wins / row.n) * 100)}%)</span>
-                      </td>
-                      <td className="num py-2 pr-3 text-right">{row.ambiguous}</td>
-                      <td
-                        className={cn(
-                          "num py-2 pr-3 text-right",
-                          row.meanNetR === null ? "" : row.meanNetR > 0 ? "text-bull" : "text-bear",
-                        )}
-                      >
-                        {r(row.meanNetR)}
-                      </td>
-                      <td className="num py-2 pr-3 text-right text-muted-foreground">
-                        {row.placebo ? (
-                          <>
-                            {r(row.placebo.meanNetR)}
-                            <div className="text-[11px]">{row.placebo.n} trades</div>
-                          </>
-                        ) : (
-                          "none yet"
-                        )}
-                      </td>
-                      <td className="num py-2 pr-3">{row.rr}</td>
-                      <td className="py-2 text-xs text-muted-foreground">not scored yet</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <p className="mt-2 text-xs text-muted-foreground">
-              Small samples swing a lot: treat fewer than ~100 trades per strategy as noise.
-            </p>
-          </div>
-        )}
-      </section>
+      <FiltersBar filters={filters} onChange={onFilters} />
+      <ResultsPanel filters={filters} />
 
       <section className="grid gap-6 md:grid-cols-2">
         <div className="panel p-4 sm:p-5">
@@ -387,6 +287,8 @@ function SignalsSection({
           )}
         </div>
       </section>
+
+      <LogsPanel filters={filters} />
     </div>
   );
 }
@@ -726,6 +628,7 @@ function EquityCurve({ points }: { points: { ms: number; balance: number }[] }) 
   const first = points[0]!.balance;
   const last = points.at(-1)!.balance;
   const change = first ? (last - first) / first : 0;
+  const drawdown = maxDrawdown(points);
   return (
     <div>
       <div className="flex flex-wrap items-baseline gap-x-3">
@@ -736,6 +639,15 @@ function EquityCurve({ points }: { points: { ms: number; balance: number }[] }) 
           {change > 0 ? "▲ +" : change < 0 ? "▼ −" : ""}
           {Math.abs(change * 100).toFixed(2)}% since start
         </span>
+        {drawdown ? (
+          <span className="num text-sm text-muted-foreground">
+            <Hint text="Largest fall from a peak to a later low of the wallet balance, measured on the hourly (daily after 60 days) points.">
+              Max drawdown
+            </Hint>{" "}
+            −{drawdown.usdt.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDT (−
+            {(drawdown.fraction * 100).toFixed(2)}%)
+          </span>
+        ) : null}
       </div>
       <svg
         viewBox={`0 0 ${width} ${height}`}
