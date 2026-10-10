@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Activity } from "lucide-react";
+import { Orbit } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -92,7 +92,7 @@ function AuthPage() {
     <div className="flex min-h-screen items-center justify-center px-4 py-12">
       <div className="panel w-full max-w-md p-6">
         <Link to="/" className="mb-6 flex items-center gap-2 font-display text-xl font-semibold">
-          <Activity className="size-5 text-primary" aria-hidden />
+          <Orbit className="size-5 text-primary" aria-hidden />
           Crypto Watch
         </Link>
         <Tabs defaultValue="signin">

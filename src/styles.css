@@ -62,6 +62,7 @@
   --color-bull: var(--bull);
   --color-bear: var(--bear);
   --color-warn: var(--warn);
+  --color-aurora: var(--aurora);
   --font-display: var(--font-display);
   --font-sans: var(--font-body);
   --font-mono: var(--font-mono);
@@ -73,47 +74,60 @@
   --font-body: "DM Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 
-  --background: oklch(0.17 0.018 250);
-  --foreground: oklch(0.95 0.008 250);
-  --card: oklch(0.213 0.02 252);
-  --card-foreground: oklch(0.95 0.008 250);
-  --popover: oklch(0.213 0.02 252);
-  --popover-foreground: oklch(0.95 0.008 250);
-  --primary: oklch(0.78 0.15 178);
-  --primary-foreground: oklch(0.18 0.02 250);
-  --secondary: oklch(0.27 0.022 252);
-  --secondary-foreground: oklch(0.93 0.008 250);
-  --muted: oklch(0.25 0.02 252);
-  --muted-foreground: oklch(0.68 0.018 250);
-  --accent: oklch(0.3 0.03 252);
-  --accent-foreground: oklch(0.95 0.008 250);
+  /* Deep-space surface: very dark blue-violet. Text tokens keep AA contrast on every surface. */
+  --background: oklch(0.145 0.03 282);
+  --foreground: oklch(0.955 0.012 280);
+  --card: oklch(0.19 0.035 282);
+  --card-foreground: oklch(0.955 0.012 280);
+  --popover: oklch(0.21 0.04 284);
+  --popover-foreground: oklch(0.955 0.012 280);
+  --primary: oklch(0.78 0.14 292);
+  --primary-foreground: oklch(0.17 0.04 285);
+  --secondary: oklch(0.25 0.04 284);
+  --secondary-foreground: oklch(0.93 0.012 280);
+  --muted: oklch(0.23 0.035 284);
+  --muted-foreground: oklch(0.73 0.03 280);
+  --accent: oklch(0.28 0.05 286);
+  --accent-foreground: oklch(0.96 0.012 280);
   --destructive: oklch(0.62 0.2 21);
-  --destructive-foreground: oklch(0.97 0.01 250);
-  --border: oklch(0.3 0.02 252);
-  --input: oklch(0.3 0.02 252);
-  --ring: oklch(0.78 0.15 178);
+  --destructive-foreground: oklch(0.97 0.01 280);
+  --border: oklch(0.32 0.045 284 / 0.85);
+  --input: oklch(0.34 0.045 284);
+  --ring: oklch(0.8 0.13 292);
 
-  --bull: oklch(0.78 0.17 155);
-  --bear: oklch(0.66 0.2 22);
-  --warn: oklch(0.82 0.16 82);
+  /* Semantic market colours (never the only signal: always paired with an icon or word). */
+  --bull: oklch(0.8 0.16 158);
+  --bear: oklch(0.7 0.19 20);
+  --warn: oklch(0.84 0.15 82);
+  /* Secondary accent: aurora teal. */
+  --aurora: oklch(0.82 0.12 192);
 
-  --chart-1: oklch(0.78 0.15 178);
-  --chart-2: oklch(0.78 0.17 155);
-  --chart-3: oklch(0.82 0.16 82);
-  --chart-4: oklch(0.66 0.2 22);
-  --chart-5: oklch(0.7 0.14 280);
-  --sidebar: oklch(0.195 0.02 252);
-  --sidebar-foreground: oklch(0.95 0.008 250);
-  --sidebar-primary: oklch(0.78 0.15 178);
-  --sidebar-primary-foreground: oklch(0.18 0.02 250);
-  --sidebar-accent: oklch(0.27 0.022 252);
-  --sidebar-accent-foreground: oklch(0.95 0.008 250);
-  --sidebar-border: oklch(0.3 0.02 252);
-  --sidebar-ring: oklch(0.78 0.15 178);
+  --chart-1: oklch(0.78 0.14 292);
+  --chart-2: oklch(0.82 0.12 192);
+  --chart-3: oklch(0.84 0.15 82);
+  --chart-4: oklch(0.7 0.19 20);
+  --chart-5: oklch(0.8 0.16 158);
+  --sidebar: oklch(0.17 0.032 282);
+  --sidebar-foreground: oklch(0.955 0.012 280);
+  --sidebar-primary: oklch(0.78 0.14 292);
+  --sidebar-primary-foreground: oklch(0.17 0.04 285);
+  --sidebar-accent: oklch(0.25 0.04 284);
+  --sidebar-accent-foreground: oklch(0.955 0.012 280);
+  --sidebar-border: oklch(0.32 0.045 284);
+  --sidebar-ring: oklch(0.8 0.13 292);
 
-  --gradient-hero: radial-gradient(120% 120% at 20% 0%, oklch(0.3 0.06 190 / 0.55) 0%, transparent 60%);
-  --gradient-panel: linear-gradient(160deg, oklch(0.24 0.025 252) 0%, oklch(0.2 0.02 252) 100%);
-  --shadow-panel: 0 1px 0 0 oklch(1 0 0 / 0.04) inset, 0 18px 40px -24px oklch(0 0 0 / 0.9);
+  /* Nebula: a few static radial gradients, painted once on a fixed layer. */
+  --gradient-hero:
+    radial-gradient(70% 55% at 12% -5%, oklch(0.42 0.14 292 / 0.32) 0%, transparent 70%),
+    radial-gradient(55% 45% at 95% 10%, oklch(0.45 0.1 200 / 0.2) 0%, transparent 70%),
+    radial-gradient(60% 50% at 70% 110%, oklch(0.38 0.13 330 / 0.18) 0%, transparent 70%);
+  --gradient-panel: linear-gradient(
+    160deg,
+    oklch(0.215 0.042 284 / 0.92) 0%,
+    oklch(0.18 0.034 282 / 0.92) 100%
+  );
+  --shadow-panel:
+    0 1px 0 0 oklch(1 0 0 / 0.05) inset, 0 20px 44px -28px oklch(0.05 0.04 285 / 0.95);
 }
 
 .dark {
@@ -130,6 +144,8 @@
   }
 
   body {
+    position: relative;
+    min-height: 100vh;
     background-color: var(--color-background);
     background-image: var(--gradient-hero);
     background-attachment: fixed;
@@ -138,11 +154,64 @@
     -webkit-font-smoothing: antialiased;
   }
 
+  /* Star dust: two tiled dot layers on one fixed, non-interactive layer. Static (no animation,
+     no filters), so it is painted once and composited while scrolling. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      radial-gradient(1px 1px at 20px 30px, oklch(1 0 0 / 0.55), transparent 60%),
+      radial-gradient(1px 1px at 130px 80px, oklch(0.9 0.05 290 / 0.45), transparent 60%),
+      radial-gradient(1.5px 1.5px at 70px 150px, oklch(0.92 0.06 195 / 0.4), transparent 60%),
+      radial-gradient(1px 1px at 190px 190px, oklch(1 0 0 / 0.35), transparent 60%),
+      radial-gradient(1px 1px at 240px 40px, oklch(1 0 0 / 0.3), transparent 60%);
+    background-size: 260px 220px;
+    opacity: 0.6;
+  }
+
   h1,
   h2,
   h3 {
     font-family: var(--font-display);
     letter-spacing: -0.02em;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  summary {
+    cursor: pointer;
+    list-style: none;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary::before {
+    content: "▸";
+    display: inline-block;
+    width: 1em;
+    color: var(--color-muted-foreground);
+    transition: transform 150ms ease;
+  }
+  details[open] > summary::before {
+    transform: rotate(90deg);
+  }
+  summary.no-marker::before {
+    content: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }
 
@@ -156,4 +225,27 @@
 @utility num {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* Small uppercase label above titles ("mission" eyebrow). */
+@utility eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-aurora);
+}
+
+/* Gradient headline text (violet to aurora). */
+@utility text-nebula {
+  background-image: linear-gradient(100deg, var(--color-foreground) 10%, var(--color-primary) 55%, var(--color-aurora) 95%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Hairline that reads as an orbit line under section headers. */
+@utility orbit-rule {
+  height: 1px;
+  background-image: linear-gradient(90deg, transparent, oklch(0.78 0.14 292 / 0.6), oklch(0.82 0.12 192 / 0.5), transparent);
 }

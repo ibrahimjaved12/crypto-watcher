@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { Download, FlaskConical, Trash2 } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, BellRing, Download, FlaskConical, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
@@ -16,13 +16,17 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Hint } from "@/components/hint";
+import { EmptyState, PageHeader, TimeAgo } from "@/components/plain";
+import { relativeTime, sourceLabel } from "@/lib/labels";
+import { cn } from "@/lib/utils";
 import { createTestAlert, deleteAlert, fetchAlerts, fetchWatchlist, type AlertRow } from "@/lib/db";
 import { WINDOW_LABELS } from "@/lib/market/symbols";
 
 export const Route = createFileRoute("/_authenticated/alerts")({
   head: () => ({
     meta: [
-      { title: "Alert history — Crypto Watch" },
+      { title: "Alerts — Crypto Watch" },
       {
         name: "description",
         content: "Search your saved price alerts, see the rule behind each one, and export to CSV.",
@@ -104,111 +108,148 @@ function AlertsPage() {
 
   return (
     <AppShell>
-      <div className="flex flex-wrap items-end gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Alert history</h1>
-          <p className="text-sm text-muted-foreground">
-            {filtered.length} of {alerts.data?.length ?? 0} alerts
-          </p>
-        </div>
-        <div className="ml-auto flex flex-wrap gap-2">
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search symbol, rule, source…"
-            className="w-56"
-            aria-label="Search alerts"
-          />
-          <Button variant="secondary" onClick={exportCsv} disabled={filtered.length === 0}>
-            <Download className="size-4" aria-hidden />
-            CSV
-          </Button>
-          <Button variant="secondary" onClick={() => test.mutate()}>
-            <FlaskConical className="size-4" aria-hidden />
-            Test alert
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        eyebrow="Mission log"
+        title="Alerts"
+        subtitle={
+          <>
+            Every price move that crossed your alert threshold, with the rule and data behind it.{" "}
+            <span className="num">
+              {filtered.length} of {alerts.data?.length ?? 0}
+            </span>{" "}
+            shown.
+          </>
+        }
+        actions={
+          <>
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search pair, rule, source…"
+              className="h-9 w-full sm:w-56"
+              aria-label="Search alerts"
+            />
+            <Button variant="secondary" onClick={exportCsv} disabled={filtered.length === 0}>
+              <Download className="size-4" aria-hidden />
+              Export CSV
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => test.mutate()}
+              title="Save a fake alert, clearly marked as test data, to check that alerts are stored"
+            >
+              <FlaskConical className="size-4" aria-hidden />
+              Save a test alert
+            </Button>
+          </>
+        }
+      />
 
       <div className="panel mt-5 overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Symbol</TableHead>
-              <TableHead>Time</TableHead>
-              <TableHead>Change</TableHead>
-              <TableHead>Comparison</TableHead>
-              <TableHead>Rule</TableHead>
-              <TableHead>Price</TableHead>
-              <TableHead>Source</TableHead>
-              <TableHead />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {filtered.map((a) => (
-              <TableRow key={a.id}>
-                <TableCell className="num font-medium">
-                  {a.symbol}
-                  {a.is_test ? (
-                    <Badge variant="outline" className="ml-2 border-warn/60 text-warn">
-                      TEST DATA
-                    </Badge>
-                  ) : null}
-                </TableCell>
-                <TableCell className="num text-xs">
-                  {new Date(a.triggered_at).toLocaleString()}
-                </TableCell>
-                <TableCell
-                  className={`num ${Number(a.change_pct) >= 0 ? "text-bull" : "text-bear"}`}
-                >
-                  {Number(a.change_pct) > 0 ? "+" : ""}
-                  {Number(a.change_pct).toFixed(2)}%
-                </TableCell>
-                <TableCell className="num text-xs">
-                  {a.comparison_mode === "baseline" ? (
-                    <span
-                      title={
-                        a.baseline_at
-                          ? `Baseline at ${new Date(a.baseline_at).toLocaleString()}`
-                          : undefined
-                      }
-                    >
-                      From {Number(a.baseline_price).toLocaleString()} USDT
-                    </span>
-                  ) : a.window_minutes == null ? (
-                    "—"
-                  ) : (
-                    (WINDOW_LABELS[a.window_minutes] ?? `${a.window_minutes}m`)
-                  )}
-                </TableCell>
-                <TableCell className="max-w-[220px] truncate text-xs" title={a.rule}>
-                  {a.rule}
-                </TableCell>
-                <TableCell className="num text-xs">
-                  {a.price == null ? "—" : `$${Number(a.price).toLocaleString()}`}
-                </TableCell>
-                <TableCell className="text-xs">{a.data_source}</TableCell>
-                <TableCell>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Delete alert"
-                    onClick={() => remove.mutate(a.id)}
-                  >
-                    <Trash2 className="size-4" aria-hidden />
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-            {filtered.length === 0 ? (
+        {filtered.length === 0 ? (
+          <EmptyState
+            icon={BellRing}
+            className="m-4 border-0"
+            title={search ? "No alerts match your search" : "No alerts yet"}
+            body={
+              search
+                ? "Try a pair such as BTC, or clear the search."
+                : "An alert appears here when a watched pair moves more than your threshold from its starting price. Checks run every few minutes."
+            }
+          />
+        ) : (
+          <Table className="min-w-[720px]">
+            <TableHeader>
               <TableRow>
-                <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
-                  No alerts yet.
-                </TableCell>
+                <TableHead>Pair</TableHead>
+                <TableHead>When</TableHead>
+                <TableHead>Move</TableHead>
+                <TableHead>
+                  <Hint text="The price the move was measured from: your saved starting price, or a fixed time window for older alerts.">
+                    Measured from
+                  </Hint>
+                </TableHead>
+                <TableHead>Rule</TableHead>
+                <TableHead className="text-right">Price</TableHead>
+                <TableHead>Source</TableHead>
+                <TableHead>
+                  <span className="sr-only">Actions</span>
+                </TableHead>
               </TableRow>
-            ) : null}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {filtered.map((a) => {
+                const change = Number(a.change_pct);
+                const up = change >= 0;
+                const Arrow = up ? ArrowUpRight : ArrowDownRight;
+                return (
+                  <TableRow key={a.id}>
+                    <TableCell className="num font-medium">
+                      {a.symbol.replace(/USDT$/, "")}
+                      <span className="text-muted-foreground">/USDT</span>
+                      {a.is_test ? (
+                        <Badge variant="outline" className="ml-2 border-warn/60 text-warn">
+                          Test data
+                        </Badge>
+                      ) : null}
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      <TimeAgo at={a.triggered_at} text={relativeTime(a.triggered_at)} />
+                    </TableCell>
+                    <TableCell>
+                      <span
+                        className={cn(
+                          "num inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium",
+                          up ? "border-bull/40 bg-bull/10 text-bull" : "border-bear/40 bg-bear/10 text-bear",
+                        )}
+                      >
+                        <Arrow className="size-3.5" aria-hidden />
+                        {up ? "Up" : "Down"} {Math.abs(change).toFixed(2)}%
+                      </span>
+                    </TableCell>
+                    <TableCell className="num text-xs">
+                      {a.comparison_mode === "baseline" ? (
+                        <span
+                          title={
+                            a.baseline_at
+                              ? `Starting price saved ${new Date(a.baseline_at).toLocaleString()}`
+                              : undefined
+                          }
+                        >
+                          {Number(a.baseline_price).toLocaleString()} USDT
+                        </span>
+                      ) : a.window_minutes == null ? (
+                        "—"
+                      ) : (
+                        `${WINDOW_LABELS[a.window_minutes] ?? `${a.window_minutes}m`} ago`
+                      )}
+                    </TableCell>
+                    <TableCell className="max-w-[220px] truncate text-xs" title={a.rule}>
+                      {a.rule}
+                    </TableCell>
+                    <TableCell className="num text-right text-xs">
+                      {a.price == null ? "—" : `${Number(a.price).toLocaleString()} USDT`}
+                    </TableCell>
+                    <TableCell className="text-xs" title={a.data_source ?? undefined}>
+                      {sourceLabel(a.data_source)}
+                    </TableCell>
+                    <TableCell>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label="Delete alert"
+                        title="Delete alert"
+                        onClick={() => remove.mutate(a.id)}
+                      >
+                        <Trash2 className="size-4" aria-hidden />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
       </div>
     </AppShell>
   );
