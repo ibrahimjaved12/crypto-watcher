@@ -1525,3 +1525,25 @@ GRANT EXECUTE ON FUNCTION
   public.record_forward_daily_bars(JSONB),
   public.get_forward_daily_bars(TEXT, DATE)
   TO service_role;
+
+-- Self-check (P21, `npm run mvp:check`): which of the named tables have no trigger that rejects
+-- UPDATE/DELETE (a trigger function named reject_*). Read-only; service role only.
+CREATE FUNCTION public.missing_append_only_triggers(p_tables TEXT[])
+RETURNS TEXT[]
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = public
+AS $$
+  SELECT coalesce(array_agg(t ORDER BY t), ARRAY[]::TEXT[])
+  FROM unnest(p_tables) AS t
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger g
+    JOIN pg_proc p ON p.oid = g.tgfoid
+    WHERE g.tgrelid = to_regclass('public.' || t) AND NOT g.tgisinternal
+      AND p.proname LIKE 'reject\_%' AND (g.tgtype & 16) <> 0 AND (g.tgtype & 8) <> 0
+  )
+$$;
+REVOKE ALL ON FUNCTION public.missing_append_only_triggers(TEXT[]) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.missing_append_only_triggers(TEXT[]) TO service_role;

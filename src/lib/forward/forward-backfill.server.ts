@@ -47,6 +47,8 @@ export type BackfillDeps = {
   fetchPage(symbol: string, startMs: number, endMs: number): Promise<KlinePage>;
   record(candles: CollectorCandle[]): Promise<unknown>;
   sleep(ms: number): Promise<void>;
+  /** Called after each page: 1-based page index, estimated pages in this range, candles offered so far. */
+  onProgress?(symbol: string, pageIndex: number, pagesTotalEstimate: number, candlesOffered: number): void;
 };
 
 /** Completed candles of one validated page (a candle still open at `nowMs` is dropped). */
@@ -103,6 +105,8 @@ export async function backfillMinuteHistory(
   let cursor = Math.ceil(startMs / MINUTE_MS) * MINUTE_MS;
   const last = Math.min(endMs, Math.floor(deps.now() / MINUTE_MS) * MINUTE_MS) - MINUTE_MS;
   let offered = 0;
+  let pageIndex = 0;
+  const pagesTotal = Math.max(1, Math.ceil((last - cursor + MINUTE_MS) / (KLINE_PAGE_LIMIT * MINUTE_MS)));
   while (cursor <= last) {
     const pageEnd = Math.min(last, cursor + (KLINE_PAGE_LIMIT - 1) * MINUTE_MS);
     const page = await deps.fetchPage(symbol, cursor, pageEnd + MINUTE_MS - 1);
@@ -117,6 +121,8 @@ export async function backfillMinuteHistory(
       offered += candles.length;
     }
     cursor = pageEnd + MINUTE_MS;
+    pageIndex += 1;
+    deps.onProgress?.(symbol, pageIndex, pagesTotal, offered);
     if (page.usedWeight !== null && page.usedWeight >= WEIGHT_PAUSE_AT) {
       await deps.sleep(MINUTE_MS - (deps.now() % MINUTE_MS) + 1_000);
     }

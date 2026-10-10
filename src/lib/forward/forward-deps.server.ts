@@ -63,6 +63,8 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
           fetchPage: (pair, from, to) => fetchBinanceMinuteKlines(send, pair, from, to),
           record: (candles) => store.recordCollectorCandles(candles),
           sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          onProgress: (pair, page, total, candles) =>
+            console.log(`[forward-backfill] ${pair} ${page}/${total} pages, ${candles} candles offered`),
         },
         symbol,
         startMs,

@@ -289,3 +289,72 @@ CREATE VIEW public.forward_open_setups WITH (security_invoker = true) AS
     WHERE o.user_id = s.user_id AND o.setup_id = s.setup_id AND o.final);
 REVOKE ALL ON public.forward_open_setups FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON public.forward_open_setups TO authenticated;
+
+-- Self-check (P21, `npm run mvp:check`): which of the named tables have no trigger that rejects
+-- UPDATE/DELETE (a trigger function named reject_*). Read-only; service role only.
+CREATE FUNCTION public.missing_append_only_triggers(p_tables TEXT[])
+RETURNS TEXT[]
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = public
+AS $$
+  SELECT coalesce(array_agg(t ORDER BY t), ARRAY[]::TEXT[])
+  FROM unnest(p_tables) AS t
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger g
+    JOIN pg_proc p ON p.oid = g.tgfoid
+    WHERE g.tgrelid = to_regclass('public.' || t) AND NOT g.tgisinternal
+      AND p.proname LIKE 'reject\_%' AND (g.tgtype & 16) <> 0 AND (g.tgtype & 8) <> 0
+  )
+$$;
+REVOKE ALL ON FUNCTION public.missing_append_only_triggers(TEXT[]) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.missing_append_only_triggers(TEXT[]) TO service_role;
+
+-- Ledger invariant inputs per account (P21): the lines are contiguous from 1 when n = max_seq, and
+-- initial + sum(amount) must equal the last balance (checked by the caller, which knows the initial balance).
+CREATE FUNCTION public.paper_ledger_summary()
+RETURNS TABLE (user_id UUID, paper_account TEXT, n BIGINT, max_seq BIGINT, sum_amount_e8 NUMERIC, last_balance_e8 BIGINT)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = public
+AS $$
+  SELECT l.user_id, l.paper_account, count(*), max(l.seq), sum(l.amount_e8::numeric),
+         (array_agg(l.balance_e8 ORDER BY l.seq DESC))[1]
+  FROM public.paper_ledger l
+  GROUP BY l.user_id, l.paper_account
+$$;
+REVOKE ALL ON FUNCTION public.paper_ledger_summary() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.paper_ledger_summary() TO service_role;
+
+-- Self-check inputs (P21): counts by kind/status and the strategies that fired recently, per account.
+CREATE FUNCTION public.forward_state_counts()
+RETURNS TABLE (user_id UUID, kind TEXT, status TEXT, n BIGINT)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = public
+AS $$
+  SELECT s.user_id, 'signals'::TEXT, ''::TEXT, count(*) FROM public.forward_signals s GROUP BY s.user_id
+  UNION ALL
+  SELECT s.user_id, 'setups', s.status, count(*) FROM public.forward_setups s GROUP BY s.user_id, s.status
+  UNION ALL
+  SELECT o.user_id, 'outcomes', o.status, count(*) FROM public.forward_outcomes o WHERE o.final
+  GROUP BY o.user_id, o.status
+$$;
+
+CREATE FUNCTION public.forward_recent_strategies(p_since_ms BIGINT)
+RETURNS TABLE (user_id UUID, strategy_id TEXT, n BIGINT)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = public
+AS $$
+  SELECT s.user_id, s.strategy_id, count(*)
+  FROM public.forward_signals s WHERE s.signal_ms >= p_since_ms GROUP BY s.user_id, s.strategy_id
+$$;
+REVOKE ALL ON FUNCTION public.forward_state_counts(), public.forward_recent_strategies(BIGINT)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.forward_state_counts(), public.forward_recent_strategies(BIGINT) TO service_role;

@@ -1,10 +1,9 @@
 import { resolve } from "node:path";
 import { loadEnv, runnerImport } from "vite";
 
-// Local launcher for the forward-test job (#239). Same style as collector-worker.mjs: it loads
-// the TypeScript entrypoint through Vite's SSR module runner (local MVP only; production
-// scheduling is listed in docs/production-todo.md). Pass --once for a single evaluation, --backfill-only to seed
-// the 1m history once, --trend for the daily trend track job (#239 P14) instead of the hourly harness.
+// Launcher for `npm run mvp:check` (#239 P21): a READ-ONLY health table for the local MVP. Same style as
+// forward-run.mjs: it loads src/worker/mvp-check.ts through Vite's SSR module runner. Pass --json for
+// machine output; the exit code is 1 when any check FAILs.
 const root = resolve(import.meta.dirname, "..");
 
 function modeFromArgs() {
@@ -23,13 +22,12 @@ async function main() {
   for (const [name, value] of Object.entries(env)) {
     if (value !== undefined && process.env[name] === undefined) process.env[name] = value;
   }
-  const entry = process.argv.includes("--trend") ? "/src/worker/forward-trend-run.ts" : "/src/worker/forward-run.ts";
-  await runnerImport(entry, { root, mode, configFile: false, envDir: false });
+  await runnerImport("/src/worker/mvp-check.ts", { root, mode, configFile: false, envDir: false });
 }
 
 try {
   await main();
 } catch (error) {
-  console.error(`[forward-run] ${error instanceof Error ? error.message : String(error)}`);
+  console.error(`[mvp-check] ${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);
 }
