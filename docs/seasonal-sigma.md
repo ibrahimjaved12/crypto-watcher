@@ -85,6 +85,7 @@ The verdicts are:
 - **`robust_ok`:** both robust statistics are in [0.9, 1.1] overall and in [0.8, 1.2] in
   every UTC hour.
 - **PASS** (calibration-v2, P16) = (`sd_ok` or `robust_ok`) and, on 240 m rows, `barrier_ok`.
+  This is looser than the pre-P16 rule (either statistic suffices): read a PASS with that in mind.
   The pre-P16 rule (`sd_ok` and `robust_ok` and the label-step barrier check) stays in the JSON as
   `pass_v1` / `barrier_ok_v1`.
 - **Barrier check (P16):** `scan.label_trade` monitors every 1-minute high/low, so the

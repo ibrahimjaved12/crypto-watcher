@@ -89,7 +89,10 @@ export function parseMinuteKlines(symbol: string, value: unknown, nowMs: number,
 
 /**
  * Fetch and record [startMs, endMs) for one symbol, oldest first. Returns the candles offered.
- * Stops early on an empty page (no listing yet) and never requests the still-open minute.
+ * An empty page (before listing, or minutes Binance never published) is skipped, not an end: the
+ * loop continues to `endMs`. Never requests the still-open minute. A thrown error (418/429, bad
+ * page) aborts after the pages already recorded; the caller derives the remaining holes from what
+ * is stored.
  */
 export async function backfillMinuteHistory(
   deps: BackfillDeps,

@@ -62,12 +62,24 @@ persists it (`forward_*`, `paper_*` tables).
     horizon multiplier c_h (`volatility.horizon_calibration` on the label-step grid: median of
     |ln(open[e+h]/open[e])| / sigma over completed past windows, / 0.6745, clipped to [0.5, 2]).
   - c_h exists only after 60 days of completed past windows, so the job reads about 120 days of 1m
-    history (`FORWARD_HISTORY_DAYS = 120`, operational 1m retention 140 days) and backfills 130 days
-    once from public REST klines when the stored history starts later.
+    history (`FORWARD_HISTORY_DAYS = 120`, operational 1m retention 140 days). Hourly job runs
+    (never "Run now") repair it from public REST klines: the range before the first stored minute
+    (from 130 days back) and every interior gap, at most 50 ranges per symbol per run. The ranges
+    are derived from what is stored, so a backfill interrupted by 418/429 or a timeout leaves a
+    hole that the next hourly run sees and fills. The failure is recorded in the run's reason
+    (`backfill_failed: SYMBOL: ...`). A minute Binance never published stays a gap (one page per
+    run) and reaches Python as MISSING. The first backfill (6 symbols x about 125 pages) runs
+    inside one job call and can take minutes; run `forward-run --once` once before relying on it.
   - Until the sigma exists a signal emits **no setup** and the evaluation reports
     `reasons[SYMBOL].sigma = "no_sigma: ..."`; it never falls back to another model.
-  - Over the rolling 120-day request c_h is an expanding median from the request start (point in
-    time; it can differ slightly from the lb3h labels, which expand from 2024-01).
+  - **Known difference from the benchmark:** over the rolling 120-day request c_h is an expanding
+    median from the request start (point in time, but only about 30 to 60 days of windows), while
+    the lb3h labels expand from 2024-01. Forward setups therefore do not use exactly the same sigma
+    as the benchmark. The cleaner fix (not done) is seeding c_h from the lake.
+  - **Request size:** each run sends the whole window (up to 120 x 1,440 x 6, about 1 million rows,
+    roughly 100 MB of JSON). Fine for the local MVP, not for free-tier hosting. Each ok run records
+    `freshness.request = {rows, python_ms}`; if it is slow, send only the recent window plus a
+    persisted per-symbol sigma state.
   - Half-lives come from `LabelParams`: 1 day at 15 m, 3 days at 60 m, 7 days at 240 m.
 - **Resolution:** a resolution uses only minutes from the entry onward and is final once an event
   occurs. Calling it again with more bars never changes a final result.
@@ -82,8 +94,11 @@ persists it (`forward_*`, `paper_*` tables).
     and responses say so (`rate:trailing-30d`).
 - **Insufficient history:** a strategy without enough history returns a reason code and no
   signal. Nothing is filled.
-- **Staleness:** the orchestration skips a run (`skipped: stale`) when candle history has gaps or
-  the collector is not LIVE. No signals are generated from incomplete data.
+- **Staleness:** the orchestration skips a run (`skipped: stale`) when the last 48 hours of candles
+  (`STALE_GAP_WINDOW_MS`) have a gap, the last completed minute is missing, or the collector is not
+  LIVE. Older gaps do not block the engine (a laptop sleep would otherwise block it for the whole
+  120-day window): those minutes reach Python as missing bars, which the sigma and labels treat as
+  MISSING exactly as in the benchmark. `freshness[SYMBOL].missing_minutes` counts them.
 
 ## Comparison with backtests
 

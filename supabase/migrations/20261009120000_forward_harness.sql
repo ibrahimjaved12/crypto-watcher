@@ -47,6 +47,7 @@ CREATE TABLE public.forward_signals (
   signal_ms BIGINT NOT NULL CHECK (signal_ms >= 0),
   side SMALLINT NOT NULL CHECK (side IN (-1, 1)),
   horizon_min INTEGER NOT NULL CHECK (horizon_min IN (15, 60, 240)),
+  candle_version TEXT CHECK (candle_version IS NULL OR candle_version ~ '^[0-9a-f]{64}$'),
   run_id UUID NOT NULL REFERENCES public.paper_runs ON DELETE CASCADE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (user_id, signal_id)
@@ -69,6 +70,7 @@ CREATE TABLE public.forward_setups (
   status TEXT NOT NULL CHECK (status IN ('T', 'V', 'C', 'P', 'G', 'N')),
   params_hash TEXT NOT NULL CHECK (length(params_hash) = 64),
   payload JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+  candle_version TEXT CHECK (candle_version IS NULL OR candle_version ~ '^[0-9a-f]{64}$'),
   run_id UUID NOT NULL REFERENCES public.paper_runs ON DELETE CASCADE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (user_id, setup_id),
@@ -129,3 +131,11 @@ $$;
 
 COMMENT ON TABLE public.forward_setups IS
   'Immutable forward-test setups (labels-v2 geometry, #239). No strategy has a validated edge.';
+
+-- Candle conflict policy (#239 P15): candle_version is the SHA-256 over the operational
+-- collector_candle_hash values (candle-v1) of the completed 1m candles forming the decision candle,
+-- so a later REST revision can be traced to the decisions that used the original candle.
+COMMENT ON COLUMN public.forward_signals.candle_version IS
+  'SHA-256 of the candle-v1 hashes of the 1m candles forming the decision candle (P15); NULL when unknown.';
+COMMENT ON COLUMN public.forward_setups.candle_version IS
+  'candle_version of the setup''s signal (P15); NULL when unknown.';

@@ -269,6 +269,56 @@ test("a forward run backfills short history once and stores candle versions, nev
   assert.equal(gap.get(hex("a")), null, "an incomplete decision candle has no version");
 });
 
+test("only recent gaps are stale; older gaps reach Python as missing bars", async () => {
+  const { calls, deps } = fakeDeps();
+  const old = BOUNDARY - 3 * 86_400_000;
+  deps.readMinutes = async (symbol) => [
+    ...minutes(symbol, 120).map((row) => ({ ...row, open_time_ms: row.open_time_ms - 3 * 86_400_000 + 7_200_000 })),
+    ...minutes(symbol, 120),
+  ];
+  const summary = await run.runForward(deps, { userId: USER, trigger: "on_demand", strategyIds: ["x"], symbols: ["BTCUSDT"] });
+  assert.equal(summary.status, "ok", "a gap older than STALE_GAP_WINDOW_MS does not block the engine");
+  assert.equal(calls.python.length, 1);
+  assert.equal(calls.python[0].symbols[0].rows[0].open_time_ms, old);
+  const recent = run.staleness(["BTCUSDT"], new Map([["BTCUSDT", minutes("BTCUSDT", 120, 30)]]),
+    [{ symbol: "BTCUSDT", timeframe_minutes: 1, status: "LIVE" }], BOUNDARY);
+  assert.match(recent.join(), /1 gap/);
+});
+
+test("backfill ranges include interior gaps, so an interrupted backfill is resumed", async () => {
+  const M = 60_000;
+  const since = BOUNDARY - 1000 * M;
+  // An earlier backfill stored [since, since+100) and then hit HTTP 429; live data starts at -120.
+  const stored = [];
+  for (let open = since; open < since + 100 * M; open += M) stored.push({ open_time_ms: open });
+  stored.push(...minutes("BTCUSDT", 120));
+  assert.deepEqual(run.backfillRanges(stored, since, since - 50 * M, BOUNDARY),
+    [{ startMs: since + 100 * M, endMs: BOUNDARY - 120 * M }]);
+  assert.deepEqual(run.backfillRanges([], since, since - 50 * M, BOUNDARY), [{ startMs: since - 50 * M, endMs: BOUNDARY }]);
+  assert.equal(run.missingMinutes(stored, since, BOUNDARY), 1000 - 220);
+
+  const { deps } = fakeDeps();
+  let reads = 0;
+  deps.readMinutes = async () => (reads++ === 0 ? stored : minutes("BTCUSDT", 120));
+  const attempts = [];
+  deps.backfillMinutes = async (symbol, startMs, endMs) => {
+    attempts.push([startMs, endMs]);
+    throw new Error("Binance 1m klines rate limited (HTTP 429)");
+  };
+  const summary = await run.runForward(deps, { userId: USER, trigger: "hourly", strategyIds: ["x"], symbols: ["BTCUSDT"] });
+  assert.equal(attempts.length, 1, "a failure stops this symbol's repair for this run");
+  assert.equal(reads, 2, "pages recorded before the failure are re-read");
+  assert.match(summary.reason, /backfill_failed: BTCUSDT: .*429/);
+});
+
+test("on-demand runs never backfill", async () => {
+  const { deps } = fakeDeps();
+  let called = false;
+  deps.backfillMinutes = async () => { called = true; return 1; };
+  await run.runForward(deps, { userId: USER, trigger: "on_demand", strategyIds: ["x"], symbols: ["BTCUSDT"] });
+  assert.equal(called, false);
+});
+
 test("the repository stores candle_version as a column, never inside the setup payload", async () => {
   const writes = [];
   const client = { from(table) {
