@@ -47,7 +47,7 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
       const response = await send(config.url, {
         method: "POST",
         // P16: about 120 days of 1m rows per symbol (ewma-robust-hcal warm-up) make a large request.
-        signal: AbortSignal.timeout(300_000),
+        signal: AbortSignal.timeout(60_000),
         headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });

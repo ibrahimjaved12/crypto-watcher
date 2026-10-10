@@ -79,7 +79,7 @@ export type ForwardRunInput = {
 
 export type ForwardRunSummary = {
   runKey: string;
-  status: "ok" | "skipped_stale" | "already_done";
+  status: "ok" | "skipped_stale" | "no_sigma" | "already_done";
   reason?: string;
   counts?: Record<string, number>;
 };
@@ -138,7 +138,8 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
   const boundaryMs = Math.floor(deps.now() / HOUR_MS) * HOUR_MS;
   const runKey = `hour:${boundaryMs}`;
   const { repository } = deps;
-  if (await repository.findRun(input.userId, runKey)) return { runKey, status: "already_done" };
+  const claimed = await repository.findRun(input.userId, runKey);
+  if (claimed && !["skipped_stale", "no_sigma"].includes(claimed.status)) return { runKey, status: "already_done" };
 
   const sinceMs = boundaryMs - FORWARD_HISTORY_DAYS * DAY_MS;
   const rows = new Map<string, ForwardMinuteRow[]>();
@@ -199,16 +200,22 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
   const previous = new Map<string, string | null>(
     open.map((item): [string, string | null] => [String(item.setup["setup_id"]), item.resolution?.status ?? null]),
   );
+  // Only wholly unevaluated runs are retryable. Healthy zero-signal runs and any
+  // setup, resolution or wallet event still consume the hour key.
+  const noSigma = symbols.length > 0 && symbols.every((symbol) =>
+    String(response.reasons[symbol]?.["sigma"] ?? "").startsWith("no_sigma")) &&
+    response.setups.length === 0 && response.resolutions.length === 0 && response.ledger.length === 0;
+  const status = noSigma ? "no_sigma" : "ok";
   const runId = await repository.insertRun(input.userId, {
-    run_key: runKey, trigger: input.trigger, status: "ok", boundary_ms: boundaryMs, from_ms: fromMs,
+    run_key: runKey, trigger: input.trigger, status, boundary_ms: boundaryMs, from_ms: fromMs,
     reason: reason?.slice(0, 2000) ?? null,
-    processed_to_ms: response.processed_to_ms, versions: response.versions, params_hash: response.params_hash,
+    processed_to_ms: noSigma ? {} : response.processed_to_ms, versions: response.versions, params_hash: response.params_hash,
     wallet_config: response.wallet_config, wallet_state: response.wallet_state,
     assumptions: response.assumptions, reasons: response.reasons, freshness,
   });
   const candleVersions = await decisionCandleVersions(response, rows);
   const counts = await repository.persistEvaluation(input.userId, runId, response, previous, candleVersions);
-  return reason ? { runKey, status: "ok", counts, reason } : { runKey, status: "ok", counts };
+  return reason ? { runKey, status, counts, reason } : { runKey, status, counts };
 }
 
 /**

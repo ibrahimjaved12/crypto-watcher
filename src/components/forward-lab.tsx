@@ -17,17 +17,21 @@ import {
   SYMBOL_VALUES,
   type ForwardFilters,
 } from "@/lib/forward/forward-filters";
-import { bonferroniCritical, type ReportRow } from "@/lib/forward/forward-report";
+import { bonferroniCritical, reportCsv, type ReportRow } from "@/lib/forward/forward-report";
 import { outcomeLabel, relativeTime, strategyLabel, TA_FAMILY_IDS } from "@/lib/labels";
 import { cn } from "@/lib/utils";
 
 const rr = (value: number | null, digits = 2) =>
-  value === null ? "—" : `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toFixed(digits)} R`;
+  value === null
+    ? "—"
+    : `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toFixed(digits)} R`;
 const frame = (minutes: number) => (minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`);
 const rrText = (value: string) => (value === "3/2" ? "1.5" : value);
 const coin = (symbol: unknown) => String(symbol ?? "").replace(/USDT$/, "");
 const at = (ms: unknown) =>
-  typeof ms === "number" ? new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—";
+  typeof ms === "number"
+    ? new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+    : "—";
 
 function Chips<T extends string | number>({
   label,
@@ -53,10 +57,14 @@ function Chips<T extends string | number>({
               key={String(value)}
               type="button"
               aria-pressed={on}
-              onClick={() => onChange(on ? selected.filter((item) => item !== value) : [...selected, value])}
+              onClick={() =>
+                onChange(on ? selected.filter((item) => item !== value) : [...selected, value])
+              }
               className={cn(
                 "min-h-8 rounded-full border px-2.5 text-xs",
-                on ? "border-primary bg-primary/15 text-foreground" : "border-border text-muted-foreground",
+                on
+                  ? "border-primary bg-primary/15 text-foreground"
+                  : "border-border text-muted-foreground",
               )}
             >
               {show(value)}
@@ -97,7 +105,9 @@ export function FiltersBar({
             onChange={(event) => onChange({ to: event.target.value || undefined })}
           />
         </label>
-        <p className="text-xs text-muted-foreground">Dates select by when a trade finished (non-trades: when they would have entered).</p>
+        <p className="text-xs text-muted-foreground">
+          Dates select by when a trade finished (non-trades: when they would have entered).
+        </p>
       </div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <Chips
@@ -149,7 +159,9 @@ function NonTradesCell({ row }: { row: ReportRow }) {
   return (
     <span className="num">
       <Hint text={detail}>{skipped} skipped</Hint>
-      {t.pending ? <span className="block text-[11px] text-muted-foreground">{t.pending} still open</span> : null}
+      {t.pending ? (
+        <span className="block text-[11px] text-muted-foreground">{t.pending} still open</span>
+      ) : null}
     </span>
   );
 }
@@ -168,6 +180,25 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
         title="Results by strategy"
         hint="Finished paper trades only, after fees and funding, each next to a random-timing baseline with the same exits."
       />
+      <Button
+        variant="outline"
+        size="sm"
+        className="mb-3"
+        disabled={!rows.length || report.isFetching || !!report.error}
+        onClick={() => {
+          const url = URL.createObjectURL(
+            new Blob([reportCsv(rows)], { type: "text/csv;charset=utf-8" }),
+          );
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `forward-results-${new Date().toISOString().slice(0, 10)}.csv`;
+          link.click();
+          setTimeout(() => URL.revokeObjectURL(url), 0);
+        }}
+      >
+        <Download className="mr-2 size-4" aria-hidden />
+        Export results CSV
+      </Button>
       {report.isPending ? (
         <p className="py-6 text-sm text-muted-foreground">Loading results…</p>
       ) : report.error ? (
@@ -187,6 +218,7 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
               <tr className="border-b border-border">
                 <th className="py-2 pr-3 font-medium">Strategy</th>
                 <th className="py-2 pr-3 text-right font-medium">Trades</th>
+                <th className="py-2 pr-3 text-right font-medium">Days</th>
                 <th className="py-2 pr-3 text-right font-medium">Wins</th>
                 <th className="py-2 pr-3 text-right font-medium">
                   <Hint text="Target and stop were both touched inside the same candle. Counted with the worse result, never the better one.">
@@ -194,7 +226,7 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
                   </Hint>
                 </th>
                 <th className="py-2 pr-3 text-right font-medium">
-                  <Hint term="R">Mean per trade ± SE</Hint>
+                  <Hint term="R">Mean per trade ± day-clustered SE</Hint>
                 </th>
                 <th className="py-2 pr-3 text-right font-medium">
                   <Hint term="placebo">Random baseline</Hint>
@@ -202,9 +234,9 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
                 <th className="py-2 pr-3 text-right font-medium">Difference</th>
                 <th className="py-2 pr-3 font-medium">
                   <Hint
-                    text={`Unadjusted for the ${k} strategy rows tried here: a positive row is a hypothesis for the next sample, not an edge. With ${k} rows a single row needs z above ${bonferroniCritical(k).toFixed(2)} to survive a Bonferroni correction.`}
+                    text={`UTC exit-day clusters account for trades exiting together. Welch comparison uses both clustered errors. At least 30 trades and 10 exit days are required for each series; the Bonferroni threshold is ${Math.max(2, bonferroniCritical(k)).toFixed(2)} for ${k} rows. A positive row is a hypothesis for the next sample, not a validated edge.`}
                   >
-                    Verdict (unadjusted for {k} rows)
+                    Verdict ({k} rows corrected)
                   </Hint>
                 </th>
                 <th className="py-2 font-medium">Non-trades</th>
@@ -216,7 +248,9 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
                 return (
                   <tr key={row.key} className="border-b border-border/50 align-top">
                     <td className="py-2 pr-3">
-                      <Hint text={`${label.blurb} (id ${row.strategyId}${row.version ? `, ${row.version}` : ""})`}>
+                      <Hint
+                        text={`${label.blurb} (id ${row.strategyId}${row.version ? `, ${row.version}` : ""})`}
+                      >
                         <span className="font-medium">{label.name}</span>
                       </Hint>
                       <div className="text-[11px] text-muted-foreground">
@@ -224,10 +258,14 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
                       </div>
                     </td>
                     <td className="num py-2 pr-3 text-right">{row.n}</td>
+                    <td className="num py-2 pr-3 text-right">{row.days}</td>
                     <td className="num py-2 pr-3 text-right">
                       {row.wins}
                       {row.winRate !== null ? (
-                        <span className="text-muted-foreground"> ({Math.round(row.winRate * 100)}%)</span>
+                        <span className="text-muted-foreground">
+                          {" "}
+                          ({Math.round(row.winRate * 100)}%)
+                        </span>
                       ) : null}
                     </td>
                     <td className="num py-2 pr-3 text-right">{row.ambiguous}</td>
@@ -242,7 +280,9 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
                         <>
                           {rr(row.placebo.mean)}
                           {row.placebo.se !== null ? ` ± ${row.placebo.se.toFixed(2)}` : ""}
-                          <div className="text-[11px]">{row.placebo.n} trades</div>
+                          <div className="text-[11px]">
+                            {row.placebo.n} trades · {row.placeboDays} days
+                          </div>
                         </>
                       ) : (
                         "none yet"
@@ -251,7 +291,9 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
                     <td className="num py-2 pr-3 text-right">
                       {rr(row.diffR)}
                       {row.z !== null ? (
-                        <div className="text-[11px] text-muted-foreground">z = {row.z.toFixed(1)}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          z = {row.z.toFixed(1)}
+                        </div>
                       ) : null}
                     </td>
                     <td className="py-2 pr-3 text-xs">{row.verdict.text}</td>
@@ -264,8 +306,9 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
             </tbody>
           </table>
           <p className="mt-2 text-xs text-muted-foreground">
-            Small samples swing a lot. Fewer than 30 trades is never judged; the standard error (SE) shows how
-            much the average could move by chance.
+            Small samples swing a lot. No verdict before 30 trades across 10 UTC exit days in each
+            series. Errors are clustered by exit day; the Welch comparison does not model
+            cross-series covariance. Trades spanning different exit days may still be dependent.
           </p>
         </div>
       )}
@@ -338,7 +381,9 @@ function LogTable({ kind, filters }: { kind: LogKind; filters: ForwardFilters })
       link.download = `forward-${kind}-${new Date().toISOString().slice(0, 10)}.csv`;
       link.click();
       URL.revokeObjectURL(url);
-      toast(`Exported ${result.rows} rows${result.truncated ? " (first 50,000 only; narrow the dates)" : ""}`);
+      toast(
+        `Exported ${result.rows} rows${result.truncated ? " (first 50,000 only; narrow the dates)" : ""}`,
+      );
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Export failed"),
   });
@@ -348,7 +393,12 @@ function LogTable({ kind, filters }: { kind: LogKind; filters: ForwardFilters })
   return (
     <div>
       <div className="mb-2 flex justify-end">
-        <Button variant="outline" size="sm" onClick={() => download.mutate()} disabled={download.isPending}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => download.mutate()}
+          disabled={download.isPending}
+        >
           <Download className="size-4" aria-hidden />
           Export CSV
         </Button>
@@ -386,7 +436,10 @@ function LogTable({ kind, filters }: { kind: LogKind; filters: ForwardFilters })
             </thead>
             <tbody>
               {all.map((row, index) => (
-                <tr key={`${index}-${String(row["signal_id"] ?? row["setup_id"] ?? row["seq"])}`} className="border-b border-border/50">
+                <tr
+                  key={`${index}-${String(row["signal_id"] ?? row["setup_id"] ?? row["seq"])}`}
+                  className="border-b border-border/50"
+                >
                   {headers.map((header) => (
                     <td key={header.key} className="num py-1.5 pr-3">
                       {cell(kind, header.key, row)}
@@ -398,14 +451,22 @@ function LogTable({ kind, filters }: { kind: LogKind; filters: ForwardFilters })
           </table>
           <div className="mt-3 flex items-center gap-3">
             {next ? (
-              <Button variant="outline" size="sm" onClick={() => more.mutate(next)} disabled={more.isPending}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => more.mutate(next)}
+                disabled={more.isPending}
+              >
                 Load more
               </Button>
             ) : (
               <span className="text-xs text-muted-foreground">All {all.length} rows shown.</span>
             )}
             <span className="text-xs text-muted-foreground">
-              Newest first{all[0] ? ` · latest ${relativeTime(Number(all[0]["signal_ms"] ?? all[0]["exit_ms"] ?? all[0]["ms"]))}` : ""}
+              Newest first
+              {all[0]
+                ? ` · latest ${relativeTime(Number(all[0]["signal_ms"] ?? all[0]["exit_ms"] ?? all[0]["ms"]))}`
+                : ""}
             </span>
           </div>
         </div>
@@ -417,7 +478,10 @@ function LogTable({ kind, filters }: { kind: LogKind; filters: ForwardFilters })
 export function LogsPanel({ filters }: { filters: ForwardFilters }) {
   return (
     <section className="panel p-4 sm:p-5">
-      <SectionTitle title="Logs" hint="Every signal, finished trade and wallet line, newest first. Filters above apply." />
+      <SectionTitle
+        title="Logs"
+        hint="Every signal, finished trade and wallet line, newest first. Filters above apply."
+      />
       <Tabs defaultValue="signals">
         <TabsList>
           <TabsTrigger value="signals">Signals</TabsTrigger>

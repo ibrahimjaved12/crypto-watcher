@@ -46,6 +46,10 @@ export function explainSignalEngine(run: SignalRun, now: number): StatusLine {
       raw: rawOf(run),
     };
   }
+  if (run.status === "no_sigma") {
+    return { level: "wait", title, detail: "Waiting for enough history to estimate volatility for every coin.",
+      action: "Retry after history is available; this hour is still open for evaluation.", raw: rawOf(run) };
+  }
   if (run.status === "skipped_stale") {
     return {
       level: "wait",
@@ -53,8 +57,8 @@ export function explainSignalEngine(run: SignalRun, now: number): StatusLine {
       detail:
         "Skipped: market data was too old to trust, so no trades were simulated (safe behaviour).",
       action: summary.items.length
-        ? `Why: ${summary.items.join("; ")}. It retries automatically every hour.`
-        : "It retries automatically every hour.",
+        ? `Why: ${summary.items.join("; ")}. You can retry this hour once fresh data is available.`
+        : "You can retry this hour once fresh data is available.",
       help: summary.help,
       raw: rawOf(run),
     };

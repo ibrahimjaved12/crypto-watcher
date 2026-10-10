@@ -316,3 +316,25 @@ test("the repository stores candle_version as a column, never inside the setup p
   assert.equal(setup.candle_version, "f".repeat(64));
   assert.ok(!("candle_version" in setup.payload));
 });
+
+test("stale then fresh in the same hour succeeds, and only success consumes the key", async () => {
+  const { deps, calls } = fakeDeps({ status: "STALE" });
+  const input = { userId: USER, trigger: "on_demand", strategyIds: ["x"], symbols: ["BTCUSDT"] };
+  assert.equal((await run.runForward(deps, input)).status, "skipped_stale");
+  deps.listHealth = async () => [{ symbol: "BTCUSDT", timeframe_minutes: 1, status: "LIVE" }];
+  assert.equal((await run.runForward(deps, input)).status, "ok");
+  assert.equal((await run.runForward(deps, input)).status, "already_done");
+  assert.equal(calls.python.length, 1);
+});
+
+test("wholly no-sigma runs retry, while partial evaluations remain idempotent", async () => {
+  const { deps, calls } = fakeDeps();
+  const input = { userId: USER, trigger: "on_demand", strategyIds: ["x"], symbols: ["BTCUSDT", "ETHUSDT"] };
+  const reasons = { BTCUSDT: { sigma: "no_sigma: waiting" }, ETHUSDT: { sigma: "no_sigma: waiting" } };
+  deps.callPython = async () => response({ reasons, setups: [], resolutions: [], ledger: [] });
+  assert.equal((await run.runForward(deps, input)).status, "no_sigma");
+  assert.deepEqual(calls.runs[0].processed_to_ms, {});
+  deps.callPython = async () => response({ reasons: { ETHUSDT: { sigma: "no_sigma: waiting" } } });
+  assert.equal((await run.runForward(deps, input)).status, "ok");
+  assert.equal((await run.runForward(deps, input)).status, "already_done");
+});

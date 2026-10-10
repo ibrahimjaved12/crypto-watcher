@@ -166,31 +166,35 @@ def incomplete_category(rolling, technical):
     return "invalid_data" if reasons else None
 
 
+def _analyze_workload(request, workload, provider, now_ms, attempts):
+    series = workload["rolling"]
+    last = latest_close(series[1], now_ms)
+    rolling = analyze(series, now_ms, request.settings.threshold_pct)
+    technical = technical_results(workload["technical"], provider, request.symbol, now_ms)
+    baseline = baseline_preview(request, last.close, last.open_ms + MINUTE, provider, now_ms)
+    status = "ok" if (all(w["status"] == "ok" for w in rolling.values())
+                      and all(w["status"] == "ok" for w in technical.values())) else "partial"
+    return {"schema_version": 1, "mode": "read_only", "symbol": request.symbol,
+            "status": status,
+            "source": provider, "as_of_ms": now_ms, "price": str(last.close),
+            "observed_at_ms": last.open_ms + MINUTE,
+            "instrument": instrument(request.symbol), "price_type": "trade",
+            "source_instrument": workload["source_instrument"],
+            "endpoint": provider_endpoint(provider), "retrieved_at_ms": now_ms,
+            "threshold_pct": str(request.settings.threshold_pct),
+            "rolling": rolling, "technical": technical, "baseline": baseline,
+            "failure_category": incomplete_category(rolling, technical),
+            "attempts": attempts}
+
+
 async def analyze_request(request, client, loader=load_workload,
                           clock=lambda: time.time_ns() // 1_000_000):
     attempts = []
     for provider in ANALYSIS_PROVIDERS:
         try:
             workload = await loader(client, provider, request.symbol)
-            now_ms = clock()
-            series = workload["rolling"]
-            last = latest_close(series[1], now_ms)
-            rolling = analyze(series, now_ms, request.settings.threshold_pct)
-            technical = technical_results(workload["technical"], provider, request.symbol, now_ms)
-            baseline = baseline_preview(request, last.close, last.open_ms + MINUTE, provider, now_ms)
-            status = "ok" if (all(w["status"] == "ok" for w in rolling.values())
-                              and all(w["status"] == "ok" for w in technical.values())) else "partial"
-            return {"schema_version": 1, "mode": "read_only", "symbol": request.symbol,
-                    "status": status,
-                    "source": provider, "as_of_ms": now_ms, "price": str(last.close),
-                    "observed_at_ms": last.open_ms + MINUTE,
-                    "instrument": instrument(request.symbol), "price_type": "trade",
-                    "source_instrument": workload["source_instrument"],
-                    "endpoint": provider_endpoint(provider), "retrieved_at_ms": now_ms,
-                    "threshold_pct": str(request.settings.threshold_pct),
-                    "rolling": rolling, "technical": technical, "baseline": baseline,
-                    "failure_category": incomplete_category(rolling, technical),
-                    "attempts": attempts}
+            return await asyncio.to_thread(
+                _analyze_workload, request, workload, provider, clock(), attempts)
         except httpx.TimeoutException:
             attempts.append({"source": provider, "reason": "provider_timeout"})
         except httpx.HTTPError:

@@ -35,9 +35,10 @@ const EXACT: Record<string, Reason> = {
   skipped_stale: {
     short:
       "Skipped: market data was too old to trust, so no trades were simulated (safe behaviour)",
-    help: "The signal engine refuses to simulate trades on gappy or delayed candles. It retries on the next hourly run.",
+    help: "The signal engine refuses to simulate trades on gappy or delayed candles. You can retry in the same hour once fresh data is available.",
     level: "wait",
   },
+  no_sigma: { short: "Waiting for volatility history", help: "No symbols could be evaluated. You can retry this hour after history is available.", level: "wait" },
   funding_unavailable: {
     short: "Funding rates could not be fetched, so days cannot be scored yet",
     help: "Futures positions pay or receive funding every few hours. Without those rates the result of a day is unknown, so it stays open until the rates can be fetched.",
@@ -531,3 +532,23 @@ export const GLOSSARY: Record<string, { term: string; plain: string }> = {
     plain: "Target distance divided by stop distance. 3/2 means the target is 1.5× as far as the stop.",
   },
 };
+
+/** Wallet admission failures are recorded non-trades, separate from strategy outcomes. */
+export function walletRejectionLabel(reason: string | null | undefined): string {
+  const labels: Record<string, string> = {
+    "cap:max_positions": "Position limit reached",
+    "cap:total_exposure": "Total exposure limit reached",
+    insufficient_margin: "Not enough available margin",
+    no_admissible_leverage: "No leverage meets the liquidation buffer",
+    not_tradeable: "Setup could not be traded",
+  };
+  return labels[reason ?? ""] ?? humanizeToken(reason);
+}
+
+/** Display-only conversion of stored e8 integer/rational prices; no trading calculations. */
+export function walletAmountLabel(value: unknown): string {
+  if (typeof value !== "number" && typeof value !== "string") return "—";
+  const [numerator, denominator = "1"] = String(value).split("/");
+  const amount = Number(numerator) / Number(denominator) / 1e8;
+  return Number.isFinite(amount) ? amount.toLocaleString(undefined, { maximumFractionDigits: 8 }) : "—";
+}
