@@ -284,6 +284,46 @@ def build_labels(symbol: str, bars: BarSeries, funding: FundingSeries, params: L
         yield month, rows
 
 
+def row_factory(symbol: str, bars: BarSeries, funding: FundingSeries, params: LabelParams, ticks: dict):
+    """``row(signal_ms, horizon, side, k) -> LabelRow`` for ONE decision, with the sigma, tick and row
+    function ``build_labels`` uses (robust models only), without generating every row of every month.
+
+    The forward parity workflow compares forward setups with these rows on full-history bars: the
+    expanding hcal calibration is the point, but generating every label row of 17 months is not.
+    ``test_benchmark_robust_sigma`` pins ``row_factory`` rows equal to ``build_labels`` rows.
+    """
+    if bars.symbol != symbol:
+        raise ValueError(f"bars are {bars.symbol}, not {symbol}")
+    if params.sigma_model not in ROBUST_MODELS:
+        raise ValueError("row_factory supports the robust sigma models only")
+    months = data_lake.months_between(month_of(bars.start_ms), month_of(bars.end_ms - 1))
+    missing = [month for month in months if month not in ticks]
+    if missing:
+        raise ValueError(f"no tick for months {missing}")
+    month_starts = [data_lake.month_bounds_ms(month)[0] for month in months]
+    robust = RobustSigma(bars, hcal=params.sigma_model == "ewma-robust-hcal")
+    variances = {days: robust.levels(days) for days in {params.half_life(h) for h in params.horizons}}
+    next_comp = next_compromised(bars)
+
+    def sigma_of(var: int, horizon: int, signal_ms: int):
+        value = robust.sigma(horizon, params.half_life(horizon), params.step(horizon), signal_ms)
+        return None if value is None else (lambda: value)
+
+    def tick_at(index: int) -> int:
+        return ticks[months[bisect_right(month_starts, bars.open_time(index)) - 1]]
+
+    def row(signal_ms: int, horizon: int, side: int, k) -> LabelRow:
+        d = (signal_ms - bars.start_ms) // _MINUTE_MS - 1
+        if d < 0:
+            raise ValueError("signal precedes the bars")
+        return _row(bars, funding, params, signal_ms, d, horizon, side, k, variances[params.half_life(horizon)],
+                    next_comp, tick_at, sigma_of)
+
+    row.robust = robust
+    row.tick_at = lambda entry_ms: tick_at((entry_ms - bars.start_ms) // _MINUTE_MS)
+    return row
+
+
 def _row(bars, funding, params, signal_ms, d, horizon, side, k, variance, next_comp, tick_at, sigma_of) -> LabelRow:
     base = (signal_ms, horizon, side, k)
     e = d + 1
