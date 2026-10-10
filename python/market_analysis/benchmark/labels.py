@@ -57,7 +57,7 @@ from .canonical import content_hash, exact_from_str, exact_to_str
 from .costs import COST_MODEL_V1, CostModel
 from .funding import FundingSeries
 from .scan import NON_TRADE_STATUSES, OUTCOMES, Cell, CellPair, label_trade, next_compromised
-from .robust_sigma import ROBUST_MODELS, RobustSigma
+from .robust_sigma import CANDIDATE_MODELS, FTCAL_MODEL, ROBUST_MODELS, RobustSigma
 from .volatility import (HCAL_CLIP, HCAL_MIN_DAYS, BLOCK_MINUTES, BLOCK_MS, DAY_MS, LAMBDA_NUM, SEASONAL_WINDOW_DAYS, VAR_SCALE,
                          build_variance, build_variance_deseasonalised, horizon_sigma, horizon_sigma_seasonal,
                          seasonal_factors)
@@ -67,6 +67,8 @@ SCHEMA_V2 = "labels-v2"
 SCHEMA_V3 = "labels-v3"
 SIGMA_MODELS = {"ewma": SCHEMA, "ewma-seasonal": SCHEMA_V2, "ewma-robust": SCHEMA_V3,
                 "ewma-robust-hcal": SCHEMA_V3}
+# Candidate sigma models (audit only): refused by LabelParams unless ``allow_candidate=True`` and by the forward harness.
+CANDIDATE_SIGMA_MODELS = {FTCAL_MODEL: SCHEMA_V3}
 LABEL_NON_TRADE_STATUSES = (*NON_TRADE_STATUSES, "P")
 FIXED_COLUMNS = ("signal_ms", "horizon_min", "side", "k", "status", "p0", "sigma", "d_ticks", "leverage",
                  "wallet_ur")
@@ -103,6 +105,8 @@ class LabelParams:
     cost_model: CostModel = COST_MODEL_V1
     schema: str | None = None  # derived from sigma_model when omitted
     sigma_model: str = "ewma"
+    # Not part of the record or identity: only lets a CANDIDATE sigma model (calibration audit) be constructed.
+    allow_candidate: bool = False
 
     def __post_init__(self):
         horizons = tuple(self.horizons)
@@ -130,9 +134,13 @@ class LabelParams:
             raise ValueError("cost_model must be a CostModel")
         if self.cost_model.cost_multiplier != 1 or self.cost_model.funding_multiplier != 1:
             raise ValueError("labels are built at cost_multiplier = funding_multiplier = 1 (the grid is applied later)")
-        if self.sigma_model not in SIGMA_MODELS:
+        if self.sigma_model in CANDIDATE_SIGMA_MODELS and not self.allow_candidate:
+            raise ValueError(f"sigma_model {self.sigma_model!r} is a candidate for the calibration audit only; "
+                             "labels, experiments and the forward harness do not accept it")
+        known = {**SIGMA_MODELS, **(CANDIDATE_SIGMA_MODELS if self.allow_candidate else {})}
+        if self.sigma_model not in known:
             raise ValueError(f"sigma_model must be one of {sorted(SIGMA_MODELS)}, got {self.sigma_model!r}")
-        expected = SIGMA_MODELS[self.sigma_model]
+        expected = known[self.sigma_model]
         if self.schema is None:
             object.__setattr__(self, "schema", expected)
         elif self.schema != expected:
@@ -173,13 +181,19 @@ class LabelParams:
         if self.sigma_model != "ewma":  # lb1 records (and identities) stay exactly as before
             record["sigma_model"] = self.sigma_model
             record["seasonal_window_days"] = SEASONAL_WINDOW_DAYS
-        if self.sigma_model in ROBUST_MODELS:  # labels-v3 only: lb2 records stay exactly as before
+        if self.sigma_model in ROBUST_MODELS or self.sigma_model in CANDIDATE_SIGMA_MODELS:  # labels-v3 only
             record["robust"] = {"statistic": "EWMA of |r5| / 0.797885", "seasonal_on": "|r5|",
                                 "aggregation": "sum of (s * g)^2 over the horizon's blocks"}
             if self.sigma_model == "ewma-robust-hcal":
                 record["robust"]["hcal"] = {"statistic": "median |ln(open[e+h]/open[e])| / sigma / 0.674490",
                                             "grid": "label step", "min_days": HCAL_MIN_DAYS,
                                             "clip": [str(HCAL_CLIP[0]), str(HCAL_CLIP[1])]}
+            if self.sigma_model == FTCAL_MODEL:
+                record["robust"]["ftcal"] = {"statistic": "median over past windows of M_e / sigma, M_e = max over the "
+                                                          "window's 1m bars of max(ln(high/open_e), -ln(low/open_e)), "
+                                                          "divided by the median of sup|W| on [0, 1]",
+                                             "grid": "label step", "min_days": HCAL_MIN_DAYS,
+                                             "clip": [str(HCAL_CLIP[0]), str(HCAL_CLIP[1])]}
         return record
 
     def identity(self) -> str:
@@ -230,8 +244,11 @@ def build_labels(symbol: str, bars: BarSeries, funding: FundingSeries, params: L
             if day is None:
                 return None
             return lambda: horizon_sigma_seasonal(var, day, (signal_ms % DAY_MS) // BLOCK_MS, horizon)
-    elif params.sigma_model in ROBUST_MODELS:
-        robust = RobustSigma(bars, hcal=params.sigma_model == "ewma-robust-hcal")
+    elif params.sigma_model in ROBUST_MODELS or params.sigma_model in CANDIDATE_SIGMA_MODELS:
+        if params.sigma_model in CANDIDATE_SIGMA_MODELS and not params.allow_candidate:
+            raise ValueError(f"sigma_model {params.sigma_model!r} is a candidate for the calibration audit only")
+        robust = RobustSigma(bars, hcal=params.sigma_model == "ewma-robust-hcal",
+                             ftcal=params.sigma_model == FTCAL_MODEL)
         variances = {days: robust.levels(days) for days in half_lives}
 
         def sigma_of(var: int, horizon: int, signal_ms: int):
@@ -265,6 +282,46 @@ def build_labels(symbol: str, bars: BarSeries, funding: FundingSeries, params: L
                         rows.append(_row(bars, funding, params, signal_ms, d, horizon, side, k, variance,
                                          next_comp, tick_at, sigma_of))
         yield month, rows
+
+
+def row_factory(symbol: str, bars: BarSeries, funding: FundingSeries, params: LabelParams, ticks: dict):
+    """``row(signal_ms, horizon, side, k) -> LabelRow`` for ONE decision, with the sigma, tick and row
+    function ``build_labels`` uses (robust models only), without generating every row of every month.
+
+    The forward parity workflow compares forward setups with these rows on full-history bars: the
+    expanding hcal calibration is the point, but generating every label row of 17 months is not.
+    ``test_benchmark_robust_sigma`` pins ``row_factory`` rows equal to ``build_labels`` rows.
+    """
+    if bars.symbol != symbol:
+        raise ValueError(f"bars are {bars.symbol}, not {symbol}")
+    if params.sigma_model not in ROBUST_MODELS:
+        raise ValueError("row_factory supports the robust sigma models only")
+    months = data_lake.months_between(month_of(bars.start_ms), month_of(bars.end_ms - 1))
+    missing = [month for month in months if month not in ticks]
+    if missing:
+        raise ValueError(f"no tick for months {missing}")
+    month_starts = [data_lake.month_bounds_ms(month)[0] for month in months]
+    robust = RobustSigma(bars, hcal=params.sigma_model == "ewma-robust-hcal")
+    variances = {days: robust.levels(days) for days in {params.half_life(h) for h in params.horizons}}
+    next_comp = next_compromised(bars)
+
+    def sigma_of(var: int, horizon: int, signal_ms: int):
+        value = robust.sigma(horizon, params.half_life(horizon), params.step(horizon), signal_ms)
+        return None if value is None else (lambda: value)
+
+    def tick_at(index: int) -> int:
+        return ticks[months[bisect_right(month_starts, bars.open_time(index)) - 1]]
+
+    def row(signal_ms: int, horizon: int, side: int, k) -> LabelRow:
+        d = (signal_ms - bars.start_ms) // _MINUTE_MS - 1
+        if d < 0:
+            raise ValueError("signal precedes the bars")
+        return _row(bars, funding, params, signal_ms, d, horizon, side, k, variances[params.half_life(horizon)],
+                    next_comp, tick_at, sigma_of)
+
+    row.robust = robust
+    row.tick_at = lambda entry_ms: tick_at((entry_ms - bars.start_ms) // _MINUTE_MS)
+    return row
 
 
 def _row(bars, funding, params, signal_ms, d, horizon, side, k, variance, next_comp, tick_at, sigma_of) -> LabelRow:

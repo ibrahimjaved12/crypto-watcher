@@ -67,7 +67,9 @@ def validate_label_tag(tag: str) -> str:
 
 # sigma model -> release prefix (lb1/lb2 never change). Both labels-v3 models need their own tag, so
 # ewma-robust-hcal uses lb3h- beside lb3- (two models cannot share one release identity).
-LABEL_PREFIX = {"ewma": "lb1", "ewma-seasonal": "lb2", "ewma-robust": "lb3", "ewma-robust-hcal": "lb3h"}
+# ewma-robust-ftcal (lb3f-) is a candidate model: built only for the calibration audit.
+LABEL_PREFIX = {"ewma": "lb1", "ewma-seasonal": "lb2", "ewma-robust": "lb3", "ewma-robust-hcal": "lb3h",
+                "ewma-robust-ftcal": "lb3f"}
 
 
 def label_tag(symbol: str, first: str, last: str, label_revision: int = 1, sigma_model: str = "ewma") -> str:
@@ -204,7 +206,8 @@ def build(symbol: str, first: str, last: str, workdir: Path, provenance: dict, s
     # label_cli logs no tick values, but parser exceptions can carry individual input values;
     # keep all of its output out of the public workflow log.
     with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
-        manifest = label_cli.run(symbol, workdir, first, last, out_dir, label_cli.LabelParams(sigma_model=sigma_model))
+        manifest = label_cli.run(symbol, workdir, first, last, out_dir, label_cli.LabelParams(
+            sigma_model=sigma_model, allow_candidate=sigma_model == "ewma-robust-ftcal"))
     for month, inputs in manifest["inputs"].items():
         verified = provenance[month]
         for kind in ("bars", "funding"):

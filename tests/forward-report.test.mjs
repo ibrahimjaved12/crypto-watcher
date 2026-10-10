@@ -40,37 +40,118 @@ test("mean and standard error come from n, the sum and the sum of squares", () =
   assert.equal(report.moments(3, 3 * R, 3 * R * R * (1 - 1e-16)).se, 0, "rounding never gives a NaN");
 });
 
-test("the Welch difference against the matched control and the 30-trade rule", () => {
-  // 30 trades 0 R / 2 R (mean 1 R) against 30 control trades -1 R / +1 R (mean 0 R).
-  const [full] = report.buildReportRows([row({ n: 30, a: 0, b: 2, pn: 30, pa: -1, pb: 1 })]);
-  const se = Math.sqrt(1 / 30); // one trade per day; cluster formula has no small-sample multiplier
-  assert.ok(Math.abs(full.mean.mean - 1) < 1e-12 && Math.abs(full.placebo.mean) < 1e-12);
-  assert.ok(Math.abs(full.diffSe - Math.sqrt(2) * se) < 1e-9);
-  assert.ok(Math.abs(full.z - 1 / (Math.sqrt(2) * se)) < 1e-9);
-  assert.equal(full.verdict.kind, "better");
-  assert.match(full.verdict.text, /day-clustered; Bonferroni/);
-  const [few] = report.buildReportRows([row({ n: 29, a: 0, b: 2, pn: 30, pa: -1, pb: 1 })]);
-  assert.equal(few.verdict.text, "too few trades", "29 trades are never judged");
+// Paired-by-exit-day helpers. `fromDays` builds a consistent report row AND the paired row from per-day
+// trade lists (R units, index = UTC exit day), with an independent JS implementation of
+// r_d = (s_d - n_d*S/n)/n - (c_d - m_d*C/m)/m  and  paired_ss = sum_d r_d^2 (micro-R squared).
+const ID = "rsi_14_reversion:60";
+function fromDays(realDays, ctlDays) {
+  const sum = (list) => list.reduce((a, b) => a + b, 0);
+  const flat = (days) => Object.values(days).flat();
+  const [rt, ct] = [flat(realDays), flat(ctlDays)];
+  const n = rt.length, m = ct.length, S = sum(rt) * R, C = sum(ct) * R;
+  const dayStat = (days, key) => [(days[key] ?? []).length, sum(days[key] ?? []) * R];
+  const clusters = (days, tot, cnt) => Object.keys(days).reduce((a, key) => {
+    const [nd, sd] = dayStat(days, key);
+    return a + (sd - nd * tot / cnt) ** 2;
+  }, 0);
+  const keys = [...new Set([...Object.keys(realDays), ...Object.keys(ctlDays)])];
+  let ss = 0, both = 0;
+  for (const key of keys) {
+    const [nd, sd] = dayStat(realDays, key), [md, cd] = dayStat(ctlDays, key);
+    const r = (sd - nd * S / n) / n - (cd - md * C / m) / m;
+    ss += r * r;
+    if (nd && md) both += 1;
+  }
+  const squares = (list) => list.reduce((a, x) => a + (x * R) ** 2, 0);
+  return {
+    row: {
+      strategy_id: ID, version: "ta-v1", horizon_min: 60, rr: "2", n, n_t: 1, n_s: 1, n_e: 0, n_l: 0, n_x: 0, n_ambiguous: 0,
+      sum_net_ur: S, sum_sq_net_ur: squares(rt), sum_cost_ur: 0, sum_fund_ur: 0, first_exit_ms: 1, last_exit_ms: 2,
+      exit_days: Object.keys(realDays).length, cluster_sum_sq_ur: clusters(realDays, S, n),
+      placebo_exit_days: Object.keys(ctlDays).length, placebo_cluster_sum_sq_ur: clusters(ctlDays, C, m),
+      placebo_n: m, placebo_sum_net_ur: C, placebo_sum_sq_net_ur: squares(ct),
+    },
+    paired: { strategy_id: ID, version: "ta-v1", horizon_min: 60, rr: "2", paired_days: both, union_days: keys.length, paired_ss: ss },
+  };
+}
+const spread = (count, from, value) => Object.fromEntries(Array.from({ length: count }, (_, i) => [from + i, value(i)]));
+
+test("hand-computed 4-day example with uneven counts and a day where the control has no trade", () => {
+  const { row: r4, paired } = fromDays(
+    { 1: [1, 3], 2: [-2], 3: [2, 2, 0] },   // n = 6, S = 6 R, mean 1
+    { 1: [1], 2: [-1, -1], 4: [2] },        // m = 4, C = 1 R, mean 0.25; no control trade on day 3
+  );
+  assert.equal(paired.paired_days, 2, "only days 1 and 2 have both series");
+  assert.equal(paired.union_days, 4);
+  // Day residuals r_d: 7/48, 1/8, 1/6 (control absent, contributes 0) and -7/16 (strategy absent); sum r_d^2 = 295/1152 R^2.
+  assert.ok(Math.abs(paired.paired_ss / (R * R) - 295 / 1152) < 1e-12);
+  const [built] = report.buildReportRows([r4], [], [paired]);
+  assert.ok(Math.abs(built.diffR - 0.75) < 1e-12);
+  assert.equal(built.pairedDays, 2);
+  assert.ok(Math.abs(built.diffSe - Math.sqrt(295 / 1152)) < 1e-12);
+  assert.ok(Math.abs(built.z - 0.75 / Math.sqrt(295 / 1152)) < 1e-12);
+  assert.equal(built.verdict.kind, "too_few");
+});
+
+test("the paired difference against the matched control and the 30-trade rule", () => {
+  // 30 days, one trade each: strategy alternates 0 R / 2 R, control alternates +1 R / -1 R in the opposite phase.
+  const days = (a, b) => spread(30, 0, (i) => [i % 2 ? b : a]);
+  const { row: full, paired } = fromDays(days(0, 2), days(1, -1));
+  const [built] = report.buildReportRows([full], [], [paired]);
+  // r_d = (x_d - 1)/30 - y_d/30 = -2/30 on every day, so SE(D) = sqrt(30 * (2/30)^2).
+  assert.ok(Math.abs(built.diffSe - Math.sqrt(30 * (2 / 30) ** 2)) < 1e-9);
+  assert.ok(Math.abs(built.z - 1 / built.diffSe) < 1e-9);
+  assert.equal(built.verdict.kind, "better");
+  assert.match(built.verdict.text, /paired by exit day; Bonferroni/);
+  const { row: few, paired: fewPaired } = fromDays(spread(29, 0, (i) => [i % 2 ? 2 : 0]), days(1, -1));
+  assert.equal(report.buildReportRows([few], [], [fewPaired])[0].verdict.text, "too few trades", "29 trades are never judged");
+});
+
+test("perfectly correlated strategy and control: the paired SE collapses while the unpaired SE does not", () => {
+  const x = (i) => ((i * 7) % 11) - 5;                       // varied daily results
+  const { row: corr, paired } = fromDays(spread(40, 0, (i) => [x(i)]), spread(40, 0, (i) => [x(i) - 0.5]));
+  const [built] = report.buildReportRows([corr], [], [paired]);
+  const unpaired = Math.sqrt(built.mean.se ** 2 + built.placebo.se ** 2);
+  assert.ok(unpaired > 0.4, `the independent estimate stays large (${unpaired})`);
+  assert.ok(Math.abs(built.diffSe) < 1e-9, "r_d is 0 on every day: the control moves with the strategy");
+  assert.equal(built.z, null, "no variation in the difference: no z, no verdict of edge");
+  assert.equal(built.verdict.kind, "no_spread");
+  assert.ok(Math.abs(built.diffR - 0.5) < 1e-12);
+});
+
+test("fewer than 10 paired days gives no verdict even with 30 trades and 10 days in each series", () => {
+  const strategy = spread(40, 0, (i) => [i % 2 ? 1 : -1]);
+  const [nine] = (() => { const o = fromDays(strategy, spread(30, 31, (i) => [i % 2 ? 1 : -1])); return [report.buildReportRows([o.row], [], [o.paired])[0], o]; })();
+  assert.equal(nine.pairedDays, 9, "control days 31..60 overlap strategy days 0..39 on 9 days");
+  assert.equal(nine.verdict.kind, "too_few");
+  const ten = fromDays(strategy, spread(30, 30, (i) => [i % 2 ? 1 : -1]));
+  const built = report.buildReportRows([ten.row], [], [ten.paired])[0];
+  assert.equal(built.pairedDays, 10);
+  assert.notEqual(built.verdict.kind, "too_few");
 });
 
 test("verdict kinds: no baseline, no spread, no difference, worse", () => {
-  assert.equal(report.buildReportRows([row({ n: 30, a: 0, b: 2 })])[0].verdict.kind, "no_baseline");
-  const flat = report.buildReportRows([row({ n: 30, a: 1, b: 1, pn: 30, pa: 0, pb: 0 })])[0];
-  assert.equal(flat.verdict.kind, "no_spread");
-  assert.equal(flat.z, null);
-  assert.equal(report.buildReportRows([row({ n: 30, a: -1, b: 1, pn: 30, pa: -1, pb: 1 })])[0].verdict.kind, "no_difference");
-  assert.equal(report.buildReportRows([row({ n: 30, a: -2, b: 0, pn: 30, pa: -1, pb: 1 })])[0].verdict.kind, "worse");
+  const verdict = (real, ctl) => { const o = fromDays(real, ctl); return report.buildReportRows([o.row], [], [o.paired])[0]; };
+  const alt = (a, b) => spread(30, 0, (i) => [i % 2 ? b : a]);
+  assert.equal(report.buildReportRows([fromDays(alt(0, 2), {}).row])[0].verdict.kind, "no_baseline");
+  assert.equal(verdict(alt(1, 1), alt(0, 0)).verdict.kind, "no_spread");
+  assert.equal(verdict(alt(-1, 1), alt(1, -1)).verdict.kind, "no_difference", "mean difference 0");
+  assert.equal(verdict(alt(-2, 0), alt(1, -1)).verdict.kind, "worse");
 });
 
 test("the Bonferroni threshold scales with the number of strategy rows shown", () => {
   assert.ok(Math.abs(report.normalQuantile(0.975) - 1.959964) < 1e-6);
   assert.ok(Math.abs(report.bonferroniCritical(1) - 1.959964) < 1e-6);
   assert.ok(Math.abs(report.bonferroniCritical(10) - 2.807034) < 1e-6);
-  const rows = Array.from({ length: 10 }, (_, i) =>
-    row({ n: 30, a: 0, b: 2, pn: 30, pa: -1, pb: 1, id: `macd_12_26_9:${60 + i}` }));
-  const built = report.buildReportRows(rows);
+  // Strategy 1.5 / 0.5 R and control -0.5 / +0.5 R in phase: r_d = +-1/30, SE(D) = sqrt(30)/30, z = 5.48.
+  const parts = Array.from({ length: 10 }, (_, i) => {
+    const o = fromDays(spread(30, 0, (d) => [d % 2 ? 0.5 : 1.5]), spread(30, 0, (d) => [d % 2 ? 0.5 : -0.5]));
+    return { row: { ...o.row, strategy_id: `macd_12_26_9:${60 + i}` }, paired: { ...o.paired, strategy_id: `macd_12_26_9:${60 + i}` } };
+  });
+  const built = report.buildReportRows(parts.map((p) => p.row), [], parts.map((p) => p.paired));
+  assert.ok(Math.abs(built[0].z - 1 / (Math.sqrt(30) / 30)) < 1e-9);
   assert.match(built[0].verdict.text, /threshold for 10 rows: z ≥ 2\.81/);
-  assert.equal(built[0].clearsBonferroni, true, "z = 3.8 > 2.81");
+  assert.equal(built[0].clearsBonferroni, true, "z = 5.48 clears 2.81");
 });
 
 test("non-trades join their strategy row and unmatched ones still show", () => {
@@ -110,21 +191,26 @@ test("day-clustered SE: three uneven exit days, hand-computed residuals", () => 
   assert.equal(r.mean.mean, 1);
   assert.ok(Math.abs(r.mean.se - Math.sqrt(14)/6) < 1e-12);
   assert.ok(Math.abs(r.placebo.se - Math.sqrt(8)/6) < 1e-12);
-  assert.ok(Math.abs(r.diffSe - Math.sqrt(22)/6) < 1e-12);
-  assert.ok(Math.abs(r.z - 6/Math.sqrt(22)) < 1e-12);
+  assert.equal(r.z, null, "no paired sums loaded: no z (the independent Welch SE is not used)");
   assert.ok(Math.abs(r.naiveSe - Math.sqrt(16/30)) < 1e-12);
   assert.equal(r.verdict.kind, "too_few");
   const csv = report.reportCsv([r]);
   assert.match(csv.split("\n")[0], /Trades,Days,Mean net R,Day-clustered SE,naive SE/);
   assert.match(csv.split("\n")[0], /Control trades,Control days/);
+  assert.match(csv.split("\n")[0], /Difference R,Paired days,Paired SE of difference,Paired z,Verdict/);
 });
 
 test("ten UTC exit days are required for both series, independently of trade count", () => {
-  const input = row({ n: 300, a: 1, b: 3, pn: 300, pa: -1, pb: 1 });
-  for (const counts of [{ exit_days: 9 }, { placebo_exit_days: 9 }]) {
-    assert.equal(report.buildReportRows([{ ...input, ...counts }])[0].verdict.kind, "too_few");
-  }
-  assert.equal(report.buildReportRows([{ ...input, exit_days: 10, placebo_exit_days: 10 }])[0].verdict.kind, "better");
-  assert.equal(report.buildReportRows([{ ...input, cluster_sum_sq_ur: null }])[0].z, null);
+  const build = (realDays, ctlDays) => {
+    const per = (days) => Math.ceil(300 / days);
+    const make = (days, base) => spread(days, 0, (i) => Array.from({ length: per(days) }, (_, j) => ((i + j) % 2 ? base + 1 : base - 1)));
+    const o = fromDays(make(realDays, 1), make(ctlDays, 0));
+    return report.buildReportRows([o.row], [], [o.paired])[0];
+  };
+  assert.equal(build(9, 10).verdict.kind, "too_few");
+  assert.equal(build(10, 9).verdict.kind, "too_few");
+  assert.notEqual(build(10, 10).verdict.kind, "too_few");
+  const o = fromDays(spread(30, 0, (d) => [d % 2 ? 0.5 : 1.5]), spread(30, 0, (d) => [d % 2 ? 0.5 : -0.5]));
+  assert.equal(report.buildReportRows([o.row], [], [{ ...o.paired, paired_ss: null }])[0].z, null);
   assert.equal(report.verdictFor(30, 2.5, true, 10, 10, 10, 30).kind, "no_difference");
 });

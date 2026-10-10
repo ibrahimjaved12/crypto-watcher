@@ -427,3 +427,122 @@ def horizon_calibration(series: BarSeries, horizon_minutes: int, step_minutes: i
         c = min(max(median.median() / HCAL_MEDIAN_ABS_NORMAL, HCAL_CLIP[0]), HCAL_CLIP[1])
         out[entry_ms] = round(c * HCAL_SCALE)
     return out
+
+
+# ---------------------------------------------------------------- path-extreme calibration (audit candidate)
+#
+# ``ewma-robust-ftcal`` (candidate, audit only; never used by the forward harness). hcal fixes the
+# horizon multiplier on the MEDIAN of the terminal |ln(open[e+h]/open[e])| / sigma, which matches a
+# Gaussian terminal median but not barrier hits, which depend on the path maximum and the tails. ftcal
+# uses the PATH statistic M_e = max over the window's 1-minute bars of max(ln(high/open_e),
+# -ln(low/open_e)) and the median of sup_{0<=s<=1}|W_s| of a standard Brownian motion.
+
+FTCAL_MIN_DAYS = HCAL_MIN_DAYS
+FTCAL_CLIP = HCAL_CLIP
+FTCAL_SCALE = HCAL_SCALE
+
+
+def sup_abs_cdf(x: float) -> float:
+    """P(sup_{0<=s<=1} |W_s| <= x) = (4/pi) sum_{n>=0} (-1)^n / (2n+1) exp(-(2n+1)^2 pi^2 / (8 x^2))."""
+    from math import exp, pi
+
+    if x <= 0:
+        return 0.0
+    total = 0.0
+    n = 0
+    while True:
+        term = exp(-((2 * n + 1) ** 2) * pi * pi / (8 * x * x)) / (2 * n + 1)
+        total += -term if n % 2 else term
+        if term < 1e-18 or n > 100_000:
+            break
+        n += 1
+    return min(1.0, max(0.0, 4 / pi * total))
+
+
+def sup_abs_median(tolerance: float = 1e-12) -> float:
+    """Median of sup|W| on [0, 1]: P = 0.5 solved by bisection (computed, not remembered)."""
+    low, high = 0.3, 5.0
+    while high - low > tolerance:
+        mid = (low + high) / 2
+        if sup_abs_cdf(mid) < 0.5:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2
+
+
+FTCAL_SUP_ABS_MEDIAN = sup_abs_median()   # 1.148973258...
+
+
+def path_extreme_log(open_e: int, highs, lows) -> float:
+    """M_e = max(ln(max high / open_e), -ln(min low / open_e)) over one window's 1-minute bars (>= 0 when
+    the window's range contains the open; the open's own minute is part of the window)."""
+    from math import log
+
+    return max(log(max(highs) / open_e), -log(min(lows) / open_e))
+
+
+def path_calibration(series: BarSeries, horizon_minutes: int, step_minutes: int, robust_sigma) -> dict:
+    """{entry_ms: c_h (FTCAL_SCALE fixed point) or None} on the ``step_minutes`` grid, like ``horizon_calibration``.
+
+    For every completed past window (entry e on the grid with open_time(e + h) <= t, the opens at e and
+    e + h valid, robust sigma available, and EVERY minute of [e, e + h) present and uncompromised so the
+    path maximum is not understated) ratio_e = M_e / (sigma_robust_h(e) / VAR_SCALE). c_h(t) = median over
+    those windows of ratio_e / FTCAL_SUP_ABS_MEDIAN, clipped to [0.5, 2]; None until the first counted
+    window is at least 60 days before t. Expanding and point in time: a window enters the median only from
+    the entry time equal to its exit (e + h), the same rule as ``horizon_calibration``.
+    """
+    import numpy as np
+
+    minute_ms = 60_000
+    step_ms = step_minutes * minute_ms
+    first = series.start_ms + minute_ms
+    first += -first % step_ms
+    entries = range(first, series.end_ms, step_ms)
+    n = series.minutes
+    opens = np.frombuffer(series.open, dtype=np.int64)
+    highs = np.frombuffer(series.high, dtype=np.int64)
+    lows = np.frombuffer(series.low, dtype=np.int64)
+    flags = np.frombuffer(series.flags, dtype=np.uint16)
+    bad = (opens == MISSING) | (highs == MISSING) | (lows == MISSING) | ((flags & COMPROMISED_FLAGS) != 0)
+    bad_prefix = np.concatenate(([0], np.cumsum(bad)))          # bad_prefix[i] = bad minutes in [0, i)
+
+    candidates = []  # (entry_ms, e)
+    for entry_ms in entries:
+        e = (entry_ms - series.start_ms) // minute_ms
+        x = e + horizon_minutes
+        if e < 0 or x >= n or bad[x] or bad_prefix[x] - bad_prefix[e] != 0:
+            continue
+        sigma = robust_sigma(entry_ms)
+        if not sigma:
+            continue
+        candidates.append((entry_ms, e, sigma))
+    pending = []  # (exit_ms, entry_ms, ratio) in exit order
+    if candidates:
+        starts = np.array([e for _, e, _ in candidates], dtype=np.int64)
+        extremes = np.empty(len(candidates))
+        offsets = np.arange(horizon_minutes, dtype=np.int64)
+        for lo in range(0, len(candidates), 4096):
+            idx = starts[lo:lo + 4096, None] + offsets[None, :]
+            open_e = opens[starts[lo:lo + 4096]].astype(np.float64)
+            up = np.log(highs[idx].max(axis=1) / open_e)
+            down = -np.log(lows[idx].min(axis=1) / open_e)
+            extremes[lo:lo + 4096] = np.maximum(up, down)
+        for (entry_ms, _, sigma), extreme in zip(candidates, extremes):
+            pending.append((entry_ms + horizon_minutes * minute_ms, entry_ms, float(extreme) / (sigma / VAR_SCALE)))
+    out = {}
+    median = _RunningMedian()
+    first_counted = None
+    k = 0
+    for entry_ms in entries:
+        while k < len(pending) and pending[k][0] <= entry_ms:
+            median.add(pending[k][2])
+            if first_counted is None:
+                first_counted = pending[k][1]
+            k += 1
+        if first_counted is None or entry_ms - first_counted < FTCAL_MIN_DAYS * DAY_MS:
+            out[entry_ms] = None
+            continue
+        c = min(max(median.median() / FTCAL_SUP_ABS_MEDIAN, FTCAL_CLIP[0]), FTCAL_CLIP[1])
+        out[entry_ms] = round(c * FTCAL_SCALE)
+    return out

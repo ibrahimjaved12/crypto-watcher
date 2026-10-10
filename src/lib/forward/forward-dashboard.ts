@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { DAY_MS, rangeMs, reportRpcArgs, strategyIdsFor, type ForwardFilters } from "./forward-filters";
-import { buildReportRows, toCsv, type NonTradeRow, type OutcomeReportRow } from "./forward-report";
+import { buildReportRows, toCsv, type NonTradeRow, type OutcomeReportRow, type PairedRow } from "./forward-report";
 
 /**
  * Forward dashboard data (#239 P11, P20). Reads only the signed-in user's rows (RLS). Aggregates
@@ -136,11 +136,12 @@ export async function exportForwardLog(
 export async function loadForwardReport(client: SupabaseClient, filters: ForwardFilters) {
   const args = reportRpcArgs(filters);
   const rpc = (name: string) => client.rpc(name, args) as unknown as PromiseLike<Result>;
-  const [outcomes, nonTrades] = await Promise.all([
+  const [outcomes, nonTrades, paired] = await Promise.all([
     rows<OutcomeReportRow>(rpc("forward_outcome_report"), "outcome report"),
     rows<NonTradeRow>(rpc("forward_nontrade_report"), "non-trade report"),
+    rows<PairedRow>(rpc("forward_paired_report"), "paired report"),
   ]);
-  return buildReportRows(outcomes, nonTrades);
+  return buildReportRows(outcomes, nonTrades, paired);
 }
 
 export async function loadForwardDashboard(client: SupabaseClient) {

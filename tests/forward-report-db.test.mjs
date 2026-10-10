@@ -19,6 +19,7 @@ before(async () => {
   await db.exec(await readFile(new URL("../supabase/migrations/20261009120000_forward_harness.sql", import.meta.url), "utf8"));
   await db.exec(await readFile(new URL("../supabase/migrations/20261010120000_forward_clustered_report.sql", import.meta.url), "utf8"));
   await db.exec(await readFile(new URL("../supabase/migrations/20261010121000_forward_retryable_runs.sql", import.meta.url), "utf8"));
+  await db.exec(await readFile(new URL("../supabase/migrations/20261011090000_forward_paired_report.sql", import.meta.url), "utf8"));
 });
 beforeEach(async () => {
   await db.exec(`RESET ROLE; TRUNCATE paper_runs, forward_signals, forward_setups, forward_outcomes, paper_ledger CASCADE;
@@ -170,4 +171,57 @@ test("skipped and no-sigma attempts preserve audit rows without taking the succe
   await assert.rejects(insert("ok"), /duplicate key/);
   const result = await db.query("SELECT status FROM paper_runs WHERE run_key = 'hour:3600000'");
   assert.equal(result.rows.length, 3);
+});
+
+// Paired-by-exit-day difference (forward_paired_report): hand-computed, with the control absent on one day.
+const DAY_MS = 86_400_000;
+const dayMs = (d) => (20_000 + d) * DAY_MS + 1_000;
+async function addDays(startId, strategy, days) {
+  let n = startId;
+  for (const [day, nets] of Object.entries(days)) {
+    for (const net of nets) {
+      await setup(n, strategy);
+      await outcome(n, "E", Math.round(net * 1_000_000), dayMs(Number(day)));
+      n += 1;
+    }
+  }
+}
+const paired = async () => (await db.query(`SELECT * FROM forward_paired_report(${NIL})`)).rows;
+
+test("the paired report equals the hand-computed residual sums over the union of exit days", async () => {
+  const A = "ema_cross_20_50:60";
+  await addDays(100, A, { 1: [1, 3], 2: [-2], 3: [2, 2, 0] });
+  await addDays(200, `placebo-v1:${A}`, { 1: [1], 2: [-1, -1], 4: [2] });
+  await as(USER);
+  const rows = await paired();
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].strategy_id, Number(rows[0].paired_days), Number(rows[0].union_days)], [A, 2, 4]);
+  // r_d (R): day 1 7/48, day 2 1/8, day 3 1/6 (no control trade), day 4 -7/16 (no strategy trade).
+  assert.ok(Math.abs(Number(rows[0].paired_ss) / 1e12 - 295 / 1152) < 1e-9);
+});
+
+test("paired report: a strategy without a control has no paired row; filters and RLS match the outcome report", async () => {
+  const A = "ema_cross_20_50:60";
+  await addDays(100, A, { 1: [1], 2: [2] });                                   // no control at all
+  await addDays(300, "macd_12_26_9:60", { 1: [1], 2: [2] });
+  await addDays(400, "placebo-v1:macd_12_26_9:60", { 1: [0], 2: [1] });
+  await setup(500, "macd_12_26_9:60", { user: OTHER }); await outcome(500, "T", 9_000_000, dayMs(1), { user: OTHER });
+  await as(USER);
+  assert.deepEqual((await paired()).map((r) => r.strategy_id), ["macd_12_26_9:60"]);
+  const none = (await db.query(
+    "SELECT * FROM forward_paired_report(NULL::bigint, $1, NULL::text[], NULL::text[], NULL::int[], NULL::int[], NULL::text[])", [dayMs(0)])).rows;
+  assert.equal(none.length, 0, "the exit range filter applies to both series");
+});
+
+test("perfectly correlated strategy and control: the paired sum is ~0 while each series' own clustered sum is not", async () => {
+  const A = "ema_cross_20_50:60";
+  const x = Array.from({ length: 12 }, (_, d) => (d % 5) - 2);
+  await addDays(100, A, Object.fromEntries(x.map((v, d) => [d, [v]])));
+  await addDays(200, `placebo-v1:${A}`, Object.fromEntries(x.map((v, d) => [d, [v - 0.5]])));
+  await as(USER);
+  const [row] = await paired();
+  assert.equal(Number(row.paired_days), 12);
+  assert.ok(Number(row.paired_ss) < 1e-3, `paired sum ${row.paired_ss} (micro-R squared)`);
+  const own = (await db.query(`SELECT cluster_sum_sq_ur, placebo_cluster_sum_sq_ur FROM forward_outcome_report(${NIL})`)).rows[0];
+  assert.ok(Number(own.cluster_sum_sq_ur) > 1e12 && Number(own.placebo_cluster_sum_sq_ur) > 1e12);
 });

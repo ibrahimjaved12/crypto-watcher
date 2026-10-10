@@ -11,17 +11,24 @@ it is multiplied by the point-in-time horizon multiplier c_h of ``volatility.hor
 from __future__ import annotations
 
 from .bars import MISSING, BarSeries
-from .volatility import (BLOCK_MINUTES, BLOCK_MS, DAY_MS, HCAL_SCALE, build_scale_robust, horizon_calibration,
-                         horizon_sigma_robust, seasonal_factors_abs)
+from .volatility import (BLOCK_MINUTES, BLOCK_MS, DAY_MS, FTCAL_SCALE, HCAL_SCALE, build_scale_robust,
+                         horizon_calibration, horizon_sigma_robust, path_calibration, seasonal_factors_abs)
 
 ROBUST_MODELS = ("ewma-robust", "ewma-robust-hcal")
+# Candidate models: evaluated in the calibration audit only. LabelParams refuses them unless
+# ``allow_candidate=True`` and the forward harness rejects them outright.
+CANDIDATE_MODELS = ("ewma-robust-ftcal",)
+FTCAL_MODEL = CANDIDATE_MODELS[0]
 _MINUTE_MS = 60_000
 
 
 class RobustSigma:
-    def __init__(self, bars: BarSeries, hcal: bool):
+    def __init__(self, bars: BarSeries, hcal: bool, ftcal: bool = False):
+        if hcal and ftcal:
+            raise ValueError("hcal and ftcal are different horizon calibrations; choose one")
         self.bars = bars
         self.hcal = hcal
+        self.ftcal = ftcal
         self.factors = seasonal_factors_abs(bars)
         self._levels: dict = {}
         self._calibration: dict = {}
@@ -45,13 +52,15 @@ class RobustSigma:
     def multiplier(self, horizon: int, half_life: int, step: int, signal_ms: int) -> int | None:
         key = (horizon, half_life, step)
         if key not in self._calibration:
-            self._calibration[key] = horizon_calibration(
+            calibrate = path_calibration if self.ftcal else horizon_calibration
+            self._calibration[key] = calibrate(
                 self.bars, horizon, step, lambda entry_ms: self.robust(horizon, half_life, entry_ms))
         return self._calibration[key].get(signal_ms)
 
     def sigma(self, horizon: int, half_life: int, step: int, signal_ms: int) -> int | None:
         base = self.robust(horizon, half_life, signal_ms)
-        if base is None or not self.hcal:
+        if base is None or not (self.hcal or self.ftcal):
             return base
         c = self.multiplier(horizon, half_life, step, signal_ms)
-        return None if c is None else base * c // HCAL_SCALE
+        scale = FTCAL_SCALE if self.ftcal else HCAL_SCALE
+        return None if c is None else base * c // scale

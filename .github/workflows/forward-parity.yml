@@ -1,0 +1,130 @@
+name: Forward parity
+run-name: "Forward parity ${{ inputs.month }}"
+
+# Forward harness vs label engine on REAL bars (one development month). Read-only: nothing is published
+# to this public repository. The full report goes to reports/parity/ in the private research-data
+# repository; this public log and the job summary carry counts and PASS/FAIL per symbol only.
+# Manual only (workflow_dispatch): never on push or pull request.
+#
+# What it compares (scripts/research/forward_parity.py, python/market_analysis/forward/parity.py):
+#   Reference: the label engine (labels.row_factory = the sigma, tick and row function of build_labels) on
+#     FULL-history 1m bars from 2024-01 through the month AFTER the audited one (its first 960 minutes are
+#     the longest time limit, 4 x 240 min, of the last decisions), so the expanding hcal calibration is
+#     the point. No published lb release is needed (an optional lb3h cross-check is reported, not judged).
+#   Forward: ONE forward evaluate call shaped like the live request: bars starting exactly 120 days before the
+#     month, from_ms = month start, through the month plus 960 minutes. One call is equivalent to hourly runs
+#     because evaluation is stateless over bars (decision window, open setups and wallet are inputs, nothing
+#     is read from a store); BTCUSDT also runs a 3-day slice as 72 hourly calls chained through
+#     processed_to_ms and requires the same signals, setups and resolutions as one call.
+#   Join: every forward setup to its label row on (signal_ms, horizon, side, k) and the rr cell.
+#
+# PASS RULE, DECLARED BEFORE ANY RUN (python/market_analysis/forward/parity.py PASS_RULE):
+#   (i)   0 unmatched forward setups;
+#   (ii)  among setups with identical geometry (same tick, entry price, stop and target in ticks), 100 % identical
+#         status, exit offset, exit time and net R;
+#   (iii) >= 95 % of setups have identical geometry OR |delta sigma| / sigma <= 3 %;
+#   (iv)  median |delta c_h| / c_h <= 3 %.
+# A failed rule is a FINDING, not something to fix by loosening the rule. Do not edit these thresholds to make
+# a run pass; change code or data, or write the finding down.
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated symbols (subset of the six)"
+        type: string
+        default: "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT"
+      month:
+        description: "DEVELOPMENT month YYYY-MM (the loader refuses hidden-stretch months; the next month is read too)"
+        type: string
+        default: "2025-05"
+      label_revision:
+        description: "lb3h revision for the informational cross-check. auto = the revision whose sigma-relevant params equal FORWARD_PARAMS' (ewma-robust-hcal); none found is not an error"
+        type: string
+        default: "auto"
+      data_revision:
+        description: "rd data release revision"
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forward-parity-${{ inputs.month }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      symbols: ${{ steps.matrix.outputs.symbols }}
+    steps:
+      - id: matrix
+        env:
+          SYMBOLS: ${{ inputs.symbols }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          allowed = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT"]
+          items = [s.strip() for s in os.environ["SYMBOLS"].split(",") if s.strip()]
+          if not items or len(set(items)) != len(items) or any(s not in allowed for s in items):
+              raise SystemExit("symbols must be a comma-separated subset of " + ",".join(allowed))
+          print("symbols=" + json.dumps([s for s in allowed if s in items]))
+          PY
+
+  parity:
+    name: Parity ${{ matrix.symbol }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: ${{ fromJSON(needs.plan.outputs.symbols) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            python/requirements.txt
+            python/requirements-research.txt
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+          .venv/bin/python -m pip install -r requirements-research.txt
+      - name: Run forward parity
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+          MONTH: ${{ inputs.month }}
+          LABEL_REVISION: ${{ inputs.label_revision }}
+          DATA_REVISION: ${{ inputs.data_revision }}
+          PARITY_SUMMARY: ${{ runner.temp }}/parity-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: |
+          SLICE=""
+          if [ "$SYMBOL" = "BTCUSDT" ]; then SLICE="--slice-check"; fi
+          python/.venv/bin/python scripts/research/forward_parity.py --workdir forward-parity-work \
+            --summary "$PARITY_SUMMARY" --symbol "$SYMBOL" --month "$MONTH" \
+            --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION" $SLICE
+      - name: Delete working files
+        if: always()
+        run: rm -rf forward-parity-work
+      - name: Summary
+        if: always()
+        env:
+          PARITY_SUMMARY: ${{ runner.temp }}/parity-summary.md
+        run: |
+          if [ -f "$PARITY_SUMMARY" ]; then
+            cat "$PARITY_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
