@@ -4,6 +4,9 @@ Everything runs from one command. `npm run dev:local:all` starts local Supabase 
 operational DB), the Python API, the Binance collector, the hourly forward job (signals and paper
 trading), the daily trend job and the app. `npm run mvp:check` says whether it is healthy.
 
+To run the workers against the hosted main Supabase instead (production mode), use `npm run worker:host`; see
+[worker-host.md](worker-host.md). That flow does not use this runbook's local main stack.
+
 ## First time
 
 1. **Reset both local databases** (the forward schema is edited in place, so an old DB is stale):

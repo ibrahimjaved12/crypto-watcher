@@ -15,6 +15,7 @@ dist-ssr
 .tanstack/**
 .nitro
 *.local
+.worker-host.status.json
 supabase/.temp/
 supabase/.branches/
 operational-db/supabase/.temp/

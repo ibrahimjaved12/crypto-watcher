@@ -16,6 +16,7 @@
     "forward:trend": "node scripts/forward-run.mjs --trend",
     "forward:backfill": "node scripts/forward-run.mjs --backfill-only",
     "mvp:check": "node scripts/mvp-check.mjs",
+    "worker:host": "node scripts/worker-host.mjs",
     "collector:worker:build": "vite build --config vite.collector-worker.config.ts",
     "collector:worker:start": "node dist/collector-worker/collector-worker.mjs",
     "build": "vite build",
