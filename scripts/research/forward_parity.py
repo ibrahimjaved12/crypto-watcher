@@ -83,7 +83,7 @@ def ta_strategy_ids() -> list[str]:
 
 def request(symbol, bars, funding, first_ms, end_ms, from_ms, to_ms) -> dict:
     return {"symbols": [{"symbol": symbol, "rows": parity.rows_from_bars(bars, first_ms, end_ms),
-                         "funding": parity.funding_events(funding), "funding_available": True}],
+                         "funding": parity.funding_events(funding, bars), "funding_available": True}],
             "strategy_ids": ta_strategy_ids(), "from_ms": from_ms, "to_ms": to_ms}
 
 

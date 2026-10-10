@@ -111,7 +111,8 @@ export const binanceFundingRowSchema = z.object({
 });
 export const binanceFundingResponseSchema = z.array(binanceFundingRowSchema).max(1000);
 
-export type FundingEvent = { calc_time_ms: number; rate: string };
+/** `mark`: the exchange's mark price at the settlement (Binance `markPrice`), when it is a positive decimal. */
+export type FundingEvent = { calc_time_ms: number; rate: string; mark?: string };
 
 /** Typed, value-free validation of a Binance funding history response for one symbol. */
 export function parseBinanceFunding(symbol: string, value: unknown): FundingEvent[] {
@@ -121,7 +122,11 @@ export function parseBinanceFunding(symbol: string, value: unknown): FundingEven
   return parsed.data.map((row) => {
     if (row.symbol !== symbol || row.fundingTime <= previous) throw new Error("Invalid Binance funding response");
     previous = row.fundingTime;
-    return { calc_time_ms: row.fundingTime, rate: row.fundingRate };
+    const mark = row.markPrice !== undefined && /^\d+(\.\d+)?$/.test(row.markPrice) && Number(row.markPrice) > 0
+      ? row.markPrice : undefined;
+    return mark === undefined
+      ? { calc_time_ms: row.fundingTime, rate: row.fundingRate }
+      : { calc_time_ms: row.fundingTime, rate: row.fundingRate, mark };
   });
 }
 

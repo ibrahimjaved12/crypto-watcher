@@ -21,6 +21,7 @@ from collections import Counter
 from math import ceil
 
 from ..benchmark.canonical import exact_from_str, exact_to_str
+from ..benchmark.funding import settlement_mark
 from .bars_adapter import MINUTE_MS
 from . import outcomes
 from .setups import Setup
@@ -48,9 +49,17 @@ def rows_from_bars(bars, first_ms: int, end_ms: int) -> list[dict]:
     return rows
 
 
-def funding_events(funding) -> list[dict]:
-    return [{"calc_time_ms": t, "interval_hours": h, "rate": str(r)}
-            for t, h, r in zip(funding.calc_time_ms, funding.interval_hours, funding.rate)]
+def funding_events(funding, bars=None) -> list[dict]:
+    """Funding events; with ``bars`` each carries the lake's settlement mark (mark_open of the settlement
+    minute, what ``funding.settlement_mark`` uses) so the forward request resolves funding on the same mark."""
+    events = []
+    for t, h, r in zip(funding.calc_time_ms, funding.interval_hours, funding.rate):
+        event = {"calc_time_ms": t, "interval_hours": h, "rate": str(r)}
+        mark = settlement_mark(bars, t) if bars is not None else None
+        if mark is not None and mark > 0:
+            event["mark"] = f"{mark // SCALE}.{mark % SCALE:08d}"
+        events.append(event)
+    return events
 
 
 def _rel(forward: int, reference: int) -> float:

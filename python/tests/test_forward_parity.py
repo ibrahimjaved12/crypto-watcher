@@ -10,6 +10,7 @@ from dataclasses import replace
 from market_analysis.benchmark.scan import label_trade
 
 from market_analysis.benchmark.labels import LabelParams, build_labels, row_factory
+from market_analysis.benchmark.funding import FundingSeries, settlement_mark
 from market_analysis.forward import bars_adapter as ba
 from market_analysis.forward import parity
 from market_analysis.forward.outcomes import empty_funding, Resolution
@@ -51,6 +52,31 @@ class BarsToRowsTests(unittest.TestCase):
                              [bars.open[i], bars.high[i], bars.low[i], bars.close[i]])
         window = parity.rows_from_bars(bars, START + 100 * MINUTE, START + 200 * MINUTE)
         self.assertEqual((window[0]["open_time_ms"], len(window)), (START + 100 * MINUTE, 100))
+
+
+class FundingMarkTests(unittest.TestCase):
+    """The forward funding is paid on the settlement mark, not on the trade-price proxy."""
+
+    def test_event_mark_replaces_the_proxy_at_the_settlement_minute_only(self):
+        bars = walk_bars(1000, seed=4)
+        calc = START + 480 * MINUTE
+        proxy = settlement_mark(bars, calc)
+        self.assertEqual(proxy, bars.open[480])                     # walk_bars: mark_open = open
+        applied = ba.apply_funding_marks(bars, [{"calc_time_ms": calc, "rate": "0.0001", "mark": "1000.12345678"},
+                                                {"calc_time_ms": calc + 100 * MINUTE, "rate": "0.0001"},
+                                                {"calc_time_ms": START + 5000 * MINUTE, "rate": "0", "mark": "5"}])
+        self.assertEqual(applied, 1)
+        self.assertEqual(settlement_mark(bars, calc), 100_012_345_678)
+        self.assertEqual(settlement_mark(bars, calc + 100 * MINUTE), bars.open[580])  # no mark: untouched
+        self.assertEqual(bars.open[480], proxy)                                        # trade prices never change
+
+    def test_parity_events_carry_the_lake_settlement_mark(self):
+        bars = walk_bars(1000, seed=4)
+        calc = START + 480 * MINUTE
+        funding = FundingSeries((calc,), (8,), (Fraction(1, 10_000),), START, START + 1000 * MINUTE)
+        [event] = parity.funding_events(funding, bars)
+        self.assertEqual(ba.to_scaled(float(event["mark"])), settlement_mark(bars, calc))
+        self.assertNotIn("mark", parity.funding_events(funding)[0])
 
 
 def setup_dict(n=1, *, signal_ms=START + 15 * MINUTE * 10, rr="2", sigma=1000, level=500, c_h=1_000_000, d_ticks=40,

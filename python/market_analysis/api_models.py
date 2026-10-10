@@ -419,6 +419,9 @@ class ForwardFundingEvent(InputModel):
     calc_time_ms: Timestamp
     rate: Decimal = Field(ge=Decimal("-1"), le=Decimal("1"))
     interval_hours: Annotated[int, Field(strict=True, ge=1, le=24)] = 8
+    # The exchange's mark price at the settlement (Binance fundingRate `markPrice`); when present it is the
+    # settlement mark of that minute instead of the trade-price proxy.
+    mark: Decimal | None = Field(default=None, gt=Decimal("0"))
 
 
 class ForwardSymbolInput(InputModel):
@@ -457,7 +460,8 @@ class ForwardEvaluateRequest(InputModel):
         return {
             "symbols": [{"symbol": item.symbol, "rows": [row.model_dump() for row in item.rows],
                          "funding": [{"calc_time_ms": f.calc_time_ms, "rate": str(f.rate),
-                                      "interval_hours": f.interval_hours} for f in item.funding],
+                                      "interval_hours": f.interval_hours,
+                                      **({"mark": str(f.mark)} if f.mark is not None else {})} for f in item.funding],
                          "funding_available": item.funding_available}
                         for item in self.symbols],
             "strategy_ids": list(self.strategy_ids), "from_ms": self.from_ms, "to_ms": self.to_ms,
