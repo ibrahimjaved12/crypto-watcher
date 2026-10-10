@@ -8,6 +8,7 @@ import numpy as np
 from fractions import Fraction
 
 from market_analysis.benchmark.stepm import critical_rank, stepm, stepm_p_values
+from slow import slow
 
 UNIT = 1_000_000
 
@@ -59,6 +60,7 @@ class StepMTests(unittest.TestCase):
                 self.assertEqual(result.steps, len(result.critical_values))
                 self.assertEqual(result.rejected, tuple(sorted(result.rejected)))
 
+    @slow  # statistical acceptance (60/20 simulations); weekly slow-tests.yml runs it
     def test_all_noise_rejects_nothing_mostly(self):
         empty = sum(stepm(noise(1300 + simulation, 300, 20), B=200, seed=simulation,
                           stream_prefix="null").rejected == () for simulation in range(20))

@@ -8,6 +8,7 @@ import numpy as np
 
 from market_analysis.benchmark.bootstrap import bootstrap_indices
 from market_analysis.benchmark.spa import spa_test
+from slow import slow
 
 UNIT = 1_000_000  # 1e-6 R
 
@@ -66,6 +67,7 @@ class SpaOracleTests(unittest.TestCase):
 
 
 class SpaBehaviourTests(unittest.TestCase):
+    @slow  # statistical acceptance (60/20 simulations); weekly slow-tests.yml runs it
     def test_null_calibration(self):
         rejections = 0
         for simulation in range(60):
