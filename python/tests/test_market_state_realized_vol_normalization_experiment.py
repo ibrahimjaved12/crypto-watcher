@@ -1,4 +1,4 @@
-"""Explicit canonical-#71 fixtures for EXP-75-06A; run by GitHub CI."""
+"""Explicit canonical-#71 fixtures for EXP-75-06A; run by the Tests workflow."""
 
 from dataclasses import replace
 from decimal import Decimal

@@ -1,7 +1,7 @@
 # PR verification
 
-One GitHub Actions workflow, `CI` (`.github/workflows/verify.yml`), with one job named
-`Tests and builds` (the check shows as "CI / Tests and builds"). It runs for pull requests (not for docs-only changes), every Monday as a full run, and on
+One GitHub Actions workflow, `Tests` (`.github/workflows/verify.yml`), with one job named
+`Python tests, Node tests and builds` (the check shows as "Tests / Python tests, Node tests and builds"). It runs for pull requests (not for docs-only changes), every Monday as a full run, and on
 manual dispatch. There is no push-to-main run: merged code was verified on its PR. New pushes cancel
 older in-progress runs for the same PR. The job has a 12-minute timeout and needs no repository
 secrets. Budget, tiers and how tests are selected: [ci-budget.md](ci-budget.md).
@@ -12,7 +12,7 @@ secrets. Budget, tiers and how tests are selected: [ci-budget.md](ci-budget.md).
 | Node   | Node 22 from `.nvmrc`, both npm lockfiles, the full `tests/*.test.mjs` suite, TypeScript typecheck, application build, and standalone collector-worker build.                    |
 
 The lanes run concurrently; a failure in either fails the job and the other lane's log is still
-printed. Each run writes a "CI budget" block (seconds per lane, tests run) to the job summary.
+printed. Each run writes a "Test budget" block (seconds per lane, tests run) to the job summary.
 
 The Node suite is defined in `tests/package.json`; adding a `*.test.mjs` file automatically includes
 it. The tests use local fixtures, mocked transports and in-memory PGlite. The workflow only installs
@@ -35,5 +35,5 @@ python -m venv .venv
 .venv/bin/python tests/run_shard.py study        # add study-heavy for the full suite
 ```
 
-Branch protection is not available on this plan, so no check is "required"; treat a red `CI`
+Branch protection is not available on this plan, so no check is "required"; treat a red `Tests`
 as blocking by convention. Do not rely on a check while it is flaky; fix the cause first.

@@ -1,4 +1,4 @@
-name: CI
+name: Tests
 
 # One cheap job (docs/ci-budget.md). Pull requests run the core Python tests, the Node tests, types
 # and builds, and only the study-tier Python tests whose imports reach a changed file. The weekly
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Tests and builds
+    name: Python tests, Node tests and builds
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -103,7 +103,7 @@ jobs:
           python_line=$(grep -h '^run_shard:' python.log | tr '\n' ' ')
           node_line=$(grep -h 'Node test files passed' node.log | tr -d '\n')
           {
-            echo "### CI budget"
+            echo "### Test budget"
             echo "- python lane: $(cat python.seconds 2>/dev/null || echo '?')s ${python_failed:+FAILED} — $python_line"
             echo "- node lane: $(cat node.seconds 2>/dev/null || echo '?')s ${node_failed:+FAILED} — $node_line"
             echo "- full run: $full"

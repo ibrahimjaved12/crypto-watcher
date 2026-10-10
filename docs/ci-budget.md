@@ -19,7 +19,7 @@ billed minutes.
 
 ## After (targets, to be confirmed on the first CI run)
 
-One job `Tests and builds` in workflow `CI`, three lanes sharing one checkout and one setup:
+One job `Python tests, Node tests and builds` in workflow `Tests`, three lanes sharing one checkout and one setup:
 
 | case | wall | billed |
 |---|---|---|
@@ -36,13 +36,13 @@ One job `Tests and builds` in workflow `CI`, three lanes sharing one checkout an
   `study-heavy`.
 - **`study-heavy`** (`shards.json`: `study_part_c`, `study`, `study_evaluation`, `hmm_regimes_experiment`,
   about 120 s of the 119 s the study tier cost on the first run) runs only weekly and on dispatch, never
-  on a PR. A PR that changes study code is checked by the lighter study modules; run `CI` by hand
+  on a PR. A PR that changes study code is checked by the lighter study modules; run `Tests` by hand
   (workflow_dispatch) on the branch before merging a change to those four modules' sources.
 - **No push-to-main run:** merged code was verified on its PR; the weekly run is the net.
 - Changes to `python/requirements*.txt`, `run_shard.py`, `shards.json`, `select_tests.py`, the
   fixtures directory or `verify.yml` select the whole study tier. Dynamic imports (`importlib`) are
   invisible to the selector; the weekly run catches them.
-- Every run writes a "CI budget" block to `$GITHUB_STEP_SUMMARY`: seconds per lane, the
+- Every run writes a "Tests budget" block to `$GITHUB_STEP_SUMMARY`: seconds per lane, the
   `run_shard:` lines (tier, modules, tests, failed, seconds, or "skipped (no study code touched)") and
   the Node "N/M files passed" line.
 
@@ -75,7 +75,7 @@ independent expected value or delete it.
 
 ## Proposed replacement for the CI bullets in `CLAUDE.md` section 6 (proposal; CLAUDE.md is not edited here)
 
-> - Python CI budget: `CI` is one job (about 2 billed minutes per PR). New tests go to the `core`
+> - Python CI budget: `Tests` is one job (about 2 billed minutes per PR). New tests go to the `core`
 >   tier by default and should stay under ~10 s; the research cluster is the `study` tier in
 >   `python/tests/shards.json` and runs on PRs only when its imports are touched, plus weekly.
 >   Heavy statistical acceptance tests use `@slow` (slow-tests.yml). Do not add CI jobs or push
