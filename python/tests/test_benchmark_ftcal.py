@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from array import array
 from dataclasses import replace
+from functools import lru_cache
 from math import exp, log, pi, sqrt
 import unittest
 
@@ -22,6 +23,7 @@ DAY = 86_400_000
 SIGMA = 2 * 10 ** 17        # sigma / VAR_SCALE = 0.002 (log scale)
 
 
+@lru_cache(maxsize=4)
 def walk(minutes: int, seed=1, drift_scale=0.0006) -> BarSeries:
     """Deterministic 1-minute bars; high/low straddle open and close by a small random excursion."""
     rng = np.random.default_rng(seed)

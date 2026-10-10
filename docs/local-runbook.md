@@ -77,3 +77,20 @@ launcher stops the rest and says which). `npm run dev:local:stop` also stops the
 **Hourly run keys:** apply the new report and retry migrations through the normal migration workflow. `skipped_stale` attempts and all-symbol `no_sigma` attempts with no setups, resolutions or ledger events remain append-only audit rows but do not take the unique hour claim or advance the processed watermark. A later run in that same hour can succeed; after success, a repeat returns `already_done`. Partial evaluations and healthy runs with no new signals still consume the hour key. Existing historical rows are not rewritten. The wallet card reads the latest successful snapshot even when a newer attempt was skipped.
 
 The wallet permits several positions per coin, keyed by setup; rejected entries already persist as zero-amount ledger events with reasons. Strategy Lab now shows each position and the latest 20 recorded rejections. Wallet v2 reserves the closing taker fee alongside the flat maintenance margin when selecting the largest integer leverage with liquidation distance at least twice the stop distance, capped at 20×. Entry fees are charged outside isolated margin. A tight stop can hit that cap; the card states when it does. Existing positions retain their recorded liquidation prices; only new positions use the fee reserve. These remain simulation assumptions, not exchange-tier guarantees.
+
+## Forward parity on real bars
+
+`Forward parity` (`.github/workflows/forward-parity.yml`, manual only) compares the forward harness with the label
+engine on one real DEVELOPMENT month (default 2025-05; hidden-stretch months are refused, and the month after is
+read for the 960-minute resolution tail). Fire it from the Actions tab (Run workflow on `main`) with the six symbols
+or a subset; it needs the same private research-data secrets as the calibration audit and publishes nothing public: the
+full report is `reports/parity/<month>__<symbol>__<hash>.json` in the private repo and the public log has counts and
+PASS/FAIL per symbol. The reference is the label engine on full-history bars (2024-01 on, expanding hcal calibration);
+the forward side is ONE evaluate call shaped like the live request (120 days of 1m bars before the month). One call equals hourly
+runs because evaluation is stateless over bars; BTCUSDT also checks that on a 3-day slice (72 chained hourly calls).
+**Pass rule, fixed before any run:** (i) 0 unmatched setups; (ii) among setups with identical geometry (tick, entry price,
+stop and target in ticks) 100 % identical status, exit and net R; (iii) >= 95 % of setups have identical geometry or
+|delta sigma| / sigma <= 3 %; (iv) median |delta c_h| / c_h <= 3 %. A failed rule is a finding to investigate, not a threshold to
+loosen. `label_revision` defaults to `auto`: the lb3h revision whose sigma-relevant params equal FORWARD_PARAMS' is
+cross-checked on sigma and stops (informational; published releases use the default k/rr grids, so their full params
+identity cannot equal FORWARD_PARAMS').
