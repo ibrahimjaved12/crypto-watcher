@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from math import isfinite
 import os
 from pathlib import Path
 import shutil
@@ -87,6 +88,21 @@ def request(symbol, bars, funding, first_ms, end_ms, from_ms, to_ms) -> dict:
 
 def run_forward(call: dict) -> dict:
     return evaluate(call["symbols"], strategy_ids=call["strategy_ids"], from_ms=call["from_ms"], to_ms=call["to_ms"])
+
+
+def report_record(value):
+    """Render float statistics as decimal strings (non-finite -> None) for canonical hashing.
+
+    Verdicts are computed on the original numbers; only the persisted report is rendered, as in
+    the trend/regime reports. Keep the strict canonical serializer's no-floats contract intact.
+    """
+    if type(value) is float:
+        return repr(value) if isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: report_record(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [report_record(item) for item in value]
+    return value
 
 
 def slice_check(symbol, bars, funding, month_start_ms: int) -> dict:
@@ -197,6 +213,7 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     if args.slice_check:
         progress.phase("slice check")
         report["slice_check"] = _quiet(slice_check, symbol, bars, funding, month_start)
+    report = report_record(report)
     report["report_hash"] = content_hash(report)
     progress.phase("report write")
     path = f"reports/parity/{month}__{symbol}__{report['report_hash'][:16]}.json"
