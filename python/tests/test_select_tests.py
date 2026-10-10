@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from run_shard import load_shards
 from select_tests import select
 
 STUDY = ["test_study_a", "test_study_b", "test_study_c"]
@@ -57,6 +58,25 @@ class SelectTests(unittest.TestCase):
         write(self.root / "python", "pkg/benchmark_only.py", "Z = 1\n")
         self.assertEqual(self.run_select("python/pkg/benchmark_only.py"), [])
         self.assertEqual(self.run_select("src/app.ts", "docs/x.md", "python/tests/test_core_thing.py"), [])
+
+
+class RealRepositorySelectionTests(unittest.TestCase):
+    """The live-code boundary of the study tier, checked on the real import graph."""
+    PYTHON_DIR = Path(__file__).resolve().parent.parent
+
+    def run_select(self, *changed):
+        return select(list(changed), load_shards()["study"], self.PYTHON_DIR)
+
+    def test_benchmark_forward_and_frontend_changes_select_no_study_module(self):
+        self.assertEqual(self.run_select("python/market_analysis/benchmark/scan.py"), [])
+        self.assertEqual(self.run_select("python/market_analysis/forward/setups.py"), [])
+        self.assertEqual(self.run_select("python/tests/test_forward_engine.py", "src/lib/forward/x.ts"), [])
+
+    def test_study_source_and_shared_live_code_select_study_modules(self):
+        self.assertIn("test_historical_market_state_study_part_c",
+                      self.run_select("python/market_analysis/historical_market_state_study_part_c.py"))
+        self.assertTrue(self.run_select("python/market_analysis/canonical_identity.py"))
+        self.assertEqual(self.run_select("python/tests/shards.json"), load_shards()["study"])
 
 
 if __name__ == "__main__":
