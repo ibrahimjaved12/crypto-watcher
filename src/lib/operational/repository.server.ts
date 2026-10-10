@@ -167,7 +167,7 @@ function rpcError(error: { message: string } | null, operation: string): void {
 const FORWARD_MINUTE_READ_WINDOW_MS = 3 * 86_400_000;
 
 async function readForwardMinuteWindow(
-  client: SupabaseClient,
+  client: Pick<SupabaseClient, "rpc">,
   symbol: string,
   sinceMs: number,
   beforeMs: number,
