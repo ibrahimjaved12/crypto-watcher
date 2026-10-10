@@ -312,6 +312,9 @@ const TA_STRATEGIES: Record<string, { name: string; blurb: string }> = {
   },
 };
 
+/** The rule names of the TA baselines (strategy ids are `<rule>:<minutes>`), for the Strategy Lab filters. */
+export const TA_FAMILY_IDS: string[] = Object.keys(TA_STRATEGIES);
+
 const TREND_TRACKS: Record<string, { name: string; blurb: string }> = {
   ens_ls_25: {
     name: "Trend ensemble, long/short, 25% vol",
@@ -498,10 +501,6 @@ export const GLOSSARY: Record<string, { term: string; plain: string }> = {
   score: {
     term: "Indicator score",
     plain: "A ranking from −100 (indicators look bearish) to +100 (bullish). It is not a probability of winning or a price forecast.",
-  },
-  scoreBand: {
-    term: "Score band",
-    plain: "Groups trades by the strategy’s score when it fired, to check whether higher scores really did better. Not scored yet.",
   },
   turnover: {
     term: "Turnover per day",

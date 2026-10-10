@@ -1201,3 +1201,40 @@ test("market-state-current read forwards only known fields and never service cre
   assert.equal("service_role_key" in current, false);
   assert.equal(JSON.stringify(current).includes("super-secret"), false);
 });
+
+// P21: the repository wiring of the hourly reconcile, the conflict read and the self-check trigger test.
+test("the store wraps reconcile_conflicts, the conflict read and the append-only trigger check", async () => {
+  await resetConflicts();
+  const duration = 15 * 60_000;
+  const opening = Math.floor(Date.now() / duration) * duration - 2 * duration;
+  const stream = collectorCandle(opening, 0, {
+    volume: 1006.95, quote_volume: 1006.95 * 101, transport: "websocket",
+    endpoint: "wss://fstream.binance.com/market/stream", source_event_at: new Date(opening + duration + 10).toISOString(),
+  }, 15);
+  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([stream])]);
+  await db.query("SELECT * FROM record_collector_candles($1,7)", [
+    JSON.stringify([collectorCandle(opening, 0, { volume: 1007.427, quote_volume: 1007.427 * 101 }, 15)])]);
+  const sql = {
+    reconcile_conflicts: ["SELECT reconcile_conflicts($1) AS data", (a) => [a.older_than_hours]],
+    get_collector_candle_conflicts: ["SELECT get_collector_candle_conflicts($1,$2) AS data", (a) => [a.p_hours, a.p_limit]],
+    missing_append_only_triggers: ["SELECT missing_append_only_triggers($1::text[]) AS data", (a) => [a.p_tables]],
+  };
+  const client = {
+    async rpc(name, args) {
+      const [text, params] = sql[name];
+      return { data: (await db.query(text, params(args))).rows[0].data, error: null };
+    },
+  };
+  const { createOperationalStore } = await import(await moduleUrl("../src/lib/operational/repository.server.ts", repositoryStubs));
+  const store = createOperationalStore(client, { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 });
+  const before = await store.listCandleConflicts(24, 10);
+  assert.equal(before.length, 1);
+  assert.equal(before[0].revision_id, null);
+  assert.equal(await store.reconcileConflicts(24), 0, "a fresh conflict is not reconciled yet");
+  assert.equal(await store.reconcileConflicts(0), 1);
+  assert.equal(await store.reconcileConflicts(0), 0, "idempotent");
+  assert.notEqual((await store.listCandleConflicts(24, 10))[0].revision_id, null);
+  assert.deepEqual(
+    await store.missingAppendOnlyTriggers(["collector_candle_conflicts", "collector_candle_revisions", "no_such_table"]),
+    ["no_such_table"]);
+});

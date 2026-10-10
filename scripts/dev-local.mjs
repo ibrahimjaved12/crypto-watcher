@@ -5,6 +5,9 @@ import { loadEnvFile } from "node:process";
 
 const root = resolve(import.meta.dirname, "..");
 const withOperational = process.argv.includes("--with-operational");
+// With the operational database the forward test (hourly signals/paper trading and the daily trend
+// portfolios) runs too, unless --no-forward is given.
+const withForward = withOperational && !process.argv.includes("--no-forward");
 const children = new Map();
 let shuttingDown = false;
 
@@ -222,6 +225,17 @@ async function main() {
     start("collector", npm, ["run", "collector:worker"]);
   } else {
     console.log("[local-dev] Collector worker skipped; the app uses the request-driven path.");
+  }
+
+  if (withForward) {
+    // Both jobs enumerate every registered account (FORWARD_USER_ID may narrow them). Seed the 1m
+    // history once first for a fast first run: node scripts/forward-run.mjs --backfill-only
+    console.log("[local-dev] Starting the hourly forward job (signals and paper trading)…");
+    start("forward-hourly", process.execPath, ["scripts/forward-run.mjs"]);
+    console.log("[local-dev] Starting the daily trend job (trend portfolios)…");
+    start("forward-trend", process.execPath, ["scripts/forward-run.mjs", "--trend"]);
+  } else if (withOperational) {
+    console.log("[local-dev] Forward jobs skipped (--no-forward).");
   }
 
   console.log("[local-dev] Starting the application…");

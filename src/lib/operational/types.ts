@@ -182,6 +182,17 @@ export type MarketEpisodePersistenceStatus = {
   status: "appended" | "already_exists";
 };
 
+export type CandleConflict = {
+  conflict_id: string;
+  symbol: string;
+  timeframe_minutes: number;
+  open_time: string;
+  rest_side: string | null;
+  differing_fields: string[];
+  detected_at: string;
+  revision_id: string | null;
+};
+
 export interface OperationalStore {
   readonly enabled: boolean;
   recordCandles(batch: OperationalCandleBatch): Promise<void>;
@@ -207,6 +218,12 @@ export interface OperationalStore {
     errorMessage: string | null;
   }): Promise<void>;
   listCollectorHealth(symbols: string[]): Promise<CollectorHealth[]>;
+  /** P15 policy: append REST revisions for conflicts older than `olderThanHours` that agree within the stated tolerance. Returns revisions written. */
+  reconcileConflicts(olderThanHours?: number): Promise<number>;
+  /** Self-check: which of these tables have no trigger rejecting UPDATE/DELETE (empty = all protected). */
+  missingAppendOnlyTriggers(tables: string[]): Promise<string[]>;
+  /** Recent candle conflicts, newest first, with the revision id when one exists (diagnostics). */
+  listCandleConflicts(hours?: number, limit?: number): Promise<CandleConflict[]>;
   collectorDiagnostics(): Promise<CollectorStorageDiagnostics>;
   /**
    * Derived collector input: the shared symbol set the application assigns to the

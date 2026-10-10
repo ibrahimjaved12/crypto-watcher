@@ -19,7 +19,6 @@ const contract = await import(contractUrl);
 const run = await import(runUrl);
 const { createForwardRepository } = await import(await moduleUrl("../src/lib/forward/forward-repository.server.ts", {
   "./forward-contract": contractUrl, "./forward-run.server": runUrl }));
-const { summarizeOutcomes } = await import(await moduleUrl("../src/lib/forward/forward-dashboard.ts"));
 
 const HOUR = 3_600_000;
 const NOW = 1_760_000_000_000 - (1_760_000_000_000 % HOUR) + 5 * 60_000;
@@ -145,21 +144,6 @@ test("the repository scopes every row to the account and ignores duplicates", as
     ["user_id,signal_id", "user_id,setup_id", "user_id,setup_id,status", "user_id,paper_account,seq"]);
   const unchanged = await repository.persistEvaluation(USER, "run-9", value, new Map([[hex("b"), "open"]]));
   assert.equal(unchanged.outcomes, 0);  // an unchanged status appends no outcome row
-});
-
-test("outcome summary: sample size first and the placebo control beside each strategy", () => {
-  const rows = [
-    { setup_id: "1", strategy_id: "rsi_14_reversion:15", version: "ta-v1", rr: "2", status: "T", net_ur: 2_000_000, exit_ms: 10 },
-    { setup_id: "2", strategy_id: "rsi_14_reversion:15", version: "ta-v1", rr: "2", status: "ambiguous", net_ur: -1_000_000, exit_ms: 10 },
-    { setup_id: "3", strategy_id: "placebo-v1:rsi_14_reversion:15", version: "placebo-v1", rr: "2", status: "S", net_ur: -1_000_000, exit_ms: 10 },
-    { setup_id: "4", strategy_id: "macd_12_26_9:60", version: "ta-v1", rr: "2", status: "S", net_ur: -1_000_000, exit_ms: 10 },
-  ];
-  const summary = summarizeOutcomes(rows);
-  assert.equal(summary.length, 2);
-  assert.equal(summary[0].strategyId, "rsi_14_reversion:15");
-  assert.deepEqual([summary[0].n, summary[0].wins, summary[0].ambiguous, summary[0].meanNetR], [2, 1, 1, 0.5]);
-  assert.deepEqual(summary[0].placebo, { n: 1, meanNetR: -1 });
-  assert.equal(summary[1].placebo, null);
 });
 
 test("funding is fetched once per symbol per run and passed to Python", async () => {

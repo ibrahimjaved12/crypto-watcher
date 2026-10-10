@@ -253,3 +253,25 @@ significance test or a verdict on the strategy. See the [NIST sample-size discus
   from its own clock. `trend_track.evaluate` never reads a wall clock, so identical requests give
   identical responses. The Postgres recording time (`created_at`) remains the authoritative record
   time.
+
+## Strategy Lab reports and logs (P20)
+
+- **No row caps.** Results, non-trades and the equity curve are aggregated in SQL over every row
+  (`forward_outcome_report`, `forward_nontrade_report`, `paper_equity_series`, all `SECURITY INVOKER`, own
+  rows through RLS). The old dashboard read capped lists (2,000 setups, 10,000 outcomes, 10,000 ledger
+  lines ascending), which silently dropped the oldest trades and froze the equity curve. Logs are
+  keyset-paginated (50 rows) and exported as CSV (up to 50,000 rows, formula-prefixed cells neutralised).
+- **What a row says.** For each `(strategy, timeframe, reward:risk)`: trades, wins, unclear (ambiguous,
+  counted pessimistically), mean net R with its standard error, the matched `placebo-v1:` control (same
+  timeframe and exits), the Welch difference and z, and the non-trades (vetoed V, bad entry candle C, off-tick P,
+  stop too tight G, not tradeable N) and entered trades still open.
+- **Verdict rule (fixed).** n < 30: "too few trades". Else |z| < 2: "no difference from random timing";
+  z >= 2: "better than random timing, unadjusted for K" with the Bonferroni critical value for K rows
+  (K = strategy rows shown); z <= -2: "worse". It is a statement about this sample. A positive row is a
+  hypothesis for the next sample, not an edge. The control mean and variance come from the same
+  filters (dates, coin, direction), so both sides are compared on the same trades.
+- **Filters** live in the URL (date range, strategy rule, timeframe, direction, coin, reward:risk).
+  There is no score band: the six `ta-v1` baselines are binary rule crosses and no score exists in
+  `forward_signals` / `forward_setups`. Score bands return when a graded strategy exists.
+- Max drawdown is peak-to-trough on the bucketed equity series (hourly, daily beyond 60 days), so
+  an intra-bucket dip is not seen.

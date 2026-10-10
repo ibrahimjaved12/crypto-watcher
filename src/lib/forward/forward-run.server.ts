@@ -144,22 +144,9 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
   const rows = new Map<string, ForwardMinuteRow[]>();
   const backfillErrors: string[] = [];
   for (const symbol of symbols) {
-    let series = await deps.readMinutes(symbol, sinceMs, boundaryMs);
-    const ranges = deps.backfillMinutes && input.trigger === "hourly"
-      ? backfillRanges(series, sinceMs, boundaryMs - BACKFILL_DAYS * DAY_MS, boundaryMs)
-      : [];
-    if (ranges.length && deps.backfillMinutes) {
-      // Best effort: a failure stops this symbol's repair (the next hourly run resumes from what was
-      // stored) and is recorded in the run's reason; pages recorded before it are kept and re-read.
-      try {
-        for (const range of ranges.slice(0, MAX_BACKFILL_RANGES)) {
-          await deps.backfillMinutes(symbol, range.startMs, range.endMs);
-        }
-      } catch (error) {
-        backfillErrors.push(`${symbol}: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200));
-      }
-      series = await deps.readMinutes(symbol, sinceMs, boundaryMs);
-    }
+    const repaired = await repairSymbolHistory(deps, symbol, sinceMs, boundaryMs, input.trigger === "hourly");
+    if (repaired.error) backfillErrors.push(repaired.error);
+    const series = repaired.series;
     rows.set(symbol, series);
   }
   const backfillReason = backfillErrors.length ? `backfill_failed: ${backfillErrors.join(", ")}` : null;
@@ -222,6 +209,37 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
   const candleVersions = await decisionCandleVersions(response, rows);
   const counts = await repository.persistEvaluation(input.userId, runId, response, previous, candleVersions);
   return reason ? { runKey, status: "ok", counts, reason } : { runKey, status: "ok", counts };
+}
+
+/**
+ * Reads one symbol's stored 1m history and, when `backfill` is true, repairs it first from the
+ * ranges `backfillRanges` derives (leading range and interior gaps). A failure stops this symbol's
+ * repair and is returned (the next run resumes from what is stored); pages recorded before it are
+ * kept and re-read. Used by the hourly run and by `forward-run --backfill-only`.
+ */
+export async function repairSymbolHistory(
+  deps: Pick<ForwardDeps, "readMinutes" | "backfillMinutes">,
+  symbol: string,
+  sinceMs: number,
+  boundaryMs: number,
+  backfill: boolean,
+): Promise<{ series: ForwardMinuteRow[]; error: string | null }> {
+  let series = await deps.readMinutes(symbol, sinceMs, boundaryMs);
+  const ranges = deps.backfillMinutes && backfill
+    ? backfillRanges(series, sinceMs, boundaryMs - BACKFILL_DAYS * DAY_MS, boundaryMs)
+    : [];
+  let error: string | null = null;
+  if (ranges.length && deps.backfillMinutes) {
+    try {
+      for (const range of ranges.slice(0, MAX_BACKFILL_RANGES)) {
+        await deps.backfillMinutes(symbol, range.startMs, range.endMs);
+      }
+    } catch (failure) {
+      error = `${symbol}: ${failure instanceof Error ? failure.message : String(failure)}`.slice(0, 200);
+    }
+    series = await deps.readMinutes(symbol, sinceMs, boundaryMs);
+  }
+  return { series, error };
 }
 
 /**

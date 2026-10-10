@@ -5,6 +5,7 @@ import { operationalDbConfig } from "./config.server";
 import type {
   OperationalCandleBatch,
   CollectorCandle,
+  CandleConflict,
   CollectorHealth,
   CollectorStorageDiagnostics,
   ForwardDailyBar,
@@ -81,6 +82,15 @@ const disabledStore: OperationalStore = {
     throw new Error("Operational collector ownership is disabled");
   },
   async listCollectorHealth() {
+    return [];
+  },
+  async reconcileConflicts() {
+    return 0;
+  },
+  async listCandleConflicts() {
+    return [];
+  },
+  async missingAppendOnlyTriggers() {
     return [];
   },
   async collectorDiagnostics() {
@@ -308,6 +318,21 @@ export function createOperationalStore(
         p_error_message: input.errorMessage,
       });
       rpcError(error, "collector health write");
+    },
+    async reconcileConflicts(olderThanHours = 24) {
+      const { data, error } = await client.rpc("reconcile_conflicts", { older_than_hours: olderThanHours });
+      rpcError(error, "candle conflict reconciliation");
+      return Number(data ?? 0);
+    },
+    async missingAppendOnlyTriggers(tables: string[]) {
+      const { data, error } = await client.rpc("missing_append_only_triggers", { p_tables: tables });
+      rpcError(error, "append-only trigger check");
+      return (data ?? []) as string[];
+    },
+    async listCandleConflicts(hours = 168, limit = 1000) {
+      const { data, error } = await client.rpc("get_collector_candle_conflicts", { p_hours: hours, p_limit: limit });
+      rpcError(error, "candle conflict read");
+      return (data ?? []) as CandleConflict[];
     },
     async listCollectorHealth(symbols) {
       if (symbols.length === 0) return [];

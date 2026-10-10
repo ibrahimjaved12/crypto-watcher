@@ -20,6 +20,9 @@ import { validateCollectorWorkerEnvironment } from "./collector-worker-env.serve
 const SUBSCRIPTION_REFRESH_MS = 30_000;
 const LEASE_SECONDS = 60;
 const LEASE_REFRESH_MS = 20_000;
+/** P15 conflict policy: revisions are appended hourly for conflicts older than this. */
+const RECONCILE_INTERVAL_MS = 3_600_000;
+const RECONCILE_OLDER_THAN_HOURS = 24;
 const STALE_AFTER_MS = 30_000;
 const CONNECTION_MAX_AGE_MS = 23 * 60 * 60_000 + 50 * 60_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -56,6 +59,7 @@ export class CollectorRuntime {
   private subscriptionTimer: ReturnType<typeof setInterval> | null = null;
   private leaseTimer: ReturnType<typeof setInterval> | null = null;
   private staleTimer: ReturnType<typeof setInterval> | null = null;
+  private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
   private candleRecoveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private candleRecoveryAttempts = 0;
@@ -171,6 +175,7 @@ export class CollectorRuntime {
       () => void this.reconcileSubscriptions(),
       SUBSCRIPTION_REFRESH_MS,
     );
+    this.reconcileTimer = setInterval(() => void this.reconcileConflicts(), RECONCILE_INTERVAL_MS);
     this.staleTimer = setInterval(() => {
       if (
         this.socket?.readyState === WebSocket.OPEN &&
@@ -182,6 +187,18 @@ export class CollectorRuntime {
       }
     }, 10_000);
     void this.movement.start();
+  }
+
+  /** Hourly maintenance: a failure is logged and never stops the collector. */
+  private async reconcileConflicts(): Promise<void> {
+    try {
+      const written = await this.store.reconcileConflicts(RECONCILE_OLDER_THAN_HOURS);
+      console.info(`[collector] reconciled ${written} conflicts`);
+    } catch (error) {
+      console.error(
+        `[collector] conflict reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private async renewLease(): Promise<void> {
@@ -528,7 +545,7 @@ export class CollectorRuntime {
   }
 
   private clearTimers(): void {
-    for (const timer of [this.subscriptionTimer, this.leaseTimer, this.staleTimer]) {
+    for (const timer of [this.subscriptionTimer, this.leaseTimer, this.staleTimer, this.reconcileTimer]) {
       if (timer) clearInterval(timer);
     }
     if (this.retryTimer) clearTimeout(this.retryTimer);
@@ -538,6 +555,7 @@ export class CollectorRuntime {
     this.subscriptionTimer = null;
     this.leaseTimer = null;
     this.staleTimer = null;
+    this.reconcileTimer = null;
     this.retryTimer = null;
     this.lifetimeTimer = null;
     this.candleRecoveryRetryTimer = null;
