@@ -207,7 +207,8 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     stats = _quiet(parity.compare, result["setups"], result["resolutions"], reference,
                    lambda h, ms: None if robust.level_at(horizon_half[h], ms) == MISSING else robust.level_at(horizon_half[h], ms),
                    lambda h, ms: robust.multiplier(h, horizon_half[h], FORWARD_PARAMS.step(h), ms),
-                   reference.tick_at, FORWARD_PARAMS, bars=request_bars, funding=request_funding)
+                   reference.tick_at, FORWARD_PARAMS, bars=request_bars, funding=request_funding,
+                   reference_bars=bars, reference_funding=funding)
     report = {"schema": "forward-parity-v1", "symbol": symbol, "month": month, "reference_through": months[-1],
               "request_days": REQUEST_DAYS, "forward_params_identity": FORWARD_PARAMS.identity(),
               "pass_rule": parity.PASS_RULE, "signals": len(result["signals"]), "setups": len(result["setups"]),

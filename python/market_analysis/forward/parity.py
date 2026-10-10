@@ -101,12 +101,15 @@ def _resolution_matches(resolution, pair, entry_ms: int) -> bool:
             and resolution.get("net_ur") == pair.pess.net_ur)
 
 
-def compare(setups: list[dict], resolutions: list[dict], reference, level_of, multiplier_of, tick_of, params, *, bars, funding) -> dict:
+def compare(setups: list[dict], resolutions: list[dict], reference, level_of, multiplier_of, tick_of, params, *, bars, funding,
+            reference_bars=None, reference_funding=None) -> dict:
     """Join every forward setup to its label row and measure the differences.
 
     ``reference(signal_ms, horizon, side, k) -> LabelRow``; ``level_of(horizon, signal_ms)`` and
     ``multiplier_of(horizon, signal_ms)`` give the reference robust level and c_h (HCAL_SCALE fixed point);
     ``tick_of(entry_ms)`` is the label engine's (monthly) tick at an entry.
+    Optional full-history ``reference_bars``/``reference_funding`` diagnose failed comparisons
+    using identical inputs; these diagnostic resolutions never affect the verdict.
     """
     # Use bars/funding adapted from the exact forward request, including mark-proxy semantics.
     by_setup = {item["setup_id"]: item for item in resolutions}
@@ -115,6 +118,8 @@ def compare(setups: list[dict], resolutions: list[dict], reference, level_of, mu
     unmatched, status_pairs = [], Counter()
     joined = copied_evaluated = copied_ok = 0
     copied_diffs = []
+    mismatch_fields, mismatch_causes = Counter(), Counter()
+    mismatch_details = []
     rel_sigma, rel_ch, rel_level = [], [], []
     identical = identical_ok = sigma_ok_or_identical = 0
     resolution_diffs = []
@@ -131,6 +136,8 @@ def compare(setups: list[dict], resolutions: list[dict], reference, level_of, mu
         ref = cache[key]
         joined += 1
         copied_match = False
+        resolved = None
+        copied = None
         if ref.status == "T" and len(ref.cells) > rr_index[setup["rr"]]:
             copied = reference_setup(setup, ref, tick_of, params, bars.symbol)
             try:
@@ -143,6 +150,34 @@ def compare(setups: list[dict], resolutions: list[dict], reference, level_of, mu
                 copied_evaluated += 1
                 copied_match = _resolution_matches(resolved.to_dict(), ref.cells[rr_index[setup["rr"]]], copied.entry_ms)
         copied_ok += bool(copied_match)
+        if not copied_match:
+            # Diagnostic only: NEVER substitute this counterfactual for rule (v)'s request inputs.
+            cause = "unevaluated" if resolved is None else "unattributed"
+            reference_resolution = None
+            if copied is not None and reference_bars is not None:
+                try:
+                    reference_resolution = outcomes.resolve_setup(copied, reference_bars, reference_funding)
+                except ValueError:
+                    cause = "reference_inputs_unresolvable"
+                else:
+                    cause = ("request_input_difference" if _resolution_matches(
+                        reference_resolution.to_dict(), ref.cells[rr_index[setup["rr"]]], copied.entry_ms)
+                        else "reference_input_resolution_mismatch")
+            mismatch_causes[cause] += 1
+            if resolved is not None:
+                pair = ref.cells[rr_index[setup["rr"]]]
+                expected = {"status": "ambiguous" if pair.opt is not None else pair.pess.outcome,
+                            "exit_offset": pair.pess.exit_offset,
+                            "exit_ms": ref.signal_ms + pair.pess.exit_offset * MINUTE_MS,
+                            "net_ur": pair.pess.net_ur}
+                actual = {field: resolved.to_dict()[field] for field in expected}
+                fields = [field for field in expected if actual[field] != expected[field]]
+                mismatch_fields.update(fields)
+                if len(copied_diffs) < 5:
+                    mismatch_details.append({"key": key + (setup["rr"],), "fields": fields,
+                                             "cause": cause, "expected": expected, "actual": actual,
+                                             "expected_fund_ur": pair.pess.fund_ur,
+                                             "actual_fund_ur": resolved.fund_ur})
         if not copied_match and len(copied_diffs) < 5:
             copied_diffs.append(key + (setup["rr"],))
         status_pairs[(setup["status"], ref.status)] += 1
@@ -189,6 +224,9 @@ def compare(setups: list[dict], resolutions: list[dict], reference, level_of, mu
     stats = {
         "setups": n, "unmatched": len(unmatched), "unmatched_first_keys": unmatched[:5],
         "status_pairs": {f"{a}/{b}": c for (a, b), c in sorted(status_pairs.items())},
+        "reference_geometry_mismatch_fields": dict(mismatch_fields),
+        "reference_geometry_mismatch_causes": dict(mismatch_causes),
+        "reference_geometry_mismatch_details_first": mismatch_details,
         "reference_geometry_joined": joined,
         "reference_geometry_evaluated": copied_evaluated,
         "reference_geometry_unevaluated": joined - copied_evaluated,
