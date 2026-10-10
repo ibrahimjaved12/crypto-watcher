@@ -42,7 +42,7 @@ One job `Python tests, Node tests and builds` in workflow `Tests`, three lanes s
 - Changes to `python/requirements*.txt`, `run_shard.py`, `shards.json`, `select_tests.py`, the
   fixtures directory or `verify.yml` select the whole study tier. Dynamic imports (`importlib`) are
   invisible to the selector; the weekly run catches them.
-- Every run writes a "Tests budget" block to `$GITHUB_STEP_SUMMARY`: seconds per lane, the
+- Every run writes a "Test budget" block to `$GITHUB_STEP_SUMMARY`: seconds per lane, the
   `run_shard:` lines (tier, modules, tests, failed, seconds, or "skipped (no study code touched)") and
   the Node "N/M files passed" line.
 
