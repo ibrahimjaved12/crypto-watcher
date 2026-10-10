@@ -62,6 +62,28 @@ def to_scaled(value) -> int:
     return result
 
 
+def apply_funding_marks(bars: BarSeries, events) -> int:
+    """Set mark_open of each funding settlement minute to the event's ``mark`` (the exchange's mark price at
+    the settlement). The collector has no mark stream (mark = trade proxy), but ``funding_cash`` is paid on the
+    settlement mark; without this the forward funding differs from the label engine's by about 1e-6 R on setups
+    that cross a settlement. Events without a mark, or whose minute has no bar, are left alone. Returns the
+    number of minutes set."""
+    applied = 0
+    for event in events or ():
+        mark = event.get("mark")
+        offset = int(event["calc_time_ms"]) - bars.start_ms
+        if mark is None or not 0 <= offset < bars.minutes * MINUTE_MS:
+            continue
+        index = offset // MINUTE_MS
+        if bars.open[index] == MISSING:
+            continue
+        scaled = int(Decimal(str(mark)).scaleb(SCALE_EXPONENT).quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+        if 0 < scaled <= _MAX_SCALED:
+            bars.mark_open[index] = scaled
+            applied += 1
+    return applied
+
+
 def _check_row(symbol: str, row: dict, index: int) -> tuple:
     where = f"row {index}"
     if not isinstance(row, dict):

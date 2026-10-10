@@ -275,3 +275,21 @@ significance test or a verdict on the strategy. See the [NIST sample-size discus
   `forward_signals` / `forward_setups`. Score bands return when a graded strategy exists.
 - Max drawdown is peak-to-trough on the bucketed equity series (hourly, daily beyond 60 days), so
   an intra-bucket dip is not seen.
+
+## Parity run findings (BTCUSDT 2025-05, 1,736 setups)
+
+The first real-month parity run failed rules (ii) and (v). Both are findings, with these causes:
+
+- **Rule (ii), 0 of 1,736 setups with identical geometry.** The robust level is bit-identical (|delta| = 0) and
+  every setup joins its label row (unmatched 0, all T/T). Geometry differs in all setups because of c_h alone: the
+  forward request expands the c_h median from the start of its 120-day window, the label engine from 2024-01. Median
+  |delta c_h| / c_h = 1.3 %, p95 1.6 %, hence sigma differs by the same and d_ticks by a few ticks; rules (iii) and (iv)
+  pass (99.8 % within 3 %). Nothing short of giving the forward harness the same c_h history closes this: seed c_h from
+  the lake or persist the calibration state per symbol (the ratio multiset, or the heaps of `_RunningMedian`, updated
+  each hour). The pass rule is not loosened; rule (ii) keeps failing until then.
+- **Rule (v), 73 of 1,736 resolutions differ by 1 micro-R in net.** Status and exit are identical; `fund_ur` differs by 1
+  micro-R exactly on the setups that cross a funding settlement. Funding is paid on the settlement mark and the forward
+  bars used the trade price as the mark proxy. Fixed: the funding history now carries the exchange mark
+  (`markPrice` of `fundingRate`) and `evaluate` sets the settlement minute's mark with it (`apply_funding_marks`); the
+  parity request passes the lake's settlement mark so the check compares like with like. Live uses the API's markPrice, which
+  may differ from the lake's mark-kline open by a little; the parity report shows what remains.

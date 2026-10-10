@@ -176,9 +176,11 @@ test("a failed funding fetch never fills zeros and records funding_unavailable",
 
 test("Binance funding responses are validated", () => {
   const rows = [{ symbol: "BTCUSDT", fundingTime: 1, fundingRate: "0.00010000", markPrice: "1" },
-    { symbol: "BTCUSDT", fundingTime: 2, fundingRate: "-1e-5" }];
+    { symbol: "BTCUSDT", fundingTime: 2, fundingRate: "-1e-5" },
+    { symbol: "BTCUSDT", fundingTime: 3, fundingRate: "0.0001", markPrice: "" }];
   assert.deepEqual(contract.parseBinanceFunding("BTCUSDT", rows),
-    [{ calc_time_ms: 1, rate: "0.00010000" }, { calc_time_ms: 2, rate: "-1e-5" }]);
+    [{ calc_time_ms: 1, rate: "0.00010000", mark: "1" }, { calc_time_ms: 2, rate: "-1e-5" },
+      { calc_time_ms: 3, rate: "0.0001" }], "the exchange mark rides along only when it is a positive decimal");
   assert.throws(() => contract.parseBinanceFunding("ETHUSDT", rows), /Invalid Binance funding/);
   assert.throws(() => contract.parseBinanceFunding("BTCUSDT", [rows[1], rows[0]]), /Invalid Binance funding/);
   assert.throws(() => contract.parseBinanceFunding("BTCUSDT", { code: -1 }), /Invalid Binance funding/);

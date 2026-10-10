@@ -23,7 +23,7 @@ from ..benchmark.bars import infer_tick
 from ..benchmark.funding import FundingSeries
 from ..benchmark.scan import next_compromised
 from . import VERSIONS
-from .bars_adapter import ASSUMPTIONS, MINUTE_MS, bars_from_collector_rows
+from .bars_adapter import ASSUMPTIONS, MINUTE_MS, apply_funding_marks, bars_from_collector_rows
 from .outcomes import Resolution, resolve_setup
 
 HOUR_MS = 3_600_000
@@ -57,6 +57,7 @@ def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setu
     for item in symbols:
         symbol = item["symbol"]
         bars = bars_from_collector_rows(symbol, item["rows"])
+        apply_funding_marks(bars, item.get("funding"))  # settlement marks from the funding history, when given
         funding = _funding(bars, item.get("funding"))
         funding_ok = item.get("funding_available", True)
         if not funding_ok:
