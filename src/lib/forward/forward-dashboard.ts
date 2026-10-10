@@ -24,6 +24,17 @@ export type OpenSetupRow = {
   setup_id: string; strategy_id: string; version: string; symbol: string; side: number; horizon_min: number;
   entry_ms: number; rr: string;
 };
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+export type LatestRun = {
+  run_key: string;
+  status: string;
+  reason: string | null;
+  boundary_ms: number;
+  created_at: string;
+  freshness: JsonValue;
+  wallet_state: JsonValue;
+  assumptions: JsonValue;
+};
 export type LogPage = { rows: LogRow[]; nextCursor: string | null };
 
 type Result = { data: unknown; error: { message: string } | null };
@@ -141,7 +152,7 @@ export async function loadForwardDashboard(client: SupabaseClient) {
       .order("entry_ms", { ascending: false }).limit(100), "open setups"),
     rows<{ ms: number }>(from("paper_ledger").select("ms").order("seq", { ascending: true }).limit(1), "ledger"),
     rows<{ ms: number }>(from("paper_ledger").select("ms").order("seq", { ascending: false }).limit(1), "ledger"),
-    rows<Record<string, unknown>>(from("paper_runs")
+    rows<LatestRun>(from("paper_runs")
       .select("run_key, status, reason, boundary_ms, freshness, wallet_state, assumptions, created_at")
       .order("boundary_ms", { ascending: false }).limit(1), "runs"),
   ]);

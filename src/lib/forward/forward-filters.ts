@@ -27,7 +27,7 @@ export type ForwardFilters = z.infer<typeof forwardFiltersSchema>;
 
 /** Search-param validator that never throws: a bad value falls back to "no filter". */
 export function parseSearch(search: Record<string, unknown>): ForwardFilters {
-  const pick = <T,>(schema: z.ZodType<T>, value: unknown, fallback: T) => {
+  const pick = <T,>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, value: unknown, fallback: T) => {
     const parsed = schema.safeParse(value);
     return parsed.success ? parsed.data : fallback;
   };

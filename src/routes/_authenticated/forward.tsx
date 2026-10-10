@@ -76,7 +76,7 @@ function ForwardPage() {
   const trend = useQuery({ queryKey: ["forward-trend-dashboard"], queryFn: () => loadTrend() });
   const load = useServerFn(getForwardDashboard);
   const data = useQuery({ queryKey: ["forward-dashboard"], queryFn: () => load() });
-  const latest = data.data?.latestRun as SignalRun | null | undefined;
+  const latest = data.data?.latestRun as unknown as SignalRun | null | undefined;
   const tracks = trend.data?.tracks ?? [];
   const signalLine = explainSignalEngine(latest, Date.now());
   const trendLine = explainTrendTrack(
@@ -169,7 +169,7 @@ function SignalsSection({
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Signal check failed"),
   });
-  const latest = data.data?.latestRun as SignalRun | null | undefined;
+  const latest = data.data?.latestRun as unknown as SignalRun | null | undefined;
   const equity = data.data?.equity ?? [];
   const positions = Object.entries(latest?.wallet_state?.positions ?? {});
   const signals = (data.data?.signals ?? []).slice(0, 20);
