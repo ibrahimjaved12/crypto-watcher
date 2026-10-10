@@ -21,9 +21,12 @@ run-name: "Forward parity ${{ inputs.month }}"
 # PASS RULE, DECLARED BEFORE ANY RUN (python/market_analysis/forward/parity.py PASS_RULE):
 #   (i)   0 unmatched forward setups;
 #   (ii)  among setups with identical geometry (same tick, entry price, stop and target in ticks), 100 % identical
-#         status, exit offset, exit time and net R;
+#         status, exit offset, exit time and net R; an empty identical-geometry set FAILS;
 #   (iii) >= 95 % of setups have identical geometry OR |delta sigma| / sigma <= 3 %;
-#   (iv)  median |delta c_h| / c_h <= 3 %.
+#   (iv)  median |delta c_h| / c_h <= 3 %;
+#   (v)   over ALL joined setups, copy reference geometry and resolve with the forward outcome engine
+#         on the forward request's bars/funding: 100 % identical status (including ambiguity), exit offset,
+#         exit_ms and net_ur; unevaluated rows or an empty join FAIL. Overall PASS requires all five rules.
 # A failed rule is a FINDING, not something to fix by loosening the rule. Do not edit these thresholds to make
 # a run pass; change code or data, or write the finding down.
 on:

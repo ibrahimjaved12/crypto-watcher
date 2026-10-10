@@ -4,11 +4,15 @@ from __future__ import annotations
 from fractions import Fraction
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+from dataclasses import replace
+
+from market_analysis.benchmark.scan import label_trade
 
 from market_analysis.benchmark.labels import LabelParams, build_labels, row_factory
 from market_analysis.forward import bars_adapter as ba
 from market_analysis.forward import parity
-from market_analysis.forward.outcomes import empty_funding
+from market_analysis.forward.outcomes import empty_funding, Resolution
 from market_analysis.forward.setups import FORWARD_PARAMS
 from test_forward_engine import START, TICK, walk_bars
 
@@ -60,7 +64,9 @@ def setup_dict(n=1, *, signal_ms=START + 15 * MINUTE * 10, rr="2", sigma=1000, l
 
 def reference_row(setup, *, sigma=1000, d_ticks=40, status="T", exit_offset=12, net=1_500_000, outcome="T", opt=None):
     pair = SimpleNamespace(pess=SimpleNamespace(outcome=outcome, exit_offset=exit_offset, net_ur=net), opt=opt)
-    return SimpleNamespace(status=status, sigma=sigma, d_ticks=d_ticks, p0=setup["p0"], cells=(pair, pair))
+    return SimpleNamespace(signal_ms=setup["signal_ms"], horizon_min=setup["horizon_min"],
+                           side=setup["side"], k=Fraction(setup["k"]), status=status, sigma=sigma,
+                           d_ticks=d_ticks, p0=setup["p0"], cells=(pair, pair))
 
 
 def resolution(setup, **kw):
@@ -71,8 +77,15 @@ def resolution(setup, **kw):
 
 class CompareTests(unittest.TestCase):
     def compare(self, setups, resolutions, rows, *, level=500, c_h=1_000_000, tick=TICK):
-        return parity.compare(setups, resolutions, lambda ms, h, side, k: rows[ms],
-                              lambda h, ms: level, lambda h, ms: c_h, lambda entry: tick, FORWARD_PARAMS)
+        def resolve(copied, bars, funding):
+            pair = rows[copied.signal_ms].cells[0]
+            return Resolution(copied.setup_id, "ambiguous" if pair.opt is not None else pair.pess.outcome,
+                              exit_offset=pair.pess.exit_offset,
+                              exit_ms=copied.entry_ms + pair.pess.exit_offset * MINUTE, net_ur=pair.pess.net_ur)
+        with patch.object(parity.outcomes, "resolve_setup", side_effect=resolve):
+            return parity.compare(setups, resolutions, lambda ms, h, side, k: rows[ms],
+                                  lambda h, ms: level, lambda h, ms: c_h, lambda entry: tick, FORWARD_PARAMS,
+                                  bars=SimpleNamespace(symbol="BTCUSDT"), funding=None)
 
     def test_perfect_agreement_passes_every_rule(self):
         s = setup_dict()
@@ -122,6 +135,85 @@ class CompareTests(unittest.TestCase):
 
     def test_no_setups_is_a_failure_not_a_pass(self):
         self.assertFalse(self.compare([], [], {})["verdict"]["pass"])
+
+
+class ReferenceResolutionTests(unittest.TestCase):
+    def case(self, *, side=1, rr="2", ambiguous=False):
+        # Only 220 synthetic minutes; no sigma fitting or historical downloads.
+        bars = walk_bars(220)
+        entry = 150
+        setup = setup_dict(side=side, rr=rr, p0=bars.open[entry], d_ticks=41)
+        ref = reference_row(setup, d_ticks=40)
+        if ambiguous:
+            bars.high[entry] = ref.p0 + 100 * TICK
+            bars.low[entry] = ref.p0 - 100 * TICK
+            bars.mark_high[entry] = bars.high[entry]
+            bars.mark_low[entry] = bars.low[entry]
+        funding = empty_funding(bars)
+        targets = [ref.p0 + side * (-(-r.numerator * ref.d_ticks // r.denominator)) * TICK
+                   for r in FORWARD_PARAMS.rr_grid]
+        label = label_trade(bars, funding, FORWARD_PARAMS.cost_model, tick=TICK, entry_index=entry,
+                            side=side, stop_price=ref.p0 - side * ref.d_ticks * TICK,
+                            target_prices=targets, window_minutes=FORWARD_PARAMS.window(15))
+        self.assertEqual(label.status, "T")
+        ref.cells = label.cells
+        return setup, ref, bars, funding
+
+    def compare(self, setup, ref, bars, funding):
+        return parity.compare([setup], [resolution(setup)], lambda *args: ref,
+                              lambda *args: 500, lambda *args: 1_000_000, lambda ms: TICK,
+                              FORWARD_PARAMS, bars=bars, funding=funding)
+
+    def test_different_geometry_resolves_reference_and_empty_rule_ii_fails(self):
+        for side in (1, -1):
+            for rr in ("3/2", "2"):
+                for ambiguous in (False, True):
+                    with self.subTest(side=side, rr=rr, ambiguous=ambiguous):
+                        setup, ref, bars, funding = self.case(side=side, rr=rr, ambiguous=ambiguous)
+                        original = dict(setup)
+                        stats = self.compare(setup, ref, bars, funding)
+                        self.assertEqual(setup, original)
+                        self.assertEqual(stats["reference_geometry_status_exit_net_ok"], 1)
+                        self.assertTrue(stats["verdict"]["v_reference_geometry_agrees"])
+                        self.assertEqual(stats["identical_geometry"], 0)
+                        self.assertFalse(stats["verdict"]["ii_identical_geometry_agrees"])
+                        self.assertFalse(stats["verdict"]["pass"])
+
+    def test_each_resolution_mismatch_fails_rule_v(self):
+        for field, value in (("outcome", "bad"), ("exit_offset", 999), ("net_ur", -999999999)):
+            setup, ref, bars, funding = self.case()
+            pair = ref.cells[1]
+            ref.cells = (ref.cells[0], replace(pair, pess=replace(pair.pess, **{field: value})))
+            stats = self.compare(setup, ref, bars, funding)
+            self.assertFalse(stats["verdict"]["v_reference_geometry_agrees"], field)
+            self.assertFalse(stats["verdict"]["pass"])
+            self.assertEqual(stats["reference_geometry_mismatches"], 1)
+            key = stats["reference_geometry_mismatches_first_keys"][0]
+            self.assertEqual(key, (setup["signal_ms"], 15, 1, "2", "2"))
+            self.assertNotIn(str(setup["signal_ms"]), parity.public_line("BTCUSDT", "2025-05", stats))
+
+    def test_rule_v_is_required_even_when_other_rules_pass(self):
+        setup, ref, bars, funding = self.case()
+        setup.update(d_ticks=40, stop=ref.p0 - 40 * TICK, target=ref.p0 + 80 * TICK)
+        copied = parity.reference_setup(setup, ref, lambda ms: TICK, FORWARD_PARAMS, bars.symbol)
+        actual = parity.outcomes.resolve_setup(copied, bars, funding)
+        with patch.object(parity.outcomes, "resolve_setup", return_value=replace(actual, exit_ms=1)):
+            stats = parity.compare([setup], [actual.to_dict()], lambda *args: ref,
+                                   lambda *args: 500, lambda *args: 1_000_000, lambda ms: TICK,
+                                   FORWARD_PARAMS, bars=bars, funding=funding)
+        for rule in ("i_no_unmatched", "ii_identical_geometry_agrees", "iii_geometry_or_sigma_95",
+                     "iv_median_c_h_3pct"):
+            self.assertTrue(stats["verdict"][rule], rule)
+        self.assertFalse(stats["verdict"]["v_reference_geometry_agrees"])
+        self.assertFalse(stats["verdict"]["pass"])
+
+    def test_unresolvable_reference_cannot_silently_pass(self):
+        setup, ref, bars, funding = self.case()
+        ref.status, ref.cells = "I", ()
+        stats = self.compare(setup, ref, bars, funding)
+        self.assertEqual(stats["reference_geometry_joined"], 1)
+        self.assertEqual(stats["reference_geometry_unevaluated"], 1)
+        self.assertFalse(stats["verdict"]["v_reference_geometry_agrees"])
 
 
 if __name__ == "__main__":

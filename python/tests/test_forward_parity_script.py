@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
+from market_analysis.forward.outcomes import Resolution
 from market_analysis.benchmark.canonical import canonical_bytes, content_hash
 from test_forward_parity import TICK, reference_row, resolution, setup_dict
 
@@ -60,7 +61,10 @@ class ParityReportTests(unittest.TestCase):
                     (script, "infer_tick", TICK),
                     (script.lab, "row_factory", reference),
                     (script, "run_forward", result),
-                    (script, "request", {}),
+                    (script, "request", {"symbols": [{"rows": [], "funding": []}]}),
+                    (script, "bars_from_collector_rows", SimpleNamespace(symbol="BTCUSDT")),
+                    (script, "_funding", None),
+                    (script.parity.outcomes, "resolve_setup", Resolution(**resolution(setup))),
                     (script, "published_cross_check", {"revision": None}),
                 )
                 for target, name, returned in replacements:
@@ -81,7 +85,8 @@ class ParityReportTests(unittest.TestCase):
                 self.assertEqual(report["pass_rule"], {
                     "unmatched_max": 0, "identical_geometry_status_exit_share_min": "1.0",
                     "geometry_or_sigma_share_min": "0.95", "sigma_tolerance": "0.03",
-                    "median_c_h_tolerance": "0.03"})
+                    "median_c_h_tolerance": "0.03",
+                    "reference_geometry_status_exit_net_share_min": "1.0"})
                 self.assertEqual(report["stats"]["abs_rel_delta_sigma"]["median"],
                                  "0.0" if geometry_identical else "0.2")
                 self.assertEqual(report["stats"]["verdict"]["pass"], geometry_identical)

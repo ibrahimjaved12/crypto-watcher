@@ -40,7 +40,8 @@ from market_analysis.benchmark.hidden_guard import HiddenStretchLocked  # noqa: 
 from market_analysis.benchmark.market_data import load_symbol_bars, load_symbol_funding  # noqa: E402
 from market_analysis.forward import parity  # noqa: E402
 from label_build import label_tag  # noqa: E402
-from market_analysis.forward.evaluate import evaluate  # noqa: E402
+from market_analysis.forward.bars_adapter import bars_from_collector_rows  # noqa: E402
+from market_analysis.forward.evaluate import _funding, evaluate  # noqa: E402
 from market_analysis.forward.setups import FORWARD_PARAMS  # noqa: E402
 from market_analysis.forward.signals import FORWARD_STRATEGIES  # noqa: E402
 
@@ -195,14 +196,18 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     progress.phase("forward")
     first = month_start - REQUEST_DAYS * DAY
     end = month_end + (TAIL_MINUTES + 1) * MINUTE
-    result = _quiet(run_forward, request(symbol, bars, funding, first, end, month_start, month_end))
+    call = request(symbol, bars, funding, first, end, month_start, month_end)
+    result = _quiet(run_forward, call)
+    request_item = call["symbols"][0]
+    request_bars = _quiet(bars_from_collector_rows, symbol, request_item["rows"])
+    request_funding = _quiet(_funding, request_bars, request_item.get("funding"))
     progress.phase("compare", rows=len(result["setups"]))
     robust = reference.robust
     horizon_half = {h: FORWARD_PARAMS.half_life(h) for h in FORWARD_PARAMS.horizons}
     stats = _quiet(parity.compare, result["setups"], result["resolutions"], reference,
                    lambda h, ms: None if robust.level_at(horizon_half[h], ms) == MISSING else robust.level_at(horizon_half[h], ms),
                    lambda h, ms: robust.multiplier(h, horizon_half[h], FORWARD_PARAMS.step(h), ms),
-                   reference.tick_at, FORWARD_PARAMS)
+                   reference.tick_at, FORWARD_PARAMS, bars=request_bars, funding=request_funding)
     report = {"schema": "forward-parity-v1", "symbol": symbol, "month": month, "reference_through": months[-1],
               "request_days": REQUEST_DAYS, "forward_params_identity": FORWARD_PARAMS.identity(),
               "pass_rule": parity.PASS_RULE, "signals": len(result["signals"]), "setups": len(result["setups"]),
