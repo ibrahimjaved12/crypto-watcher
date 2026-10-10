@@ -274,7 +274,7 @@ test("only recent gaps are stale; older gaps reach Python as missing bars", asyn
   const old = BOUNDARY - 3 * 86_400_000;
   deps.readMinutes = async (symbol) => [
     ...minutes(symbol, 120).map((row) => ({ ...row, open_time_ms: row.open_time_ms - 3 * 86_400_000 + 7_200_000 })),
-    ...minutes(symbol, 120),
+    ...minutes(symbol, 47 * 60),
   ];
   const summary = await run.runForward(deps, { userId: USER, trigger: "on_demand", strategyIds: ["x"], symbols: ["BTCUSDT"] });
   assert.equal(summary.status, "ok", "a gap older than STALE_GAP_WINDOW_MS does not block the engine");
