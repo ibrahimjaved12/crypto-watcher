@@ -296,7 +296,7 @@ The first real-month parity run failed rules (ii) and (v). Both are findings, wi
 
 ### P26b / P27: funding parity and separate market/wallet evaluation
 
-Rule (ii) stays **FAIL** until exact c_h state (#263), so the overall verdict is **FAIL** even when rule (v) passes.
+For unseeded rolling-history requests, rule (ii) stays **FAIL** because exact c_h state is absent (#263), so the overall verdict is **FAIL** even when rule (v) passes; P28a adds the seeded mode described below.
 Rule (v) now applies settlement funding marks to its copied request bars before building funding,
 exactly as the forward outcome engine does.
 
@@ -367,7 +367,46 @@ python scripts/research/seed_sigma_state.py --bars-dir /path/to/lake --symbol BT
   --first-month 2024-01 --last-month 2025-04 --cutoff-ms 1746057600000 --output /tmp/BTCUSDT-sigma.json
 ```
 
-`forward_parity.py --seed-sigma-state` seeds all available pre-month history before the existing
+`forward_parity.py --seed-sigma-state` (workflow input `seed_sigma_state: true`) seeds all available pre-month history before the existing
 request, so rule (ii) can pass with identical sigma/geometry; an unseeded rolling-history run still
 has the previously documented c_h discrepancy. A pass is measured by the report, not assumed.
 This does not persist TA indicators or reduce their warm-up requirement to a few rows.
+
+### P28b: persistence and hourly wiring
+
+Apply both migrations: application DB `20261011130000_forward_sigma_state.sql` and operational DB
+`20261011130000_forward_sigma_history.sql` (earliest stored minute discovery). The global
+`forward_sigma_state` key is `(symbol, sigma_version)`; it contains market data only and is accessible
+only by the service role. Account wallet/run/output records retain their existing ownership.
+
+The production hourly runner loads and verifies state, sends sequential `/v1/forward/market_evaluate`
+requests with `use_sigma_state: true` and `sigma_state`, then submits the merged events to
+`/v1/forward/wallet_step`. It still reads the **existing 120-day TA lookback**, extended back to
+`as_of_ms + 1 minute` if needed. Indicators are not checkpointed, and this does not claim requests
+shrink to a few rows. The sigma engine ignores already-consumed history in that lookback.
+
+Missing/version/checksum/identity-mismatched or out-of-cache state produces a `sigma_rebuild` log
+and run reason. The runner discovers the first stored 1m candle and rebuilds in bounded 30-day
+requests (`sigma_only: true`) before evaluating the decision interval. No other sigma model is used.
+A rebuild from limited stored history cannot recreate an older lake origin: import the matching lake
+seed to preserve that origin. If history remains insufficient, outcomes retain the existing no-sigma
+behavior. Repairing candles at/before a valid checkpoint does not retroactively change it; corrections
+require a deliberate reseed/version migration, not a silent alteration of past decisions.
+
+`commit_forward_sigma_run` inserts the run, signals, setups, outcomes, ledger, and advanced states in
+one transaction. It checks the expected wallet run and sigma checksums under ordered locks; a racing
+run must reload unless the other account produced the identical market state. A completed hour is a
+no-op, including checkpoint `updated_at`. Retryable `skipped_stale`/`no_sigma` attempts do not advance
+sigma state. Failures roll back the run and checkpoint together; future/newer checkpoints are never
+rolled back by a lagging account.
+
+Import an exported seed before enabling the hourly job:
+
+```sh
+# Credentials come from the existing service environment; do not put them in the file or command.
+node scripts/seed-sigma-state.mjs /tmp/BTCUSDT-sigma.json
+```
+
+The loader reads `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, checks the version and checksum, and
+calls the service-only seed RPC. Re-importing the identical file is a no-op; a different existing
+checkpoint is refused. This command does not run Python, start a server, or alter a wallet.

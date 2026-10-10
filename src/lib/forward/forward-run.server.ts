@@ -1,6 +1,8 @@
 import type { CollectorHealth, ForwardMinuteRow } from "../operational/types";
 import {
   FINAL_STATUSES,
+  validateSigmaState, forwardMarketResponseSchema,
+  type SigmaStateRecord,
   type FundingEvent,
   validateForwardResponse,
   type ForwardEvaluateResponse,
@@ -11,7 +13,7 @@ import {
 /**
  * Forward-test orchestration (#239 P11). Every completed hour (and on demand) for the six frozen
  * symbols: read 1m collector candles from the operational store, call the stateless Python
- * `/v1/forward/evaluate`, validate the response, persist it idempotently (unique signal/setup ids,
+ * market_evaluate + wallet_step endpoints, validate responses, persist atomically (unique signal/setup ids,
  * append-only outcomes and ledger), and record one `paper_runs` row. Stale data (a gap within the
  * last STALE_GAP_WINDOW_MS, a missing last minute, or collector health not LIVE) records
  * `skipped_stale` and generates no signals. Older gaps are not stale: those minutes reach Python
@@ -46,9 +48,14 @@ const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 
 export type StoredOpenSetup = { setup: Record<string, unknown>; resolution: ForwardResolution | null };
-export type LatestRun = { processedToMs: Record<string, number>; walletState: WalletState | null };
+export type LatestRun = { id?: string; processedToMs: Record<string, number>; walletState: WalletState | null };
 
 export interface ForwardRepository {
+  loadSigmaStates?(symbols: readonly string[]): Promise<Record<string, unknown>>;
+  commitRun?(userId: string, row: Record<string, unknown>, response: ForwardEvaluateResponse,
+             previous: Map<string, string | null>, candleVersions: Map<string, string | null>,
+             states: SigmaStateRecord[], expected: Record<string, string | null>,
+             expectedRunId: string | null): Promise<Record<string, number>>;
   findRun(userId: string, runKey: string): Promise<{ id: string; status: string } | null>;
   latestOkRun(userId: string): Promise<LatestRun | null>;
   openSetups(userId: string): Promise<StoredOpenSetup[]>;
@@ -63,6 +70,10 @@ export type ForwardDeps = {
   readMinutes(symbol: string, sinceMs: number, beforeMs: number): Promise<ForwardMinuteRow[]>;
   listHealth(symbols: string[]): Promise<CollectorHealth[]>;
   callPython(body: unknown): Promise<unknown>;
+  callMarket?(body: unknown): Promise<unknown>;
+  callWallet?(body: unknown): Promise<unknown>;
+  firstMinute?(symbol: string): Promise<number | null>;
+  log?(message: string): void;
   /** Public funding history from `startMs` (Binance `/fapi/v1/fundingRate`, limit 1000). */
   fetchFunding(symbol: string, startMs: number): Promise<FundingEvent[]>;
   /** P16: fetch and record 1m REST candles for [startMs, endMs); returns candles offered. */
@@ -141,11 +152,25 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
   const claimed = await repository.findRun(input.userId, runKey);
   if (claimed && !["skipped_stale", "no_sigma"].includes(claimed.status)) return { runKey, status: "already_done" };
 
+  const split = Boolean(deps.callMarket);
+  if (split && (!deps.callWallet || !repository.loadSigmaStates || !repository.commitRun || !deps.firstMinute))
+    throw new Error("Incomplete sigma persistence dependencies");
+  const storedStates = split ? await repository.loadSigmaStates!([...symbols]) : {};
+  const states: Record<string, SigmaStateRecord | null> = {};
+  const expectedStates: Record<string, string | null> = {};
+  const rebuildReasons: string[] = [];
+  for (const symbol of symbols) {
+    const raw = storedStates[symbol] as { checksum?: string } | undefined;
+    expectedStates[symbol] = raw?.checksum ?? null;
+    try { states[symbol] = await validateSigmaState(raw, symbol); }
+    catch { states[symbol] = null; }
+  }
   const sinceMs = boundaryMs - FORWARD_HISTORY_DAYS * DAY_MS;
   const rows = new Map<string, ForwardMinuteRow[]>();
   const backfillErrors: string[] = [];
   for (const symbol of symbols) {
-    const repaired = await repairSymbolHistory(deps, symbol, sinceMs, boundaryMs, input.trigger === "hourly");
+    const readFrom = states[symbol] ? Math.min(sinceMs, states[symbol]!.as_of_ms + MINUTE_MS) : sinceMs;
+    const repaired = await repairSymbolHistory(deps, symbol, readFrom, boundaryMs, input.trigger === "hourly");
     if (repaired.error) backfillErrors.push(repaired.error);
     const series = repaired.series;
     rows.set(symbol, series);
@@ -175,27 +200,83 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
   const oldestEntry = Math.min(fromMs, ...open.map((item) => Number(item.setup["entry_ms"])).filter(Number.isFinite));
   const funding = await fetchRunFunding(deps, symbols, oldestEntry - HOUR_MS);
   const fundingUnavailable = symbols.filter((symbol) => funding.get(symbol) === null);
-  // Request size/latency of the full-history request (P16), kept so it can be judged before hosting.
+  // Indicator lookback rows and Python latency (sigma checkpoints do not replace TA warm-up).
   const requestRows = symbols.reduce((sum, symbol) => sum + (rows.get(symbol)?.length ?? 0), 0);
   const pythonStarted = Date.now();
-  const response = validateForwardResponse(await deps.callPython({
-    schema_version: 1,
-    symbols: symbols.map((symbol) => ({
-      symbol,
-      rows: (rows.get(symbol) ?? []).map(({ candle_hash: _hash, ...row }) => row),
-      funding: funding.get(symbol) ?? [],
-      funding_available: funding.get(symbol) !== null,
-    })),
-    strategy_ids: input.strategyIds,
-    from_ms: fromMs,
-    to_ms: boundaryMs - MINUTE_MS,
-    open_setups: open,
-    wallet_state: latest?.walletState ?? null,
-  }));
+  let response: ForwardEvaluateResponse;
+  const advancedStates: SigmaStateRecord[] = [];
+  if (split) {
+    const parts: ReturnType<typeof forwardMarketResponseSchema.parse>[] = [];
+    const events: Record<string, unknown>[] = [];
+    for (const symbol of symbols) {
+      let state = states[symbol];
+      const rebuild = async (why: string) => {
+        const reason = `sigma_rebuild: ${symbol} ${why}`;
+        rebuildReasons.push(reason);
+        deps.log?.(reason);
+        // Rebuild only from authoritative stored minutes, never from a different sigma model.
+        state = await rebuildSigmaState(deps, symbol, fromMs, input.strategyIds);
+      };
+      if (!state) await rebuild(storedStates[symbol] ? "checksum/version mismatch" : "missing state");
+      else if (state.as_of_ms >= boundaryMs || fromMs < state.as_of_ms - 2 * DAY_MS)
+        await rebuild("decision outside checkpoint cache");
+      const request = () => ({
+        schema_version: 1, symbol,
+        rows: (rows.get(symbol) ?? []).map(({ candle_hash: _hash, ...row }) => row),
+        funding: funding.get(symbol) ?? [], funding_available: funding.get(symbol) !== null,
+        strategy_ids: input.strategyIds, from_ms: fromMs, to_ms: boundaryMs - MINUTE_MS,
+        open_setups: open.filter((item) => item.setup["symbol"] === symbol),
+        positions: latest?.walletState?.positions ?? {}, use_sigma_state: true, sigma_state: state,
+      });
+      let value;
+      try { value = await deps.callMarket!(request()); }
+      catch (error) {
+        if (!(error instanceof Error) || error.message !== "sigma_state_rebuild_required") throw error;
+        await rebuild("Python state identity mismatch");
+        value = await deps.callMarket!(request());
+      }
+      const part = forwardMarketResponseSchema.parse(value);
+      if (part.symbol !== symbol) throw new Error("Market symbol mismatch");
+      const advanced = await validateSigmaState(part.sigma_state, symbol);
+      if (advanced.as_of_ms !== boundaryMs - MINUTE_MS) throw new Error("Sigma state boundary mismatch");
+      advancedStates.push(advanced);
+      for (const event of [...part.events].sort((a, b) => a.sequence - b.sequence))
+        events.push({ ...event, compatibility_order: events.length });
+      parts.push(part);
+    }
+    const wallet = await deps.callWallet!({ schema_version: 1, state: latest?.walletState ?? null, events }) as { wallet_state: unknown; ledger: unknown };
+    const first = parts[0];
+    if (!first) throw new Error("No forward symbols");
+    response = validateForwardResponse({
+      schema_version: 1, versions: first.versions, params_hash: first.params_hash,
+      wallet_config: first.wallet_config, assumptions: first.assumptions,
+      processed_to_ms: Object.fromEntries(parts.map((p) => [p.symbol, p.processed_to_ms])),
+      funding_unavailable: parts.filter((p) => !p.funding_available).map((p) => p.symbol),
+      signals: parts.flatMap((p) => p.signals), setups: parts.flatMap((p) => p.setups),
+      resolutions: parts.flatMap((p) => p.resolutions), reasons: Object.fromEntries(parts.map((p) => [p.symbol, p.reasons])),
+      wallet_state: wallet.wallet_state, ledger: wallet.ledger,
+    });
+  } else {
+    response = validateForwardResponse(await deps.callPython({
+      schema_version: 1,
+      symbols: symbols.map((symbol) => ({
+        symbol,
+        rows: (rows.get(symbol) ?? []).map(({ candle_hash: _hash, ...row }) => row),
+        funding: funding.get(symbol) ?? [],
+        funding_available: funding.get(symbol) !== null,
+      })),
+      strategy_ids: input.strategyIds,
+      from_ms: fromMs,
+      to_ms: boundaryMs - MINUTE_MS,
+      open_setups: open,
+      wallet_state: latest?.walletState ?? null,
+    }));
+  }
   freshness["request"] = { rows: requestRows, python_ms: Date.now() - pythonStarted };
   const reason = [
     ...(fundingUnavailable.length ? [`funding_unavailable: ${fundingUnavailable.join(",")}`] : []),
     ...(backfillReason ? [backfillReason] : []),
+    ...rebuildReasons,
   ].join("; ") || null;
   const previous = new Map<string, string | null>(
     open.map((item): [string, string | null] => [String(item.setup["setup_id"]), item.resolution?.status ?? null]),
@@ -206,15 +287,20 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
     String(response.reasons[symbol]?.["sigma"] ?? "").startsWith("no_sigma")) &&
     response.setups.length === 0 && response.resolutions.length === 0 && response.ledger.length === 0;
   const status = noSigma ? "no_sigma" : "ok";
-  const runId = await repository.insertRun(input.userId, {
+  const runRow = {
     run_key: runKey, trigger: input.trigger, status, boundary_ms: boundaryMs, from_ms: fromMs,
     reason: reason?.slice(0, 2000) ?? null,
     processed_to_ms: noSigma ? {} : response.processed_to_ms, versions: response.versions, params_hash: response.params_hash,
     wallet_config: response.wallet_config, wallet_state: response.wallet_state,
     assumptions: response.assumptions, reasons: response.reasons, freshness,
-  });
+  };
   const candleVersions = await decisionCandleVersions(response, rows);
-  const counts = await repository.persistEvaluation(input.userId, runId, response, previous, candleVersions);
+  const counts = split
+    ? await repository.commitRun!(input.userId, runRow, response, previous, candleVersions,
+                                  noSigma ? [] : advancedStates, expectedStates, latest?.id ?? null)
+    : await repository.persistEvaluation(input.userId, await repository.insertRun(input.userId, runRow),
+                                         response, previous, candleVersions);
+  if (counts["already_done"]) return { runKey, status: "already_done" };
   return reason ? { runKey, status, counts, reason } : { runKey, status, counts };
 }
 
@@ -336,4 +422,21 @@ export function newOutcomeRows(response: ForwardEvaluateResponse, previous: Map<
       fund_ur: resolution.fund_ur,
       payload: resolution,
     }));
+}
+
+/** Seed in bounded requests up to the first decision; the run commits the result only on success. */
+export async function rebuildSigmaState(deps: ForwardDeps, symbol: string, cutoffMs: number, strategyIds: string[]) {
+  const first = await deps.firstMinute!(symbol);
+  if (first === null || first >= cutoffMs) return null;
+  let state: SigmaStateRecord | null = null;
+  for (let from = first; from < cutoffMs; from += 30 * DAY_MS) {
+    const rows = await deps.readMinutes(symbol, from, Math.min(cutoffMs, from + 30 * DAY_MS));
+    if (!rows.length) continue;
+    const result = await deps.callMarket!({ schema_version: 1, symbol,
+      rows: rows.map(({ candle_hash: _hash, ...row }) => row), funding: [], strategy_ids: strategyIds,
+      from_ms: 0, to_ms: cutoffMs, sigma_state: state, use_sigma_state: true, sigma_only: true,
+    }) as { sigma_state: unknown };
+    state = await validateSigmaState(result.sigma_state, symbol);
+  }
+  return state;
 }

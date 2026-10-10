@@ -34,6 +34,7 @@ def crosses_funding_time(entry_ms: int, exit_ms: int) -> bool:
     return exit_ms // HOUR_MS * HOUR_MS > entry_ms
 from .setups import FORWARD_PARAMS, NO_SIGMA, ForwardSigma, Setup, build_setup
 from .signals import generate_signals
+from .sigma_state import SigmaState, SigmaStateMismatch, StateSigma, empty_state, POINT_HISTORY_MS
 from .wallet import WalletConfig, initial_state, liquidation_events, position_terms, wallet_step
 
 
@@ -47,7 +48,7 @@ def _funding(bars, events) -> FundingSeries:
 def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy_ids,
                     from_ms: int, to_ms: int, funding_available: bool = True,
                     positions=None, wallet_config: WalletConfig = WalletConfig(),
-                    sigma_factory=ForwardSigma) -> dict:
+                    sigma_factory=ForwardSigma, sigma_state=None, use_sigma_state=False, sigma_only=False) -> dict:
     """Evaluate one symbol from collector rows, without sizing or moving wallet balances.
 
     Positions supply previously persisted liquidation terms. New setups emit liquidation
@@ -58,6 +59,20 @@ def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy
     apply_funding_marks(bars, funding)
     funding = _funding(bars, funding)
     funding_ok = funding_available
+    incremental = None
+    if use_sigma_state:
+        incremental = (SigmaState.from_record(sigma_state, symbol=symbol) if sigma_state is not None
+                       else empty_state(symbol, bars.start_ms))
+        if incremental.as_of_ms >= bars.end_ms or (not sigma_only and incremental.day is not None
+                and from_ms < incremental.day * 86_400_000 - POINT_HISTORY_MS):
+            raise SigmaStateMismatch("sigma state decision history mismatch")
+        sigma = StateSigma(incremental, bars)
+    else:
+        sigma = sigma_factory(bars, FORWARD_PARAMS)
+    if sigma_only:
+        if incremental is None:
+            raise ValueError("sigma_only requires use_sigma_state")
+        return {"symbol": symbol, "sigma_state": incremental.to_record()}
     saved = [(Setup.from_dict(item["setup"]),
               Resolution(**item["resolution"]) if item.get("resolution") else None)
              for item in open_setups if item["setup"]["symbol"] == symbol]
@@ -65,7 +80,6 @@ def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy
     signals, symbol_reasons = generate_signals(symbol, bars, from_ms, to_ms, strategy_ids)
     reasons = symbol_reasons
     processed_to = min(to_ms, bars.end_ms - MINUTE_MS)
-    sigma = sigma_factory(bars, FORWARD_PARAMS)
     tick = infer_tick(bars)
     nc = next_compromised(bars)
     new = []
@@ -118,7 +132,10 @@ def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy
     events.sort(key=lambda event: (event["ms"], event["symbol"], event["sequence"]))
     return {"symbol": symbol, "signals": out_signals, "setups": out_setups,
             "resolutions": out_resolutions, "events": events, "reasons": reasons,
-            "processed_to_ms": processed_to, "funding_available": funding_ok}
+            "processed_to_ms": processed_to, "funding_available": funding_ok,
+            "versions": dict(VERSIONS), "params_hash": FORWARD_PARAMS.identity(),
+            "wallet_config": wallet_config.to_record(), "assumptions": [*ASSUMPTIONS, *wallet_config.assumptions],
+            **({"sigma_state": incremental.to_record()} if incremental is not None else {})}
 
 
 def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setups=(), wallet_state=None,

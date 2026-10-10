@@ -20,6 +20,10 @@ MINUTE_MS = 60_000
 POINT_HISTORY_MS = 2 * v.DAY_MS
 
 
+class SigmaStateMismatch(ValueError):
+    """The caller must rebuild from authoritative history, never substitute another model."""
+
+
 def _wire(value):
     if type(value) is int:
         return str(value)
@@ -66,18 +70,18 @@ class SigmaState:
     @classmethod
     def from_record(cls, record, *, symbol=None, params=FORWARD_PARAMS):
         if not isinstance(record, dict) or record.get("sigma_version") != SIGMA_VERSION:
-            raise ValueError("sigma state version mismatch")
+            raise SigmaStateMismatch("sigma state version mismatch")
         body = {key: record.get(key) for key in ("symbol", "sigma_version", "as_of_ms", "payload")}
         if content_hash(body) != record.get("checksum"):
-            raise ValueError("sigma state checksum mismatch")
+            raise SigmaStateMismatch("sigma state checksum mismatch")
         try:
             state = cls(**_unwire(record["payload"]))
         except (TypeError, KeyError):
-            raise ValueError("invalid sigma state payload") from None
+            raise SigmaStateMismatch("invalid sigma state payload") from None
         if (state.symbol != record["symbol"] or (symbol is not None and state.symbol != symbol)
                 or state.as_of_ms != record["as_of_ms"] or state.params_hash != params.identity()
                 or state.grids != [[h, params.half_life(h), params.step(h)] for h in params.horizons]):
-            raise ValueError("sigma state identity mismatch")
+            raise SigmaStateMismatch("sigma state identity mismatch")
         return state
 
 

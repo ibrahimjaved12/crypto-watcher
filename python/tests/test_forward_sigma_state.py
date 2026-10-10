@@ -57,6 +57,18 @@ class SigmaStateTests(unittest.TestCase):
                 self.assertEqual(sigma_at(state, t, h), expected[2])
                 self.assertEqual(state.points[str(h)][str(t)], list(expected))
 
+    def test_seeded_geometry_equals_full_history_for_both_sides(self):
+        from market_analysis.forward.sigma_state import StateSigma
+        from market_analysis.forward.setups import build_setup
+        from market_analysis.forward.signals import Signal
+        adapter = StateSigma(deepcopy(self.one), self.history)
+        for h in FORWARD_PARAMS.horizons:
+            for side in (-1, 1):
+                t = START + (23 * 1440 + 120) * MINUTE
+                signal = Signal("signal", f"test:{h}", "test", "BTCUSDT", t, side, h)
+                self.assertEqual(build_setup(signal, self.history, adapter, tick=10**5),
+                                 build_setup(signal, self.history, self.reference, tick=10**5))
+
     def test_overlap_is_noop_and_future_is_rejected(self):
         state = deepcopy(self.one)
         before = state.to_record()
@@ -84,3 +96,19 @@ class SigmaStateTests(unittest.TestCase):
         self.assertTrue(all(window[0] >= cutoff for window in state.pending))
         advance(state, self.history)
         self.assertEqual(state.to_record(), self.one.to_record())
+
+
+class MarketStateTests(unittest.TestCase):
+    def test_market_round_trip_and_corruption_requires_explicit_rebuild(self):
+        from market_analysis.forward.evaluate import market_evaluate
+        from market_analysis.forward.sigma_state import SigmaStateMismatch
+        data = [{"open_time_ms": START + i * MINUTE, "open": 100.0, "high": 100.1,
+                 "low": 99.9, "close": 100.0, "transport": "rest"} for i in range(60)]
+        options = dict(strategy_ids=[], from_ms=START, to_ms=START + 59 * MINUTE, use_sigma_state=True)
+        first = market_evaluate("BTCUSDT", data, **options)
+        second = market_evaluate("BTCUSDT", data, sigma_state=first["sigma_state"], **options)
+        self.assertEqual(first, second)
+        corrupt = {**first["sigma_state"], "checksum": "0" * 64}
+        with self.assertRaises(SigmaStateMismatch):
+            market_evaluate("BTCUSDT", data, sigma_state=corrupt, **options)
+        self.assertEqual(market_evaluate("BTCUSDT", data, **options)["sigma_state"], first["sigma_state"])

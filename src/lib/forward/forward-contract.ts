@@ -152,3 +152,43 @@ export function validateForwardResponse(value: unknown): ForwardEvaluateResponse
   }
   return response;
 }
+
+export const SIGMA_VERSION = "forward-sigma-v1";
+export const sigmaStateSchema = z.object({
+  symbol: z.string().regex(/^[A-Z0-9]{5,16}$/), sigma_version: z.literal(SIGMA_VERSION),
+  as_of_ms: z.number().int().nonnegative().safe(), payload: z.record(z.string(), z.unknown()), checksum: sha256,
+}).strict();
+export type SigmaStateRecord = z.infer<typeof sigmaStateSchema>;
+
+/** Canonical JSON compatible with Python canonical_bytes; payload integers are strings. */
+export function sigmaCanonical(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number" && Number.isSafeInteger(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(sigmaCanonical).join(",")}]`;
+  if (typeof value === "object" && value !== null)
+    return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      .map(([key, item]) => `${JSON.stringify(key)}:${sigmaCanonical(item)}`).join(",")}}`;
+  throw new Error("Invalid sigma state JSON");
+}
+
+export async function validateSigmaState(value: unknown, symbol: string): Promise<SigmaStateRecord> {
+  const record = sigmaStateSchema.parse(value);
+  if (record.symbol !== symbol || record.payload["symbol"] !== symbol ||
+      record.payload["as_of_ms"] !== String(record.as_of_ms)) throw new Error("Sigma state identity mismatch");
+  const { checksum, ...body } = record;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sigmaCanonical(body)));
+  const actual = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  if (actual !== checksum) throw new Error("Sigma state checksum mismatch");
+  return record;
+}
+
+export const forwardMarketResponseSchema = z.object({
+  symbol: z.string(), signals: z.array(forwardSignalSchema), setups: z.array(forwardSetupSchema),
+  resolutions: z.array(forwardResolutionSchema), reasons: z.record(z.string(), z.string()),
+  processed_to_ms: ms, funding_available: z.boolean(), sigma_state: sigmaStateSchema,
+  events: z.array(z.object({ ms, symbol: z.string(), sequence: z.number().int().nonnegative(),
+    type: z.enum(["open", "close", "funding", "liquidation"]),
+  }).passthrough()),
+  versions: z.record(z.string(), z.string()), params_hash: sha256,
+  wallet_config: z.record(z.string(), z.unknown()), assumptions: z.array(z.string()),
+});

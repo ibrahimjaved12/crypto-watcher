@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   FINAL_STATUSES,
+  SIGMA_VERSION,
   type ForwardEvaluateResponse,
   type ForwardResolution,
   type WalletState,
@@ -28,6 +29,36 @@ export function createForwardRepository(client: SupabaseClient): ForwardReposito
   }
 
   return {
+    async loadSigmaStates(symbols) {
+      const { data, error } = await client.from("forward_sigma_state")
+        .select("symbol,sigma_version,as_of_ms,payload,checksum").eq("sigma_version", SIGMA_VERSION).in("symbol", [...symbols]);
+      fail(error, "sigma state read");
+      return Object.fromEntries((data ?? []).map((row: { symbol: string }) => [row.symbol, row]));
+    },
+    async commitRun(userId, row, response, previous, candleVersions, states, expected, expectedRunId) {
+      const version = (id: string) => ({ candle_version: candleVersions.get(id) ?? null });
+      const records = {
+        signals: response.signals.map((signal) => ({ ...signal, ...version(signal.signal_id) })),
+        setups: response.setups.map((setup) => ({
+          setup_id: setup.setup_id, signal_id: setup.signal_id, strategy_id: setup.strategy_id,
+          version: setup.version, symbol: setup.symbol, side: setup.side, horizon_min: setup.horizon_min,
+          signal_ms: setup.signal_ms, entry_ms: setup.entry_ms, k: setup.k, rr: setup.rr, status: setup.status,
+          params_hash: setup.params_hash, ...version(setup.signal_id), payload: setup,
+        })),
+        outcomes: newOutcomeRows(response, previous),
+        ledger: response.ledger.map((line) => ({
+          paper_account: PAPER_ACCOUNT, seq: line.seq, ms: line.ms, type: line.type,
+          setup_id: line.setup_id ?? null, symbol: line.symbol ?? null, amount_e8: line.amount_e8,
+          balance_e8: line.balance_e8, payload: line,
+        })),
+      };
+      const { data, error } = await client.rpc("commit_forward_sigma_run", {
+        p_user_id: userId, p_run: row, p_records: records, p_states: states,
+        p_expected: expected, p_expected_run_id: expectedRunId,
+      });
+      fail(error, "atomic run and sigma commit");
+      return data as Record<string, number>;
+    },
     async findRun(userId, runKey) {
       const { data, error } = await client.from("paper_runs").select("id, status")
         .eq("user_id", userId).eq("paper_account", PAPER_ACCOUNT).eq("run_key", runKey).in("status", ["ok", "failed"]).maybeSingle();
@@ -35,13 +66,13 @@ export function createForwardRepository(client: SupabaseClient): ForwardReposito
       return (data as { id: string; status: string } | null) ?? null;
     },
     async latestOkRun(userId) {
-      const { data, error } = await client.from("paper_runs").select("processed_to_ms, wallet_state")
+      const { data, error } = await client.from("paper_runs").select("id, processed_to_ms, wallet_state")
         .eq("user_id", userId).eq("paper_account", PAPER_ACCOUNT).eq("status", "ok")
         .order("boundary_ms", { ascending: false }).limit(1).maybeSingle();
       fail(error, "latest run read");
       if (!data) return null;
-      const row = data as { processed_to_ms: Record<string, number>; wallet_state: unknown };
-      return { processedToMs: row.processed_to_ms ?? {}, walletState: (row.wallet_state as WalletState | null) ?? null };
+      const row = data as { id: string; processed_to_ms: Record<string, number>; wallet_state: unknown };
+      return { id: row.id, processedToMs: row.processed_to_ms ?? {}, walletState: (row.wallet_state as WalletState | null) ?? null };
     },
     async openSetups(userId) {
       const { data: setups, error } = await client.from("forward_setups").select("setup_id, payload")

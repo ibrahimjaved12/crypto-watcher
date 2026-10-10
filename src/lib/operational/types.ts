@@ -248,6 +248,7 @@ export interface OperationalStore {
     limit?: number,
   ): Promise<CompletedCandleSeries<T>>;
   /** Completed one-minute candles of one symbol in [sinceMs, beforeMs) for the forward engine (#239). */
+  firstForwardMinute?(symbol: string): Promise<number | null>;
   readForwardMinuteCandles(symbol: string, sinceMs: number, beforeMs: number): Promise<ForwardMinuteRow[]>;
   /** Stored completed daily bars of one symbol from `sinceMs` (a UTC day start), oldest first (#239 P14). */
   readForwardDailyBars(symbol: string, sinceMs: number): Promise<ForwardDailyBar[]>;

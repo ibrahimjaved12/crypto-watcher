@@ -340,3 +340,123 @@ test("wholly no-sigma runs retry, while partial evaluations remain idempotent", 
   assert.equal((await run.runForward(deps, input)).status, "ok");
   assert.equal((await run.runForward(deps, input)).status, "already_done");
 });
+
+async function sigmaRecord(asOf, patch = {}) {
+  const { createHash } = await import("node:crypto");
+  const body = { symbol: "BTCUSDT", sigma_version: contract.SIGMA_VERSION, as_of_ms: asOf,
+    payload: { symbol: "BTCUSDT", as_of_ms: String(asOf), ewma: { "1": ["12345678901234567890", "2", "3", "4"] } }, ...patch };
+  return { ...body, checksum: createHash("sha256").update(contract.sigmaCanonical(body)).digest("hex") };
+}
+
+async function splitDeps({ corrupt = false, noSigma = false, stale = false } = {}) {
+  const base = fakeDeps({ status: stale ? "STALE" : "LIVE" });
+  const original = await sigmaRecord(BOUNDARY - HOUR - 60_000);
+  let saved = corrupt ? { ...original, checksum: hex("0") } : original;
+  let committed = false;
+  const next = await sigmaRecord(BOUNDARY - 60_000);
+  const calls = { market: [], commits: [], log: [], reads: [] };
+  base.deps.firstMinute = async () => BOUNDARY - 2 * HOUR;
+  base.deps.log = (line) => calls.log.push(line);
+  base.deps.readMinutes = async (symbol, from, to) => {
+    calls.reads.push([from, to]);
+    return minutes(symbol).filter((row) => row.open_time_ms >= from && row.open_time_ms < to);
+  };
+  base.deps.repository.loadSigmaStates = async () => ({ BTCUSDT: saved });
+  base.deps.repository.findRun = async () => committed ? { id: "run", status: "ok" } : null;
+  base.deps.repository.commitRun = async (...args) => {
+    calls.commits.push(args);
+    if (args[1].status === "ok") { committed = true; saved = args[5][0]; }
+    return { signals: 0, setups: 0, outcomes: 0, ledger: 0 };
+  };
+  base.deps.callMarket = async (body) => {
+    calls.market.push(body);
+    if (body.sigma_only) return { symbol: "BTCUSDT", sigma_state: original };
+    const r = response();
+    return { symbol: "BTCUSDT", signals: [], setups: [], resolutions: [], events: [],
+      reasons: noSigma ? { sigma: "no_sigma: history required" } : {}, processed_to_ms: BOUNDARY - 60_000,
+      funding_available: true, sigma_state: next, versions: r.versions, params_hash: r.params_hash,
+      wallet_config: r.wallet_config, assumptions: r.assumptions };
+  };
+  base.deps.callWallet = async () => ({ schema_version: 1, wallet_state: response().wallet_state, ledger: [] });
+  base.deps.callPython = async () => { throw new Error("Legacy endpoint must not be used by production split wiring"); };
+  return { deps: base.deps, calls, saved: () => saved };
+}
+
+const splitInput = { userId: USER, trigger: "on_demand", strategyIds: ["ema_cross_20_50:60"], symbols: ["BTCUSDT"] };
+
+test("sigma state round trip keeps exact integers and detects checksum/version mismatch", async () => {
+  const record = await sigmaRecord(BOUNDARY - 60_000);
+  assert.deepEqual(await contract.validateSigmaState(JSON.parse(JSON.stringify(record)), "BTCUSDT"), record);
+  await assert.rejects(contract.validateSigmaState({ ...record, checksum: hex("0") }, "BTCUSDT"));
+  await assert.rejects(contract.validateSigmaState({ ...record, sigma_version: "old" }, "BTCUSDT"));
+  const { validateSeed } = await import("../scripts/seed-sigma-state.mjs");
+  assert.deepEqual(validateSeed(record), record);
+  assert.throws(() => validateSeed({ ...record, checksum: hex("0") }));
+});
+
+test("double-run of an hour leaves sigma state and its atomic commit unchanged", async () => {
+  const f = await splitDeps();
+  assert.equal((await run.runForward(f.deps, splitInput)).status, "ok");
+  const saved = structuredClone(f.saved());
+  assert.equal((await run.runForward(f.deps, splitInput)).status, "already_done");
+  assert.deepEqual(f.saved(), saved);
+  assert.equal(f.calls.commits.length, 1);
+  assert.equal(f.calls.market.length, 1);
+  assert.equal(f.calls.commits[0][5][0].as_of_ms, BOUNDARY - 60_000);
+});
+
+test("checksum mismatch rebuilds from stored minutes and logs the cause", async () => {
+  const f = await splitDeps({ corrupt: true });
+  const result = await run.runForward(f.deps, splitInput);
+  assert.equal(result.status, "ok");
+  assert.match(result.reason, /sigma_rebuild: BTCUSDT checksum\/version mismatch/);
+  assert.equal(f.calls.market[0].sigma_only, true);
+  assert.equal(f.calls.market[0].sigma_state, null);
+  assert.equal(f.calls.market[1].sigma_state.as_of_ms, BOUNDARY - HOUR - 60_000);
+  assert.equal(f.calls.commits[0][6].BTCUSDT, hex("0"));
+});
+
+test("retryable no_sigma and stale runs never advance the checkpoint", async () => {
+  for (const options of [{ noSigma: true }, { stale: true }]) {
+    const f = await splitDeps(options);
+    const before = structuredClone(f.saved());
+    const result = await run.runForward(f.deps, splitInput);
+    assert.equal(result.status, options.stale ? "skipped_stale" : "no_sigma");
+    assert.deepEqual(f.saved(), before);
+    if (options.stale) assert.equal(f.calls.commits.length, 0);
+    else assert.deepEqual(f.calls.commits[0][5], []);
+  }
+});
+
+test("Python identity mismatch also requests a logged rebuild, while ordinary failures do not", async () => {
+  const f = await splitDeps();
+  const calculate = f.deps.callMarket;
+  let first = true;
+  f.deps.callMarket = async (body) => {
+    if (first) { first = false; throw new Error("sigma_state_rebuild_required"); }
+    return calculate(body);
+  };
+  const result = await run.runForward(f.deps, splitInput);
+  assert.match(result.reason, /Python state identity mismatch/);
+  assert.equal(f.calls.market[0].sigma_only, true);
+  const broken = await splitDeps();
+  broken.deps.callMarket = async () => { throw new Error("transport failed"); };
+  await assert.rejects(run.runForward(broken.deps, splitInput), /transport failed/);
+  assert.equal(broken.calls.commits.length, 0);
+});
+
+test("repository sends outputs, expected wallet revision, and sigma state in one RPC", async () => {
+  const calls = [];
+  const repository = createForwardRepository({ rpc: async (name, args) => {
+    calls.push({ name, args }); return { data: { signals: 1 }, error: null };
+  } });
+  const state = await sigmaRecord(BOUNDARY - 60_000);
+  await repository.commitRun(USER, { status: "ok" }, response(), new Map(), new Map(), [state],
+                             { BTCUSDT: null }, "prior-run");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "commit_forward_sigma_run");
+  assert.deepEqual(calls[0].args.p_states, [state]);
+  assert.equal(calls[0].args.p_expected_run_id, "prior-run");
+  assert.equal(calls[0].args.p_records.signals.length, 1);
+  assert.equal(calls[0].args.p_records.ledger.length, 1);
+});
