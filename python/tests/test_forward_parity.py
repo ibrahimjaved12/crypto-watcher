@@ -63,7 +63,7 @@ def setup_dict(n=1, *, signal_ms=START + 15 * MINUTE * 10, rr="2", sigma=1000, l
 
 
 def reference_row(setup, *, sigma=1000, d_ticks=40, status="T", exit_offset=12, net=1_500_000, outcome="T", opt=None):
-    pair = SimpleNamespace(pess=SimpleNamespace(outcome=outcome, exit_offset=exit_offset, net_ur=net), opt=opt)
+    pair = SimpleNamespace(pess=SimpleNamespace(outcome=outcome, exit_offset=exit_offset, net_ur=net, fund_ur=0), opt=opt)
     return SimpleNamespace(signal_ms=setup["signal_ms"], horizon_min=setup["horizon_min"],
                            side=setup["side"], k=Fraction(setup["k"]), status=status, sigma=sigma,
                            d_ticks=d_ticks, p0=setup["p0"], cells=(pair, pair))
@@ -206,6 +206,30 @@ class ReferenceResolutionTests(unittest.TestCase):
             self.assertTrue(stats["verdict"][rule], rule)
         self.assertFalse(stats["verdict"]["v_reference_geometry_agrees"])
         self.assertFalse(stats["verdict"]["pass"])
+
+    def test_input_diagnostics_never_override_rule_v(self):
+        setup, ref, bars, funding = self.case()
+        copied = parity.reference_setup(setup, ref, lambda ms: TICK, FORWARD_PARAMS, bars.symbol)
+        actual = parity.outcomes.resolve_setup(copied, bars, funding)
+        for same_inputs_match in (True, False):
+            bad = replace(actual, net_ur=actual.net_ur + 1)
+            with patch.object(parity.outcomes, "resolve_setup",
+                              side_effect=[bad, actual if same_inputs_match else bad]):
+                stats = parity.compare([setup], [], lambda *args: ref,
+                                       lambda *args: 500, lambda *args: 1_000_000, lambda ms: TICK,
+                                       FORWARD_PARAMS, bars=bars, funding=funding,
+                                       reference_bars=bars, reference_funding=funding)
+            cause = "request_input_difference" if same_inputs_match else "reference_input_resolution_mismatch"
+            self.assertEqual(stats["reference_geometry_mismatch_causes"], {cause: 1})
+            self.assertEqual(stats["reference_geometry_mismatch_fields"], {"net_ur": 1})
+            self.assertFalse(stats["verdict"]["v_reference_geometry_agrees"])
+            self.assertFalse(stats["verdict"]["pass"])
+            detail = stats["reference_geometry_mismatch_details_first"][0]
+            self.assertEqual(detail["actual"]["net_ur"], bad.net_ur)
+            self.assertEqual(detail["expected"]["net_ur"], actual.net_ur)
+            public = parity.public_line("BTCUSDT", "2025-05", stats)
+            self.assertNotIn(cause, public)
+            self.assertNotIn(str(setup["signal_ms"]), public)
 
     def test_unresolvable_reference_cannot_silently_pass(self):
         setup, ref, bars, funding = self.case()

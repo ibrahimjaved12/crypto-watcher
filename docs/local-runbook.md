@@ -94,3 +94,6 @@ stop and target in ticks) 100 % identical status, exit and net R; (iii) >= 95 % 
 loosen. Rule (ii) fails when the identical-geometry set is empty. Overall PASS also requires rule (v): reference-geometry setups resolved by the forward outcome engine on the request bars and funding must match status (including ambiguity), exit offset, exit_ms and net_ur for 100 % of joined setups, with counts public and up to five mismatching keys only in the private report; unevaluated rows or an empty join fail. `label_revision` defaults to `auto`: the lb3h revision whose sigma-relevant params equal FORWARD_PARAMS' is
 cross-checked on sigma and stops (informational; published releases use the default k/rr grids, so their full params
 identity cannot equal FORWARD_PARAMS').
+
+Parity failures are findings: an empty identical-geometry set still fails rule (ii), and copied-geometry mismatches still fail rule (v).
+The private report diagnoses mismatching fields and re-resolves failed setups on the reference bars/funding to distinguish request-input differences (including mark proxies) from reference-input resolution mismatches; this diagnostic never replaces the request-input verdict.
