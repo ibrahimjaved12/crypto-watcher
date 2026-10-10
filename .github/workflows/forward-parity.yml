@@ -44,6 +44,10 @@ on:
         description: "lb3h revision for the informational cross-check. auto = the revision whose sigma-relevant params equal FORWARD_PARAMS' (ewma-robust-hcal); none found is not an error"
         type: string
         default: "auto"
+      seed_sigma_state:
+        description: "Seed exact sigma state from the full pre-month lake history (P28a)"
+        type: boolean
+        default: false
       data_revision:
         description: "rd data release revision"
         type: string
@@ -111,15 +115,18 @@ jobs:
           MONTH: ${{ inputs.month }}
           LABEL_REVISION: ${{ inputs.label_revision }}
           DATA_REVISION: ${{ inputs.data_revision }}
+          SEED_SIGMA_STATE: ${{ inputs.seed_sigma_state }}
           PARITY_SUMMARY: ${{ runner.temp }}/parity-summary.md
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: |
+          SEED=""
+          if [ "$SEED_SIGMA_STATE" = "true" ]; then SEED="--seed-sigma-state"; fi
           SLICE=""
           if [ "$SYMBOL" = "BTCUSDT" ]; then SLICE="--slice-check"; fi
           python/.venv/bin/python scripts/research/forward_parity.py --workdir forward-parity-work \
             --summary "$PARITY_SUMMARY" --symbol "$SYMBOL" --month "$MONTH" \
-            --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION" $SLICE
+            --label-revision "$LABEL_REVISION" --data-revision "$DATA_REVISION" $SLICE $SEED
       - name: Delete working files
         if: always()
         run: rm -rf forward-parity-work

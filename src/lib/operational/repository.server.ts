@@ -451,6 +451,14 @@ export function createOperationalStore(
         throw new Error("Operational database returned an invalid collector completed candle row");
       }
     },
+    async firstForwardMinute(symbol) {
+      const { data, error } = await client.rpc("get_collector_forward_history_start", { p_symbol: symbol });
+      rpcError(error, "sigma history start read");
+      if (data === null) return null;
+      const ms = Number(data);
+      if (!Number.isSafeInteger(ms) || ms < 0) throw new Error("Invalid sigma history start");
+      return ms;
+    },
     async readForwardMinuteCandles(symbol, sinceMs, beforeMs) {
       // One RPC for 120 days is ~170,000 rows (tens of MB of JSON) and the local API drops the
       // connection ("terminated" / "fetch failed"). Read fixed windows and concatenate; the SQL range
