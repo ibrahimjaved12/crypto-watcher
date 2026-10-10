@@ -1238,3 +1238,27 @@ test("the store wraps reconcile_conflicts, the conflict read and the append-only
     await store.missingAppendOnlyTriggers(["collector_candle_conflicts", "collector_candle_revisions", "no_such_table"]),
     ["no_such_table"]);
 });
+
+test("forward minutes are read in non-overlapping windows and a transient failure retries once", async () => {
+  const day = 86_400_000;
+  const calls = [];
+  let failNext = true;
+  const hash = "a".repeat(32);
+  const client = {
+    async rpc(name, args) {
+      assert.equal(name, "get_collector_forward_minutes");
+      calls.push([Date.parse(args.p_since), Date.parse(args.p_before)]);
+      if (failNext) { failNext = false; throw new TypeError("fetch failed"); }
+      return { data: [[Date.parse(args.p_since), 1, 1, 1, 1, 1, "rest", null, hash]], error: null };
+    },
+  };
+  const { createOperationalStore } = await import(await moduleUrl("../src/lib/operational/repository.server.ts", repositoryStubs));
+  const store = createOperationalStore(client, { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 });
+  const rows = await store.readForwardMinuteCandles("btcusdt", 0, 7 * day);
+  assert.deepEqual(calls, [[0, 3 * day], [0, 3 * day], [3 * day, 6 * day], [6 * day, 7 * day]], "first window retried, then contiguous half-open windows");
+  assert.deepEqual(rows.map((row) => row.open_time_ms), [0, 3 * day, 6 * day]);
+  failNext = true;
+  calls.length = 0;
+  client.rpc = async () => { throw new TypeError("fetch failed"); };
+  await assert.rejects(store.readForwardMinuteCandles("btcusdt", 0, day), /fetch failed/, "a second failure surfaces");
+});

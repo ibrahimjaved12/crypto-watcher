@@ -164,6 +164,42 @@ function rpcError(error: { message: string } | null, operation: string): void {
   if (error) throw new Error(`Operational database ${operation} failed: ${error.message}`);
 }
 
+const FORWARD_MINUTE_READ_WINDOW_MS = 3 * 86_400_000;
+
+async function readForwardMinuteWindow(
+  client: Pick<SupabaseClient, "rpc">,
+  symbol: string,
+  sinceMs: number,
+  beforeMs: number,
+): Promise<ForwardMinuteRow[]> {
+  const { data, error } = await client.rpc("get_collector_forward_minutes", {
+    p_symbol: symbol.toUpperCase(),
+    p_since: new Date(sinceMs).toISOString(),
+    p_before: new Date(beforeMs).toISOString(),
+  });
+  rpcError(error, "forward minute candle read");
+  if (!Array.isArray(data)) throw new Error("Invalid forward minute candle response");
+  return data.map((row: unknown) => {
+    if (!Array.isArray(row) || row.length !== 9) throw new Error("Invalid forward minute candle row");
+    const [openTime, open, high, low, close, volume, transport, sourceEventAt, candleHash] = row;
+    if (transport !== "rest" && transport !== "websocket") throw new Error("Invalid candle transport");
+    if (typeof candleHash !== "string" || !/^[0-9a-f]{32}$/.test(candleHash))
+      throw new Error("Invalid candle version hash");
+    return {
+      open_time_ms: Number(openTime),
+      open: Number(open),
+      high: Number(high),
+      low: Number(low),
+      close: Number(close),
+      volume: Number(volume),
+      transport,
+      source_event_at_ms: sourceEventAt === null ? null : Number(sourceEventAt),
+      candle_hash: candleHash,
+    } satisfies ForwardMinuteRow;
+  });
+}
+
+
 export function createOperationalStore(
   client: RpcClient,
   options: {
@@ -416,31 +452,22 @@ export function createOperationalStore(
       }
     },
     async readForwardMinuteCandles(symbol, sinceMs, beforeMs) {
-      const { data, error } = await client.rpc("get_collector_forward_minutes", {
-        p_symbol: symbol.toUpperCase(),
-        p_since: new Date(sinceMs).toISOString(),
-        p_before: new Date(beforeMs).toISOString(),
-      });
-      rpcError(error, "forward minute candle read");
-      if (!Array.isArray(data)) throw new Error("Invalid forward minute candle response");
-      return data.map((row: unknown) => {
-        if (!Array.isArray(row) || row.length !== 9) throw new Error("Invalid forward minute candle row");
-        const [openTime, open, high, low, close, volume, transport, sourceEventAt, candleHash] = row;
-        if (transport !== "rest" && transport !== "websocket") throw new Error("Invalid candle transport");
-        if (typeof candleHash !== "string" || !/^[0-9a-f]{32}$/.test(candleHash))
-          throw new Error("Invalid candle version hash");
-        return {
-          open_time_ms: Number(openTime),
-          open: Number(open),
-          high: Number(high),
-          low: Number(low),
-          close: Number(close),
-          volume: Number(volume),
-          transport,
-          source_event_at_ms: sourceEventAt === null ? null : Number(sourceEventAt),
-          candle_hash: candleHash,
-        } satisfies ForwardMinuteRow;
-      });
+      // One RPC for 120 days is ~170,000 rows (tens of MB of JSON) and the local API drops the
+      // connection ("terminated" / "fetch failed"). Read fixed windows and concatenate; the SQL range
+      // is half-open, so consecutive windows never overlap. A transient failure retries once.
+      const out: ForwardMinuteRow[] = [];
+      for (let from = sinceMs; from < beforeMs; from += FORWARD_MINUTE_READ_WINDOW_MS) {
+        const to = Math.min(beforeMs, from + FORWARD_MINUTE_READ_WINDOW_MS);
+        for (let attempt = 1; ; attempt++) {
+          try {
+            out.push(...(await readForwardMinuteWindow(client, symbol, from, to)));
+            break;
+          } catch (error) {
+            if (attempt >= 2) throw error;
+          }
+        }
+      }
+      return out;
     },
     async readForwardDailyBars(symbol, sinceMs) {
       const { data, error } = await client.rpc("get_forward_daily_bars", {
