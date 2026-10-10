@@ -117,6 +117,40 @@ def liquidation_events(positions: dict, bars: BarSeries, resolutions: dict, conf
     return events
 
 
+def adverse_path(setup: dict, bars: BarSeries, resolution: dict | None) -> dict:
+    """Positive record-breaking mark extremes, inclusive of the final exit minute."""
+    first = max(0, (setup["entry_ms"] - bars.start_ms) // MINUTE_MS)
+    last = bars.minutes - 1
+    if resolution is not None and resolution.get("exit_ms") is not None:
+        last = min(last, (resolution["exit_ms"] - bars.start_ms) // MINUTE_MS)
+    points, worst = [], None
+    series = bars.mark_low if setup["side"] == 1 else bars.mark_high
+    for i in range(first, last + 1):
+        price = int(series[i])
+        if price > 0 and (worst is None or (price < worst if setup["side"] == 1 else price > worst)):
+            points.append([bars.open_time(i), price])
+            worst = price
+    return {"setup_id": setup["setup_id"], "symbol": bars.symbol, "side": setup["side"], "points": points}
+
+
+def path_liquidations(positions: dict, paths) -> list:
+    events = []
+    for path in paths:
+        position = positions.get(path["setup_id"])
+        if position is None:
+            continue
+        if position["symbol"] != path["symbol"] or position["side"] != path["side"]:
+            raise ValueError("adverse path position mismatch")
+        lp = exact_from_str(position["liquidation_price"])
+        for ms, price in path["points"]:
+            if ms < position["entry_ms"] or price <= 0:
+                continue
+            if (price <= floor(lp) if position["side"] == 1 else price >= ceil(lp)):
+                events.append({"type": "liquidation", "ms": ms, "setup_id": path["setup_id"]})
+                break
+    return events
+
+
 def step(state: dict, events, config: WalletConfig = WalletConfig()) -> tuple[dict, list]:
     """Apply events in (ms, liquidation < close < funding < open, id) order; returns (new state, ledger)."""
     state = {"version": WALLET_VERSION, "balance_e8": int(state["balance_e8"]),
@@ -213,7 +247,8 @@ def step(state: dict, events, config: WalletConfig = WalletConfig()) -> tuple[di
     return state, ledger
 
 
-def wallet_step(state: dict, events, config: WalletConfig = WalletConfig()) -> tuple[dict, list]:
+def wallet_step(state: dict, events, config: WalletConfig = WalletConfig(), *, adverse_paths=(),
+                compatibility: bool = False) -> tuple[dict, list]:
     """Pure portfolio composition of ordered per-symbol market events.
 
     Merge transport records by (ms, symbol, sequence), then execute the existing wallet
@@ -221,10 +256,10 @@ def wallet_step(state: dict, events, config: WalletConfig = WalletConfig()) -> t
     stable ties for callers whose symbol list is not alphabetical.
     """
     merged = sorted(events, key=lambda event: (event["ms"], event["symbol"], event["sequence"]))
-    identities = [(event["symbol"], event["sequence"]) for event in merged]
+    identities = [(event["stage_run_id"], event["symbol"], event["sequence"]) for event in merged]
     if len(set(identities)) != len(identities):
-        raise ValueError("duplicate per-symbol event sequence")
-    if any("compatibility_order" in event for event in merged):
+        raise ValueError("duplicate stage/symbol event sequence")
+    if compatibility and any("compatibility_order" in event for event in merged):
         orders = [event.get("compatibility_order") for event in merged]
         if any(type(order) is not int for order in orders) or len(set(orders)) != len(orders):
             raise ValueError("compatibility_order must be present and unique on every event")
@@ -234,6 +269,7 @@ def wallet_step(state: dict, events, config: WalletConfig = WalletConfig()) -> t
                   if not (event["type"] == "open" and key == "symbol")} for event in merged]
     opened, _ = step(state, [event for event in execution if event["type"] == "open"], config)
     eligible = state["positions"].keys() | opened["positions"].keys()
+    execution += path_liquidations(opened["positions"], adverse_paths)
     execution = [event for event in execution
                  if event["type"] != "liquidation" or event["setup_id"] in eligible]
     return step(state, execution, config)

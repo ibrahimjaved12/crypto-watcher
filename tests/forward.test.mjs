@@ -17,8 +17,11 @@ const contractUrl = await moduleUrl("../src/lib/forward/forward-contract.ts", { 
 const runUrl = await moduleUrl("../src/lib/forward/forward-run.server.ts", { "./forward-contract": contractUrl });
 const contract = await import(contractUrl);
 const run = await import(runUrl);
+const sharedRepositoryUrl = await moduleUrl("../src/lib/forward/forward-shared-repository.server.ts", {
+  "./forward-contract": contractUrl, "./forward-run.server": runUrl });
 const { createForwardRepository } = await import(await moduleUrl("../src/lib/forward/forward-repository.server.ts", {
-  "./forward-contract": contractUrl, "./forward-run.server": runUrl }));
+  "./forward-contract": contractUrl, "./forward-run.server": runUrl,
+  "./forward-shared-repository.server": sharedRepositoryUrl }));
 
 const HOUR = 3_600_000;
 const NOW = 1_760_000_000_000 - (1_760_000_000_000 % HOUR) + 5 * 60_000;
@@ -372,12 +375,13 @@ async function splitDeps({ corrupt = false, noSigma = false, stale = false } = {
     calls.market.push(body);
     if (body.sigma_only) return { symbol: "BTCUSDT", sigma_state: original };
     const r = response();
-    return { symbol: "BTCUSDT", signals: [], setups: [], resolutions: [], events: [],
+    return { symbol: "BTCUSDT", signals: [], setups: [], resolutions: [], events: [], adverse_paths: [],
       reasons: noSigma ? { sigma: "no_sigma: history required" } : {}, processed_to_ms: BOUNDARY - 60_000,
       funding_available: true, sigma_state: next, versions: r.versions, params_hash: r.params_hash,
       wallet_config: r.wallet_config, assumptions: r.assumptions };
   };
-  base.deps.callWallet = async () => ({ schema_version: 1, wallet_state: response().wallet_state, ledger: [] });
+  base.deps.callWallet = async () => ({ schema_version: 1, wallet_state: response().wallet_state, ledger: [],
+    wallet_config: response().wallet_config, assumptions: [] });
   base.deps.callPython = async () => { throw new Error("Legacy endpoint must not be used by production split wiring"); };
   return { deps: base.deps, calls, saved: () => saved };
 }

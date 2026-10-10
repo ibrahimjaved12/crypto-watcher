@@ -1,7 +1,6 @@
 """Versioned server-to-server input. Never accepts DB credentials or a user JWT."""
 from decimal import Decimal
 from typing import Annotated, Any, Literal
-from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -511,8 +510,7 @@ class ForwardMarketRequest(ForwardSymbolInput):
     from_ms: Timestamp
     to_ms: Timestamp
     open_setups: Annotated[tuple[ForwardOpenSetup, ...], Field(max_length=2000)] = ()
-    positions: dict[str, Any] = Field(default_factory=dict)
-    wallet_config: ForwardWalletConfig | None = None
+    stage_run_id: str = Field(pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
     @model_validator(mode="after")
     def window(self):
@@ -521,7 +519,6 @@ class ForwardMarketRequest(ForwardSymbolInput):
         return self
 
     def evaluate_input(self):
-        from .forward.wallet import WalletConfig
         return {"symbol": self.symbol, "bars": [row.model_dump() for row in self.rows],
                 "sigma_state": self.sigma_state, "use_sigma_state": self.use_sigma_state, "sigma_only": self.sigma_only,
                 "funding": [{"calc_time_ms": f.calc_time_ms, "rate": str(f.rate),
@@ -530,16 +527,15 @@ class ForwardMarketRequest(ForwardSymbolInput):
                 "funding_available": self.funding_available, "strategy_ids": self.strategy_ids,
                 "from_ms": self.from_ms, "to_ms": self.to_ms,
                 "open_setups": [item.model_dump() for item in self.open_setups],
-                "positions": self.positions,
-                "wallet_config": self.wallet_config.config() if self.wallet_config else WalletConfig()}
+                "stage_run_id": self.stage_run_id}
 
 
 class ForwardWalletEvent(InputModel):
-    type: Literal["open", "close", "funding", "liquidation"]
+    type: Literal["open", "close", "funding"]
     ms: Timestamp
     symbol: str = Field(min_length=5, max_length=16, pattern=r"^[A-Z0-9]+$")
     sequence: Annotated[int, Field(strict=True, ge=0)]
-    compatibility_order: Annotated[int, Field(strict=True, ge=0)] | None = None
+    stage_run_id: str = Field(pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
     setup: dict[str, Any] | None = None
     setup_id: str | None = None
     outcome: str | None = None
@@ -552,7 +548,7 @@ class ForwardWalletEvent(InputModel):
         from fractions import Fraction
         if self.type == "open" and (not self.setup or self.setup.get("symbol") != self.symbol):
             raise ValueError("open requires a setup for the event symbol")
-        if self.type in ("close", "liquidation") and not self.setup_id:
+        if self.type == "close" and not self.setup_id:
             raise ValueError("exit requires setup_id")
         if self.type == "funding":
             if self.rate is None or self.mark is None:
@@ -566,11 +562,26 @@ class ForwardWalletEvent(InputModel):
         return self
 
 
+class ForwardAdversePath(InputModel):
+    setup_id: str
+    symbol: str
+    side: Literal[-1, 1]
+    points: Annotated[tuple[tuple[Timestamp, Annotated[int, Field(strict=True, gt=0)]], ...], Field(max_length=200_000)]
+
+    @model_validator(mode="after")
+    def chronological(self):
+        if any(b[0] <= a[0] or (b[1] >= a[1] if self.side == 1 else b[1] <= a[1])
+               for a, b in zip(self.points, self.points[1:])):
+            raise ValueError("adverse points must be chronological record extremes")
+        return self
+
+
 class ForwardWalletRequest(InputModel):
     schema_version: Literal[1]
     state: dict[str, Any] | None = None
     events: Annotated[tuple[ForwardWalletEvent, ...], Field(max_length=200_000)]
     config: ForwardWalletConfig | None = None
+    adverse_paths: Annotated[tuple[ForwardAdversePath, ...], Field(max_length=200_000)] = ()
 
 
 class ForwardDailyBar(InputModel):

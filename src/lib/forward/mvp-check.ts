@@ -23,7 +23,8 @@ export const THRESHOLDS = {
 } as const;
 export const BENCHMARK_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT"] as const;
 export const COLLECTOR_TIMEFRAMES = [1, 15, 60, 240] as const;
-export const FORWARD_TABLES = ["paper_runs", "forward_signals", "forward_setups", "forward_outcomes", "paper_ledger"] as const;
+export const FORWARD_TABLES = ["paper_runs", "paper_ledger", "forward_market_stages", "forward_market_events",
+  "forward_market_paths", "forward_market_signals", "forward_market_setups", "forward_market_outcomes"] as const;
 export const CANDLE_EVIDENCE_TABLES = ["collector_candle_conflicts", "collector_candle_revisions"] as const;
 
 export const classifyHistoryDays = (days: number): Level =>
