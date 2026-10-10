@@ -104,9 +104,11 @@ class PathStatisticTests(unittest.TestCase):
 
     def test_clip_to_half_and_two(self):
         bars = walk(75 * 1440)
-        self.assertEqual(vol.path_calibration(bars, 15, 15, lambda entry_ms: 10 ** 12)[max(range(bars.start_ms + MINUTE, bars.end_ms, 15 * MINUTE))],
+        # Entries are aligned to the absolute 15-minute grid, not start + 1 minute.
+        last = (bars.end_ms - MINUTE) // (15 * MINUTE) * (15 * MINUTE)
+        self.assertEqual(vol.path_calibration(bars, 15, 15, lambda entry_ms: 10 ** 12)[last],
                          2 * vol.FTCAL_SCALE)
-        self.assertEqual(vol.path_calibration(bars, 15, 15, lambda entry_ms: 10 ** 21)[max(range(bars.start_ms + MINUTE, bars.end_ms, 15 * MINUTE))],
+        self.assertEqual(vol.path_calibration(bars, 15, 15, lambda entry_ms: 10 ** 21)[last],
                          vol.FTCAL_SCALE // 2)
 
     def test_point_in_time_ignores_windows_that_complete_after_t(self):
@@ -117,11 +119,20 @@ class PathStatisticTests(unittest.TestCase):
             for i in range(cut, bars.minutes):
                 future[name][i] = future[name][i] * 3 if name != "low" else future[name][i] // 3
         other = replace(bars, **future)
-        base = vol.path_calibration(bars, 60, 15, lambda entry_ms: SIGMA)
-        changed = vol.path_calibration(other, 60, 15, lambda entry_ms: SIGMA)
-        before = [t for t in base if (t - bars.start_ms) // MINUTE < cut]
+        # Keep the baseline away from the clip bounds so changed windows can affect c_h.
+        sigma = 2 * SIGMA
+        base = vol.path_calibration(bars, 60, 15, lambda entry_ms: sigma)
+        changed = vol.path_calibration(other, 60, 15, lambda entry_ms: sigma)
+        cut_ms = bars.start_ms + cut * MINUTE
+        before = [t for t in base if t <= cut_ms]  # a window ending at cut excludes the changed minute
         self.assertTrue(any(base[t] is not None for t in before), "some calibrated entries precede the change")
+        self.assertGreater(base[cut_ms], vol.FTCAL_SCALE // 2)
+        self.assertLess(base[cut_ms], 2 * vol.FTCAL_SCALE)
         self.assertTrue(all(base[t] == changed[t] for t in before))
+        # Recompute from completed windows independently, including the perturbed future.
+        last = max(changed)
+        expected, _ = self._scalar_c(other, 60, 15, sigma, last)
+        self.assertEqual(changed[last], expected)
         self.assertTrue(any(base[t] != changed[t] for t in base if (t - bars.start_ms) // MINUTE > cut + 60))
 
     def test_a_missing_minute_drops_every_window_that_contains_it(self):
