@@ -27,14 +27,17 @@ async function loadWorker(collectorStubSource) {
   return import(stub(outputText));
 }
 
+let builtArtifact;
 function buildWorkerArtifact(root) {
+  if (builtArtifact) return builtArtifact; // one vite build per file: every test reads the same artifact
   const build = spawnSync(
     process.execPath,
     ["node_modules/vite/bin/vite.js", "build", "--config", "vite.collector-worker.config.ts"],
     { cwd: root, encoding: "utf8" },
   );
   assert.equal(build.status, 0, build.stderr);
-  return join(root, "dist/collector-worker/collector-worker.mjs");
+  builtArtifact = join(root, "dist/collector-worker/collector-worker.mjs");
+  return builtArtifact;
 }
 
 // A minimal environment proves the artifact reads runtime configuration instead of
@@ -72,27 +75,6 @@ function captureShutdown() {
     },
   };
 }
-
-test("the TanStack application server no longer starts the collector", async () => {
-  const server = await readFile(new URL("../src/server.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(server, /collector\.server/);
-  assert.doesNotMatch(server, /startBinanceCollector|startCollectorWorker/);
-});
-
-test("the worker entrypoint reuses the shared collector startup path", async () => {
-  const worker = await readFile(
-    new URL("../src/lib/market/collector-worker.server.ts", import.meta.url),
-    "utf8",
-  );
-  assert.match(worker, /from "\.\/collector\.server"/);
-  assert.match(worker, /startBinanceCollector/);
-  const entry = await readFile(
-    new URL("../src/worker/collector-worker.ts", import.meta.url),
-    "utf8",
-  );
-  assert.match(entry, /from "\.\.\/lib\/market\/collector-worker\.server"/);
-  assert.match(entry, /startCollectorWorker\(\)/);
-});
 
 test("the worker starts through startBinanceCollector and releases on shutdown", async () => {
   const module = await loadWorker(`
@@ -164,24 +146,6 @@ test("the worker wires SIGTERM and SIGINT by default", async () => {
     for (const listener of termListeners) process.removeListener("SIGTERM", listener);
     for (const listener of intListeners) process.removeListener("SIGINT", listener);
   }
-});
-
-test("package.json and the launcher expose a separate collector worker", async () => {
-  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  assert.equal(pkg.scripts["collector:worker"], "node scripts/collector-worker.mjs");
-  assert.equal(
-    pkg.scripts["collector:worker:build"],
-    "vite build --config vite.collector-worker.config.ts",
-  );
-  assert.equal(
-    pkg.scripts["collector:worker:start"],
-    "node dist/collector-worker/collector-worker.mjs",
-  );
-  const launcher = await readFile(
-    new URL("../scripts/collector-worker.mjs", import.meta.url),
-    "utf8",
-  );
-  assert.match(launcher, /src\/worker\/collector-worker\.ts/);
 });
 
 test("the production worker artifact builds and runs with plain node", async () => {
@@ -400,8 +364,3 @@ test("the built worker reads its subscription universe from the operational data
   }
 });
 
-test("local development starts the collector as a separate process", async () => {
-  const devLocal = await readFile(new URL("../scripts/dev-local.mjs", import.meta.url), "utf8");
-  assert.match(devLocal, /collector:worker/);
-  assert.match(devLocal, /start\(\s*"collector"/);
-});

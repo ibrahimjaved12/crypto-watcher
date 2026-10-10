@@ -1,9 +1,14 @@
-name: Verify
+name: Tests
 
+# One cheap job (docs/ci-budget.md). Pull requests run the core Python tests, the Node tests, types
+# and builds, and only the study-tier Python tests whose imports reach a changed file. The weekly
+# schedule and manual dispatch run everything. No push-to-main run: merged code was verified on its PR.
 on:
   pull_request:
-  push:
-    branches: [main]
+    paths-ignore: ["docs/**", "**/*.md", "research/**"]
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 1"
 
 permissions:
   contents: read
@@ -13,103 +18,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Python tests run in three parallel shards (python/tests/shards.json; "rest" is every
-  # module no other shard lists). Budget: the Python tests finish in under 3 minutes.
-  python-heavy-a:
-    name: Python tests · study part C
+  verify:
+    name: Python tests, Node tests and builds
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: python
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
       - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
           cache: pip
-          cache-dependency-path: |
-            python/requirements.txt
-            python/requirements-research.txt
-      - name: Install Python dependencies
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install -r requirements.txt
-          .venv/bin/python -m pip install -r requirements-research.txt
-      - name: Run Python unit tests (study-c)
-        run: .venv/bin/python tests/run_shard.py study-c
-
-  python-heavy-b:
-    name: Python tests · study core
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: python
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.10"
-          cache: pip
-          cache-dependency-path: |
-            python/requirements.txt
-            python/requirements-research.txt
-      - name: Install Python dependencies
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install -r requirements.txt
-          .venv/bin/python -m pip install -r requirements-research.txt
-      - name: Run Python unit tests (study-core)
-        run: .venv/bin/python tests/run_shard.py study-core
-
-  python-rest:
-    name: Python tests · benchmark and everything else
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: python
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.10"
-          cache: pip
-          cache-dependency-path: |
-            python/requirements.txt
-            python/requirements-research.txt
-      - name: Install Python dependencies
-        run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install -r requirements.txt
-          .venv/bin/python -m pip install -r requirements-research.txt
-      - name: Run Python unit tests (rest)
-        run: .venv/bin/python tests/run_shard.py rest
-
-  python:
-    # Single required status: passes only when every shard passed.
-    name: Python tests
-    needs: [python-heavy-a, python-heavy-b, python-rest]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require every Python shard to succeed
-        env:
-          HEAVY_A: ${{ needs.python-heavy-a.result }}
-          HEAVY_B: ${{ needs.python-heavy-b.result }}
-          REST: ${{ needs.python-rest.result }}
-        run: |
-          echo "study-c=$HEAVY_A study-core=$HEAVY_B rest=$REST"
-          test "$HEAVY_A" = success && test "$HEAVY_B" = success && test "$REST" = success
-
-  node:
-    name: Node tests, types and builds
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
+          cache-dependency-path: python/requirements*.txt
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
@@ -117,15 +38,74 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             tests/package-lock.json
-      - name: Install application dependencies
-        run: npm ci
-      - name: Install test dependencies
-        run: npm ci --prefix tests --ignore-scripts
-      - name: Run full Node test suite
-        run: npm test --prefix tests
-      - name: Typecheck
-        run: npx --no-install tsc --noEmit
-      - name: Build application
-        run: npm run build
-      - name: Build collector worker
-        run: npm run collector:worker:build
+      - name: Install dependencies (Python and Node in parallel)
+        run: |
+          set -uo pipefail
+          (python -m venv python/.venv \
+            && python/.venv/bin/python -m pip install -q --disable-pip-version-check -r python/requirements.txt) &
+          python_pid=$!
+          (npm ci --no-audit --no-fund && npm ci --prefix tests --ignore-scripts --no-audit --no-fund) &
+          node_pid=$!
+          status=0
+          wait "$python_pid" || { echo "::error::Python install failed"; status=1; }
+          wait "$node_pid" || { echo "::error::Node install failed"; status=1; }
+          exit "$status"
+      - name: Select tests
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            git diff --name-only "$BASE_SHA" HEAD > changed.txt
+            echo "full=false" >> "$GITHUB_ENV"
+          else
+            : > changed.txt
+            echo "full=true" >> "$GITHUB_ENV"
+          fi
+          echo "changed files: $(wc -l < changed.txt)"
+      - name: Run Python and Node lanes concurrently
+        run: |
+          set -uo pipefail
+          lane_python() {
+            local start=$SECONDS status=0
+            python/.venv/bin/python python/tests/run_shard.py core --jobs 1 || status=1
+            if [ "$full" = "true" ]; then
+              python/.venv/bin/python python/tests/run_shard.py study --jobs 1 || status=1
+              python/.venv/bin/python python/tests/run_shard.py study-heavy --jobs 1 || status=1
+            else
+              python/.venv/bin/python python/tests/run_shard.py study --jobs 1 --changed-file changed.txt || status=1
+              echo "run_shard: study-heavy: deferred to the weekly full run (4 modules, about 2 minutes)"
+            fi
+            echo "$((SECONDS - start))" > python.seconds
+            return "$status"
+          }
+          lane_node() {
+            local start=$SECONDS status=0
+            { npm test --prefix tests \
+              && npx --no-install tsc --noEmit \
+              && npm run build \
+              && npm run collector:worker:build; } || status=1
+            echo "$((SECONDS - start))" > node.seconds
+            return "$status"
+          }
+          lane_python > python.log 2>&1 & python_pid=$!
+          lane_node > node.log 2>&1 & node_pid=$!
+          status=0
+          wait "$python_pid" || { status=1; python_failed=1; }
+          wait "$node_pid" || { status=1; node_failed=1; }
+          for lane in python node; do
+            echo "::group::$lane lane (${lane}.log)"
+            cat "$lane.log"
+            echo "::endgroup::"
+          done
+          python_line=$(grep -h '^run_shard:' python.log | tr '\n' ' ')
+          node_line=$(grep -h 'Node test files passed' node.log | tr -d '\n')
+          {
+            echo "### Test budget"
+            echo "- python lane: $(cat python.seconds 2>/dev/null || echo '?')s ${python_failed:+FAILED} — $python_line"
+            echo "- node lane: $(cat node.seconds 2>/dev/null || echo '?')s ${node_failed:+FAILED} — $node_line"
+            echo "- full run: $full"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

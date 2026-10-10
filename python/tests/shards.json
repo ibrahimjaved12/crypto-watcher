@@ -1,9 +1,39 @@
 {
-  "study-c": ["test_historical_market_state_study_part_c"],
-  "study-core": [
-    "test_historical_market_state_study",
-    "test_historical_market_state_study_evaluation",
+  "study": [
+    "test_binance_historical_archive",
+    "test_binance_historical_download",
+    "test_github_historical_orchestration",
+    "test_historical_derivatives_context",
+    "test_historical_experiment_batch",
+    "test_historical_mark_trade_extension",
+    "test_historical_market_state_candidate_evidence",
+    "test_historical_market_state_forward_outcomes",
+    "test_historical_market_state_hmm_crossfit",
+    "test_historical_market_state_study_execution",
+    "test_historical_market_state_study_features",
+    "test_historical_market_state_study_models",
+    "test_historical_market_state_study_resolver",
     "test_historical_market_state_study_statistics",
-    "test_historical_market_state_study_resolver"
+    "test_historical_ohlc_evidence",
+    "test_historical_stage_batching",
+    "test_historical_taker_flow_extension",
+    "test_market_state_atr_normalization_experiment",
+    "test_market_state_bocpd_experiment",
+    "test_market_state_correlation_clusters_experiment",
+    "test_market_state_cusum_experiment",
+    "test_market_state_ewma_experiment",
+    "test_market_state_kalman_experiment",
+    "test_market_state_pca_common_factor_experiment",
+    "test_market_state_pelt_experiment",
+    "test_market_state_realized_vol_normalization_experiment",
+    "test_market_state_regression_acceleration_experiment",
+    "test_market_state_shared_v1_branch_parity",
+    "test_performance_equivalence"
+  ],
+  "study-heavy": [
+    "test_historical_market_state_study_part_c",
+    "test_historical_market_state_study",
+    "test_market_state_hmm_regimes_experiment",
+    "test_historical_market_state_study_evaluation"
   ]
 }

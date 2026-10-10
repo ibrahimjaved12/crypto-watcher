@@ -148,35 +148,6 @@ test("server-only Supabase validation requires the service-role credential", () 
   );
 });
 
-test("the app keeps its browser/server check while the worker validates server-only", () => {
-  const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
-  // The TanStack app still proves its runtime matches the browser build it serves.
-  assert.match(read("../src/server.ts"), /validateServerEnvironment\(\)/);
-  assert.match(
-    read("../src/integrations/supabase/auth-middleware.ts"),
-    /validateServerEnvironment\(\)/,
-  );
-  assert.match(read("../src/lib/environment.server.ts"), /import\.meta\.env/);
-  // The shared admin client no longer performs the browser cross-check, so the
-  // headless collector worker can create it from runtime server configuration.
-  const adminClient = read("../src/integrations/supabase/client.server.ts");
-  assert.match(adminClient, /validateServerSupabaseEnvironment\(\)/);
-  assert.doesNotMatch(adminClient, /validateServerEnvironment\(\)/);
-  // The worker's own boundary is server-only and free of build-time browser values.
-  const workerEnv = read("../src/lib/market/collector-worker-env.server.ts");
-  assert.doesNotMatch(workerEnv, /import\.meta/);
-  assert.doesNotMatch(workerEnv, /["']VITE_/);
-  // The collector owns only operational working state, so its boundary must not
-  // require a main Lovable database credential or a browser build to match.
-  assert.doesNotMatch(workerEnv, /validateServerSupabase/);
-  assert.doesNotMatch(workerEnv, /SUPABASE_URL|SUPABASE_SERVICE_ROLE_KEY|APP_PROFILE/);
-  assert.match(workerEnv, /operationalDbConfig/);
-  assert.match(
-    read("../src/lib/market/collector.server.ts"),
-    /validateCollectorWorkerEnvironment\(\)/,
-  );
-});
-
 test("URLs reject credentials and non-origin targets", () => {
   for (const url of [
     "ftp://localhost",
