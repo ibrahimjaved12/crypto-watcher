@@ -26,7 +26,7 @@ test("skipped latest run preserves each funded setup and its strategy metadata",
         wallet_state: { positions: { a: { symbol: "SOLUSDT", side: 1 }, b: { symbol: "SOLUSDT", side: -1 } } },
         wallet_config: { leverage_cap: 20 } },
     ],
-    forward_setups: [
+    forward_market_setups: [
       { setup_id: "a", strategy_id: "bollinger_20_2_reversion:15", horizon_min: 15 },
       { setup_id: "b", strategy_id: "macd_12_26_9:60", horizon_min: 60 },
       { setup_id: "c", strategy_id: "rsi_14_reversion:15", horizon_min: 15 },

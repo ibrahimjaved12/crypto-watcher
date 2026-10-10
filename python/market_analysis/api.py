@@ -182,8 +182,10 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
         try:
             config = body.config.config() if body.config else WalletConfig()
             state, ledger = wallet_step(body.state or initial_state(config),
-                                        [event.model_dump(exclude_none=True) for event in body.events], config)
-            return {"schema_version": 1, "wallet_state": state, "ledger": ledger}
+                                        [event.model_dump(exclude_none=True) for event in body.events], config,
+                                        adverse_paths=[path.model_dump() for path in body.adverse_paths])
+            return {"schema_version": 1, "wallet_state": state, "ledger": ledger,
+                    "wallet_config": config.to_record(), "assumptions": list(config.assumptions)}
         except (ValueError, KeyError, TypeError, ZeroDivisionError):
             raise HTTPException(409, "Forward wallet step could not be completed") from None
 

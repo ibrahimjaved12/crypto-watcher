@@ -1,3 +1,4 @@
+import type { SharedRepository } from "./forward-stages.server";
 import type { CollectorHealth, ForwardMinuteRow } from "../operational/types";
 import {
   FINAL_STATUSES,
@@ -51,6 +52,7 @@ export type StoredOpenSetup = { setup: Record<string, unknown>; resolution: Forw
 export type LatestRun = { id?: string; processedToMs: Record<string, number>; walletState: WalletState | null };
 
 export interface ForwardRepository {
+  shared?: SharedRepository;
   loadSigmaStates?(symbols: readonly string[]): Promise<Record<string, unknown>>;
   commitRun?(userId: string, row: Record<string, unknown>, response: ForwardEvaluateResponse,
              previous: Map<string, string | null>, candleVersions: Map<string, string | null>,
@@ -145,6 +147,10 @@ export function staleness(
 }
 
 export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Promise<ForwardRunSummary> {
+  if (deps.repository.shared) {
+    const { runSharedForward } = await import("./forward-stages.server");
+    return runSharedForward(deps, input);
+  }
   const symbols = input.symbols ?? FORWARD_SYMBOLS;
   const boundaryMs = Math.floor(deps.now() / HOUR_MS) * HOUR_MS;
   const runKey = `hour:${boundaryMs}`;
@@ -209,6 +215,7 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
   let response: ForwardEvaluateResponse;
   const advancedStates: SigmaStateRecord[] = [];
   if (split) {
+    const stageRunId = crypto.randomUUID();
     const parts: ReturnType<typeof forwardMarketResponseSchema.parse>[] = [];
     const events: Record<string, unknown>[] = [];
     for (const symbol of symbols) {
@@ -229,7 +236,7 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
         funding: funding.get(symbol) ?? [], funding_available: funding.get(symbol) !== null,
         strategy_ids: input.strategyIds, from_ms: fromMs, to_ms: boundaryMs - MINUTE_MS,
         open_setups: open.filter((item) => item.setup["symbol"] === symbol),
-        positions: latest?.walletState?.positions ?? {}, use_sigma_state: true, sigma_state: state,
+        stage_run_id: stageRunId, use_sigma_state: true, sigma_state: state,
       });
       let value;
       try { value = await deps.callMarket!(request()); }
@@ -248,15 +255,16 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
       deps.log?.(`sigma_payload_bytes: ${symbol} ${payloadBytes}`);
       advancedStates.push(advanced);
       for (const event of [...part.events].sort((a, b) => a.sequence - b.sequence))
-        events.push({ ...event, compatibility_order: events.length });
+        events.push(event);
       parts.push(part);
     }
-    const wallet = await deps.callWallet!({ schema_version: 1, state: latest?.walletState ?? null, events }) as { wallet_state: unknown; ledger: unknown };
+    const wallet = await deps.callWallet!({ schema_version: 1, state: latest?.walletState ?? null, events,
+      adverse_paths: parts.flatMap((p) => p.adverse_paths) }) as { wallet_state: unknown; ledger: unknown; wallet_config: unknown; assumptions: string[] };
     const first = parts[0];
     if (!first) throw new Error("No forward symbols");
     response = validateForwardResponse({
       schema_version: 1, versions: first.versions, params_hash: first.params_hash,
-      wallet_config: first.wallet_config, assumptions: first.assumptions,
+      wallet_config: wallet.wallet_config, assumptions: [...first.assumptions, ...wallet.assumptions],
       processed_to_ms: Object.fromEntries(parts.map((p) => [p.symbol, p.processed_to_ms])),
       funding_unavailable: parts.filter((p) => !p.funding_available).map((p) => p.symbol),
       signals: parts.flatMap((p) => p.signals), setups: parts.flatMap((p) => p.setups),
@@ -415,7 +423,7 @@ export async function decisionCandleVersions(
 }
 
 /** Outcome rows worth appending: a status not recorded before for that setup. */
-export function newOutcomeRows(response: ForwardEvaluateResponse, previous: Map<string, string | null>) {
+export function newOutcomeRows(response: Pick<ForwardEvaluateResponse, "resolutions">, previous: Map<string, string | null>) {
   return response.resolutions
     .filter((resolution) => previous.get(resolution.setup_id) !== resolution.status)
     .map((resolution) => ({
@@ -441,7 +449,7 @@ export async function rebuildSigmaState(deps: ForwardDeps, symbol: string, cutof
     if (!rows.length) continue;
     const result = await deps.callMarket!({ schema_version: 1, symbol,
       rows: rows.map(({ candle_hash: _hash, ...row }) => row), funding: [], strategy_ids: strategyIds,
-      from_ms: 0, to_ms: cutoffMs, sigma_state: state, use_sigma_state: true, sigma_only: true,
+      stage_run_id: crypto.randomUUID(), from_ms: 0, to_ms: cutoffMs, sigma_state: state, use_sigma_state: true, sigma_only: true,
     }) as { sigma_state: unknown };
     state = await validateSigmaState(result.sigma_state, symbol);
   }

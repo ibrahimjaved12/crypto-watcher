@@ -35,7 +35,7 @@ def crosses_funding_time(entry_ms: int, exit_ms: int) -> bool:
 from .setups import FORWARD_PARAMS, NO_SIGMA, ForwardSigma, Setup, build_setup
 from .signals import generate_signals
 from .sigma_state import SigmaState, SigmaStateMismatch, StateSigma, empty_state, POINT_HISTORY_MS
-from .wallet import WalletConfig, initial_state, liquidation_events, position_terms, wallet_step
+from .wallet import WalletConfig, initial_state, adverse_path, wallet_step
 
 
 def _funding(bars, events) -> FundingSeries:
@@ -47,14 +47,19 @@ def _funding(bars, events) -> FundingSeries:
 
 def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy_ids,
                     from_ms: int, to_ms: int, funding_available: bool = True,
-                    positions=None, wallet_config: WalletConfig = WalletConfig(),
-                    sigma_factory=ForwardSigma, sigma_state=None, use_sigma_state=False, sigma_only=False) -> dict:
+                    stage_run_id: str = "00000000-0000-0000-0000-000000000000",
+                    sigma_factory=ForwardSigma, sigma_state=None, use_sigma_state=False, sigma_only=False,
+                    _legacy_window=False) -> dict:
     """Evaluate one symbol from collector rows, without sizing or moving wallet balances.
 
-    Positions supply previously persisted liquidation terms. New setups emit liquidation
-    candidates independent of sizing; wallet_step applies the legacy portfolio preflight.
-    Events are JSON records ordered by (ms, symbol, sequence).
+    Shared records contain no wallet configuration or positions. Liquidation is derived
+    from adverse mark paths by each user's wallet. Events use stage/symbol/sequence keys.
     """
+    # Shared stages cannot publish paths, exits or checkpoints beyond their boundary.
+    # /evaluate historically treats to_ms as the signal window only, so its private
+    # composition retains the full supplied resolution history.
+    if not _legacy_window:
+        bars = [row for row in bars if row["open_time_ms"] <= to_ms]
     bars = bars_from_collector_rows(symbol, bars)
     apply_funding_marks(bars, funding)
     funding = _funding(bars, funding)
@@ -121,25 +126,16 @@ def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy
         if mark > 0:
             wallet_events.append({"type": "funding", "ms": calc_time, "symbol": symbol, "rate": str(rate),
                                   "mark": mark})
-    # Liquidation prices depend on geometry/config, never on quantity or available balance.
-    candidates = {key: dict(value) for key, value in (positions or {}).items()
-                  if value["symbol"] == symbol}
-    for setup, _ in new:
-        record = setup.to_dict()
-        terms = position_terms(record, wallet_config)
-        if terms is not None and setup.setup_id not in candidates:
-            candidates[setup.setup_id] = {"symbol": symbol, "side": setup.side,
-                                         "entry_ms": setup.entry_ms,
-                                         "liquidation_price": str(terms[2])}
-    wallet_events += liquidation_events(candidates, bars, resolutions, wallet_config)
-    events = [{**event, "symbol": symbol, "sequence": sequence}
+    paths = [adverse_path(setup.to_dict(), bars, resolutions.get(setup.setup_id))
+             for setup, _ in saved + new]
+    events = [{**event, "stage_run_id": stage_run_id, "symbol": symbol, "sequence": sequence}
               for sequence, event in enumerate(wallet_events)]
     events.sort(key=lambda event: (event["ms"], event["symbol"], event["sequence"]))
     return {"symbol": symbol, "signals": out_signals, "setups": out_setups,
-            "resolutions": out_resolutions, "events": events, "reasons": reasons,
+            "resolutions": out_resolutions, "events": events, "adverse_paths": paths, "reasons": reasons,
             "processed_to_ms": processed_to, "funding_available": funding_ok,
             "versions": dict(VERSIONS), "params_hash": FORWARD_PARAMS.identity(),
-            "wallet_config": wallet_config.to_record(), "assumptions": [*ASSUMPTIONS, *wallet_config.assumptions],
+            "assumptions": list(ASSUMPTIONS),
             **({"sigma_state": incremental.to_record()} if incremental is not None else {})}
 
 
@@ -148,12 +144,22 @@ def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setu
     """Compose per-symbol market evaluation and the pure portfolio wallet step."""
     state = wallet_state or initial_state(wallet_config)
     out_signals, out_setups, out_resolutions, reasons, wallet_events = [], [], [], {}, []
-    processed_to, funding_unavailable = {}, []
+    processed_to, funding_unavailable, paths = {}, [], []
     for item in symbols:
         result = market_evaluate(item["symbol"], item["rows"], item.get("funding"), open_setups,
                                  strategy_ids=strategy_ids, from_ms=from_ms, to_ms=to_ms,
                                  funding_available=item.get("funding_available", True),
-                                 positions=state["positions"], wallet_config=wallet_config, sigma_factory=sigma_factory)
+                                 sigma_factory=sigma_factory, _legacy_window=True)
+        paths.extend(result["adverse_paths"])
+        # Legacy callers may hold positions without saved market setups. Preserve /evaluate
+        # by deriving their paths locally; the shared endpoint never accepts these positions.
+        known = {path["setup_id"] for path in result["adverse_paths"]}
+        orphaned = [(key, value) for key, value in state["positions"].items()
+                    if value["symbol"] == item["symbol"] and key not in known]
+        if orphaned:
+            series = bars_from_collector_rows(item["symbol"], item["rows"])
+            apply_funding_marks(series, item.get("funding"))
+            paths.extend(adverse_path({**value, "setup_id": key}, series, None) for key, value in orphaned)
         symbol = item["symbol"]
         out_signals.extend(result["signals"])
         out_setups.extend(result["setups"])
@@ -165,7 +171,7 @@ def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setu
         # Preserve the old stable tie order, including caller symbol order, for /evaluate.
         for event in sorted(result["events"], key=lambda event: event["sequence"]):
             wallet_events.append({**event, "compatibility_order": len(wallet_events)})
-    new_state, ledger = wallet_step(state, wallet_events, wallet_config)
+    new_state, ledger = wallet_step(state, wallet_events, wallet_config, adverse_paths=paths, compatibility=True)
     return {"schema_version": 1, "versions": dict(VERSIONS), "params_hash": FORWARD_PARAMS.identity(),
             "wallet_config": wallet_config.to_record(), "assumptions": [*ASSUMPTIONS, *wallet_config.assumptions],
             "processed_to_ms": processed_to, "funding_unavailable": funding_unavailable, "signals": out_signals, "setups": out_setups,

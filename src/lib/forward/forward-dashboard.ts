@@ -4,7 +4,7 @@ import { DAY_MS, rangeMs, reportRpcArgs, strategyIdsFor, type ForwardFilters } f
 import { buildReportRows, toCsv, type NonTradeRow, type OutcomeReportRow, type PairedRow } from "./forward-report";
 
 /**
- * Forward dashboard data (#239 P11, P20). Reads only the signed-in user's rows (RLS). Aggregates
+ * Shared market facts and the signed-in user's wallet rows (RLS). Aggregates
  * (results, non-trades, equity) are computed by SQL over every row; nothing here has a row cap that
  * could drop old trades. Logs are keyset-paginated.
  */
@@ -61,7 +61,7 @@ const COLUMNS: Record<LogKind, string[]> = {
     "net_ur", "cost_ur", "fund_ur", "exit_ms"],
   ledger: ["seq", "ms", "type", "symbol", "setup_id", "amount_e8", "balance_e8"],
 };
-const SOURCE: Record<LogKind, string> = { signals: "forward_signals", outcomes: "forward_outcome_log", ledger: "paper_ledger" };
+const SOURCE: Record<LogKind, string> = { signals: "forward_market_signals", outcomes: "forward_market_outcome_log", ledger: "paper_ledger" };
 const TIME_COLUMN: Record<LogKind, string> = { signals: "signal_ms", outcomes: "exit_ms", ledger: "ms" };
 const CURSOR = { signals: /^\d+\|[0-9a-f]{64}$/, outcomes: /^\d+\|[0-9a-f]{64}$/, ledger: /^\d+$/ };
 
@@ -147,21 +147,21 @@ export async function loadForwardReport(client: SupabaseClient, filters: Forward
 export async function loadForwardDashboard(client: SupabaseClient) {
   const from = (table: string) => client.from(table) as unknown as Query;
   const [signals, openSetups, firstLine, lastLine, runs, walletRuns, rejectedPositions] = await Promise.all([
-    rows<SignalRow>(from("forward_signals").select(COLUMNS.signals.join(","))
+    rows<SignalRow>(from("forward_market_signals").select(COLUMNS.signals.join(","))
       .order("signal_ms", { ascending: false }).limit(50), "signals"),
-    rows<OpenSetupRow>(from("forward_open_setups").select("setup_id, strategy_id, version, symbol, side, horizon_min, entry_ms, rr")
+    rows<OpenSetupRow>(from("forward_market_open_setups").select("setup_id, strategy_id, version, symbol, side, horizon_min, entry_ms, rr")
       .order("entry_ms", { ascending: false }).limit(100), "open setups"),
     rows<{ ms: number }>(from("paper_ledger").select("ms").order("seq", { ascending: true }).limit(1), "ledger"),
     rows<{ ms: number }>(from("paper_ledger").select("ms").order("seq", { ascending: false }).limit(1), "ledger"),
     rows<LatestRun>(from("paper_runs")
       .select("run_key, status, reason, boundary_ms, freshness, wallet_state, assumptions, created_at")
-      .eq("paper_account", "default").order("boundary_ms", { ascending: false })
+      .order("boundary_ms", { ascending: false })
       .order("created_at", { ascending: false }).limit(1), "runs"),
     rows<{ wallet_state: { positions?: Record<string, Record<string, JsonValue>> }; wallet_config: { leverage_cap?: number }; boundary_ms: number }>(
-      from("paper_runs").select("wallet_state, wallet_config, boundary_ms").eq("paper_account", "default").eq("status", "ok")
+      from("paper_runs").select("wallet_state, wallet_config, boundary_ms").eq("status", "ok")
         .order("boundary_ms", { ascending: false }).limit(1), "wallet snapshot"),
     rows<{ seq: number; ms: number; symbol: string; setup_id: string; payload: { reason?: string } }>(
-      from("paper_ledger").select("seq, ms, symbol, setup_id, payload").eq("paper_account", "default")
+      from("paper_ledger").select("seq, ms, symbol, setup_id, payload")
         .eq("type", "rejected").order("seq", { ascending: false }).limit(20), "wallet rejections"),
   ]);
   const wallet = walletRuns[0];
@@ -169,7 +169,7 @@ export async function loadForwardDashboard(client: SupabaseClient) {
   const ids = [...new Set([...positions.map(([id]) => id), ...rejectedPositions.map((r) => r.setup_id)])];
   const metadata = new Map<string, OpenSetupRow>();
   for (let offset = 0; offset < ids.length; offset += 100) {
-    const setups = await rows<OpenSetupRow>(from("forward_setups")
+    const setups = await rows<OpenSetupRow>(from("forward_market_setups")
       .select("setup_id, strategy_id, horizon_min").in("setup_id", ids.slice(offset, offset + 100)), "position strategies");
     for (const setup of setups) metadata.set(setup.setup_id, setup);
   }

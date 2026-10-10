@@ -87,9 +87,9 @@ async function collectorChecks(): Promise<Check[]> {
   return checks;
 }
 
-type CountRow = { user_id: string; kind: string; status: string; n: number | string };
+type CountRow = { user_id: string | null; kind: string; status: string; n: number | string };
 
-async function accountChecks(userId: string, label: string, all: { counts: CountRow[]; ledgers: (LedgerSummary & { user_id: string; paper_account: string })[]; strategies: { user_id: string; strategy_id: string }[] }): Promise<Check[]> {
+async function accountChecks(userId: string, label: string, all: { counts: CountRow[]; ledgers: (LedgerSummary & { user_id: string; paper_account: string })[]; strategies: { user_id: string | null; strategy_id: string }[] }): Promise<Check[]> {
   const p = label ? `${label} ` : "";
   const checks: Check[] = [];
   const { data: runs } = await db.from("paper_runs")
@@ -108,7 +108,7 @@ async function accountChecks(userId: string, label: string, all: { counts: Count
     detail: t ? `${t.status}${t.committed ? "" : " (not committed)"}, scored through ${t.through_day_ms === null ? "—" : new Date(t.through_day_ms).toISOString().slice(0, 10)}${t.reason ? `: ${t.reason}` : ""}` : "no daily trend run recorded yet",
   });
 
-  const mine = all.counts.filter((row) => row.user_id === userId);
+  const mine = all.counts.filter((row) => row.user_id === null || row.user_id === userId);
   const by = (kind: string) => mine.filter((row) => row.kind === kind).map((row) => `${row.status || "all"} ${row.n}`).join(", ") || "none";
   const signals = Number(mine.find((row) => row.kind === "signals")?.n ?? 0);
   const setups = mine.filter((row) => row.kind === "setups").reduce((sum, row) => sum + Number(row.n), 0);
@@ -120,7 +120,7 @@ async function accountChecks(userId: string, label: string, all: { counts: Count
       (signals > 0 && setups === 0 ? `; sigma not ready (${noSigma} signal(s) reported no_sigma)` : ""),
   });
 
-  const recent = all.strategies.filter((row) => row.user_id === userId).map((row) => row.strategy_id);
+  const recent = all.strategies.filter((row) => row.user_id === null || row.user_id === userId).map((row) => row.strategy_id);
   const noPlacebo = strategiesWithoutPlacebo(recent);
   checks.push({
     name: `${p}placebo controls`,
@@ -128,8 +128,11 @@ async function accountChecks(userId: string, label: string, all: { counts: Count
     detail: noPlacebo.length ? `no matched placebo-v1 signal in the last 7 days for: ${noPlacebo.join(", ")}` : `${new Set(recent.filter((id) => !id.startsWith("placebo-v1:"))).size} strategies with matched controls (of ${FORWARD_STRATEGY_IDS.length / 2} configured)`,
   });
 
-  const initial = Number(run?.wallet_config?.initial_balance_e8 ?? 100e8);
-  const ledger = all.ledgers.find((row) => row.user_id === userId && row.paper_account === "default") ?? null;
+  const { data: account, error: accountError } = await db.from("forward_wallet_accounts")
+    .select("account_id,config").eq("user_id", userId).maybeSingle();
+  if (accountError) throw new Error(`Forward wallet account read failed: ${accountError.message}`);
+  const initial = Number(account?.config?.initial_balance_e8 ?? run?.wallet_config?.initial_balance_e8 ?? 100e8);
+  const ledger = all.ledgers.find((row) => row.user_id === userId && row.paper_account === account?.account_id) ?? null;
   const result = ledgerInvariant(initial, ledger && {
     n: Number(ledger.n), max_seq: Number(ledger.max_seq), sum_amount_e8: Number(ledger.sum_amount_e8),
     last_balance_e8: Number(ledger.last_balance_e8),
@@ -157,7 +160,7 @@ async function main() {
   const [counts, ledgers, strategies, missingApp] = await Promise.all([
     rpc<CountRow>("forward_state_counts"),
     rpc<LedgerSummary & { user_id: string; paper_account: string }>("paper_ledger_summary"),
-    rpc<{ user_id: string; strategy_id: string }>("forward_recent_strategies", {
+    rpc<{ user_id: string | null; strategy_id: string }>("forward_recent_strategies", {
       p_since_ms: Date.now() - THRESHOLDS.placeboWindowMs }),
     rpc<string>("missing_append_only_triggers", { p_tables: [...FORWARD_TABLES] }),
   ]);
@@ -170,7 +173,7 @@ async function main() {
   checks.push({
     name: "append-only (forward tables)",
     level: missing.length ? "FAIL" : "PASS",
-    detail: missing.length ? `no trigger on: ${missing.join(", ")}` : "the five forward tables are protected",
+    detail: missing.length ? `no trigger on: ${missing.join(", ")}` : "shared market and per-user ledger/run tables are protected",
   });
   if (process.argv.includes("--json")) console.log(JSON.stringify({ ok: exitCodeFor(checks) === 0, checks }, null, 2));
   else console.log(formatTable(checks));

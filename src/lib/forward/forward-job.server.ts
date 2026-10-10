@@ -30,6 +30,34 @@ export async function runHourlyForAccounts(io: ForwardJobIo): Promise<{ users: n
     return { users: 0, failed: 0 };
   }
   const deps = await io.deps();
+  if (deps.repository?.shared && !io.run) {
+    const { runMarketStage, runUserStage } = await import("./forward-stages.server");
+    const boundary = Math.floor(deps.now() / HOUR_MS) * HOUR_MS;
+    const accounts = [];
+    let failed = 0;
+    for (const userId of users) {
+      try { accounts.push(await deps.repository.shared.account(userId, boundary)); }
+      catch (error) { failed++; io.error(`[forward-run] ${userId}: ${String(error)}`); }
+    }
+    let stage;
+    try { stage = await runMarketStage(deps, { trigger: "hourly", strategyIds: io.strategyIds }, boundary); }
+    catch (error) {
+      io.error(`[forward-market] ${String(error)}`);
+      return { users: users.length, failed: users.length };
+    }
+    for (const account of accounts) {
+      try {
+        if (!("id" in stage)) {
+          await deps.repository.shared.retryable(account.userId, boundary, stage.status, stage.reason ?? "");
+          io.log(`[forward-run] ${account.userId} ${stage.runKey} ${stage.status}`);
+        } else {
+          const result = await runUserStage(deps, account, boundary, "hourly");
+          io.log(`[forward-run] ${account.userId} ${result.runKey} ${result.status}`);
+        }
+      } catch (error) { failed++; io.error(`[forward-run] ${account.userId}: ${String(error)}`); }
+    }
+    return { users: users.length, failed };
+  }
   const run = io.run ?? runForward;
   let failed = 0;
   for (const userId of users) {

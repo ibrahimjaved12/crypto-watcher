@@ -183,13 +183,23 @@ export async function validateSigmaState(value: unknown, symbol: string): Promis
   return record;
 }
 
+const marketEventKey = {
+  stage_run_id: z.string().uuid(), ms, symbol: z.string(), sequence: z.number().int().nonnegative(),
+};
+const marketEventSchema = z.discriminatedUnion("type", [
+  z.object({ ...marketEventKey, type: z.literal("open"), setup: forwardSetupSchema }),
+  z.object({ ...marketEventKey, type: z.literal("close"), setup_id: z.string(),
+    outcome: z.string(), exit_ref_price: intOrNull }),
+  z.object({ ...marketEventKey, type: z.literal("funding"), rate: z.string(), mark: z.number().int().positive() }),
+]);
+
 export const forwardMarketResponseSchema = z.object({
   symbol: z.string(), signals: z.array(forwardSignalSchema), setups: z.array(forwardSetupSchema),
   resolutions: z.array(forwardResolutionSchema), reasons: z.record(z.string(), z.string()),
   processed_to_ms: ms, funding_available: z.boolean(), sigma_state: sigmaStateSchema,
-  events: z.array(z.object({ ms, symbol: z.string(), sequence: z.number().int().nonnegative(),
-    type: z.enum(["open", "close", "funding", "liquidation"]),
-  }).passthrough()),
+  adverse_paths: z.array(z.object({ setup_id: z.string(), symbol: z.string(),
+    side: z.union([z.literal(1), z.literal(-1)]), points: z.array(z.tuple([ms, z.number().int().positive()])) })),
+  events: z.array(marketEventSchema),
   versions: z.record(z.string(), z.string()), params_hash: sha256,
-  wallet_config: z.record(z.string(), z.unknown()), assumptions: z.array(z.string()),
+  assumptions: z.array(z.string()),
 });

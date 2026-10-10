@@ -1,12 +1,8 @@
 """Small synthetic split regressions; no long sigma warm-up or external processes."""
-from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import replace
 from fractions import Fraction
 import importlib
-import importlib.util
-import json
-from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -15,19 +11,9 @@ from market_analysis.forward.setups import Setup, setup_id
 from market_analysis.forward.signals import Signal
 
 engine = importlib.import_module("market_analysis.forward.evaluate")
-FIXTURES = Path(__file__).with_name("fixtures")
 START = 1735689600000
 MINUTE = 60_000
 SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT")
-
-
-def original_engine():
-    # Frozen at the start of P27; relative imports intentionally target the production package.
-    spec = importlib.util.spec_from_file_location("market_analysis.forward._before_p27",
-                                                  FIXTURES / "forward_evaluate_before_p27.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def rows(count=8):
@@ -48,22 +34,126 @@ def held_position():
 
 
 class SplitTests(unittest.TestCase):
-    def test_hand_derived_golden_and_complete_original_response(self):
-        fixture = json.loads((FIXTURES / "forward_split_golden.json").read_text())
+    def test_three_wallet_configs_share_market_and_match_legacy_accounting(self):
+        # Fix discovery/geometry only. The oracle uses the former opens-only preflight
+        # and full mark-series scan, independently of the adverse-path implementation.
+        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT")
+        def signals(symbol, bars, *args):
+            return [Signal(symbol, "test:15", "test", symbol, START, 1, 15)], {}
+        def setups(signal, *args, **kwargs):
+            return [replace(setup(signal.symbol, signal.symbol, START), window_minutes=7)]
+        inputs = []
+        for symbol in symbols:
+            data = rows()
+            if symbol == "BTCUSDT":
+                data[4] = {**data[4], "low": 1.0}
+            elif symbol == "ETHUSDT":
+                data[4] = {**data[4], "high": 105.0}
+            elif symbol == "SOLUSDT":
+                data[4] = {**data[4], "low": 97.0}
+            inputs.append({"symbol": symbol, "rows": data,
+                           "funding": [{"calc_time_ms": START + 2 * MINUTE,
+                                        "rate": "0.001", "mark": "100"}]})
+        kwargs = dict(strategy_ids=[], from_ms=START - MINUTE, to_ms=START + 7 * MINUTE)
+        with patch.object(engine, "generate_signals", side_effect=signals), patch.object(
+                engine, "build_setup", side_effect=setups):
+            parts = [engine.market_evaluate(i["symbol"], i["rows"], i["funding"], **kwargs) for i in inputs]
+            events = [e for p in parts for e in p["events"]]
+            paths = [p for part in parts for p in part["adverse_paths"]]
+            before = deepcopy((events, paths))
+            balances = []
+            for cap, buffer, mmr in ((5, 1, "0.005"), (10, 2, "0.01"), (20, 3, "0.02")):
+                config = wallet.WalletConfig(leverage_cap=cap, liquidation_buffer=buffer,
+                    mmr=Fraction(mmr), max_positions=3, max_exposure_multiple=Fraction(20))
+                state = wallet.initial_state(config)
+                legacy = [{k: v for k, v in e.items() if k not in
+                           ("symbol", "sequence", "stage_run_id") or e["type"] == "funding"}
+                          for part in parts for e in sorted(part["events"], key=lambda e: e["sequence"])]
+                opened, _ = wallet.step(state, [e for e in legacy if e["type"] == "open"], config)
+                for item, part in zip(inputs, parts):
+                    bars = engine.bars_from_collector_rows(item["symbol"], item["rows"])
+                    engine.apply_funding_marks(bars, item["funding"])
+                    legacy += wallet.liquidation_events(opened["positions"], bars,
+                        {r["setup_id"]: r for r in part["resolutions"]}, config)
+                expected = wallet.step(state, legacy, config)
+                actual = wallet.wallet_step(state, reversed(events), config, adverse_paths=paths)
+                self.assertEqual(actual, expected)
+                composed = engine.evaluate(inputs, wallet_config=config, **kwargs)
+                self.assertEqual(actual, (composed["wallet_state"], composed["ledger"]))
+                self.assertIn("liquidation", [line["type"] for line in actual[1]])
+                self.assertIn("rejected", [line["type"] for line in actual[1]])
+                self.assertEqual({line["outcome"] for line in actual[1] if line["type"] == "pnl"}, {"S", "T"})
+                balances.append(actual[0]["balance_e8"])
+            self.assertGreater(len(set(balances)), 1)
+            self.assertEqual((events, paths), before)
+
+    def test_never_opened_close_and_path_are_silent_and_duplicate_keys_fail(self):
         state = wallet.initial_state()
+        event = {"type": "close", "ms": START, "symbol": "BTCUSDT", "sequence": 0,
+                 "stage_run_id": "00000000-0000-0000-0000-000000000001", "setup_id": "absent"}
+        path = {"setup_id": "absent", "symbol": "BTCUSDT", "side": 1, "points": [[START, 1]]}
+        self.assertEqual(wallet.wallet_step(state, [event], adverse_paths=[path]), (state, []))
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            wallet.wallet_step(state, [event, event])
+        self.assertEqual(wallet.wallet_step(state, [event, {**event,
+            "stage_run_id": "00000000-0000-0000-0000-000000000002"}]), (state, []))
+
+    def test_shared_paths_stop_at_stage_end_and_evaluate_keeps_legacy_window(self):
+        data = rows()
+        data[6] = {**data[6], "low": 1.0}
+        saved = [{"setup": setup(entry=START).to_dict()}]
+        args = dict(strategy_ids=[], from_ms=START, to_ms=START + 3 * MINUTE, open_setups=saved)
+        shared = engine.market_evaluate("BTCUSDT", data, **args)
+        self.assertEqual(shared["resolutions"][0]["status"], "open")
+        self.assertTrue(all(ms <= args["to_ms"] for path in shared["adverse_paths"] for ms, _ in path["points"]))
+        legacy = engine.evaluate([{"symbol": "BTCUSDT", "rows": data}], **args)
+        self.assertEqual(legacy["resolutions"][0]["exit_ms"], START + 6 * MINUTE)
+
+    def test_compatibility_order_only_changes_internal_composition(self):
+        config = wallet.WalletConfig(max_positions=1)
+        state = wallet.initial_state(config)
+        events = [{"type": "open", "ms": START, "symbol": symbol, "sequence": 0,
+                   "stage_run_id": "00000000-0000-0000-0000-000000000001",
+                   "setup": setup(symbol, symbol, START).to_dict(), "compatibility_order": i}
+                  for i, symbol in enumerate(("ETHUSDT", "BTCUSDT"))]
+        internal = wallet.wallet_step(state, events, config, compatibility=True)
+        legacy = wallet.step(state, [{"type": "open", "ms": START, "setup": e["setup"]} for e in events], config)
+        self.assertEqual(internal, legacy)
+        transport = wallet.wallet_step(state, events, config)
+        self.assertEqual(transport[1][0]["symbol"], "BTCUSDT")
+        self.assertEqual(internal[1][0]["symbol"], "ETHUSDT")
+
+    def test_liquidation_eligibility_uses_original_opens_only_preflight(self):
+        config = wallet.WalletConfig(max_positions=1)
+        state = wallet.initial_state(config)
         state["positions"]["held"] = held_position()
         state["used_margin_e8"] = 10**9
-        call = dict(symbols=[{"symbol": fixture["symbol"], "rows": rows(fixture["row_count"]),
-                             "funding": [{"calc_time_ms": START + MINUTE, "rate": "0.001", "mark": "110"}]}],
-                    strategy_ids=[], from_ms=START, to_ms=START + 2 * MINUTE,
-                    open_setups=[{"setup": setup().to_dict()}], wallet_state=state)
-        before = deepcopy(call)
-        expected = original_engine().evaluate(**call)
-        actual = engine.evaluate(**call)
-        self.assertEqual(actual, expected)
-        self.assertEqual({key: actual[key] for key in fixture["expected"]}, fixture["expected"])
-        self.assertEqual(actual["wallet_state"], {**state, "seq": 1, "balance_e8": 9989000000})
-        self.assertEqual(call, before)
+        new = setup(entry=START + MINUTE).to_dict()
+        events = [{"type": "close", "ms": START + MINUTE, "setup_id": "held", "exit_ref_price": 100 * 10**8},
+                  {"type": "open", "ms": START + MINUTE, "setup": new}]
+        events = [{**e, "symbol": "BTCUSDT", "sequence": i,
+                   "stage_run_id": "00000000-0000-0000-0000-000000000001"} for i, e in enumerate(events)]
+        path = {"setup_id": new["setup_id"], "symbol": "BTCUSDT", "side": 1,
+                "points": [[START + 2 * MINUTE, 1]]}
+        result, ledger = wallet.wallet_step(state, events, config, adverse_paths=[path])
+        # The chronological close frees capacity, but the historical opens-only preflight
+        # rejected this entry, so its liquidation candidate must still be filtered out.
+        self.assertIn(new["setup_id"], result["positions"])
+        self.assertNotIn("liquidation", [line["type"] for line in ledger])
+
+    def test_record_extremes_match_inclusive_long_and_short_mark_thresholds(self):
+        bars = engine.bars_from_collector_rows("BTCUSDT", rows())
+        for i, (low, high) in enumerate(zip([100, 99, 99, 101, 97, 96, 98, 95],
+                                          [100, 101, 101, 99, 103, 104, 102, 105])):
+            bars.mark_low[i], bars.mark_high[i] = low, high
+        for side, lp in ((1, "195/2"), (-1, "205/2")):
+            position = {**held_position(), "side": side, "liquidation_price": lp}
+            resolution = {"exit_ms": START + 4 * MINUTE}
+            path = wallet.adverse_path({**position, "setup_id": "held"}, bars, resolution)
+            self.assertEqual([point[0] for point in path["points"]],
+                             [START, START + MINUTE, START + 4 * MINUTE])
+            self.assertEqual(wallet.path_liquidations({"held": position}, [path]),
+                wallet.liquidation_events({"held": position}, bars, {"held": resolution}, wallet.WalletConfig()))
 
     def test_six_symbols_equal_individual_market_slices(self):
         saved = [{"setup": setup(symbol, symbol).to_dict()} for symbol in SYMBOLS]
@@ -71,7 +161,6 @@ class SplitTests(unittest.TestCase):
                   for symbol in SYMBOLS]
         kwargs = dict(strategy_ids=[], from_ms=START, to_ms=START + 7 * MINUTE, open_setups=saved)
         full = engine.evaluate(inputs, **kwargs)
-        self.assertEqual(full, original_engine().evaluate(inputs, **kwargs))
         all_events = []
         for item in inputs:
             part = engine.market_evaluate(item["symbol"], item["rows"],
@@ -87,42 +176,6 @@ class SplitTests(unittest.TestCase):
         state, ledger = wallet.wallet_step(wallet.initial_state(), reversed(all_events))
         self.assertEqual((state, ledger), (full["wallet_state"], full["ledger"]))
 
-    def test_generated_entries_exits_funding_liquidation_and_caps_match_original(self):
-        # Replace only signal discovery/geometry to avoid 90+ days of sigma warm-up.
-        # Adapters, resolution, funding, liquidation and wallet accounting remain real.
-        old = original_engine()
-        def signals(symbol, bars, *args):
-            return [Signal(symbol, "test:15", "test", symbol, START, 1, 15)], {}
-        def setups(signal, *args, **kwargs):
-            return [replace(setup(signal.symbol, signal.symbol + str(i), START), window_minutes=7)
-                    for i in range(2)]
-        for cap in (1, 6):
-            for reverse in (False, True):
-                with self.subTest(cap=cap, reverse=reverse), ExitStack() as patches:
-                    for module in (old, engine):
-                        patches.enter_context(patch.object(module, "generate_signals", side_effect=signals))
-                        patches.enter_context(patch.object(module, "build_setup", side_effect=setups))
-                    inputs = []
-                    for symbol in SYMBOLS:
-                        data = rows()
-                        if symbol == "BTCUSDT":
-                            data[4] = {**data[4], "low": 80.0}  # liquidation at the stop minute
-                        inputs.append({"symbol": symbol, "rows": data,
-                                       "funding": [{"calc_time_ms": START + 2 * MINUTE,
-                                                    "rate": "0.001", "mark": "110"}]})
-                    if reverse:
-                        inputs.reverse()
-                    kwargs = dict(strategy_ids=[], from_ms=START - MINUTE, to_ms=START + 7 * MINUTE,
-                                  wallet_config=wallet.WalletConfig(max_positions=cap))
-                    actual = engine.evaluate(inputs, **kwargs)
-                    self.assertEqual(actual, old.evaluate(inputs, **kwargs))
-                    for item in inputs:
-                        part = engine.market_evaluate(item["symbol"], item["rows"], item["funding"], **kwargs)
-                        for key in ("signals", "setups"):
-                            self.assertEqual(part[key], [v for v in actual[key] if v["symbol"] == item["symbol"]])
-                        ids = {v["setup_id"] for v in part["setups"]}
-                        self.assertEqual(part["resolutions"], [v for v in actual["resolutions"] if v["setup_id"] in ids])
-
     def test_wallet_merge_is_pure_deterministic_and_keeps_settlement_priority(self):
         state = wallet.initial_state()
         state["positions"]["held"] = held_position()
@@ -131,6 +184,7 @@ class SplitTests(unittest.TestCase):
                    "rate": "0.001", "mark": 100 * 10**8},
                   {"type": "close", "ms": START + MINUTE, "symbol": "BTCUSDT", "sequence": 1,
                    "setup_id": "held", "exit_ref_price": 100 * 10**8, "outcome": "E"}]
+        events = [{**e, "stage_run_id": "00000000-0000-0000-0000-000000000001"} for e in events]
         before = deepcopy((state, events))
         actual = wallet.wallet_step(state, events)
         self.assertEqual(actual, wallet.step(state, events))
@@ -151,6 +205,7 @@ class SplitApiTests(unittest.TestCase):
         self.assertEqual(ForwardWalletConfig().config(), wallet.WalletConfig())
         token = "test-service-token-" + "x" * 32
         body = {"schema_version": 1, "symbol": "BTCUSDT", "rows": rows(),
+                "stage_run_id": "00000000-0000-0000-0000-000000000001",
                 "strategy_ids": ["ema_cross_20_50:15"], "from_ms": START, "to_ms": START + 7 * MINUTE}
 
         async def exercise():
@@ -167,7 +222,7 @@ class SplitApiTests(unittest.TestCase):
                     response = await client.post(market_path, json=body)
                     self.assertEqual(response.status_code, 200, response.text)
                     market = response.json()
-                    response = await client.post(wallet_path, json={"schema_version": 1, "events": market["events"]})
+                    response = await client.post(wallet_path, json={"schema_version": 1, "events": market["events"], "adverse_paths": market["adverse_paths"]})
                     self.assertEqual(response.status_code, 200, response.text)
                     combined = await client.post("/v1/forward/evaluate", json={
                         "schema_version": 1, "symbols": [{"symbol": body["symbol"], "rows": body["rows"]}],

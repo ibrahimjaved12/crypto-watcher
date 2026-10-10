@@ -307,26 +307,37 @@ are released after each symbol, rather than retained for a second liquidation pa
 The two additional authenticated routes are synchronous in the same forward Python process
 as `/v1/forward/evaluate`, with no movement-process dispatch:
 
-- `/v1/forward/market_evaluate`: `schema_version: 1`, `symbol`, `rows`, optional `funding` and
-  `funding_available`, `strategy_ids`, `from_ms`, `to_ms`, optional `open_setups`, `positions`
-  (the persisted wallet position map), and `wallet_config`. Returns `symbol`, `signals`,
-  `setups`, `resolutions`, `reasons`, `processed_to_ms`, `funding_available`, and `events`.
-- `/v1/forward/wallet_step`: `schema_version: 1`, optional `state` (defaults to the initial
-  wallet), `events` (concatenated market event lists), and optional `config`. Returns
-  `schema_version`, `wallet_state`, and `ledger`. Use the same wallet configuration for both
-  endpoints; omitted configuration uses the existing defaults. Exact fractional configuration
-  fields are strings, e.g. `risk_fraction: "1/100"`.
+- `/v1/forward/market_evaluate`: `schema_version: 1`, `stage_run_id` (UUID), `symbol`,
+  `rows`, optional `funding` and `funding_available`, `strategy_ids`, `from_ms`, `to_ms`,
+  optional `open_setups` (market facts only), and optional sigma checkpoint fields.
+  It accepts no positions or wallet configuration. Returns signals, setups, resolutions,
+  reasons, processed time, events, adverse paths, versions, and advanced sigma state when enabled.
+- `/v1/forward/wallet_step`: `schema_version: 1`, optional `state`, `events`,
+  `adverse_paths`, and optional `config`. Returns wallet state, ledger, effective wallet
+  configuration, and assumptions. Exact fractional configuration fields are strings,
+  e.g. `risk_fraction: "1/100"`.
 
-Events contain `type` (`open`, `close`, `funding`, `liquidation`), `ms`, `symbol`, and a per-symbol
-`sequence`, plus the existing wallet event payload. Transport merging uses `(ms, symbol, sequence)`;
-wallet execution preserves the existing liquidation-before-close-before-funding-before-open
-priority and setup-ID ties. New-position liquidation candidates are filtered using the same
-portfolio-wide opens-only preflight as before, including caps and insufficient-margin rejection.
-Persisted positions retain their saved liquidation terms. The composed endpoint attaches
-`compatibility_order` to preserve historical stable ties in caller symbol order; split callers
-requiring those same ties should assign this increasing index by caller symbol order and then
-per-symbol sequence before submitting events. With no such index, stable ties use the deterministic
-transport order. Neither wallet function mutates its inputs, reads a clock, or performs I/O.
+Persisted events contain `stage_run_id`, `symbol`, `sequence`, `ms`, and `type`
+(`open`, `close`, or `funding`), plus their event payload. Duplicate
+`(stage_run_id, symbol, sequence)` keys are rejected. Transport merging uses
+`(ms, symbol, sequence)`; wallet execution order is unchanged: timestamp, then
+liquidation before close before funding before open, with the existing setup-ID/stable ties.
+Only the `/evaluate` composition honors its internal `compatibility_order` to preserve
+historical caller-symbol ordering. The wallet API does not accept that override.
+
+Each open or resolved setup carries an adverse path: `{setup_id, symbol, side, points}`,
+where `points` is a chronological list of `[ms, worst_price]` record-breaking positive
+mark extremes from entry through the final exit minute, inclusive, or the available stage end.
+Shared evaluation excludes rows after `to_ms`; `/evaluate` preserves its historical behavior
+of treating `to_ms` as the signal window while resolving against all supplied rows.
+Longs use mark lows; shorts use mark highs. Existing trade-price proxies and settlement-mark
+adjustments remain unchanged. The wallet derives a liquidation at the first long point
+`<= floor(liquidation_price)` or short point `>= ceil(liquidation_price)`. New positions get
+that price from `position_terms` with their user's leverage cap, buffer, and maintenance margin;
+held positions retain their stored terms. Eligibility still comes from the original
+portfolio-wide opens-only preflight, including caps and margin rejections. A close or adverse
+path for a setup that the user never opened produces no ledger line and no error.
+Neither wallet function mutates its inputs, reads a clock, or performs I/O.
 
 Peak-memory expectation: separate one-symbol requests hold **one sixth of the rows** of a
 six-symbol request with equal history lengths. This is a rows-held expectation, not a measured
@@ -335,11 +346,12 @@ and wallet state still contribute. The compatibility endpoint still receives all
 raw rows; use sequential market requests followed by one wallet step to obtain the input-memory
 benefit. Do not execute each symbol's wallet independently, because sizing and caps are portfolio-wide.
 
-CI regressions use short synthetic inputs. `python/tests/fixtures/forward_evaluate_before_p27.py`
-is the evaluator copied before the refactor; `forward_split_golden.json` contains fixed expectations
-hand-derived from that code without running a server or evaluating the fixture locally. Tests
-compare complete composed responses to the frozen path, as well as that fixed golden projection,
-including funding, liquidation, capped entries, reversed symbol order, and per-symbol market slices.
+CI regressions use short synthetic inputs. P29 replaces the frozen pre-P27 evaluator and
+its golden fixture/test with a three-configuration equivalence guard. It compares shared
+replay and `/evaluate` with the former opens-only plus full mark-series liquidation algorithm,
+covering liquidation, stop, target, rejected entry, funding, and simultaneous multi-symbol events.
+The independent full-series scan remains in `liquidation_events` for that oracle.
+These regressions were not run locally.
 
 ### P28a: exact sigma state
 
@@ -393,12 +405,10 @@ seed to preserve that origin. If history remains insufficient, outcomes retain t
 behavior. Repairing candles at/before a valid checkpoint does not retroactively change it; corrections
 require a deliberate reseed/version migration, not a silent alteration of past decisions.
 
-`commit_forward_sigma_run` inserts the run, signals, setups, outcomes, ledger, and advanced states in
-one transaction. It checks the expected wallet run and sigma checksums under ordered locks; a racing
-run must reload unless the other account produced the identical market state. A completed hour is a
-no-op, including checkpoint `updated_at`. Retryable `skipped_stale`/`no_sigma` attempts do not advance
-sigma state. Failures roll back the run and checkpoint together; future/newer checkpoints are never
-rolled back by a lagging account.
+P29 supersedes the combined `commit_forward_sigma_run` production path with the separate
+market and user commits below. The old RPC remains available for rollback; the shared
+production runner never calls it. Ordered checkpoint locks and expected checksum checks remain.
+
 
 Import an exported seed before enabling the hourly job:
 
@@ -465,3 +475,47 @@ node scripts/seed-sigma-state.mjs /path/to/private-seed.json
 Use the existing service environment for credentials. Identical imports are idempotent and a different
 live checkpoint cannot be overwritten. Starting the hourly job without a seed explicitly uses
 `store_rebuild` provenance; it is not equivalent to a lake-seeded run.
+
+### P29: one shared hourly market stage, independent user wallets
+
+Apply application migration `20261011150000_forward_shared_stages.sql` after P28.
+`runMarketStage` checks the persisted boundary before reading sigma, evaluates each symbol
+sequentially once, and commits the shared stage. `runUserStage` only reads committed stages
+and replays them after the account cursor, in boundary order. A second user in the same hour
+adds no market evaluation or sigma rebuild. The hourly job runs the market stage before
+its user loop; account initialization and wallet failures are isolated per user.
+A concurrent market calculation may race, but only one stage commits per boundary and
+both callers reload the winning persisted stage and event keys.
+
+Shared tables have no `user_id`: `forward_market_stages`, `forward_market_events`,
+`forward_market_paths`, `forward_market_signals`, `forward_market_setups`, and
+`forward_market_outcomes`. They contain market facts only, are append-only, selectable by
+authenticated users, and writable only by the service role. Dashboard market logs and report
+RPCs read these shared facts. Sigma remains in the existing service-only checkpoint table.
+
+`forward_wallet_accounts` stores the user's account ID, configuration, and start boundary.
+`paper_runs` and `paper_ledger` retain their existing owner RLS (`auth.uid() = user_id`),
+with no client writes. New accounts use their user UUID as account ID, start at the current
+boundary, and consume only later stages; they do not open historical setups. The migration
+maps existing users to their existing account ID/configuration and wallet snapshots, so the
+owner's `default` ledger and sequence continue without copying or renumbering ledger lines.
+`INSERT ... SELECT DISTINCT ON` backfills shared market facts and stage boundaries from legacy
+rows. Historical stages have no reconstructed event stream. Old tables, columns, and RPCs
+remain in place; this migration does not drop legacy data. Rollback requires restoring the old
+application/report definitions; new shared hours are not mirrored into the legacy market tables.
+
+- `commit_market_stage` serializes market commits, takes sigma locks in symbol order, checks
+  expected checksums and stage boundaries, and atomically inserts shared output plus checkpoints.
+  Repeating a boundary is a no-op, including checkpoint timestamps.
+- `commit_user_run` locks the user, checks the expected previous successful run and next stage,
+  and inserts that user's run/ledger atomically. Successful `(user, boundary)` retries are no-ops.
+  `consumed_boundary_ms` is the cursor; retryable `skipped_stale`/`no_sigma` rows never advance it.
+  Those market-stage skips also never persist advanced sigma or consume the market hour key.
+  A user failure leaves the shared stage and other users' commits intact for a later retry.
+
+`FORWARD_USER_ID` optionally selects a user, not a shared market namespace. Wallet configuration
+changes are service-side only; there is no client configuration editor in this change.
+The Python equivalence, TypeScript call-counter/failure-isolation tests, and PGlite transaction,
+migration, idempotency, and RLS tests are committed for GitHub checks. No local tests, typecheck,
+build, servers, or database migrations were run for P29; no runtime or CI-duration result is claimed.
+The added Python fixtures contain only a handful of minutes, with no long sigma warm-up.

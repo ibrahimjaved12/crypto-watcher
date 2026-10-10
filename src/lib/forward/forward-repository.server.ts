@@ -1,3 +1,4 @@
+import { createSharedRepository } from "./forward-shared-repository.server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   FINAL_STATUSES,
@@ -12,7 +13,7 @@ import { newOutcomeRows, type ForwardRepository, type StoredOpenSetup } from "./
  * Application-DB persistence of forward records (#239 P11), service role, account-scoped.
  * Inserts only; duplicates are ignored on their natural keys, so a re-run is a no-op.
  */
-export const PAPER_ACCOUNT = "default";
+
 
 function fail(error: { message: string } | null, operation: string): void {
   if (error) throw new Error(`Forward ${operation} failed: ${error.message}`);
@@ -29,6 +30,7 @@ export function createForwardRepository(client: SupabaseClient): ForwardReposito
   }
 
   return {
+    shared: createSharedRepository(client),
     async loadSigmaStates(symbols) {
       const { data, error } = await client.from("forward_sigma_state")
         .select("symbol,sigma_version,as_of_ms,payload,checksum").eq("sigma_version", SIGMA_VERSION).in("symbol", [...symbols]);
@@ -47,7 +49,7 @@ export function createForwardRepository(client: SupabaseClient): ForwardReposito
         })),
         outcomes: newOutcomeRows(response, previous),
         ledger: response.ledger.map((line) => ({
-          paper_account: PAPER_ACCOUNT, seq: line.seq, ms: line.ms, type: line.type,
+          paper_account: userId, seq: line.seq, ms: line.ms, type: line.type,
           setup_id: line.setup_id ?? null, symbol: line.symbol ?? null, amount_e8: line.amount_e8,
           balance_e8: line.balance_e8, payload: line,
         })),
@@ -61,13 +63,13 @@ export function createForwardRepository(client: SupabaseClient): ForwardReposito
     },
     async findRun(userId, runKey) {
       const { data, error } = await client.from("paper_runs").select("id, status")
-        .eq("user_id", userId).eq("paper_account", PAPER_ACCOUNT).eq("run_key", runKey).in("status", ["ok", "failed"]).maybeSingle();
+        .eq("user_id", userId).eq("paper_account", userId).eq("run_key", runKey).in("status", ["ok", "failed"]).maybeSingle();
       fail(error, "run read");
       return (data as { id: string; status: string } | null) ?? null;
     },
     async latestOkRun(userId) {
       const { data, error } = await client.from("paper_runs").select("id, processed_to_ms, wallet_state")
-        .eq("user_id", userId).eq("paper_account", PAPER_ACCOUNT).eq("status", "ok")
+        .eq("user_id", userId).eq("paper_account", userId).eq("status", "ok")
         .order("boundary_ms", { ascending: false }).limit(1).maybeSingle();
       fail(error, "latest run read");
       if (!data) return null;
@@ -104,7 +106,7 @@ export function createForwardRepository(client: SupabaseClient): ForwardReposito
     },
     async insertRun(userId, row) {
       const { data, error } = await client.from("paper_runs")
-        .insert({ ...row, user_id: userId, paper_account: PAPER_ACCOUNT }).select("id").single();
+        .insert({ ...row, user_id: userId, paper_account: userId }).select("id").single();
       fail(error, "run insert");
       return (data as { id: string }).id;
     },
@@ -125,7 +127,7 @@ export function createForwardRepository(client: SupabaseClient): ForwardReposito
       const outcomes = await insert("forward_outcomes", owned(newOutcomeRows(response, previous)),
         "user_id,setup_id,status");
       const ledger = await insert("paper_ledger", owned(response.ledger.map((line) => ({
-        paper_account: PAPER_ACCOUNT, seq: line.seq, ms: line.ms, type: line.type,
+        paper_account: userId, seq: line.seq, ms: line.ms, type: line.type,
         setup_id: line.setup_id ?? null, symbol: line.symbol ?? null, amount_e8: line.amount_e8,
         balance_e8: line.balance_e8, payload: line }))), "user_id,paper_account,seq");
       return { signals, setups, outcomes, ledger };
