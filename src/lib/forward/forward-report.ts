@@ -1,8 +1,9 @@
 /**
  * Forward-test report maths (#239 P20, pure). The database aggregates every final outcome in SQL
  * (`forward_outcome_report`, `forward_nontrade_report`); this module only turns those sums into
- * display rows: mean and UTC exit-day-clustered standard error in R, the matched random-timing control, a Welch z for the
- * difference, a Bonferroni note for the number of strategy rows shown, and a fixed-rule verdict.
+ * display rows: mean and UTC exit-day-clustered standard error in R, the matched random-timing control, a z for the
+ * difference paired by UTC exit day (strategy and control share days, so their covariance is kept), a
+ * Bonferroni note for the number of strategy rows shown, and a fixed-rule verdict.
  * A verdict is a statement about this sample, not an edge: a positive row is a hypothesis for the
  * next sample.
  */
@@ -38,6 +39,17 @@ export type OutcomeReportRow = {
   placebo_sum_sq_net_ur: number | string;
 };
 
+/** `forward_paired_report`: sum_d r_d^2 (micro-R squared) over the union of exit days, see the migration. */
+export type PairedRow = {
+  strategy_id: string;
+  version: string;
+  horizon_min: number;
+  rr: string;
+  paired_days: number | string;
+  union_days: number | string;
+  paired_ss: number | string | null;
+};
+
 export type NonTradeRow = {
   strategy_id: string;
   horizon_min: number;
@@ -62,6 +74,8 @@ export type ReportRow = {
   n: number;
   days: number;
   placeboDays: number;
+  /** UTC exit days on which both the strategy and its control have a trade. */
+  pairedDays: number;
   naiveSe: number | null;
   placeboNaiveSe: number | null;
   wins: number;
@@ -140,8 +154,10 @@ export function verdictFor(
   days = 0,
   controlDays = 0,
   controlTrades = 0,
+  pairedDays = Number.POSITIVE_INFINITY,
 ): { kind: VerdictKind; text: string } {
   if (n < MIN_TRADES || days < MIN_EXIT_DAYS || (hasBaseline && (controlDays < MIN_EXIT_DAYS || controlTrades < MIN_TRADES))) return { kind: "too_few", text: "too few trades" };
+  if (hasBaseline && pairedDays < MIN_EXIT_DAYS) return { kind: "too_few", text: "too few trades" };
   if (!hasBaseline) return { kind: "no_baseline", text: "no random-timing baseline yet" };
   if (z === null) return { kind: "no_spread", text: "no spread in the results; cannot compare" };
   const critical = Math.max(Z_NOTABLE, bonferroniCritical(k));
@@ -149,14 +165,22 @@ export function verdictFor(
   if (z <= -critical) return { kind: "worse", text: "worse than random timing" };
   return {
     kind: "better",
-    text: `better than random timing (day-clustered; Bonferroni threshold for ${k} rows: z ≥ ${critical.toFixed(2)})`,
+    text: `better than random timing (paired by exit day; Bonferroni threshold for ${k} rows: z ≥ ${critical.toFixed(2)})`,
   };
 }
 
 const keyOf = (strategyId: string, horizon: number, rr: string) => `${strategyId}|${horizon}|${rr}`;
 const emptyNonTrades = (): NonTrades => ({ vetoed: 0, cost: 0, position: 0, gap: 0, notEntered: 0, pending: 0 });
 
-export function buildReportRows(outcomes: OutcomeReportRow[], nonTrades: NonTradeRow[] = []): ReportRow[] {
+const pairedKey = (row: { strategy_id: string; version: string; horizon_min: number; rr: string }) =>
+  `${row.strategy_id}|${row.version}|${row.horizon_min}|${row.rr}`;
+
+export function buildReportRows(
+  outcomes: OutcomeReportRow[],
+  nonTrades: NonTradeRow[] = [],
+  paired: PairedRow[] = [],
+): ReportRow[] {
+  const pairedByKey = new Map(paired.map((row) => [pairedKey(row), row]));
   const nonTradeByKey = new Map<string, NonTrades>();
   for (const row of nonTrades) {
     nonTradeByKey.set(keyOf(row.strategy_id, row.horizon_min, row.rr), {
@@ -168,7 +192,7 @@ export function buildReportRows(outcomes: OutcomeReportRow[], nonTrades: NonTrad
   const rows: ReportRow[] = outcomes.map((row) => {
     const key = keyOf(row.strategy_id, row.horizon_min, row.rr);
     seen.add(key);
-    return partialRow(row, nonTradeByKey.get(key) ?? emptyNonTrades());
+    return partialRow(row, nonTradeByKey.get(key) ?? emptyNonTrades(), undefined, pairedByKey.get(pairedKey(row)));
   });
   for (const row of nonTrades) {
     const key = keyOf(row.strategy_id, row.horizon_min, row.rr);
@@ -178,7 +202,7 @@ export function buildReportRows(outcomes: OutcomeReportRow[], nonTrades: NonTrad
   }
   const k = rows.length;
   return rows.map((row) => {
-    const verdict = verdictFor(row.n, row.z, row.placebo !== null && row.placebo.n > 0, k, row.days, row.placeboDays, row.placebo?.n ?? 0);
+    const verdict = verdictFor(row.n, row.z, row.placebo !== null && row.placebo.n > 0, k, row.days, row.placeboDays, row.placebo?.n ?? 0, row.pairedDays);
     return {
       ...row,
       verdict,
@@ -187,12 +211,12 @@ export function buildReportRows(outcomes: OutcomeReportRow[], nonTrades: NonTrad
   });
 }
 
-function partialRow(row: OutcomeReportRow | null, nonTrades: NonTrades, fallback?: NonTradeRow): ReportRow {
+function partialRow(row: OutcomeReportRow | null, nonTrades: NonTrades, fallback?: NonTradeRow, pairedRow?: PairedRow): ReportRow {
   if (!row) {
     const id = fallback!;
     return {
       key: keyOf(id.strategy_id, id.horizon_min, id.rr), strategyId: id.strategy_id, version: "", horizonMin: id.horizon_min,
-      rr: id.rr, n: 0, days: 0, placeboDays: 0, naiveSe: null, placeboNaiveSe: null, wins: 0, stops: 0, expired: 0, liquidated: 0, unresolved: 0, ambiguous: 0, winRate: null,
+      rr: id.rr, n: 0, days: 0, placeboDays: 0, pairedDays: 0, naiveSe: null, placeboNaiveSe: null, wins: 0, stops: 0, expired: 0, liquidated: 0, unresolved: 0, ambiguous: 0, winRate: null,
       mean: moments(0, 0, 0), meanCostR: null, meanFundR: null, placebo: null, diffR: null, diffSe: null, z: null,
       verdict: { kind: "too_few", text: "too few trades" }, clearsBonferroni: false, nonTrades,
       firstExitMs: null, lastExitMs: null,
@@ -212,8 +236,12 @@ function partialRow(row: OutcomeReportRow | null, nonTrades: NonTrades, fallback
   let z: number | null = null;
   if (placebo && mean.mean !== null && placebo.mean !== null) {
     diffR = mean.mean - placebo.mean;
-    if (mean.se !== null && placebo.se !== null) {
-      diffSe = Math.sqrt(mean.se ** 2 + placebo.se ** 2); // Welch: unequal variances, no pooling
+    // Paired by UTC exit day: SE(D) = sqrt(sum_d r_d^2) over the union of days, which keeps the
+    // same-day covariance of strategy and control (see forward_paired_report). Without the paired
+    // sums (not loaded) there is no z: the independent Welch SE would be wrong for this design.
+    const ss = pairedRow?.paired_ss;
+    if (ss !== null && ss !== undefined && Number.isFinite(Number(ss)) && Number(ss) >= 0) {
+      diffSe = Math.sqrt(Number(ss)) / UR;
       z = diffSe > 0 ? diffR / diffSe : null;
     }
   }
@@ -223,7 +251,7 @@ function partialRow(row: OutcomeReportRow | null, nonTrades: NonTrades, fallback
     wins: num(row.n_t), stops: num(row.n_s), expired: num(row.n_e), liquidated: num(row.n_l),
     unresolved: num(row.n_x), ambiguous: num(row.n_ambiguous),
     winRate: n ? num(row.n_t) / n : null,
-    mean, days, placeboDays, naiveSe, placeboNaiveSe,
+    mean, days, placeboDays, pairedDays: pairedRow ? num(pairedRow.paired_days) : 0, naiveSe, placeboNaiveSe,
     meanCostR: n ? num(row.sum_cost_ur) / n / UR : null,
     meanFundR: n ? num(row.sum_fund_ur) / n / UR : null,
     placebo, diffR, diffSe, z,
@@ -262,8 +290,9 @@ export function toCsv(header: string[], rows: unknown[][]): string {
 export function reportCsv(rows: ReportRow[]): string {
   return toCsv(["Strategy", "Version", "Timeframe minutes", "Reward:risk", "Trades", "Days", "Mean net R",
     "Day-clustered SE", "naive SE", "Control trades", "Control days", "Control mean net R",
-    "Control day-clustered SE", "Control naive SE", "Difference R", "Welch z", "Verdict"],
+    "Control day-clustered SE", "Control naive SE", "Difference R", "Paired days", "Paired SE of difference",
+    "Paired z", "Verdict"],
   rows.map((r) => [r.strategyId, r.version, r.horizonMin, r.rr, r.n, r.days, r.mean.mean, r.mean.se,
     r.naiveSe, r.placebo?.n ?? 0, r.placeboDays, r.placebo?.mean, r.placebo?.se, r.placeboNaiveSe,
-    r.diffR, r.z, r.verdict.text]));
+    r.diffR, r.pairedDays, r.diffSe, r.z, r.verdict.text]));
 }

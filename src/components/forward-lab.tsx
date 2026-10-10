@@ -234,7 +234,7 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
                 <th className="py-2 pr-3 text-right font-medium">Difference</th>
                 <th className="py-2 pr-3 font-medium">
                   <Hint
-                    text={`UTC exit-day clusters account for trades exiting together. Welch comparison uses both clustered errors. At least 30 trades and 10 exit days are required for each series; the Bonferroni threshold is ${Math.max(2, bonferroniCritical(k)).toFixed(2)} for ${k} rows. A positive row is a hypothesis for the next sample, not a validated edge.`}
+                    text={`UTC exit-day clusters account for trades exiting together. The difference is paired by exit day: strategy and control share days, so their same-day covariance is kept. At least 30 trades and 10 exit days are required for each series, and 10 days on which both have a trade; the Bonferroni threshold is ${Math.max(2, bonferroniCritical(k)).toFixed(2)} for ${k} rows. A positive row is a hypothesis for the next sample, not a validated edge.`}
                   >
                     Verdict ({k} rows corrected)
                   </Hint>
@@ -292,7 +292,7 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
                       {rr(row.diffR)}
                       {row.z !== null ? (
                         <div className="text-[11px] text-muted-foreground">
-                          z = {row.z.toFixed(1)}
+                          z = {row.z.toFixed(1)} · {row.pairedDays} paired days
                         </div>
                       ) : null}
                     </td>
@@ -307,8 +307,8 @@ export function ResultsPanel({ filters }: { filters: ForwardFilters }) {
           </table>
           <p className="mt-2 text-xs text-muted-foreground">
             Small samples swing a lot. No verdict before 30 trades across 10 UTC exit days in each
-            series. Errors are clustered by exit day; the Welch comparison does not model
-            cross-series covariance. Trades spanning different exit days may still be dependent.
+            series, plus 10 days on which both have a trade. Errors are clustered by exit day and the
+            difference is paired by exit day. Trades spanning different exit days may still be dependent.
           </p>
         </div>
       )}
