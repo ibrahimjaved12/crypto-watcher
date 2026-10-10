@@ -42,7 +42,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
 from data_lake_build import GitHubError, ResearchDataRepo  # noqa: E402
 from label_build import download, download_inputs, label_tag, published_inputs  # noqa: E402
 from market_analysis import data_lake as lake  # noqa: E402
-from market_analysis.benchmark import experiment_run as er  # noqa: E402
+from market_analysis import metrics_lake as mx  # noqa: E402
+from market_analysis.benchmark import experiment_run as er, positioning  # noqa: E402
 from market_analysis.benchmark.experiment_log import ExperimentLog  # noqa: E402
 from market_analysis.benchmark.hidden_guard import HiddenGate, write_plan  # noqa: E402
 from market_analysis.benchmark.report import canonical_json, markdown  # noqa: E402
@@ -110,7 +111,7 @@ def _quiet(function, *args, **kwargs):
         return function(*args, **kwargs)
 
 
-PHASES = frozenset({"checkout", "label download", "bars download", "snapshot", "hidden opening", "spec build",
+PHASES = frozenset({"checkout", "label download", "bars download", "metrics download", "snapshot", "hidden opening", "spec build",
                     "label load", "evaluate", "bootstrap ci", "placebo", "spa bootstrap", "step-down", "report write",
                     "push"})
 COUNT_KEYS = frozenset({"symbol_index", "symbols", "months", "files", "rows", "variant", "of", "total"})
@@ -208,7 +209,8 @@ def emit(lines: list[str], summary: Path | None) -> None:
 
 def download_labels(repo: ResearchDataRepo, question: dict, segment: str, label_dir: Path,
                     progress=NO_PROGRESS) -> None:
-    """lb1 manifest + the segment's monthly label files per symbol, sha256-verified against the manifest."""
+    """The question's label manifest (lb1/lb2/lb3/lb3h by sigma model) + the segment's monthly label files per
+    symbol, sha256-verified against the manifest."""
     with progress.stage("label download", total=len(lake.SYMBOLS)) as set_symbol:
         for symbol_index, symbol in enumerate(lake.SYMBOLS, 1):
             set_symbol(symbol_index)
@@ -219,7 +221,9 @@ def download_labels(repo: ResearchDataRepo, question: dict, segment: str, label_
 
 def _download_symbol_labels(repo: ResearchDataRepo, question: dict, segment: str, label_dir: Path,
                             symbol: str) -> None:
-    tag = label_tag(symbol, er.LABEL_FIRST_MONTH, er.LABEL_LAST_MONTH, question["label_revision"])
+    # The question's sigma model selects the release family: lb1 / lb2 / lb3 / lb3h (P16).
+    tag = label_tag(symbol, er.LABEL_FIRST_MONTH, er.LABEL_LAST_MONTH, question["label_revision"],
+                    er.question_sigma_model(question))
     release = repo.published_release(tag)
     if release is None or release.get("tag_name") != tag or release.get("draft") is not False:
         raise PublicError(f"missing published release: {tag}")
@@ -235,6 +239,56 @@ def _download_symbol_labels(repo: ResearchDataRepo, question: dict, segment: str
         if item is None or item["name"] not in assets:
             raise PublicError(f"{tag}: missing label file for {month}")
         download(repo, assets[item["name"]], label_dir / item["name"], item["sha256"])
+
+
+_MANIFEST_LIMIT = 16 << 20
+
+
+def download_metrics_month(repo, symbol: str, month: str, revision: int, dest: Path) -> str:
+    """Download one ``mx-SYMBOL-MONTH-rN`` csv.gz into ``dest``, sha256-verified (asset digest, else the
+    release manifest's sha256, as ``daily_download``); returns its sha256."""
+    tag = mx.release_tag(symbol, month, revision)
+    release = repo.published_release(tag)
+    if release is None or release.get("tag_name") != tag or release.get("draft") is not False:
+        raise PublicError(f"missing published release: {tag}")
+    assets = repo.assets(release["id"])
+    name = mx.csv_asset_name(symbol, month)
+    if name not in assets:
+        raise PublicError(f"{tag}: missing asset {name}")
+    expected = None
+    if not assets[name].get("digest"):
+        manifest_name = mx.manifest_asset_name(symbol, month)
+        if manifest_name not in assets:
+            raise PublicError(f"{tag}: missing {manifest_name} for checksum fallback")
+        manifest_path = Path(dest) / manifest_name
+        download(repo, assets[manifest_name], manifest_path, limit=_MANIFEST_LIMIT)
+        manifest = json.loads(manifest_path.read_bytes())
+        if (manifest.get("release_tag") != tag or manifest.get("symbol") != symbol
+                or manifest.get("month") != month):
+            raise PublicError(f"{tag}: manifest identity mismatch")
+        matches = [item["sha256"] for item in manifest.get("assets", []) if item.get("name") == name]
+        if len(matches) != 1:
+            raise PublicError(f"{tag}: no unique sha256 for {name}")
+        expected = matches[0]
+    sha, _ = download(repo, assets[name], Path(dest) / name, expected)
+    return sha
+
+
+def download_metrics(repo: ResearchDataRepo, question: dict, segment: str, bars_dir: Path,
+                     progress=NO_PROGRESS) -> None:
+    """mx metrics csv.gz of FIRST_MONTH..segment's last month for a ``metrics`` family (positioning-v1);
+    sha256-verified as in the screen. Only months of the segment's window are fetched, so a development or
+    validation run never downloads hidden months."""
+    if er.family_of(question).data != "metrics":
+        return
+    months = lake.months_between(lake.FIRST_MONTH, segment_months(segment)[-1])
+    with progress.stage("metrics download", total=len(lake.SYMBOLS)) as set_symbol:
+        for symbol_index, symbol in enumerate(lake.SYMBOLS, 1):
+            set_symbol(symbol_index)
+            for month in months:
+                download_metrics_month(repo, symbol, month, positioning.METRICS_REVISION, bars_dir)
+            progress.phase("metrics download", symbol_index=symbol_index, symbols=len(lake.SYMBOLS),
+                           months=len(months))
 
 
 def download_bars(repo: ResearchDataRepo, question: dict, segment: str, bars_dir: Path,
@@ -283,7 +337,7 @@ def register(args, checkout: Checkout) -> list[str]:
         question = er.make_question(args.question_id, hypothesis, args.horizon, strategies, seed=args.seed,
                                     label_revision=args.label_revision, data_revision=args.data_revision,
                                     created_utc=NOW_UTC, B_stats=args.b_stats, B_placebo=args.b_placebo,
-                                    family=args.family)
+                                    family=args.family, sigma_model=args.sigma_model)
     except er.QuestionError as error:
         raise PublicError(str(error)) from None
     path = checkout.path / "questions" / f"{args.question_id}.json"
@@ -330,8 +384,9 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     bars_dir.mkdir(parents=True)
     _quiet(download_labels, repo, question, args.segment, label_dir, progress)
     _quiet(download_bars, repo, question, args.segment, bars_dir, label_dir, progress)
+    _quiet(download_metrics, repo, question, args.segment, bars_dir, progress)
     progress.phase("snapshot", symbols=len(lake.SYMBOLS), months=len(segment_months(args.segment)))
-    snapshot = _quiet(er.data_snapshot, label_dir, segment_months(args.segment))
+    snapshot = _quiet(er.data_snapshot, label_dir, segment_months(args.segment), er.question_params(question))
     token = gate = None
     if args.segment == "hidden":
         progress.phase("hidden opening")
@@ -374,6 +429,7 @@ def count(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progr
     bars_dir = workdir / "bars"
     bars_dir.mkdir(parents=True)
     _quiet(download_bars, repo, question, args.segment, bars_dir, None, progress)
+    _quiet(download_metrics, repo, question, args.segment, bars_dir, progress)
     counts = _quiet(er.signal_counts, question, args.segment, bars_dir, progress=progress)
     progress.phase("report write")
     path = checkout.path / "counts" / f"{args.question_id}.json"
@@ -405,6 +461,9 @@ def parse_args(argv=None):
     reg.add_argument("--seed", type=int, required=True)
     reg.add_argument("--b-stats", type=int, default=er.MIN_B_STATS)
     reg.add_argument("--b-placebo", type=int, default=er.MIN_B_PLACEBO)
+    reg.add_argument("--sigma-model", choices=sorted(er.SIGMA_MODELS), default=None,
+                     help="label release family: ewma (lb1, question-v1), ewma-seasonal (lb2), ewma-robust (lb3), "
+                          "ewma-robust-hcal (lb3h); default: the family's fixed model, else ewma")
     pln = commands.add_parser("plan")
     pln.add_argument("--question-id", required=True)
     rn = commands.add_parser("run")

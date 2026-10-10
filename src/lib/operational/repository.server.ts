@@ -285,7 +285,7 @@ export function createOperationalStore(
           transport: candle.transport,
         })),
         p_retention_days: options.candleRetentionDays,
-        p_minute_retention_days: options.minuteCandleRetentionDays ?? 62,
+        p_minute_retention_days: options.minuteCandleRetentionDays ?? 140,
       });
       rpcError(error, "collector candle write");
       return ((data ?? []) as Array<{ candle_identity: string }>).map((row) => row.candle_identity);
@@ -314,7 +314,7 @@ export function createOperationalStore(
       const { data, error } = await client
         .from("collector_health")
         .select(
-          "instrument_id, symbol, timeframe_minutes, status, last_event_at, last_completed_open_time, lag_ms, queue_depth, reconnect_count, error_message, updated_at",
+          "instrument_id, symbol, timeframe_minutes, status, last_event_at, last_completed_open_time, lag_ms, queue_depth, reconnect_count, error_message, conflict_count_24h, last_conflict_at, updated_at",
         )
         .in("symbol", symbols)
         .order("symbol", { ascending: true })
@@ -399,9 +399,11 @@ export function createOperationalStore(
       rpcError(error, "forward minute candle read");
       if (!Array.isArray(data)) throw new Error("Invalid forward minute candle response");
       return data.map((row: unknown) => {
-        if (!Array.isArray(row) || row.length !== 8) throw new Error("Invalid forward minute candle row");
-        const [openTime, open, high, low, close, volume, transport, sourceEventAt] = row;
+        if (!Array.isArray(row) || row.length !== 9) throw new Error("Invalid forward minute candle row");
+        const [openTime, open, high, low, close, volume, transport, sourceEventAt, candleHash] = row;
         if (transport !== "rest" && transport !== "websocket") throw new Error("Invalid candle transport");
+        if (typeof candleHash !== "string" || !/^[0-9a-f]{32}$/.test(candleHash))
+          throw new Error("Invalid candle version hash");
         return {
           open_time_ms: Number(openTime),
           open: Number(open),
@@ -411,6 +413,7 @@ export function createOperationalStore(
           volume: Number(volume),
           transport,
           source_event_at_ms: sourceEventAt === null ? null : Number(sourceEventAt),
+          candle_hash: candleHash,
         } satisfies ForwardMinuteRow;
       });
     },

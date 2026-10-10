@@ -2,6 +2,12 @@
 
 A question (schema ``question-v1``) is ONE horizon of ONE signal family: its
 strategies x the family's fixed k values x rr indices, all six symbols, both sides.
+Schema ``question-v2`` (P16) adds an explicit ``sigma_model`` (a ``labels.SIGMA_MODELS`` key): the
+label release family the question is judged on (``ewma`` lb1, ``ewma-seasonal`` lb2,
+``ewma-robust`` lb3, ``ewma-robust-hcal`` lb3h). A question-v1 file has no such field and means
+``ewma``; ``make_question`` with the default ``sigma_model="ewma"`` still writes question-v1, so old
+questions stay valid and byte-identical. The model enters the question hash, the label parameters
+(and so the data snapshot id, the trial identities and every plan built on them).
 ``runner.run_experiment`` turns every strategy x every (horizon, k, rr_index) present
 in the geometries into a variant, so the geometries never mix horizons.
 
@@ -12,7 +18,10 @@ x 8), ``order-flow`` (of-v1 on minute bars + funding, 240 minutes, k 2 x rr_inde
 ``funding-basis`` (fb-v1 on the 1-minute premium index; 240 minutes with k 2 x rr_index 1,
 60 minutes with k 2 x rr_index 0; each strategy belongs to one horizon, so K = the
 question's strategies) and ``order-flow-v2`` (of-v2, the of-v1 cum240 rule at crossing
-thresholds 2, 5/2, 3, 7/2; 240 minutes, k 2 x rr_index 1..3, K = strategies x 3). Inputs are loaded one symbol at a time and released once that
+thresholds 2, 5/2, 3, 7/2; 240 minutes, k 2 x rr_index 1..3, K = strategies x 3) and ``positioning-v1``
+(fade the account long/short ratio from the metrics archive, theta 2, 5/2, 3; 240 minutes, k 2 x
+rr_index 1..3, K = 9; its questions use the ``ewma-robust-hcal`` labels, so they are question-v2).
+A family with a ``sigma_model`` fixes the label model of its questions. Inputs are loaded one symbol at a time and released once that
 symbol's part is built; a family's ``combine`` then joins the parts (the cross-sectional
 fb_xs_4h ranks per-symbol z values there).
 
@@ -36,17 +45,19 @@ import re
 from typing import Callable
 
 from .. import data_lake
-from . import funding_basis, order_flow, order_flow_v2, ta_strategies
+from . import funding_basis, order_flow, order_flow_v2, positioning, ta_strategies
 from .canonical import canonical_bytes, content_hash, exact_from_str
 from .evaluate import decimal_text
 from .hidden_guard import HiddenGate, HiddenGuardError, HiddenStretchLocked, Plan
 from .label_store import Geometry
-from .labels import LabelParams
+from .labels import SIGMA_MODELS, LabelParams
 from .market_data import load_symbol_bars, load_symbol_candles, load_symbol_funding, load_symbol_premium
 from .runner import NO_PROGRESS, StrategySpec, run_experiment
 from .segments import segment_bounds_ms, segment_months
 
 SCHEMA = "question-v1"
+SCHEMA_V2 = "question-v2"
+DEFAULT_SIGMA_MODEL = "ewma"
 MIN_B_STATS, MIN_B_PLACEBO = 2000, 200
 SEGMENTS = ("development", "validation", "hidden")
 LABEL_FIRST_MONTH = data_lake.FIRST_MONTH
@@ -54,12 +65,13 @@ LABEL_LAST_MONTH = segment_months("hidden")[-1]  # lb1 releases cover every segm
 QUESTION_FIELDS = ("schema", "question_id", "hypothesis", "family", "strategy_version", "strategies", "horizon_min",
                    "k_values", "rr_indices", "seed", "B_stats", "B_placebo", "label_revision", "data_revision",
                    "created_utc")
+QUESTION_FIELDS_V2 = (*QUESTION_FIELDS, "sigma_model")
 _QUESTION_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}\Z")
 _UTC = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 
 
 class QuestionError(ValueError):
-    """An invalid question-v1 record."""
+    """An invalid question-v1 / question-v2 record."""
 
 
 @dataclass(frozen=True)
@@ -86,6 +98,7 @@ class Family:
     config: Callable
     strategy_horizons: dict | None = None
     combine: Callable | None = None
+    sigma_model: str | None = None  # the label sigma model every question of the family must use
 
     @property
     def horizons(self) -> tuple:
@@ -123,6 +136,11 @@ def _order_flow_v2_signals(inputs, symbol, name, horizon, first_ms, end_ms, para
                                         label_step_min=params.step(horizon))
 
 
+def _positioning_signals(metrics, symbol, name, horizon, first_ms, end_ms, params):
+    return positioning.symbol_signals(name, metrics, horizon, first_ms=first_ms, end_ms=end_ms,
+                                      label_step_min=params.step(horizon))
+
+
 def _load_premium(bars_dir, symbol, last_month, horizon, token, gate):
     return load_symbol_premium(bars_dir, symbol, data_lake.FIRST_MONTH, last_month, token=token, gate=gate)
 
@@ -145,6 +163,10 @@ FAMILIES = {family.family_id: family for family in (
     Family("order-flow-v2", order_flow_v2.VERSION, tuple(order_flow_v2.STRATEGIES),
            {order_flow_v2.HORIZON: (tuple(order_flow_v2.K_VALUES), tuple(order_flow_v2.RR_INDICES))}, "bars+funding",
            _load_bars_funding, _order_flow_v2_signals, order_flow_v2.strategy_config),
+    Family("positioning-v1", positioning.VERSION, tuple(positioning.STRATEGIES),
+           {positioning.HORIZON: (tuple(positioning.K_VALUES), tuple(positioning.RR_INDICES))}, "metrics",
+           positioning.load_metrics, _positioning_signals, positioning.strategy_config,
+           sigma_model=positioning.SIGMA_MODEL),
 )}
 
 
@@ -204,16 +226,25 @@ def _int(value, name: str, minimum: int, maximum: int | None = None) -> None:
 
 
 def validate_question(question: dict) -> dict:
-    """Strict question-v1 check; returns the question unchanged."""
+    """Strict question-v1 / question-v2 check; returns the question unchanged."""
     if type(question) is not dict:
         raise QuestionError("question must be an object")
-    unknown = sorted(set(question) - set(QUESTION_FIELDS))
-    missing = sorted(set(QUESTION_FIELDS) - set(question))
+    schema = question.get("schema")
+    expected = QUESTION_FIELDS_V2 if schema == SCHEMA_V2 else QUESTION_FIELDS
+    unknown = sorted(set(question) - set(expected))
+    missing = sorted(set(expected) - set(question))
     if unknown or missing:
         raise QuestionError(f"question fields: unknown {unknown}, missing {missing}")
     family = family_of(question)
-    if question["schema"] != SCHEMA or question["strategy_version"] != family.strategy_version:
-        raise QuestionError(f"question must be {SCHEMA} / {family.family_id} / {family.strategy_version}")
+    if schema not in (SCHEMA, SCHEMA_V2) or question["strategy_version"] != family.strategy_version:
+        raise QuestionError(f"question must be {SCHEMA} or {SCHEMA_V2} / {family.family_id} / "
+                            f"{family.strategy_version}")
+    if schema == SCHEMA_V2 and (type(question["sigma_model"]) is not str
+                                or question["sigma_model"] not in SIGMA_MODELS):
+        raise QuestionError(f"sigma_model must be one of {sorted(SIGMA_MODELS)}")
+    model = question["sigma_model"] if schema == SCHEMA_V2 else DEFAULT_SIGMA_MODEL
+    if family.sigma_model is not None and model != family.sigma_model:
+        raise QuestionError(f"{family.family_id} questions use sigma_model {family.sigma_model}")
     if type(question["question_id"]) is not str or not _QUESTION_ID.fullmatch(question["question_id"]):
         raise QuestionError("question_id must be lowercase [a-z0-9._-], at most 100 characters")
     if type(question["hypothesis"]) is not str or not question["hypothesis"].strip():
@@ -238,17 +269,35 @@ def validate_question(question: dict) -> dict:
     return question
 
 
+def question_sigma_model(question: dict) -> str:
+    """The question's label sigma model (question-v1: ``ewma``)."""
+    return validate_question(question).get("sigma_model", DEFAULT_SIGMA_MODEL)
+
+
+def question_params(question: dict) -> LabelParams:
+    """Label parameters of the question's release family (lb1 / lb2 / lb3 / lb3h)."""
+    return LabelParams(sigma_model=question_sigma_model(question))
+
+
 def make_question(question_id: str, hypothesis: str, horizon_min: int, strategies, *, seed: int,
                   label_revision: int, data_revision: int, created_utc: str, B_stats: int = MIN_B_STATS,
-                  B_placebo: int = MIN_B_PLACEBO, family: str = "ta-baselines") -> dict:
+                  B_placebo: int = MIN_B_PLACEBO, family: str = "ta-baselines",
+                  sigma_model: str | None = None) -> dict:
+    """``sigma_model=None``: the family's fixed model, else ``ewma`` (question-v1)."""
     entry = family_of({"family": family})
+    if sigma_model is None:
+        sigma_model = entry.sigma_model or DEFAULT_SIGMA_MODEL
     k_values, rr_indices = entry.geometry.get(horizon_min, ((), ())) if type(horizon_min) is int else ((), ())
-    question = {"schema": SCHEMA, "question_id": question_id, "hypothesis": hypothesis, "family": family,
+    v2 = sigma_model != DEFAULT_SIGMA_MODEL  # the default keeps writing question-v1, byte for byte
+    question = {"schema": SCHEMA_V2 if v2 else SCHEMA, "question_id": question_id, "hypothesis": hypothesis,
+                "family": family,
                 "strategy_version": entry.strategy_version, "strategies": list(strategies), "horizon_min": horizon_min,
                 "k_values": list(k_values), "rr_indices": list(rr_indices), "seed": seed,
                 "B_stats": B_stats,
                 "B_placebo": B_placebo, "label_revision": label_revision, "data_revision": data_revision,
                 "created_utc": created_utc}
+    if v2:
+        question["sigma_model"] = sigma_model
     return validate_question(question)
 
 
@@ -270,7 +319,7 @@ def question_hash(question: dict) -> str:
 
 def build_geometries(question: dict, params: LabelParams | None = None) -> list[Geometry]:
     """All six symbols x both sides x k x rr_index, one horizon only."""
-    params = params or LabelParams()
+    params = params or question_params(question)
     validate_question(question)
     horizon = question["horizon_min"]
     if horizon not in params.horizons:
@@ -297,7 +346,7 @@ def build_specs(question: dict, segment: str, load_inputs, strategies=None, para
     soon as that symbol's signals are built.
     """
     validate_question(question)
-    family, params = family_of(question), params or LabelParams()
+    family, params = family_of(question), params or question_params(question)
     first_ms, end_ms = segment_bounds_ms(segment)
     horizon = question["horizon_min"]
     names = question["strategies"] if strategies is None else list(strategies)
@@ -411,7 +460,7 @@ def run_question(question: dict, segment: str, bars_dir, label_dir, log, *, toke
         if plan.data_snapshot_id != data_snapshot_id:
             raise HiddenGuardError("label data differ from the data snapshot the plan was registered on")
         strategies = [item["strategy_id"] for item in plan.strategies]
-    params = LabelParams()
+    params = question_params(question)
     geometries = build_geometries(question, params)
     last_month = segment_months(segment)[-1]
     family = family_of(question)
@@ -467,7 +516,7 @@ def signal_counts(question: dict, segment: str, bars_dir, params: LabelParams | 
     family, last_month = family_of(question), segment_months(segment)[-1]
     specs = build_specs(question, segment, lambda symbol: family.load(bars_dir, symbol, last_month,
                                                                       question["horizon_min"], None, None),
-                        None, params or LabelParams(), progress=progress)
+                        None, params or question_params(question), progress=progress)
     return {"question_id": question["question_id"], "family": family.family_id, **count_signals(specs, segment)}
 
 

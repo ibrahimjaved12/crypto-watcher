@@ -295,11 +295,14 @@ using the same label-step entries the label store uses:
   with Broadie-Glasserman-Kou widening), plus the realized/predicted sigma ratio
   implied by the observed expiry share. Non-trade statuses are counted separately.
 
-**Pass criteria** per symbol x horizon x half-life: `sd_ok` (sd(z) in [0.9, 1.1])
-and, on every 240 m row, `barrier_ok`: each (k, rr) expiry share is within
-`max(10% x theory, 2 pp)` of the Brownian theory with Broadie-Glasserman-Kou
-discrete-monitoring widening for the 15-minute label step. The continuous theory
-is reported alongside. PASS requires both verdicts where `barrier_ok` applies.
+**Pass criteria** (calibration-v2, P16) per symbol x horizon x half-life: `sd_ok`
+(sd(z) in [0.9, 1.1]) or `robust_ok`, and, on every 240 m row, `barrier_ok`:
+(a) T/(T+S) within 0.02 of b/(a+b) for every (k, rr, side) and (b) at k = 1 the
+implied sigma ratio against the Brownian theory widened for the 1-minute MONITORING
+step (the scan checks every 1-minute high/low) in [0.85, 1.15]; k = 2 ratios are
+descriptive. The continuous theory is reported alongside, and the pre-P16 check
+(expiry within `max(10% x theory, 2 pp)` of the theory widened for the 15-minute
+label step) stays in the JSON as `pass_v1`. See [seasonal sigma](./seasonal-sigma.md).
 
 The full report (JSON + Markdown) is committed to `reports/calibration/` in the
 private research-data repo. The public log shows only symbol, horizon, half-life,

@@ -231,6 +231,16 @@ add its own durable single-owner/fencing mechanism; the monitor-run and collecto
 paper-position ownership.
 
 
+### Candle conflicts (#239 P15)
+
+A REST recovery candle can differ from the stream-finalised candle already stored for the same
+open time. The stored candle is kept (immutable), the offered candle is appended to
+`collector_candle_conflicts` with which side came from REST, and the rest of the batch is written:
+a conflict never fails a batch and never makes a symbol UNAVAILABLE. Health rows report
+`conflict_count_24h` / `last_conflict_at` only. `reconcile_conflicts(24)` appends REST revisions
+within a stated tolerance to `collector_candle_revisions` for research parity without touching the
+stored row. Details: [operational database](./operational-database.md#candle-conflicts-and-revisions-239-p15).
+
 ### Shared completed-candle contract (#91)
 
 `completed-candle-v1` exposes collector-recorded native Binance USD-M perpetual

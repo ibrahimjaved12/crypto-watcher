@@ -10,6 +10,11 @@ import {
   type DailyBar,
 } from "./forward-trend-contract";
 import { createTrendRepository } from "./forward-trend-repository.server";
+import {
+  backfillMinuteHistory,
+  KLINE_PAGE_LIMIT,
+  type KlinePage,
+} from "./forward-backfill.server";
 import type { TrendDeps } from "./forward-trend-run.server";
 
 /** Every forward strategy id of the Python registry (`forward.signals.FORWARD_STRATEGIES`). */
@@ -41,7 +46,8 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
       const config = pythonServiceConfig("/v1/forward/evaluate");
       const response = await send(config.url, {
         method: "POST",
-        signal: AbortSignal.timeout(120_000),
+        // P16: about 120 days of 1m rows per symbol (ewma-robust-hcal warm-up) make a large request.
+        signal: AbortSignal.timeout(300_000),
         headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
@@ -49,8 +55,43 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
       return response.json();
     },
     fetchFunding: (symbol, startMs) => fetchBinanceFunding(send, symbol, startMs),
+    // P16: one-time 1m history backfill through the conflict-safe collector write (P15).
+    backfillMinutes: (symbol, startMs, endMs) =>
+      backfillMinuteHistory(
+        {
+          now: () => Date.now(),
+          fetchPage: (pair, from, to) => fetchBinanceMinuteKlines(send, pair, from, to),
+          record: (candles) => store.recordCollectorCandles(candles),
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        },
+        symbol,
+        startMs,
+        endMs,
+      ),
     repository: createForwardRepository(supabaseAdmin as unknown as SupabaseClient),
   };
+}
+
+/** One page of completed 1m klines (`/fapi/v1/klines?interval=1m`, limit 1500, weight 10). */
+export async function fetchBinanceMinuteKlines(
+  send: typeof fetch,
+  symbol: string,
+  startMs: number,
+  endMs: number,
+): Promise<KlinePage> {
+  const url = new URL("https://fapi.binance.com/fapi/v1/klines");
+  url.searchParams.set("symbol", symbol);
+  url.searchParams.set("interval", "1m");
+  url.searchParams.set("startTime", String(Math.max(0, Math.floor(startMs))));
+  url.searchParams.set("endTime", String(Math.max(0, Math.floor(endMs))));
+  url.searchParams.set("limit", String(KLINE_PAGE_LIMIT));
+  const response = await send(url.toString(), { signal: AbortSignal.timeout(15_000) });
+  if (response.status === 418 || response.status === 429) {
+    throw new Error(`Binance 1m klines rate limited (HTTP ${response.status})`);
+  }
+  if (!response.ok) throw new Error(`Binance 1m klines failed with HTTP ${response.status}`);
+  const weight = Number(response.headers.get("x-mbx-used-weight-1m"));
+  return { rows: await response.json(), usedWeight: Number.isFinite(weight) && weight > 0 ? weight : null };
 }
 
 /** Public, unauthenticated Binance responses are rate limited by IP weight: 418/429 abort the call. */

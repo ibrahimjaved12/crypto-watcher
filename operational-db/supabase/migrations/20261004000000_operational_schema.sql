@@ -146,6 +146,9 @@ CREATE TABLE public.collector_health (
   queue_depth INTEGER NOT NULL DEFAULT 0 CHECK (queue_depth >= 0),
   reconnect_count INTEGER NOT NULL DEFAULT 0 CHECK (reconnect_count >= 0),
   error_message TEXT,
+  -- Candle conflicts (P15) are reported, never a health degradation: status stays as measured.
+  conflict_count_24h INTEGER NOT NULL DEFAULT 0 CHECK (conflict_count_24h >= 0),
+  last_conflict_at TIMESTAMPTZ,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (instrument_id, timeframe_minutes),
   CHECK (instrument_id = 'binance-usdm:' || symbol)
@@ -247,27 +250,91 @@ CREATE INDEX sync_outbox_due
 
 CREATE INDEX sync_outbox_user ON public.sync_outbox(user_id, created_at DESC);
 
--- A completed candle finalized from the live stream can differ from the REST candle for the same
--- stable identity (for example after a disconnect, when trades were missed). The stored candle is
--- never overwritten, and one conflicting row must not fail the whole batch (that took every symbol
--- offline). The conflicting INCOMING candle is quarantined for inspection and the rest of the batch
--- is written. The quarantine is a bounded diagnostic log, not a data source.
-CREATE TABLE public.collector_candle_quarantine (
-  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+-- Candle conflict policy (#239 P15, owner decision 2026-10-10). A completed candle finalized from
+-- the live stream can differ from the REST candle for the same stable identity (missed trades after
+-- a disconnect; seen live as BTCUSDT 15m volume 1006.95 vs 1007.427). Stored candles are immutable
+-- and never overwritten, and one conflicting row never fails its batch (that once took every symbol
+-- UNAVAILABLE): the rest of the batch is written and each conflicting OFFERED candle is appended
+-- here, once per distinct offer. Conflicts are append-only evidence, never a data source. A
+-- conflict does not degrade collector health; it only feeds conflict_count_24h/last_conflict_at.
+CREATE TABLE public.collector_candle_conflicts (
+  conflict_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   provider TEXT NOT NULL,
   instrument_id TEXT NOT NULL,
+  symbol TEXT NOT NULL,
   price_type TEXT NOT NULL,
-  timeframe_minutes INTEGER NOT NULL,
+  timeframe_minutes INTEGER NOT NULL CHECK (timeframe_minutes IN (1, 15, 60, 240)),
   open_time TIMESTAMPTZ NOT NULL,
   stored JSONB NOT NULL,
-  incoming JSONB NOT NULL,
-  incoming_hash TEXT NOT NULL,
-  quarantined_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-  -- A retried recovery re-submits the same conflicting candle; keep one row per distinct candle.
-  UNIQUE (provider, instrument_id, price_type, timeframe_minutes, open_time, incoming_hash)
+  stored_transport TEXT NOT NULL CHECK (stored_transport IN ('rest', 'websocket')),
+  stored_hash TEXT NOT NULL,
+  offered JSONB NOT NULL,
+  offered_transport TEXT NOT NULL CHECK (offered_transport IN ('rest', 'websocket')),
+  offered_hash TEXT NOT NULL,
+  differing_fields TEXT[] NOT NULL CHECK (cardinality(differing_fields) >= 1),
+  -- Which side came from REST (what the Binance archive matches): research parity uses REST.
+  rest_side TEXT NOT NULL CHECK (rest_side IN ('stored', 'offered', 'both', 'neither')),
+  detected_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  -- A replayed recovery re-submits the same conflicting candle; keep one row per distinct offer.
+  UNIQUE (provider, instrument_id, price_type, timeframe_minutes, open_time, offered_hash)
 );
-CREATE INDEX collector_candle_quarantine_time
-  ON public.collector_candle_quarantine(quarantined_at DESC);
+CREATE INDEX collector_candle_conflicts_recent
+  ON public.collector_candle_conflicts(instrument_id, timeframe_minutes, detected_at DESC);
+
+-- Reconciled REST values (#239 P15). Append-only: a revision never modifies the stored candle;
+-- readers keep the original candle by default, and every forward signal/setup records the
+-- candle_version (collector_candle_hash) it used, so a later revision can be traced to decisions.
+CREATE TABLE public.collector_candle_revisions (
+  revision_id TEXT PRIMARY KEY,
+  conflict_id BIGINT NOT NULL UNIQUE REFERENCES public.collector_candle_conflicts(conflict_id),
+  provider TEXT NOT NULL,
+  instrument_id TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  price_type TEXT NOT NULL,
+  timeframe_minutes INTEGER NOT NULL CHECK (timeframe_minutes IN (1, 15, 60, 240)),
+  open_time TIMESTAMPTZ NOT NULL,
+  fields JSONB NOT NULL,
+  source TEXT NOT NULL CHECK (source = 'rest'),
+  supersedes TEXT NOT NULL,
+  tolerance JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX collector_candle_revisions_identity
+  ON public.collector_candle_revisions(instrument_id, timeframe_minutes, open_time);
+
+CREATE FUNCTION public.reject_candle_evidence_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER collector_candle_conflicts_append_only
+  BEFORE UPDATE OR DELETE ON public.collector_candle_conflicts
+  FOR EACH ROW EXECUTE FUNCTION public.reject_candle_evidence_mutation();
+CREATE TRIGGER collector_candle_revisions_append_only
+  BEFORE UPDATE OR DELETE ON public.collector_candle_revisions
+  FOR EACH ROW EXECUTE FUNCTION public.reject_candle_evidence_mutation();
+
+-- Version identity of one candle's values ("candle-v1"). The same text form is used for stored
+-- candles, conflict offers and revisions, so a forward decision's candle_version can be matched
+-- against collector_candle_revisions.supersedes. float8 text is PostgreSQL's shortest exact form.
+CREATE FUNCTION public.collector_candle_hash(
+  p_provider TEXT, p_instrument_id TEXT, p_price_type TEXT, p_timeframe_minutes INTEGER,
+  p_open_time TIMESTAMPTZ, p_open DOUBLE PRECISION, p_high DOUBLE PRECISION,
+  p_low DOUBLE PRECISION, p_close DOUBLE PRECISION, p_volume DOUBLE PRECISION,
+  p_quote_volume DOUBLE PRECISION
+) RETURNS TEXT
+LANGUAGE sql STABLE SET search_path = public
+AS $$
+  SELECT md5(concat_ws('|', 'candle-v1', p_provider, p_instrument_id, p_price_type,
+    p_timeframe_minutes::TEXT, (extract(epoch FROM p_open_time) * 1000)::BIGINT::TEXT,
+    p_open::TEXT, p_high::TEXT, p_low::TEXT, p_close::TEXT, p_volume::TEXT,
+    coalesce(p_quote_volume::TEXT, '')));
+$$;
 
 CREATE INDEX collector_recent_candles_time
   ON public.collector_recent_candles(open_time DESC);
@@ -285,7 +352,8 @@ ALTER TABLE public.monitor_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.operational_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.sync_outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.collector_recent_candles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.collector_candle_quarantine ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.collector_candle_conflicts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.collector_candle_revisions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.collector_health ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.collector_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.collector_leases ENABLE ROW LEVEL SECURITY;
@@ -620,11 +688,13 @@ $$;
 
 -- Day-based retention bounds the bulk of the store while each canonical series
 -- retains its newest 260 completed candles for TA minimum history and catch-up.
--- One-minute candles keep p_minute_retention_days (default 62, bounded 31..90): the
--- forward engine (#239) needs 28 days of seasonal profile plus the EWMA warm-up and
--- 30 days of signal history per symbol.
+-- One-minute candles keep p_minute_retention_days (default 140, bounded 31..200): the forward
+-- engine's ewma-robust-hcal sigma (#239 P16) needs 60 days of completed horizon windows plus the
+-- 28-day slot-factor warm-up and its EWMA history, about 120 days, with margin.
+-- Conflict policy (P15): a row whose stable identity is already stored with different values is
+-- never inserted and never fails the batch; it is appended to collector_candle_conflicts.
 CREATE FUNCTION public.record_collector_candles(
-  p_rows JSONB, p_retention_days INTEGER DEFAULT 7, p_minute_retention_days INTEGER DEFAULT 62
+  p_rows JSONB, p_retention_days INTEGER DEFAULT 7, p_minute_retention_days INTEGER DEFAULT 140
 ) RETURNS TABLE (candle_identity TEXT)
 LANGUAGE plpgsql SECURITY INVOKER SET search_path = public
 AS $$
@@ -632,7 +702,7 @@ BEGIN
   IF jsonb_typeof(p_rows) <> 'array' OR jsonb_array_length(p_rows) < 1
      OR jsonb_array_length(p_rows) > 1000
      OR p_retention_days < 1 OR p_retention_days > 30
-     OR p_minute_retention_days < 31 OR p_minute_retention_days > 90 THEN
+     OR p_minute_retention_days < 31 OR p_minute_retention_days > 200 THEN
     RAISE EXCEPTION 'Invalid collector candle batch';
   END IF;
 
@@ -649,7 +719,20 @@ BEGIN
     )
   ),
   conflicting AS (
-    SELECT i.*, to_jsonb(c) - 'inserted_at' AS stored_json
+    SELECT i.*, to_jsonb(c) - 'inserted_at' AS stored_json, c.transport AS stored_transport,
+      public.collector_candle_hash(c.provider, c.instrument_id, c.price_type, c.timeframe_minutes,
+        c.open_time, c.open, c.high, c.low, c.close, c.volume, c.quote_volume) AS stored_hash,
+      public.collector_candle_hash(i.provider, i.instrument_id, i.price_type, i.timeframe_minutes,
+        i.open_time, i.open, i.high, i.low, i.close, i.volume, i.quote_volume) AS offered_hash,
+      array_remove(ARRAY[
+        CASE WHEN c.close_time <> i.close_time THEN 'close_time' END,
+        CASE WHEN c.open <> i.open THEN 'open' END,
+        CASE WHEN c.high <> i.high THEN 'high' END,
+        CASE WHEN c.low <> i.low THEN 'low' END,
+        CASE WHEN c.close <> i.close THEN 'close' END,
+        CASE WHEN c.volume <> i.volume THEN 'volume' END,
+        CASE WHEN c.quote_volume IS DISTINCT FROM i.quote_volume THEN 'quote_volume' END
+      ], NULL) AS differing_fields
     FROM incoming i
     JOIN public.collector_recent_candles c USING (
       provider, instrument_id, price_type, timeframe_minutes, open_time
@@ -658,13 +741,23 @@ BEGIN
       OR c.low <> i.low OR c.close <> i.close OR c.volume <> i.volume
       OR c.quote_volume IS DISTINCT FROM i.quote_volume
   ),
-  quarantined AS (
-    INSERT INTO public.collector_candle_quarantine (
-      provider, instrument_id, price_type, timeframe_minutes, open_time,
-      stored, incoming, incoming_hash
+  recorded AS (
+    INSERT INTO public.collector_candle_conflicts (
+      provider, instrument_id, symbol, price_type, timeframe_minutes, open_time,
+      stored, stored_transport, stored_hash, offered, offered_transport, offered_hash,
+      differing_fields, rest_side
     )
-    SELECT k.provider, k.instrument_id, k.price_type, k.timeframe_minutes, k.open_time,
-      k.stored_json, k.incoming_json, md5(k.incoming_json::TEXT)
+    SELECT DISTINCT ON (k.provider, k.instrument_id, k.price_type, k.timeframe_minutes,
+        k.open_time, k.offered_hash)
+      k.provider, k.instrument_id, k.symbol, k.price_type, k.timeframe_minutes, k.open_time,
+      k.stored_json, k.stored_transport, k.stored_hash, k.incoming_json - 'received_at',
+      k.transport, k.offered_hash, k.differing_fields,
+      CASE
+        WHEN k.stored_transport = 'rest' AND k.transport = 'rest' THEN 'both'
+        WHEN k.stored_transport = 'rest' THEN 'stored'
+        WHEN k.transport = 'rest' THEN 'offered'
+        ELSE 'neither'
+      END
     FROM conflicting k
     ON CONFLICT DO NOTHING
     RETURNING 1
@@ -694,8 +787,8 @@ BEGIN
     || timeframe_minutes::TEXT || '|' || (extract(epoch FROM open_time) * 1000)::BIGINT::TEXT
   FROM inserted;
 
-  DELETE FROM public.collector_candle_quarantine
-    WHERE quarantined_at < clock_timestamp() - INTERVAL '30 days';
+  -- Conflict counters only; the measured health status is never changed by a conflict.
+  PERFORM public.refresh_collector_conflict_counters();
 
   -- Keep the newest 260 completed candles per canonical series (TA history and catch-up margin).
   DELETE FROM public.collector_recent_candles c
@@ -714,6 +807,129 @@ BEGIN
           LIMIT 260
         ) keep
       );
+END;
+$$;
+
+-- Rolling 24-hour conflict count and latest conflict per collector health row (P15).
+CREATE FUNCTION public.refresh_collector_conflict_counters()
+RETURNS VOID
+LANGUAGE sql SECURITY INVOKER SET search_path = public
+AS $$
+  UPDATE public.collector_health h SET
+    conflict_count_24h = coalesce(s.recent, 0),
+    last_conflict_at = s.last_at
+  FROM public.collector_health base
+  LEFT JOIN (
+    SELECT instrument_id, timeframe_minutes,
+      (count(*) FILTER (WHERE detected_at > clock_timestamp() - interval '24 hours'))::INTEGER
+        AS recent,
+      max(detected_at) AS last_at
+    FROM public.collector_candle_conflicts
+    GROUP BY instrument_id, timeframe_minutes
+  ) s USING (instrument_id, timeframe_minutes)
+  WHERE h.instrument_id = base.instrument_id AND h.timeframe_minutes = base.timeframe_minutes
+    AND (h.conflict_count_24h, h.last_conflict_at)
+      IS DISTINCT FROM (coalesce(s.recent, 0), s.last_at);
+$$;
+
+-- Research parity (P15): REST is what the Binance archive matches. For conflicts older than
+-- `older_than_hours` where the OFFERED candle came from REST and the stored one did not, and the
+-- only differing fields are high/low/close/volume/quote_volume within the stated tolerance
+-- (prices: relative difference <= p_price_tolerance, default 0.2%; volumes: absolute difference
+-- <= p_volume_tolerance of the larger value, default 2%), append one revision carrying the REST
+-- values and the superseded stored hash. Never touches collector_recent_candles. Idempotent
+-- (one revision per conflict). Returns the number of revisions written.
+CREATE FUNCTION public.reconcile_conflicts(
+  older_than_hours INTEGER DEFAULT 24,
+  p_price_tolerance DOUBLE PRECISION DEFAULT 0.002,
+  p_volume_tolerance DOUBLE PRECISION DEFAULT 0.02
+) RETURNS INTEGER
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = public
+AS $$
+DECLARE
+  written INTEGER;
+BEGIN
+  IF older_than_hours IS NULL OR older_than_hours < 0 OR older_than_hours > 24 * 365
+     OR p_price_tolerance IS NULL OR p_price_tolerance < 0 OR p_price_tolerance > 0.05
+     OR p_volume_tolerance IS NULL OR p_volume_tolerance < 0 OR p_volume_tolerance > 0.5 THEN
+    RAISE EXCEPTION 'Invalid conflict reconciliation request';
+  END IF;
+  WITH eligible AS (
+    SELECT k.*,
+      (k.stored->>'high')::float8 AS s_high, (k.offered->>'high')::float8 AS o_high,
+      (k.stored->>'low')::float8 AS s_low, (k.offered->>'low')::float8 AS o_low,
+      (k.stored->>'close')::float8 AS s_close, (k.offered->>'close')::float8 AS o_close,
+      (k.stored->>'volume')::float8 AS s_volume, (k.offered->>'volume')::float8 AS o_volume,
+      (k.stored->>'quote_volume')::float8 AS s_quote, (k.offered->>'quote_volume')::float8 AS o_quote
+    FROM public.collector_candle_conflicts k
+    WHERE k.detected_at < clock_timestamp() - make_interval(hours => older_than_hours)
+      AND k.rest_side = 'offered'
+      AND k.differing_fields <@ ARRAY['high', 'low', 'close', 'volume', 'quote_volume']
+      AND NOT EXISTS (
+        SELECT 1 FROM public.collector_candle_revisions r WHERE r.conflict_id = k.conflict_id
+      )
+  ),
+  within AS (
+    SELECT e.* FROM eligible e
+    WHERE abs(e.o_high - e.s_high) <= p_price_tolerance * e.s_high
+      AND abs(e.o_low - e.s_low) <= p_price_tolerance * e.s_low
+      AND abs(e.o_close - e.s_close) <= p_price_tolerance * e.s_close
+      AND abs(e.o_volume - e.s_volume) <= p_volume_tolerance * greatest(e.o_volume, e.s_volume)
+      AND (e.o_quote IS NULL OR e.s_quote IS NULL
+        OR abs(e.o_quote - e.s_quote) <= p_volume_tolerance * greatest(e.o_quote, e.s_quote))
+  ),
+  appended AS (
+    INSERT INTO public.collector_candle_revisions (
+      revision_id, conflict_id, provider, instrument_id, symbol, price_type, timeframe_minutes,
+      open_time, fields, source, supersedes, tolerance
+    )
+    SELECT md5(w.stored_hash || '|' || w.offered_hash), w.conflict_id, w.provider,
+      w.instrument_id, w.symbol, w.price_type, w.timeframe_minutes, w.open_time,
+      jsonb_build_object(
+        'open', w.offered->'open', 'high', w.offered->'high', 'low', w.offered->'low',
+        'close', w.offered->'close', 'volume', w.offered->'volume',
+        'quote_volume', w.offered->'quote_volume', 'close_time', w.offered->'close_time',
+        'candle_hash', w.offered_hash
+      ),
+      'rest', w.stored_hash,
+      jsonb_build_object('price_relative', p_price_tolerance, 'volume_relative', p_volume_tolerance)
+    FROM within w
+    ON CONFLICT DO NOTHING
+    RETURNING 1
+  )
+  SELECT count(*)::INTEGER INTO written FROM appended;
+  RETURN written;
+END;
+$$;
+
+-- Recent candle conflicts for diagnostics (newest first), with whether a revision exists.
+CREATE FUNCTION public.get_collector_candle_conflicts(p_hours INTEGER DEFAULT 168, p_limit INTEGER DEFAULT 100)
+RETURNS JSONB
+LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = public
+AS $$
+DECLARE
+  rows JSONB;
+BEGIN
+  IF p_hours IS NULL OR p_hours < 1 OR p_hours > 24 * 365 OR p_limit IS NULL OR p_limit < 1
+     OR p_limit > 1000 THEN
+    RAISE EXCEPTION 'Invalid candle conflict request';
+  END IF;
+  SELECT coalesce(jsonb_agg(item ORDER BY detected_at DESC), '[]'::jsonb) INTO rows
+  FROM (
+    SELECT k.detected_at, jsonb_build_object(
+      'conflict_id', k.conflict_id, 'symbol', k.symbol, 'timeframe_minutes', k.timeframe_minutes,
+      'open_time', k.open_time, 'stored_transport', k.stored_transport,
+      'offered_transport', k.offered_transport, 'differing_fields', k.differing_fields,
+      'rest_side', k.rest_side, 'detected_at', k.detected_at,
+      'revision_id', (SELECT r.revision_id FROM public.collector_candle_revisions r
+                      WHERE r.conflict_id = k.conflict_id)
+    ) AS item
+    FROM public.collector_candle_conflicts k
+    WHERE k.detected_at > clock_timestamp() - make_interval(hours => p_hours)
+    ORDER BY k.detected_at DESC
+    LIMIT p_limit
+  ) recent;
+  RETURN rows;
 END;
 $$;
 
@@ -770,6 +986,8 @@ BEGIN
     reconnect_count = EXCLUDED.reconnect_count,
     error_message = EXCLUDED.error_message,
     updated_at = clock_timestamp();
+  -- The 24-hour conflict window decays with time, so every health write refreshes it.
+  PERFORM public.refresh_collector_conflict_counters();
 END;
 $$;
 
@@ -1120,7 +1338,8 @@ AS $$
 $$;
 
 -- Forward engine input (#239): completed one-minute candles of one symbol in
--- [p_since, p_before) as compact arrays with their provenance, at most 63 days.
+-- [p_since, p_before) as compact arrays with their provenance and candle_version hash
+-- (collector_candle_hash), at most 140 days (P16: ewma-robust-hcal needs about 120 days).
 CREATE FUNCTION public.get_collector_forward_minutes(
   p_symbol TEXT, p_since TIMESTAMPTZ, p_before TIMESTAMPTZ
 ) RETURNS JSONB
@@ -1130,13 +1349,15 @@ DECLARE
   rows JSONB;
 BEGIN
   IF p_symbol IS NULL OR btrim(p_symbol) = '' OR p_since IS NULL OR p_before IS NULL
-     OR p_before <= p_since OR p_before - p_since > interval '63 days' THEN
+     OR p_before <= p_since OR p_before - p_since > interval '140 days' THEN
     RAISE EXCEPTION 'Invalid forward minute candle request';
   END IF;
   SELECT coalesce(jsonb_agg(jsonb_build_array(
       (extract(epoch FROM open_time) * 1000)::BIGINT, open, high, low, close, volume, transport,
       CASE WHEN source_event_at IS NULL THEN NULL
-           ELSE (extract(epoch FROM source_event_at) * 1000)::BIGINT END
+           ELSE (extract(epoch FROM source_event_at) * 1000)::BIGINT END,
+      public.collector_candle_hash(provider, instrument_id, price_type, timeframe_minutes,
+        open_time, open, high, low, close, volume, quote_volume)
     ) ORDER BY open_time), '[]'::jsonb)
     INTO rows
     FROM public.collector_recent_candles
@@ -1169,7 +1390,10 @@ REVOKE ALL ON FUNCTION
   public.get_collector_completed_candles(TEXT, INTEGER, INTEGER),
   public.get_collector_movement_candles(TEXT[], TIMESTAMPTZ, TIMESTAMPTZ),
   public.get_collector_forward_minutes(TEXT, TIMESTAMPTZ, TIMESTAMPTZ),
-  public.record_collector_candles(JSONB, INTEGER, INTEGER)
+  public.record_collector_candles(JSONB, INTEGER, INTEGER),
+  public.refresh_collector_conflict_counters(),
+  public.reconcile_conflicts(INTEGER, DOUBLE PRECISION, DOUBLE PRECISION),
+  public.get_collector_candle_conflicts(INTEGER, INTEGER)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION
   public.record_recent_candles(UUID, JSONB, INTEGER),
@@ -1192,7 +1416,10 @@ GRANT EXECUTE ON FUNCTION
   public.get_collector_completed_candles(TEXT, INTEGER, INTEGER),
   public.get_collector_movement_candles(TEXT[], TIMESTAMPTZ, TIMESTAMPTZ),
   public.get_collector_forward_minutes(TEXT, TIMESTAMPTZ, TIMESTAMPTZ),
-  public.record_collector_candles(JSONB, INTEGER, INTEGER)
+  public.record_collector_candles(JSONB, INTEGER, INTEGER),
+  public.refresh_collector_conflict_counters(),
+  public.reconcile_conflicts(INTEGER, DOUBLE PRECISION, DOUBLE PRECISION),
+  public.get_collector_candle_conflicts(INTEGER, INTEGER)
   TO service_role;
 
 -- Forward trend daily feed (#239 P14): completed UTC-day Binance USD-M klines for the daily trend

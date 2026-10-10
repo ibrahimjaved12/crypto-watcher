@@ -63,33 +63,10 @@ _MANIFEST_LIMIT = 16 << 20
 
 
 def download_metrics(repo, symbol: str, month: str, revision: int, dest: Path) -> str:
-    """Download one ``mx-SYMBOL-MONTH-rN`` csv.gz into ``dest``, sha256-verified (asset digest, else the
-    release manifest's sha256, as ``daily_download``); returns its sha256."""
-    tag = mx.release_tag(symbol, month, revision)
-    release = repo.published_release(tag)
-    if release is None or release.get("tag_name") != tag or release.get("draft") is not False:
-        raise PublicError(f"missing published release: {tag}")
-    assets = repo.assets(release["id"])
-    name = mx.csv_asset_name(symbol, month)
-    if name not in assets:
-        raise PublicError(f"{tag}: missing asset {name}")
-    expected = None
-    if not assets[name].get("digest"):
-        manifest_name = mx.manifest_asset_name(symbol, month)
-        if manifest_name not in assets:
-            raise PublicError(f"{tag}: missing {manifest_name} for checksum fallback")
-        manifest_path = Path(dest) / manifest_name
-        download(repo, assets[manifest_name], manifest_path, limit=_MANIFEST_LIMIT)
-        manifest = json.loads(manifest_path.read_bytes())
-        if (manifest.get("release_tag") != tag or manifest.get("symbol") != symbol
-                or manifest.get("month") != month):
-            raise PublicError(f"{tag}: manifest identity mismatch")
-        matches = [item["sha256"] for item in manifest.get("assets", []) if item.get("name") == name]
-        if len(matches) != 1:
-            raise PublicError(f"{tag}: no unique sha256 for {name}")
-        expected = matches[0]
-    sha, _ = download(repo, assets[name], Path(dest) / name, expected)
-    return sha
+    """Download one ``mx-SYMBOL-MONTH-rN`` csv.gz into ``dest``, sha256-verified; returns its sha256.
+
+    The implementation lives in experiment_run (shared with the positioning-v1 family's runs)."""
+    return xr.download_metrics_month(repo, symbol, month, revision, dest)
 
 
 def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progress) -> list[str]:

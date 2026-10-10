@@ -64,6 +64,8 @@ export type ForwardMinuteRow = {
   volume: number;
   transport: "rest" | "websocket";
   source_event_at_ms: number | null;
+  /** candle-v1 version hash (collector_candle_hash); never sent to Python (P15). */
+  candle_hash?: string | undefined;
 };
 
 /** One completed UTC-day kline of the forward trend feed (#239 P14); prices are exact decimal text. */
@@ -91,6 +93,9 @@ export type CollectorHealth = {
   queue_depth: number;
   reconnect_count: number;
   error_message: string | null;
+  /** Candle conflicts in the last 24 h (P15). Reported only; never degrades `status`. */
+  conflict_count_24h?: number | undefined;
+  last_conflict_at?: string | null | undefined;
   updated_at: string;
 };
 

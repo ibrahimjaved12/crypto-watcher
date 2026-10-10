@@ -84,7 +84,19 @@ The verdicts are:
 
 - **`robust_ok`:** both robust statistics are in [0.9, 1.1] overall and in [0.8, 1.2] in
   every UTC hour.
-- **PASS** = `sd_ok` and `robust_ok` and, on 240 m rows, `barrier_ok`.
+- **PASS** (calibration-v2, P16) = (`sd_ok` or `robust_ok`) and, on 240 m rows, `barrier_ok`.
+  This is looser than the pre-P16 rule (either statistic suffices): read a PASS with that in mind.
+  The pre-P16 rule (`sd_ok` and `robust_ok` and the label-step barrier check) stays in the JSON as
+  `pass_v1` / `barrier_ok_v1`.
+- **Barrier check (P16):** `scan.label_trade` monitors every 1-minute high/low, so the
+  discrete-monitoring widening uses the 1-minute monitoring step, `0.5826 sqrt(1/240)` = 0.0376
+  sigma_h at 240 m (the old 0.145650 = `0.5826 sqrt(15/240)` used the 15-minute LABEL step by
+  mistake; it is kept only as a traced field). Pre-stated criteria, identical for every model:
+  (a) T/(T+S) within 0.02 of b/(a+b) for every (k, rr, side); (b) at k = 1 the sigma ratio implied
+  by the pooled expiry share against the monitoring-step theory in [0.85, 1.15] for every rr;
+  (c) at k = 2 the implied ratio is reported as DESCRIPTIVE (far barriers are hit more often than
+  Brownian motion predicts: heavy tails and volatility clustering, which no scalar sigma can fix).
+  `barrier_ok` = (a) and (b).
 - **Barrier check:** it reads labels built with the same model, lb1 for `ewma` and lb2 for
   `ewma-seasonal`. When a symbol's release is missing it is NA, and only the sigma/z audit
   runs.
@@ -128,6 +140,6 @@ z is heavy-tailed, so a squared-return EWMA overstates the typical scale. Two mo
   (ewma-robust-hcal). Two models cannot share one release identity, so the hcal model gets its own
   prefix. The sigma column is `sigma_ewma_robust` / `sigma_ewma_robust_hcal`. lb1 and lb2 are
   byte-identical (pinned in tests).
-- **Audit:** reports all four models. The PASS definition and the thresholds are unchanged. Each
-  model's barrier block adds the median, min and max implied sigma ratio (widened theory, both
-  sides), so the residual can be read.
+- **Audit:** reports all four models. Each model's barrier block adds the median, min and max
+  implied sigma ratio (monitoring-step theory, both sides; the label-step value is traced), so the
+  residual can be read. P16 adopted `ewma-robust-hcal` as the forward harness sigma model.

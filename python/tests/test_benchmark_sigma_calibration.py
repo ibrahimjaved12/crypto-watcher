@@ -43,7 +43,8 @@ class ZStatisticsTests(unittest.TestCase):
         self.assertTrue(0.9 <= row["z"]["sd"] <= 1.1, row["z"]["sd"])
         self.assertTrue(row["sd_ok"])
         self.assertIsNone(row["barrier_ok"])  # only 240 m rows carry a barrier verdict
-        self.assertEqual(row["pass"], row["sd_ok"] and row["robust_ok"])  # robust_ok needs every hour in band
+        self.assertEqual(row["pass"], row["sd_ok"] or row["robust_ok"])  # P16: z part is sd_ok or robust_ok
+        self.assertEqual(row["pass_v1"], row["sd_ok"] and row["robust_ok"])  # pre-P16 rule, traced
         self.assertAlmostEqual(row["z"]["robust_sd"], 1.0, delta=0.1)
         self.assertAlmostEqual(row["z"]["mean_abs_ratio"], 1.0, delta=0.1)
         self.assertEqual(len(row["z_by_hour"]), 24)
@@ -126,6 +127,26 @@ class BarrierTheoryTests(unittest.TestCase):
             with self.subTest(k=row["k"], rr=row["rr"]):
                 self.assertGreater(row["theory"]["expiry_widened"], row["theory"]["expiry_continuous"])
 
+    def test_widening_uses_the_one_minute_monitoring_step(self):
+        # scan.label_trade checks every 1-minute high/low: the widening is 0.5826 sqrt(1/240) = 0.0376,
+        # not the 15-minute label step's 0.5826 sqrt(15/240) = 0.1457 (kept only as a traced field).
+        self.assertEqual(cal.MONITORING_STEP_MIN, 1)
+        summary = cal.barrier_summary({}, LabelParams())
+        self.assertEqual(summary["monitoring_step_min"], 1)
+        self.assertEqual(summary["label_step_min"], 15)
+        self.assertAlmostEqual(summary["discrete_widening_monitoring_sigma_h"], 0.5826 * (1 / 240) ** 0.5)
+        self.assertAlmostEqual(summary["discrete_widening_monitoring_sigma_h"], 0.0376, places=4)
+        self.assertAlmostEqual(summary["discrete_widening_sigma_h"], 0.145650, places=6)
+        for row in summary["geometries"]:
+            theory = row["theory"]
+            self.assertLess(theory["expiry_continuous"], theory["expiry_monitoring"])
+            self.assertLess(theory["expiry_monitoring"], theory["expiry_widened"])
+            self.assertEqual(row["implied_ratio_role"], "judged" if row["k"] == "1" else "descriptive")
+        header = cal.build_report("development", {}, horizons=(240,), half_lives=(7,), params=LabelParams(),
+                                  code_commit="local", created_utc="2026-10-10T00:00:00Z", data_snapshot_id=None)
+        self.assertEqual(header["monitoring_step_min"], 1)
+        self.assertEqual(header["schema"], "calibration-v2")
+
     def test_implied_sigma_ratio_round_trip(self):
         observed = cal.expiry_probability(3 / 0.85, 2 / 0.85, 4)
         self.assertAlmostEqual(cal.implied_sigma_ratio(observed, 3.0, 2.0, 4), 0.85, places=6)
@@ -151,8 +172,68 @@ class BarrierTheoryTests(unittest.TestCase):
         self.assertAlmostEqual(both["shares"]["E"], 0.6)
         self.assertEqual(both["non_trades"], {"V": 2})
         self.assertAlmostEqual(both["target_first_resolved"], 4 / 6)
-        self.assertTrue(row["expiry_within_tolerance"])  # 0.60 vs BGK-widened theory about 0.60
+        self.assertTrue(row["expiry_within_tolerance"])  # 0.60 vs BGK-widened theory about 0.60 (traced)
+        self.assertAlmostEqual(both["target_first_ts"], 4 / 6)
         self.assertFalse(summary["pass"])  # the other geometries have no trades
+        self.assertFalse(summary["pass_v1"])
+
+    def _criteria_columns(self, params, cells):
+        """Constructed label columns: {(k, rr_index): (long outcomes, short outcomes)}."""
+        columns = {}
+        for geometry in cal.barrier_geometries("BTCUSDT", params):
+            column = GeometryColumns(geometry)
+            outcomes = cells.get((int(geometry.k), geometry.rr_index), ("", ""))[0 if geometry.side == 1 else 1]
+            for outcome in outcomes:
+                for name in column.data:
+                    column[name].append(ord(outcome) if name == "outcome" else 0)
+            columns[Geometry(*geometry)] = column
+        return columns
+
+    @staticmethod
+    def _outcomes(t, s, e):
+        return "T" * t + "S" * s + "E" * e
+
+    def _calibrated_cells(self, params, ratio=1.0, shift=0.0):
+        """Outcome strings matching theory (scaled by ratio) for every (k, rr): 10,000 trades per side."""
+        widening = cal.discrete_widening(cal.MONITORING_STEP_MIN, 240)
+        cells = {}
+        for k in (1, 2):
+            for index, rr in enumerate(params.rr_grid):
+                b, a = float(k), float(k * rr)
+                expiry = cal.expiry_probability(a / ratio + widening, b / ratio + widening, 4)
+                share_t = min(1.0, max(0.0, b / (a + b) + shift))
+                e = round(10_000 * expiry)
+                t = round((10_000 - e) * share_t)
+                text = self._outcomes(t, 10_000 - e - t, e)
+                cells[(k, index)] = (text, text)
+        return cells
+
+    def test_criteria_a_and_b_on_constructed_label_columns(self):
+        params = LabelParams()
+        good = cal.barrier_summary(self._criteria_columns(params, self._calibrated_cells(params)), params)
+        self.assertTrue(good["criteria"]["target_first_ok"])
+        self.assertTrue(good["criteria"]["implied_ratio_ok"])
+        self.assertTrue(good["pass"])
+        # (a) fails when the target-first share is 0.03 off theory on any side.
+        shifted = cal.barrier_summary(self._criteria_columns(params, self._calibrated_cells(params, shift=0.03)), params)
+        self.assertFalse(shifted["criteria"]["target_first_ok"])
+        self.assertFalse(shifted["pass"])
+        # (b) fails when realized sigma is 1.25 x predicted at k = 1.
+        wide = cal.barrier_summary(self._criteria_columns(params, self._calibrated_cells(params, ratio=1.25)), params)
+        self.assertTrue(wide["criteria"]["target_first_ok"])
+        self.assertFalse(wide["criteria"]["implied_ratio_ok"])
+        k1 = [row for row in wide["geometries"] if row["k"] == "1"]
+        self.assertTrue(all(row["implied_ratio_ok"] is False for row in k1))
+        # (c) k = 2 is descriptive: a k = 2 ratio far from 1 never fails the verdict.
+        cells = self._calibrated_cells(params)
+        far = self._calibrated_cells(params, ratio=1.4)
+        for index in range(len(params.rr_grid)):
+            cells[(2, index)] = far[(2, index)]
+        descriptive = cal.barrier_summary(self._criteria_columns(params, cells), params)
+        self.assertTrue(descriptive["pass"])
+        k2 = [row for row in descriptive["geometries"] if row["k"] == "2"]
+        self.assertTrue(all(row["implied_ratio_ok"] is None for row in k2))
+        self.assertTrue(any(row["sides"]["both"]["implied_sigma_ratio_monitoring"] > 1.3 for row in k2))
 
 
     def test_tiny_theory_cell_tolerates_one_point_deviation(self):
@@ -203,6 +284,10 @@ class ReportAndGuardTests(unittest.TestCase):
         cal.set_barrier_verdict(result, False)
         failed = result["horizons"]["240"]["7"]
         self.assertEqual((failed["sd_ok"], failed["barrier_ok"], failed["pass"]), (True, False, False))
+        either = {"horizons": {"240": {"7": {**row, "robust_ok": False}}}}
+        cal.set_barrier_verdict(either, True, barrier_ok_v1=True)
+        self.assertTrue(either["horizons"]["240"]["7"]["pass"])  # P16: sd_ok or robust_ok
+        self.assertFalse(either["horizons"]["240"]["7"]["pass_v1"])  # pre-P16: both required
         self.assertIsNone(result["horizons"]["60"]["7"]["barrier_ok"])
         report = cal.build_report("development", {"BTCUSDT": result}, horizons=(60, 240), half_lives=(7,),
                                   params=LabelParams(), code_commit="local", created_utc="2026-10-09T00:00:00Z",
