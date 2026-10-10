@@ -34,7 +34,7 @@ def crosses_funding_time(entry_ms: int, exit_ms: int) -> bool:
     return exit_ms // HOUR_MS * HOUR_MS > entry_ms
 from .setups import FORWARD_PARAMS, NO_SIGMA, ForwardSigma, Setup, build_setup
 from .signals import generate_signals
-from .wallet import WalletConfig, initial_state, liquidation_events, step
+from .wallet import WalletConfig, initial_state, liquidation_events, position_terms, wallet_step
 
 
 def _funding(bars, events) -> FundingSeries:
@@ -44,72 +44,105 @@ def _funding(bars, events) -> FundingSeries:
                          tuple(r for _, _, r in inside), bars.start_ms, bars.end_ms)
 
 
+def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy_ids,
+                    from_ms: int, to_ms: int, funding_available: bool = True,
+                    positions=None, wallet_config: WalletConfig = WalletConfig()) -> dict:
+    """Evaluate one symbol from collector rows, without sizing or moving wallet balances.
+
+    Positions supply previously persisted liquidation terms. New setups emit liquidation
+    candidates independent of sizing; wallet_step applies the legacy portfolio preflight.
+    Events are JSON records ordered by (ms, symbol, sequence).
+    """
+    bars = bars_from_collector_rows(symbol, bars)
+    apply_funding_marks(bars, funding)
+    funding = _funding(bars, funding)
+    funding_ok = funding_available
+    saved = [(Setup.from_dict(item["setup"]),
+              Resolution(**item["resolution"]) if item.get("resolution") else None)
+             for item in open_setups if item["setup"]["symbol"] == symbol]
+    out_signals, out_setups, out_resolutions, wallet_events = [], [], [], []
+    signals, symbol_reasons = generate_signals(symbol, bars, from_ms, to_ms, strategy_ids)
+    reasons = symbol_reasons
+    processed_to = min(to_ms, bars.end_ms - MINUTE_MS)
+    sigma = ForwardSigma(bars, FORWARD_PARAMS)
+    tick = infer_tick(bars)
+    nc = next_compromised(bars)
+    new = []
+    no_sigma = 0
+    for signal in signals:
+        setups = build_setup(signal, bars, sigma, tick=tick, next_comp=nc)
+        if setups == NO_SIGMA:
+            no_sigma += 1
+        out_signals.append(signal.to_dict())
+        for setup in setups or ():
+            out_setups.append(setup.to_dict())
+            if setup.status == "T":
+                new.append((setup, None))
+                wallet_events.append({"type": "open", "ms": setup.entry_ms, "setup": setup.to_dict()})
+    if no_sigma:  # never another model: the signal stands, no setup is emitted (P16)
+        symbol_reasons["sigma"] = (f"no_sigma: {no_sigma} signal(s) before {FORWARD_PARAMS.sigma_model} "
+                                   "history exists (60 days of completed windows)")
+    resolutions = {}
+    for setup, previous in saved + new:
+        if setup.entry_ms < bars.start_ms:
+            continue  # its bars are not in this request; keep the previous resolution
+        resolution = resolve_setup(setup, bars, funding, previous)
+        if (not funding_ok and resolution.final and not (previous is not None and previous.final)
+                and crosses_funding_time(setup.entry_ms, resolution.exit_ms)):
+            resolution = Resolution(setup.setup_id, "open", resolved_through_ms=resolution.resolved_through_ms,
+                                    label_leverage=resolution.label_leverage, wallet_ur=resolution.wallet_ur)
+        out_resolutions.append(resolution.to_dict())
+        resolutions[setup.setup_id] = resolution.to_dict()
+        if resolution.final and not (previous is not None and previous.final):
+            wallet_events.append({"type": "close", "ms": resolution.exit_ms, "setup_id": setup.setup_id,
+                                  "outcome": resolution.status, "exit_ref_price": resolution.exit_ref_price})
+    for calc_time, rate, _ in zip(funding.calc_time_ms, funding.rate, funding.interval_hours):
+        mark = bars.mark_open[(calc_time - bars.start_ms) // MINUTE_MS]
+        if mark > 0:
+            wallet_events.append({"type": "funding", "ms": calc_time, "symbol": symbol, "rate": str(rate),
+                                  "mark": mark})
+    # Liquidation prices depend on geometry/config, never on quantity or available balance.
+    candidates = {key: dict(value) for key, value in (positions or {}).items()
+                  if value["symbol"] == symbol}
+    for setup, _ in new:
+        record = setup.to_dict()
+        terms = position_terms(record, wallet_config)
+        if terms is not None and setup.setup_id not in candidates:
+            candidates[setup.setup_id] = {"symbol": symbol, "side": setup.side,
+                                         "entry_ms": setup.entry_ms,
+                                         "liquidation_price": str(terms[2])}
+    wallet_events += liquidation_events(candidates, bars, resolutions, wallet_config)
+    events = [{**event, "symbol": symbol, "sequence": sequence}
+              for sequence, event in enumerate(wallet_events)]
+    events.sort(key=lambda event: (event["ms"], event["symbol"], event["sequence"]))
+    return {"symbol": symbol, "signals": out_signals, "setups": out_setups,
+            "resolutions": out_resolutions, "events": events, "reasons": reasons,
+            "processed_to_ms": processed_to, "funding_available": funding_ok}
+
+
 def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setups=(), wallet_state=None,
              wallet_config: WalletConfig = WalletConfig()) -> dict:
-    """``symbols``: [{"symbol", "rows", "funding"?}]; ``open_setups``: [{"setup": dict, "resolution": dict|None}]."""
-    saved = [(Setup.from_dict(item["setup"]),
-              Resolution(**item["resolution"]) if item.get("resolution") else None) for item in open_setups]
+    """Compose per-symbol market evaluation and the pure portfolio wallet step."""
     state = wallet_state or initial_state(wallet_config)
     out_signals, out_setups, out_resolutions, reasons, wallet_events = [], [], [], {}, []
-    processed_to = {}
-    funding_unavailable = []
-    liquidation_inputs = []
+    processed_to, funding_unavailable = {}, []
     for item in symbols:
+        result = market_evaluate(item["symbol"], item["rows"], item.get("funding"), open_setups,
+                                 strategy_ids=strategy_ids, from_ms=from_ms, to_ms=to_ms,
+                                 funding_available=item.get("funding_available", True),
+                                 positions=state["positions"], wallet_config=wallet_config)
         symbol = item["symbol"]
-        bars = bars_from_collector_rows(symbol, item["rows"])
-        apply_funding_marks(bars, item.get("funding"))  # settlement marks from the funding history, when given
-        funding = _funding(bars, item.get("funding"))
-        funding_ok = item.get("funding_available", True)
-        if not funding_ok:
+        out_signals.extend(result["signals"])
+        out_setups.extend(result["setups"])
+        out_resolutions.extend(result["resolutions"])
+        reasons[symbol] = result["reasons"]
+        processed_to[symbol] = result["processed_to_ms"]
+        if not result["funding_available"]:
             funding_unavailable.append(symbol)
-        signals, symbol_reasons = generate_signals(symbol, bars, from_ms, to_ms, strategy_ids)
-        reasons[symbol] = symbol_reasons
-        processed_to[symbol] = min(to_ms, bars.end_ms - MINUTE_MS)
-        sigma = ForwardSigma(bars, FORWARD_PARAMS)
-        tick = infer_tick(bars)
-        nc = next_compromised(bars)
-        new = []
-        no_sigma = 0
-        for signal in signals:
-            setups = build_setup(signal, bars, sigma, tick=tick, next_comp=nc)
-            if setups == NO_SIGMA:
-                no_sigma += 1
-            out_signals.append(signal.to_dict())
-            for setup in setups or ():
-                out_setups.append(setup.to_dict())
-                if setup.status == "T":
-                    new.append((setup, None))
-                    wallet_events.append({"type": "open", "ms": setup.entry_ms, "setup": setup.to_dict()})
-        if no_sigma:  # never another model: the signal stands, no setup is emitted (P16)
-            symbol_reasons["sigma"] = (f"no_sigma: {no_sigma} signal(s) before {FORWARD_PARAMS.sigma_model} "
-                                       "history exists (60 days of completed windows)")
-        resolutions = {}
-        for setup, previous in [pair for pair in saved if pair[0].symbol == symbol] + new:
-            if setup.entry_ms < bars.start_ms:
-                continue  # its bars are not in this request; keep the previous resolution
-            resolution = resolve_setup(setup, bars, funding, previous)
-            if (not funding_ok and resolution.final and not (previous is not None and previous.final)
-                    and crosses_funding_time(setup.entry_ms, resolution.exit_ms)):
-                resolution = Resolution(setup.setup_id, "open", resolved_through_ms=resolution.resolved_through_ms,
-                                        label_leverage=resolution.label_leverage, wallet_ur=resolution.wallet_ur)
-            out_resolutions.append(resolution.to_dict())
-            resolutions[setup.setup_id] = resolution.to_dict()
-            if resolution.final and not (previous is not None and previous.final):
-                wallet_events.append({"type": "close", "ms": resolution.exit_ms, "setup_id": setup.setup_id,
-                                      "outcome": resolution.status, "exit_ref_price": resolution.exit_ref_price})
-        for calc_time, rate, _ in zip(funding.calc_time_ms, funding.rate, funding.interval_hours):
-            mark = bars.mark_open[(calc_time - bars.start_ms) // MINUTE_MS]
-            if mark > 0:
-                wallet_events.append({"type": "funding", "ms": calc_time, "symbol": symbol, "rate": str(rate),
-                                      "mark": mark})
-        liquidation_inputs.append((bars, resolutions))
-    # Liquidation needs the positions as they will be after this step's opens: price them from the
-    # setups (the wallet's leverage and liquidation price do not depend on the size).
-    opened, _ = step(state, [ev for ev in wallet_events if ev["type"] == "open"], wallet_config)
-    positions = {**state["positions"], **opened["positions"]}
-    for bars, resolutions in liquidation_inputs:
-        wallet_events += liquidation_events(positions, bars, resolutions, wallet_config)
-    new_state, ledger = step(state, wallet_events, wallet_config)
+        # Preserve the old stable tie order, including caller symbol order, for /evaluate.
+        for event in sorted(result["events"], key=lambda event: event["sequence"]):
+            wallet_events.append({**event, "compatibility_order": len(wallet_events)})
+    new_state, ledger = wallet_step(state, wallet_events, wallet_config)
     return {"schema_version": 1, "versions": dict(VERSIONS), "params_hash": FORWARD_PARAMS.identity(),
             "wallet_config": wallet_config.to_record(), "assumptions": [*ASSUMPTIONS, *wallet_config.assumptions],
             "processed_to_ms": processed_to, "funding_unavailable": funding_unavailable, "signals": out_signals, "setups": out_setups,

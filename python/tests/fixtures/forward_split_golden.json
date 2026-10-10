@@ -1,0 +1,16 @@
+{
+  "provenance": "Derived by reading the pre-P27 evaluate, outcomes and wallet paths before executing any tests; fixed synthetic pending setup and existing-position funding, with no generated signals.",
+  "symbol": "BTCUSDT",
+  "start_ms": 1735689600000,
+  "row_count": 3,
+  "entry_offset_minutes": 5,
+  "expected": {
+    "signals": [],
+    "setups": [],
+    "processed_to_ms": {"BTCUSDT": 1735689720000},
+    "funding_unavailable": [],
+    "reasons": {"BTCUSDT": {}},
+    "resolutions": [{"setup_id": "dc9adf6fb71538b0f0b85344107e4c4ed86918277f76e7f2bfc9d99e7f1e6492", "status": "pending", "resolved_through_ms": null, "exit_offset": null, "exit_ms": null, "exit_ref_price": null, "net_ur": null, "cost_ur": null, "fund_ur": null, "optimistic": null, "label_leverage": null, "wallet_ur": null}],
+    "ledger": [{"seq": 1, "ms": 1735689660000, "type": "funding", "amount_e8": -11000000, "balance_e8": 9989000000, "assumptions": ["flat-tier"], "setup_id": "held", "symbol": "BTCUSDT", "rate": "1/1000"}]
+  }
+}

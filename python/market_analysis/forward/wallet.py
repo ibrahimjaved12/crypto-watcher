@@ -211,3 +211,29 @@ def step(state: dict, events, config: WalletConfig = WalletConfig()) -> tuple[di
         else:
             raise ValueError(f"unknown wallet event {kind!r}")
     return state, ledger
+
+
+def wallet_step(state: dict, events, config: WalletConfig = WalletConfig()) -> tuple[dict, list]:
+    """Pure portfolio composition of ordered per-symbol market events.
+
+    Merge transport records by (ms, symbol, sequence), then execute the existing wallet
+    settlement priority. The optional compatibility_order preserves /evaluate's historical
+    stable ties for callers whose symbol list is not alphabetical.
+    """
+    merged = sorted(events, key=lambda event: (event["ms"], event["symbol"], event["sequence"]))
+    identities = [(event["symbol"], event["sequence"]) for event in merged]
+    if len(set(identities)) != len(identities):
+        raise ValueError("duplicate per-symbol event sequence")
+    if any("compatibility_order" in event for event in merged):
+        orders = [event.get("compatibility_order") for event in merged]
+        if any(type(order) is not int for order in orders) or len(set(orders)) != len(orders):
+            raise ValueError("compatibility_order must be present and unique on every event")
+        merged.sort(key=lambda event: event["compatibility_order"])
+    # Historically opens have no symbol sort key; the symbol lives inside their setup.
+    execution = [{key: value for key, value in event.items()
+                  if not (event["type"] == "open" and key == "symbol")} for event in merged]
+    opened, _ = step(state, [event for event in execution if event["type"] == "open"], config)
+    eligible = state["positions"].keys() | opened["positions"].keys()
+    execution = [event for event in execution
+                 if event["type"] != "liquidation" or event["setup_id"] in eligible]
+    return step(state, execution, config)

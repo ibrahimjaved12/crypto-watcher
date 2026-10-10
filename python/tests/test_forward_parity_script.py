@@ -114,5 +114,60 @@ class ParityReportTests(unittest.TestCase):
             canonical_bytes(original)
 
 
+class SettlementResolutionTests(unittest.TestCase):
+    def test_rule_v_uses_the_same_settlement_mark_as_evaluate(self):
+        from market_analysis.forward.bars_adapter import bars_from_collector_rows, apply_funding_marks
+        from market_analysis.forward.evaluate import evaluate, _funding
+        from market_analysis.forward.parity import reference_setup
+        from market_analysis.benchmark.scan import label_trade
+        from market_analysis.forward.setups import setup_id
+        from fractions import Fraction
+        from dataclasses import replace
+
+        script = load_script()
+        start = script.lake.month_bounds_ms("2025-05")[0]
+        rows = [{"open_time_ms": start + i * script.MINUTE, "open": 100.0, "high": 100.01,
+                 "low": 99.99, "close": 100.0, "transport": "rest"} for i in range(120)]
+        events = [{"calc_time_ms": start + 60 * script.MINUTE, "rate": "0.001", "mark": "110"}]
+        item = {"symbol": "BTCUSDT", "rows": rows, "funding": events}
+        geometry = setup_dict(signal_ms=start + 45 * script.MINUTE, p0=100 * 10**8, d_ticks=200)
+        reference = reference_row(geometry, d_ticks=200)
+        setup = reference_setup(geometry, reference, lambda _: TICK, script.FORWARD_PARAMS, "BTCUSDT")
+        setup = replace(setup, setup_id=setup_id(setup.signal_id, Fraction(2), Fraction(2), setup.params_hash))
+        geometry["setup_id"] = setup.setup_id
+        engine = evaluate([item], strategy_ids=[], from_ms=start, to_ms=start + 119 * script.MINUTE,
+                          open_setups=[{"setup": setup.to_dict()}])
+        bars = bars_from_collector_rows("BTCUSDT", rows)
+        funding = _funding(bars, events)
+        unmarked = script.parity.outcomes.resolve_setup(setup, bars, funding)
+        apply_funding_marks(bars, events)
+        expected = script.parity.outcomes.resolve_setup(setup, bars, funding)
+        self.assertEqual(engine["resolutions"], [expected.to_dict()])
+        self.assertNotEqual(unmarked.net_ur, expected.net_ur)
+        label = label_trade(bars, funding, script.FORWARD_PARAMS.cost_model, tick=TICK,
+                            entry_index=45, side=1, stop_price=setup.stop,
+                            target_prices=[setup.target], window_minutes=setup.window_minutes)
+        reference.cells = (label.cells[0], label.cells[0])
+        ref = Mock(return_value=reference)
+        ref.robust = SimpleNamespace(level_at=lambda *a: 500, multiplier=lambda *a: 1_000_000)
+        ref.tick_at = lambda *a: TICK
+        with TemporaryDirectory() as directory, ExitStack() as patches:
+            for target, name, value in (
+                (script.xr, "_download_symbol_bars", None), (script, "load_symbol_bars", bars),
+                (script, "load_symbol_funding", funding), (script, "infer_tick", TICK),
+                (script.lab, "row_factory", ref), (script, "request", {"symbols": [item]}),
+                (script, "run_forward", {**engine, "setups": [geometry]}),
+                (script, "published_cross_check", {"revision": None}),
+            ):
+                patches.enter_context(patch.object(target, name, return_value=value))
+            args = script.parse_args(["--symbol", "BTCUSDT", "--month", "2025-05"])
+            checkout = Mock(path=Path(directory) / "repo")
+            script.run(args, checkout, Mock(), Path(directory) / "data", MagicMock())
+            [path] = checkout.commit_and_push.call_args.args[0]
+            stats = json.loads((checkout.path / path).read_text())["stats"]
+            self.assertTrue(stats["verdict"]["v_reference_geometry_agrees"])
+            self.assertEqual(stats["reference_geometry_status_exit_net_ok"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

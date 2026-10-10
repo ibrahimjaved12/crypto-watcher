@@ -15,6 +15,8 @@ from .api_models import (
     AnalysisRequest,
     CompletedCandleSeriesRequest,
     ForwardEvaluateRequest,
+    ForwardMarketRequest,
+    ForwardWalletRequest,
     ForwardTrendRequest,
     MovementBoundaryRequest,
     MovementClassificationRequest,
@@ -25,7 +27,8 @@ from .api_models import (
     TechnicalAnalysisRequest,
 )
 from .forward.bars_adapter import CollectorRowError
-from .forward.evaluate import evaluate as forward_evaluate
+from .forward.evaluate import evaluate as forward_evaluate, market_evaluate
+from .forward.wallet import WalletConfig, initial_state, wallet_step
 from .forward.trend_track import evaluate as forward_trend
 from .movement_service import MovementBoundaryService
 from .service import analyze_request
@@ -161,6 +164,25 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
             raise HTTPException(422, f"Invalid collector rows: {error.code}") from None
         except ValueError:
             raise HTTPException(409, "Forward evaluation could not be completed") from None
+
+    @app.post("/v1/forward/market_evaluate", dependencies=[Depends(authorize)])
+    def forward_market_route(body: ForwardMarketRequest):
+        try:
+            return market_evaluate(**body.evaluate_input())
+        except CollectorRowError as error:
+            raise HTTPException(422, f"Invalid collector rows: {error.code}") from None
+        except (ValueError, KeyError, TypeError, ZeroDivisionError):
+            raise HTTPException(409, "Forward market evaluation could not be completed") from None
+
+    @app.post("/v1/forward/wallet_step", dependencies=[Depends(authorize)])
+    def forward_wallet_route(body: ForwardWalletRequest):
+        try:
+            config = body.config.config() if body.config else WalletConfig()
+            state, ledger = wallet_step(body.state or initial_state(config),
+                                        [event.model_dump(exclude_none=True) for event in body.events], config)
+            return {"schema_version": 1, "wallet_state": state, "ledger": ledger}
+        except (ValueError, KeyError, TypeError, ZeroDivisionError):
+            raise HTTPException(409, "Forward wallet step could not be completed") from None
 
     @app.post("/v1/forward/trend", dependencies=[Depends(authorize)])
     def forward_trend_route(body: ForwardTrendRequest):
