@@ -212,6 +212,37 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
 }
 
 /**
+ * Reads one symbol's stored 1m history and, when `backfill` is true, repairs it first from the
+ * ranges `backfillRanges` derives (leading range and interior gaps). A failure stops this symbol's
+ * repair and is returned (the next run resumes from what is stored); pages recorded before it are
+ * kept and re-read. Used by the hourly run and by `forward-run --backfill-only`.
+ */
+export async function repairSymbolHistory(
+  deps: Pick<ForwardDeps, "readMinutes" | "backfillMinutes">,
+  symbol: string,
+  sinceMs: number,
+  boundaryMs: number,
+  backfill: boolean,
+): Promise<{ series: ForwardMinuteRow[]; error: string | null }> {
+  let series = await deps.readMinutes(symbol, sinceMs, boundaryMs);
+  const ranges = deps.backfillMinutes && backfill
+    ? backfillRanges(series, sinceMs, boundaryMs - BACKFILL_DAYS * DAY_MS, boundaryMs)
+    : [];
+  let error: string | null = null;
+  if (ranges.length && deps.backfillMinutes) {
+    try {
+      for (const range of ranges.slice(0, MAX_BACKFILL_RANGES)) {
+        await deps.backfillMinutes(symbol, range.startMs, range.endMs);
+      }
+    } catch (failure) {
+      error = `${symbol}: ${failure instanceof Error ? failure.message : String(failure)}`.slice(0, 200);
+    }
+    series = await deps.readMinutes(symbol, sinceMs, boundaryMs);
+  }
+  return { series, error };
+}
+
+/**
  * Ranges [startMs, endMs) to backfill, oldest first: from `leadingFromMs` to the first stored minute
  * when the history starts after `requiredFromMs` (or is empty), then every interior gap. Minutes
  * after the last stored one are left to the live collector (staleness reports them). Deriving the
