@@ -35,6 +35,7 @@ from market_analysis.benchmark import experiment_run as er  # noqa: E402
 from market_analysis.benchmark.canonical import canonical_bytes, content_hash as canonical_hash  # noqa: E402
 from market_analysis.benchmark.hidden_guard import HiddenStretchLocked  # noqa: E402
 from market_analysis.benchmark.labels import LabelParams  # noqa: E402
+from market_analysis.benchmark.robust_sigma import CANDIDATE_MODELS  # noqa: E402
 from market_analysis.benchmark.segments import segment_months  # noqa: E402
 
 NOW_UTC = xr.NOW_UTC  # the only wall-clock read (at import of experiment_run)
@@ -145,7 +146,8 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
             progress.phase("snapshot", symbols=len(labelled), months=len(segment_months(args.segment)))
             directory = next(iter(label_dirs[model].values()))
             snapshots[model] = _quiet(er.data_snapshot, directory, segment_months(args.segment),
-                                      LabelParams(sigma_model=model), symbols=labelled)
+                                      LabelParams(sigma_model=model, allow_candidate=model in CANDIDATE_MODELS),
+                                      symbols=labelled)
     if snapshots:
         snapshot = snapshots["ewma"] if set(snapshots) == {"ewma"} else canonical_hash(snapshots)
     params = LabelParams()
@@ -185,7 +187,8 @@ def parse_args(argv=None):
     parser.add_argument("--label-revision", type=int, default=1)
     parser.add_argument("--data-revision", type=int, default=1)
     parser.add_argument("--symbols", default=",".join(lake.SYMBOLS))
-    parser.add_argument("--sigma-models", default=",".join(cal.SIGMA_MODELS), help="subset of ewma,ewma-seasonal")
+    parser.add_argument("--sigma-models", default=",".join(cal.DEFAULT_SIGMA_MODELS),
+                        help="subset of ewma,ewma-seasonal,ewma-robust,ewma-robust-hcal,ewma-robust-ftcal (candidate)")
     parser.add_argument("--seasonal-label-revision", type=int, default=1, help="lb2 label release revision")
     parser.add_argument("--robust-label-revision", type=int, default=1,
                         help="lb3 (ewma-robust) and lb3h (ewma-robust-hcal) label release revision")

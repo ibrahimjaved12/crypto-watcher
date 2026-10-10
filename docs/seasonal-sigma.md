@@ -143,3 +143,29 @@ z is heavy-tailed, so a squared-return EWMA overstates the typical scale. Two mo
 - **Audit:** reports all four models. Each model's barrier block adds the median, min and max
   implied sigma ratio (monitoring-step theory, both sides; the label-step value is traced), so the
   residual can be read. P16 adopted `ewma-robust-hcal` as the forward harness sigma model.
+
+## Candidate: `ewma-robust-ftcal` (audit only)
+
+`ewma-robust` plus a path-based horizon multiplier, evaluated in the calibration audit **only**. It is a
+candidate, not a model: `LabelParams` refuses it unless `allow_candidate=True` (the flag is not part of
+any record or identity, so existing label revisions and params identities are unchanged), experiments
+do not list it, and the forward harness rejects it (`FORWARD_PARAMS` stays `ewma-robust-hcal`).
+
+- **Why.** The audit v2 shows `ewma-robust-hcal` over-correcting at 240 m (median implied sigma ratio
+  about 1.12, sigma too small). `horizon_calibration` fits c_h on the MEDIAN terminal `|ln(open[e+h]/open[e])|`,
+  which matches a Gaussian terminal median but not barrier hits, which depend on the path maximum and the tails.
+- **c_h.** For every completed past window (same eligibility as hcal, plus every 1-minute bar of the window
+  present and uncompromised) `M_e = max over the window's 1m bars of max(ln(high/open_e), -ln(low/open_e))`,
+  `ratio_e = M_e / sigma_robust_h(e)`; `c_h(t) = median(ratio_e) / median(sup_{0<=s<=1}|W_s|)`, clipped to
+  [0.5, 2], `None` until the first counted window is 60 days old. Expanding and point in time; same fixed point
+  (`HCAL_SCALE`) and tie rules as hcal. The Brownian constant (1.148973...) is solved numerically from
+  `P(sup|W| <= x) = (4/pi) sum (-1)^n/(2n+1) exp(-(2n+1)^2 pi^2/(8x^2))` by bisection to 1e-12
+  (`volatility.FTCAL_SUP_ABS_MEDIAN`), with a series test and a seeded 2e5-path simulation test.
+- **Audit.** Name it in `sigma_models` (not in the default set). Its barrier part needs `lb3f-` label
+  releases (`label-build.yml`, sigma model `ewma-robust-ftcal`). The report gets `horizons_robust_ftcal` and
+  `barriers_robust_ftcal` with the same fields and the **unchanged** v2 pass rule and bands.
+- **Monitoring reference (descriptive).** Every barrier section now also reports the implied sigma ratio under
+  CONTINUOUS monitoring next to the 1-minute-step widened (monitoring) and label-step widened ones. A 1-minute
+  high/low already contains the intra-minute extremes, so monitoring is nearly continuous and the BGK widening
+  `0.5826 sqrt(1/h)` may over-correct. The judged criterion (b) is still the **monitoring-step** ratio; the
+  continuous one is not judged. Which to judge is an owner decision after reading the numbers.

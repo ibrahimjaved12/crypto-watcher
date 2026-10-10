@@ -32,9 +32,9 @@ on:
         default: "1"
         required: true
       sigma_model:
-        description: "Sigma model: ewma (lb1), ewma-seasonal (lb2), ewma-robust (lb3) or ewma-robust-hcal (lb3h)"
+        description: "Sigma model: ewma (lb1), ewma-seasonal (lb2), ewma-robust (lb3), ewma-robust-hcal (lb3h) or the audit-only candidate ewma-robust-ftcal (lb3f)"
         type: choice
-        options: [ewma, ewma-seasonal, ewma-robust, ewma-robust-hcal]
+        options: [ewma, ewma-seasonal, ewma-robust, ewma-robust-hcal, ewma-robust-ftcal]
         default: ewma
       publish:
         description: Publish releases (false = read private inputs and build only)

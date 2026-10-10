@@ -32,11 +32,11 @@ on:
         type: string
         default: "1"
       sigma_models:
-        description: "Comma-separated sigma models (subset of ewma,ewma-seasonal,ewma-robust,ewma-robust-hcal)"
+        description: "Comma-separated sigma models (subset of ewma,ewma-seasonal,ewma-robust,ewma-robust-hcal,ewma-robust-ftcal; ftcal is a CANDIDATE, audit only, needs lb3f label releases for its barrier part)"
         type: string
         default: "ewma,ewma-seasonal,ewma-robust,ewma-robust-hcal"
       robust_label_revision:
-        description: "lb3 / lb3h (labels-v3, ewma-robust / ewma-robust-hcal) release revision"
+        description: "lb3 / lb3h / lb3f (labels-v3, ewma-robust / ewma-robust-hcal / ewma-robust-ftcal) release revision"
         type: string
         default: "1"
       seasonal_label_revision:

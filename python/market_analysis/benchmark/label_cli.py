@@ -20,7 +20,7 @@ import sys
 from .. import data_lake
 from .bars import TICK_RULE, BarSeries, infer_tick, off_tick_count, read_bars_csv
 from .funding import FundingSeries, read_funding_csv
-from .labels import SIGMA_MODELS, LabelParams, build_labels, write_label_csv
+from .labels import CANDIDATE_SIGMA_MODELS, SIGMA_MODELS, LabelParams, build_labels, write_label_csv
 
 _BLOCK = 1 << 20
 
@@ -138,12 +138,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--last-month", required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--summary", type=Path, help="append a markdown summary (aggregate counts only)")
-    parser.add_argument("--sigma-model", choices=sorted(SIGMA_MODELS), default="ewma",
+    parser.add_argument("--sigma-model", choices=sorted((*SIGMA_MODELS, *CANDIDATE_SIGMA_MODELS)), default="ewma",
                         help="ewma: labels-v1 (lb1); ewma-seasonal: labels-v2 (lb2); ewma-robust / ewma-robust-hcal: labels-v3 (lb3 / lb3h)")
     args = parser.parse_args(argv)
     try:
         manifest = run(args.symbol, args.bars_dir, args.first_month, args.last_month, args.out_dir,
-                       LabelParams(sigma_model=args.sigma_model))
+                       LabelParams(sigma_model=args.sigma_model,
+                                   allow_candidate=args.sigma_model in CANDIDATE_SIGMA_MODELS))
     except (OSError, ValueError) as error:
         parser.error(str(error))
     if args.summary:

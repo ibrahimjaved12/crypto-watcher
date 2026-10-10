@@ -81,7 +81,7 @@ from .hidden_guard import require_months
 from .label_store import Geometry, load_geometry_columns
 from .labels import LabelParams
 from .market_data import load_symbol_bars
-from .robust_sigma import ROBUST_MODELS, RobustSigma
+from .robust_sigma import CANDIDATE_MODELS, FTCAL_MODEL, ROBUST_MODELS, RobustSigma
 from .segments import SEGMENTS, segment_bounds_ms, segment_months
 from .volatility import (BLOCK_MINUTES, BLOCK_MS, BLOCKS_PER_DAY, DAY_MS, VAR_SCALE, build_variance,
                          build_variance_deseasonalised, horizon_sigma, horizon_sigma_seasonal, seasonal_factors)
@@ -98,10 +98,14 @@ ROBUST_BAND = (0.9, 1.1)
 ROBUST_HOUR_BAND = (0.8, 1.2)
 MAD_TO_SD = 1.4826
 MEAN_ABS_NORMAL = 0.797885       # E|Z| = sqrt(2 / pi)
-SIGMA_MODELS = ("ewma", "ewma-seasonal", "ewma-robust", "ewma-robust-hcal")
+# The default audit set; ``ewma-robust-ftcal`` is a CANDIDATE (path-extreme horizon calibration) that is
+# audited only when named explicitly and is never used by labels, experiments or the forward harness.
+DEFAULT_SIGMA_MODELS = ("ewma", "ewma-seasonal", "ewma-robust", "ewma-robust-hcal")
+SIGMA_MODELS = (*DEFAULT_SIGMA_MODELS, *CANDIDATE_MODELS)
 MODEL_KEYS = {"ewma": ("horizons", "barriers"), "ewma-seasonal": ("horizons_seasonal", "barriers_seasonal"),
               "ewma-robust": ("horizons_robust", "barriers_robust"),
-              "ewma-robust-hcal": ("horizons_robust_hcal", "barriers_robust_hcal")}
+              "ewma-robust-hcal": ("horizons_robust_hcal", "barriers_robust_hcal"),
+              FTCAL_MODEL: ("horizons_robust_ftcal", "barriers_robust_ftcal")}
 # Barrier expiry cell tolerance: |observed - theory| <= max(REL * theory, ABS). The 10 % relative band
 # alone is about 0.1-0.3 percentage points on low-expiry cells (k 1, rr 1), below sampling noise and
 # the discrete-monitoring effect; the 2 percentage point floor keeps a calibrated sigma from failing there.
@@ -361,7 +365,8 @@ def audit_series(series: BarSeries, first_ms: int, end_ms: int, *, horizons=HORI
         key = MODEL_KEYS[model][0]
         out[key] = {}
         factors = seasonal_factors(series) if model == "ewma-seasonal" else None
-        robust = RobustSigma(series, hcal=model == "ewma-robust-hcal") if model in ROBUST_MODELS else None
+        robust = (RobustSigma(series, hcal=model == "ewma-robust-hcal", ftcal=model == FTCAL_MODEL)
+                  if model in ROBUST_MODELS or model in CANDIDATE_MODELS else None)
         for half_life in half_lives:
             if robust is not None:
                 variance = robust.levels(half_life)
@@ -538,6 +543,12 @@ def barrier_summary(columns: dict, params: LabelParams) -> dict:
                 row["sides"]["both"]["implied_sigma_ratio_monitoring"] for row in rows),
             "implied_sigma_ratio_widened": _median_summary(
                 row["sides"]["both"]["implied_sigma_ratio_widened"] for row in rows),
+            # Descriptive reference (P-ftcal): the 1-minute high/low already contains the intra-minute
+            # extremes, so monitoring is nearly continuous and the BGK 1-minute widening may over-correct.
+            # JUDGED criterion (b) is still the monitoring-step ratio above; this field is NOT judged.
+            "implied_sigma_ratio_continuous": _median_summary(
+                row["sides"]["both"]["implied_sigma_ratio_continuous"] for row in rows),
+            "judged_implied_ratio": "monitoring",
             "time_limit_multiple": horizons, "monitoring_step_min": MONITORING_STEP_MIN,
             "label_step_min": label_step,
             "discrete_widening_monitoring_sigma_h": widening,
@@ -587,7 +598,8 @@ def audit_symbol(bars_dir, label_dir, symbol: str, segment: str, *, horizons=HOR
     directories = {"ewma": label_dir, "ewma-seasonal": seasonal_label_dir, **(label_dirs or {})}
     for model, directory in directories.items():
         if model in models and directory is not None and BARRIER_HORIZON in tuple(horizons):
-            model_params = params if params.sigma_model == model else replace(params, schema=None, sigma_model=model)
+            model_params = (params if params.sigma_model == model else
+                            replace(params, schema=None, sigma_model=model, allow_candidate=model in CANDIDATE_MODELS))
             columns = load_geometry_columns(directory, symbol, months, barrier_geometries(symbol, model_params),
                                             model_params, segment=segment)
             key = MODEL_KEYS[model][1]
@@ -757,6 +769,13 @@ def markdown(report: dict) -> str:
                             _cell(theory["expiry_widened"]), _cell(item["implied_sigma_ratio_widened"]),
                             ", ".join(f"{code} {count}" for code, count in item["non_trades"].items()) or "none",
                             str(item["purged"])]) + " |")
+                continuous = barriers.get("implied_sigma_ratio_continuous")
+                if continuous is not None:
+                    lines += [f"Implied sigma ratio under CONTINUOUS monitoring ({barriers.get('sigma_model', model)}, "
+                              f"both sides, descriptive, NOT judged; the judged ratio uses the "
+                              f"{barriers.get('judged_implied_ratio', 'monitoring')}-step widening): median "
+                              f"{_cell(continuous['median'])}, min {_cell(continuous['min'])}, max "
+                              f"{_cell(continuous['max'])} over {continuous['cells']} (k, rr) cells.", ""]
                 ratio = barriers.get("implied_sigma_ratio_monitoring")
                 if ratio is not None:
                     lines += [f"Implied sigma ratio ({barriers.get('sigma_model', model)}, monitoring-step theory, both "
