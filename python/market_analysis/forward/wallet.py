@@ -187,7 +187,9 @@ def step(state: dict, events, config: WalletConfig = WalletConfig()) -> tuple[di
             base = {"setup_id": setup_id, "symbol": position["symbol"]}
             if kind == "liquidation":
                 lp = exact_from_str(position["liquidation_price"])
-                loss = min(costs.liquidation_loss(side, fill, lp, config.model(), leverage=position["leverage"]) * qty,
+                # Cap once at the stored, rounded-up isolated margin. A per-unit
+                # leverage cap would use unrounded margin and can leave 1 e8 behind.
+                loss = min(costs.liquidation_loss(side, fill, lp, config.model()) * qty,
                            Fraction(position["margin_e8"]))
                 entry("liquidation", ms, -_round(loss), **base)
             else:

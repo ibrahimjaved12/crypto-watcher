@@ -111,6 +111,36 @@ class WalletTests(unittest.TestCase):
         self.assertEqual(state["used_margin_e8"], 0)
         reconcile(self, state, [first, ledger])
 
+    def test_liquidation_uses_the_reserved_margin_for_both_sides(self):
+        for side in (1, -1):
+            with self.subTest(side=side):
+                state, first = opened(wl.initial_state(), setup(side=side))
+                position = state["positions"]["s1"]
+                margin = exact_from_str(position["notional_e8"]) / position["leverage"]
+                self.assertNotEqual(margin.denominator, 1)  # reservation rounds up
+                state, ledger = wl.step(state, [{"type": "liquidation", "ms": START + MINUTE,
+                                                 "setup_id": "s1"}])
+                self.assertEqual(ledger[0]["amount_e8"], -position["margin_e8"])
+                self.assertEqual((state["positions"], state["used_margin_e8"]), ({}, 0))
+                reconcile(self, state, [first, ledger])
+
+    def test_liquidation_preserves_losses_below_the_reserved_margin(self):
+        config = wl.WalletConfig(mmr=Fraction(1, 50))
+        for side in (1, -1):
+            with self.subTest(side=side):
+                state, first = opened(wl.initial_state(config), setup(side=side), config=config)
+                position = state["positions"]["s1"]
+                fill = exact_from_str(position["entry_fill"])
+                lp = exact_from_str(position["liquidation_price"])
+                qty = exact_from_str(position["qty"])
+                expected = round(qty * (side * (fill - lp) + lp * costs.COST_MODEL_V1.liquidation_fee_rate))
+                self.assertLess(expected, position["margin_e8"])
+                state, ledger = wl.step(state, [{"type": "liquidation", "ms": START + MINUTE,
+                                                 "setup_id": "s1"}], config)
+                self.assertEqual(ledger[0]["amount_e8"], -expected)
+                self.assertEqual((state["positions"], state["used_margin_e8"]), ({}, 0))
+                reconcile(self, state, [first, ledger], config)
+
 
 class FundingAvailabilityTests(unittest.TestCase):
     def test_windows_containing_a_possible_funding_time(self):
