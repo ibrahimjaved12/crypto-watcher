@@ -1,4 +1,4 @@
-"""Focused explicit-#71 fixtures for EXP-75-05. GitHub Verify runs these."""
+"""Focused explicit-#71 fixtures for EXP-75-05. GitHub CI runs these."""
 
 from dataclasses import replace
 from decimal import Decimal
