@@ -42,6 +42,7 @@ from market_analysis.forward import parity  # noqa: E402
 from label_build import label_tag  # noqa: E402
 from market_analysis.forward.bars_adapter import apply_funding_marks, bars_from_collector_rows  # noqa: E402
 from market_analysis.forward.evaluate import _funding, evaluate  # noqa: E402
+from market_analysis.forward.sigma_state import SigmaState, StateSigma, seed_state
 from market_analysis.forward.setups import FORWARD_PARAMS  # noqa: E402
 from market_analysis.forward.signals import FORWARD_STRATEGIES  # noqa: E402
 
@@ -88,7 +89,11 @@ def request(symbol, bars, funding, first_ms, end_ms, from_ms, to_ms) -> dict:
 
 
 def run_forward(call: dict) -> dict:
-    return evaluate(call["symbols"], strategy_ids=call["strategy_ids"], from_ms=call["from_ms"], to_ms=call["to_ms"])
+    options = {}
+    if call.get("sigma_seed") is not None:
+        options["sigma_factory"] = lambda bars, params: StateSigma(
+            SigmaState.from_record(call["sigma_seed"], symbol=bars.symbol, params=params), bars, params)
+    return evaluate(call["symbols"], strategy_ids=call["strategy_ids"], from_ms=call["from_ms"], to_ms=call["to_ms"], **options)
 
 
 def report_record(value):
@@ -106,18 +111,23 @@ def report_record(value):
     return value
 
 
-def slice_check(symbol, bars, funding, month_start_ms: int) -> dict:
+def slice_check(symbol, bars, funding, month_start_ms: int, sigma_seed=None) -> dict:
     """One call over a 3-day slice versus 72 hourly calls chained through processed_to_ms."""
     start = month_start_ms + 10 * DAY
     end = start + SLICE_HOURS * HOUR
     first, tail_end = start - REQUEST_DAYS * DAY, end + (TAIL_MINUTES + 1) * MINUTE
-    single = run_forward(request(symbol, bars, funding, first, tail_end, start, end))
+    def seeded_request(begin, finish):
+        call = request(symbol, bars, funding, first, tail_end, begin, finish)
+        if sigma_seed is not None:
+            call["sigma_seed"] = sigma_seed
+        return call
+    single = run_forward(seeded_request(start, end))
     ids = {"signals": set(), "setups": set()}
     finals = {}
     previous = start
     for hour in range(1, SLICE_HOURS + 1):
         to_ms = start + hour * HOUR
-        chained = run_forward(request(symbol, bars, funding, first, tail_end, previous, to_ms))
+        chained = run_forward(seeded_request(previous, to_ms))
         previous = chained["processed_to_ms"][symbol]
         ids["signals"].update(item["signal_id"] for item in chained["signals"])
         ids["setups"].update(item["setup_id"] for item in chained["setups"])
@@ -197,6 +207,9 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     first = month_start - REQUEST_DAYS * DAY
     end = month_end + (TAIL_MINUTES + 1) * MINUTE
     call = request(symbol, bars, funding, first, end, month_start, month_end)
+    sigma_seed = _quiet(seed_state, bars, month_start).to_record() if args.seed_sigma_state else None
+    if sigma_seed is not None:
+        call["sigma_seed"] = sigma_seed
     result = _quiet(run_forward, call)
     request_item = call["symbols"][0]
     request_bars = _quiet(bars_from_collector_rows, symbol, request_item["rows"])
@@ -211,7 +224,7 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
                    reference.tick_at, FORWARD_PARAMS, bars=request_bars, funding=request_funding,
                    reference_bars=bars, reference_funding=funding)
     report = {"schema": "forward-parity-v1", "symbol": symbol, "month": month, "reference_through": months[-1],
-              "request_days": REQUEST_DAYS, "forward_params_identity": FORWARD_PARAMS.identity(),
+              "request_days": REQUEST_DAYS, "seeded_sigma": sigma_seed is not None, "forward_params_identity": FORWARD_PARAMS.identity(),
               "pass_rule": parity.PASS_RULE, "signals": len(result["signals"]), "setups": len(result["setups"]),
               "stats": stats, "data_revision": args.data_revision,
               "code_commit": os.environ.get("GITHUB_SHA", "local"), "created_utc": NOW_UTC}
@@ -219,7 +232,7 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
                                              result["setups"], args.label_revision)
     if args.slice_check:
         progress.phase("slice check")
-        report["slice_check"] = _quiet(slice_check, symbol, bars, funding, month_start)
+        report["slice_check"] = _quiet(slice_check, symbol, bars, funding, month_start, sigma_seed)
     report = report_record(report)
     report["report_hash"] = content_hash(report)
     progress.phase("report write")
@@ -249,6 +262,8 @@ def parse_args(argv=None):
                         help="lb3h revision for the informational published-label cross-check; auto = the one whose "
                              "sigma-relevant params equal FORWARD_PARAMS' (none is not an error)")
     parser.add_argument("--slice-check", action="store_true")
+    parser.add_argument("--seed-sigma-state", action="store_true",
+                        help="seed exact EWMA/seasonality/c_h from all history before the audited month")
     return parser.parse_args(argv)
 
 

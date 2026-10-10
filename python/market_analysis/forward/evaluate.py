@@ -46,7 +46,8 @@ def _funding(bars, events) -> FundingSeries:
 
 def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy_ids,
                     from_ms: int, to_ms: int, funding_available: bool = True,
-                    positions=None, wallet_config: WalletConfig = WalletConfig()) -> dict:
+                    positions=None, wallet_config: WalletConfig = WalletConfig(),
+                    sigma_factory=ForwardSigma) -> dict:
     """Evaluate one symbol from collector rows, without sizing or moving wallet balances.
 
     Positions supply previously persisted liquidation terms. New setups emit liquidation
@@ -64,7 +65,7 @@ def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy
     signals, symbol_reasons = generate_signals(symbol, bars, from_ms, to_ms, strategy_ids)
     reasons = symbol_reasons
     processed_to = min(to_ms, bars.end_ms - MINUTE_MS)
-    sigma = ForwardSigma(bars, FORWARD_PARAMS)
+    sigma = sigma_factory(bars, FORWARD_PARAMS)
     tick = infer_tick(bars)
     nc = next_compromised(bars)
     new = []
@@ -121,7 +122,7 @@ def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy
 
 
 def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setups=(), wallet_state=None,
-             wallet_config: WalletConfig = WalletConfig()) -> dict:
+             wallet_config: WalletConfig = WalletConfig(), sigma_factory=ForwardSigma) -> dict:
     """Compose per-symbol market evaluation and the pure portfolio wallet step."""
     state = wallet_state or initial_state(wallet_config)
     out_signals, out_setups, out_resolutions, reasons, wallet_events = [], [], [], {}, []
@@ -130,7 +131,7 @@ def evaluate(symbols: list, *, strategy_ids, from_ms: int, to_ms: int, open_setu
         result = market_evaluate(item["symbol"], item["rows"], item.get("funding"), open_setups,
                                  strategy_ids=strategy_ids, from_ms=from_ms, to_ms=to_ms,
                                  funding_available=item.get("funding_available", True),
-                                 positions=state["positions"], wallet_config=wallet_config)
+                                 positions=state["positions"], wallet_config=wallet_config, sigma_factory=sigma_factory)
         symbol = item["symbol"]
         out_signals.extend(result["signals"])
         out_setups.extend(result["setups"])

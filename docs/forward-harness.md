@@ -340,3 +340,34 @@ is the evaluator copied before the refactor; `forward_split_golden.json` contain
 hand-derived from that code without running a server or evaluating the fixture locally. Tests
 compare complete composed responses to the frozen path, as well as that fixed golden projection,
 including funding, liquidation, capped entries, reversed symbol order, and per-symbol market slices.
+
+### P28a: exact sigma state
+
+The c_h decision is an **exact expanding ratio list**, seeded once and appended chronologically
+as windows complete. Neither a rolling-window length nor a longer request-window option is adopted.
+`forward/sigma_state.py` stores EWMA `(A, W, n)` per half-life, published levels, the previous
+block close, the current day's returns, the last 28 days of seasonal summaries, pending calibration
+windows, each horizon's ratios and `first_counted_ms`, and `as_of_ms` (last consumed minute's open).
+Advancing overlap is a no-op. Completed window opens at t enter the median before sigma(t);
+the minute's close cannot affect sigma(t). A two-day decision cache supports normal hourly retries;
+older decisions require rebuilding from history. Historical decisions produced during a long advance
+are available to that evaluation without keeping them all in the persisted state.
+
+The benchmark computes ratios using binary `log`/division and rounds only the final c_h. To preserve
+its exact result, each stored ratio is a lossless integer numerator/denominator pair **in HCAL_SCALE
+units**, rather than prematurely rounding the ratio to integer ppm. Median and final rounding match
+`horizon_calibration`/`_RunningMedian`. All payload integers travel as decimal strings to survive
+JavaScript JSON round trips; the envelope has a version, symbol, safe millisecond timestamp and SHA-256
+checksum of canonical JSON excluding the checksum itself. Wrong versions/checksums are rejected.
+
+Export a seed from already-downloaded lake files (exclusive cutoff, hidden-month guard applies):
+
+```sh
+python scripts/research/seed_sigma_state.py --bars-dir /path/to/lake --symbol BTCUSDT \
+  --first-month 2024-01 --last-month 2025-04 --cutoff-ms 1746057600000 --output /tmp/BTCUSDT-sigma.json
+```
+
+`forward_parity.py --seed-sigma-state` seeds all available pre-month history before the existing
+request, so rule (ii) can pass with identical sigma/geometry; an unseeded rolling-history run still
+has the previously documented c_h discrepancy. A pass is measured by the report, not assumed.
+This does not persist TA indicators or reduce their warm-up requirement to a few rows.
