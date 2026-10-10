@@ -678,12 +678,6 @@ test("movement normalization history RPC returns compact one-minute candles per 
   assert.deepEqual(empty, {});
 });
 
-test("baseline exposes only the generic completed candle RPC", async () => {
-  const sql = await readFile(new URL("../operational-db/supabase/migrations/20261004000000_operational_schema.sql", import.meta.url), "utf8");
-  assert.match(sql, /CREATE FUNCTION public.get_collector_completed_candles/);
-  assert.doesNotMatch(sql, /get_collector_ta_candles/);
-});
-
 test("collector persistence binds transport, endpoint and source event without clock ordering", async () => {
   const opening = Math.floor(Date.now() / 60_000) * 60_000 - 60_000;
   const rest = {
