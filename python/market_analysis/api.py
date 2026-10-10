@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import hmac
 import os
 import re
+from threading import RLock
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -46,6 +47,7 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
     app = FastAPI(title="Crypto Watch analysis", lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.movement_boundary_service = MovementBoundaryService()
+    movement_lock = RLock()  # Threadpool routes share one stateful movement session store.
 
     @app.middleware("http")
     async def private_responses(request, call_next):
@@ -82,7 +84,7 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
             raise HTTPException(502, "Analysis could not be completed") from None
 
     @app.post("/v1/completed-candles/validate", dependencies=[Depends(authorize)])
-    async def completed_candles(body: CompletedCandleSeriesRequest):
+    def completed_candles(body: CompletedCandleSeriesRequest):
         series = body.domain()
         candles = series.market_candles
         return {
@@ -97,11 +99,11 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
         }
 
     @app.post("/v1/technical-analysis", dependencies=[Depends(authorize)])
-    async def technical_analysis(body: TechnicalAnalysisRequest):
+    def technical_analysis(body: TechnicalAnalysisRequest):
         return calculate_technical_analysis(body.calculation_input())
 
     @app.post("/v1/technical-analysis/batch", dependencies=[Depends(authorize)])
-    async def technical_analysis_batch(body: TechnicalAnalysisBatchRequest):
+    def technical_analysis_batch(body: TechnicalAnalysisBatchRequest):
         return {
             "schema_version": 2,
             "results": [
@@ -111,42 +113,47 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
         }
 
     @app.post("/v1/movement/boundary", dependencies=[Depends(authorize)])
-    async def movement_boundary(body: MovementBoundaryRequest, request: Request):
+    def movement_boundary(body: MovementBoundaryRequest, request: Request):
         try:
-            return request.app.state.movement_boundary_service.advance(body)
+            with movement_lock:
+                return request.app.state.movement_boundary_service.advance(body)
         except ValueError:
             raise HTTPException(409, "Movement boundary could not be applied") from None
 
     @app.post("/v1/movement/history", dependencies=[Depends(authorize)])
-    async def movement_history(body: MovementHistoryRegistrationRequest, request: Request):
+    def movement_history(body: MovementHistoryRegistrationRequest, request: Request):
         try:
-            return request.app.state.movement_boundary_service.register_history(body)
+            with movement_lock:
+                return request.app.state.movement_boundary_service.register_history(body)
         except ValueError:
             raise HTTPException(409, "Movement history could not be registered") from None
 
     @app.post("/v1/movement/metrics", dependencies=[Depends(authorize)])
-    async def movement_metrics(body: MovementMetricsRequest, request: Request):
+    def movement_metrics(body: MovementMetricsRequest, request: Request):
         try:
-            return request.app.state.movement_boundary_service.calculate_metrics(body)
+            with movement_lock:
+                return request.app.state.movement_boundary_service.calculate_metrics(body)
         except ValueError:
             raise HTTPException(409, "Movement metrics could not be calculated") from None
 
     @app.post("/v1/movement/classification", dependencies=[Depends(authorize)])
-    async def movement_classification(body: MovementClassificationRequest, request: Request):
+    def movement_classification(body: MovementClassificationRequest, request: Request):
         try:
-            return request.app.state.movement_boundary_service.calculate_assessment(body)
+            with movement_lock:
+                return request.app.state.movement_boundary_service.calculate_assessment(body)
         except ValueError:
             raise HTTPException(409, "Movement assessment could not be calculated") from None
 
     @app.post("/v1/movement/lifecycle", dependencies=[Depends(authorize)])
-    async def movement_lifecycle(body: MovementLifecycleRequest, request: Request):
+    def movement_lifecycle(body: MovementLifecycleRequest, request: Request):
         try:
-            return request.app.state.movement_boundary_service.calculate_lifecycle(body)
+            with movement_lock:
+                return request.app.state.movement_boundary_service.calculate_lifecycle(body)
         except ValueError:
             raise HTTPException(409, "Movement lifecycle could not be calculated") from None
 
     @app.post("/v1/forward/evaluate", dependencies=[Depends(authorize)])
-    async def forward_evaluate_route(body: ForwardEvaluateRequest):
+    def forward_evaluate_route(body: ForwardEvaluateRequest):
         # Pure and stateless (#239 P10): the application persists what it returns.
         try:
             return forward_evaluate(**body.evaluate_input())
@@ -156,7 +163,7 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
             raise HTTPException(409, "Forward evaluation could not be completed") from None
 
     @app.post("/v1/forward/trend", dependencies=[Depends(authorize)])
-    async def forward_trend_route(body: ForwardTrendRequest):
+    def forward_trend_route(body: ForwardTrendRequest):
         # Daily trend portfolio track (#239 P14): stateless, bars and states in, rows and states out.
         try:
             return forward_trend(**body.evaluate_input())

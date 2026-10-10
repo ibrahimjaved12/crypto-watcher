@@ -30,7 +30,7 @@ export function createForwardRepository(client: SupabaseClient): ForwardReposito
   return {
     async findRun(userId, runKey) {
       const { data, error } = await client.from("paper_runs").select("id, status")
-        .eq("user_id", userId).eq("paper_account", PAPER_ACCOUNT).eq("run_key", runKey).maybeSingle();
+        .eq("user_id", userId).eq("paper_account", PAPER_ACCOUNT).eq("run_key", runKey).in("status", ["ok", "failed"]).maybeSingle();
       fail(error, "run read");
       return (data as { id: string; status: string } | null) ?? null;
     },

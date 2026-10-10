@@ -17,6 +17,8 @@ before(async () => {
     GRANT USAGE ON SCHEMA public,auth TO anon,authenticated,service_role;
     INSERT INTO auth.users VALUES ('${USER}'),('${OTHER}');`);
   await db.exec(await readFile(new URL("../supabase/migrations/20261009120000_forward_harness.sql", import.meta.url), "utf8"));
+  await db.exec(await readFile(new URL("../supabase/migrations/20261010120000_forward_clustered_report.sql", import.meta.url), "utf8"));
+  await db.exec(await readFile(new URL("../supabase/migrations/20261010121000_forward_retryable_runs.sql", import.meta.url), "utf8"));
 });
 beforeEach(async () => {
   await db.exec(`RESET ROLE; TRUNCATE paper_runs, forward_signals, forward_setups, forward_outcomes, paper_ledger CASCADE;
@@ -133,4 +135,39 @@ test("nothing is capped: 2,500 setups and 12,000 ledger lines are all reported",
   const hourly = (await db.query("SELECT * FROM paper_equity_series(3600000, NULL)")).rows;
   assert.equal(hourly.length, 4);
   assert.equal(Number(hourly.at(-1).seq), 12000, "each bucket keeps its last line");
+});
+
+test("SQL clusters by UTC exit day with uneven trade counts, not session timezone", async () => {
+  const strategy = "ema_cross_20_50:60";
+  const real = [[1, 3], [-2], [2, 2, 0]];
+  const control = [[-1, 1], [-2], [0, 0, 2]];
+  let n = 100;
+  for (const [name, days] of [[strategy, real], [`placebo-v1:${strategy}`, control]]) {
+    for (let day = 0; day < days.length; day++) {
+      for (const [i, value] of days[day].entries()) {
+        await setup(++n, name);
+        await outcome(n, value > 0 ? "T" : "S", value * 1e6, (day + 1) * 86400000 + (i % 2 ? 86399999 : 0));
+      }
+    }
+  }
+  await as(USER);
+  await db.exec("SET TIME ZONE 'Asia/Omsk'");
+  const [r] = await report();
+  assert.deepEqual([r.n, r.exit_days, r.sum_net_ur, r.cluster_sum_sq_ur].map(Number), [6, 3, 6e6, 14e12]);
+  assert.deepEqual([r.placebo_n, r.placebo_exit_days, r.placebo_cluster_sum_sq_ur].map(Number), [6, 3, 8e12]);
+  // Filter at an exact UTC boundary; both real and control clusters must be recomputed.
+  const [filtered] = await report(`172800000, NULL::bigint, NULL::text[], NULL::text[], NULL::int[], NULL::int[], NULL::text[]`);
+  assert.deepEqual([filtered.n, filtered.exit_days, filtered.cluster_sum_sq_ur].map(Number), [4, 2, 12.5e12]);
+  await db.exec("SET TIME ZONE 'UTC'");
+});
+
+test("skipped and no-sigma attempts preserve audit rows without taking the successful hour claim", async () => {
+  const insert = (status) => db.query(`INSERT INTO paper_runs(user_id,run_key,trigger,status,boundary_ms)
+    VALUES ($1,'hour:3600000','hourly',$2,3600000)`, [USER, status]);
+  await insert("skipped_stale");
+  await insert("no_sigma");
+  await insert("ok");
+  await assert.rejects(insert("ok"), /duplicate key/);
+  const result = await db.query("SELECT status FROM paper_runs WHERE run_key = 'hour:3600000'");
+  assert.equal(result.rows.length, 3);
 });

@@ -42,7 +42,7 @@ class WalletTests(unittest.TestCase):
         lp = exact_from_str(position["liquidation_price"])
         self.assertGreaterEqual(fill - lp, 2 * stop_distance)  # liquidation at least 2x the stop distance away
         if leverage < wl.WalletConfig().leverage_cap:
-            worse = costs.liquidation_price(1, fill, leverage + 1, wl.WalletConfig().mmr)
+            worse = costs.liquidation_price(1, fill, leverage + 1, wl.WalletConfig().mmr + wl.WalletConfig().taker_rate)
             self.assertLess(fill - worse, 2 * stop_distance)  # and it is the largest such leverage
         qty = exact_from_str(position["qty"])
         self.assertEqual(qty * stop_distance, Fraction(wl.WalletConfig().initial_balance_e8, 100))  # 1 % = 1R
@@ -155,6 +155,41 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(asyncio.run(send(body, {})).status_code, 401)
         bad = {**body, "symbols": [{"symbol": "BTCUSDT", "rows": [{**rows[0], "open_time_ms": START + 1}]}]}
         self.assertEqual(asyncio.run(send(bad, {"Authorization": f"Bearer {token}"})).status_code, 422)
+
+
+
+class FeeAwareLeverageTests(unittest.TestCase):
+    def test_largest_leverage_covers_maintenance_and_closing_fee_for_both_sides(self):
+        # Independent solvency check at the required 2-stop-distance barrier,
+        # rather than reproducing the closed-form leverage implementation.
+        for side in (1, -1):
+            for distance in (1, 3, 8):
+                config = wl.WalletConfig(slip_floor_bps=Fraction(0))
+                trade = setup(side=side, stop_distance=distance * 10**8)
+                fill, leverage, lp = wl.position_terms(trade, config)
+                barrier = fill - side * config.liquidation_buffer * abs(fill - trade["stop"])
+                admissible = [level for level in range(1, config.leverage_cap + 1)
+                              if fill / level + side * (barrier - fill)
+                              >= barrier * (config.mmr + config.taker_rate)]
+                self.assertEqual(leverage, max(admissible))
+                self.assertGreaterEqual(abs(fill - lp), 2 * abs(fill - trade["stop"]))
+                self.assertEqual(fill / leverage + side * (lp - fill),
+                                 lp * (config.mmr + config.taker_rate))
+                if distance == 1:
+                    self.assertEqual(leverage, 20, "tight stops hit the stated 20x cap")
+                else:
+                    self.assertLess(leverage, 20)
+
+    def test_closing_fee_can_reduce_leverage_and_existing_positions_keep_their_terms(self):
+        trade = setup(stop_distance=2 * 10**8)
+        no_fee = wl.WalletConfig(taker_rate=Fraction(0), slip_floor_bps=Fraction(0))
+        high_fee = wl.WalletConfig(taker_rate=Fraction(1, 50), slip_floor_bps=Fraction(0))
+        self.assertLess(wl.position_terms(trade, high_fee)[1], wl.position_terms(trade, no_fee)[1])
+        state, _ = opened(wl.initial_state(no_fee), trade, config=no_fee)
+        old = dict(state["positions"]["s1"])
+        updated, lines = wl.step(state, [], high_fee)
+        self.assertEqual(updated["positions"]["s1"], old)
+        self.assertEqual(lines, [])
 
 
 if __name__ == "__main__":

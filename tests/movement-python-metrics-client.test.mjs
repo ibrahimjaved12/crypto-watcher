@@ -451,3 +451,28 @@ test("history registration transports raw candles and factual compatibility", as
   assert.equal(sent[0].body.session_id, SESSION);
   assert.equal(sent[0].body.as_of_boundary_time_ms, BOUNDARY);
 });
+
+test("movement timeout identifies call, elapsed time and whether health also failed", async (t) => {
+  for (const healthOk of [false, true]) {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+    try {
+      const paths = [];
+      const send = async (url, options) => {
+        const path = new URL(url).pathname;
+        paths.push(path);
+        if (path === "/health") return new Response("{}", { status: healthOk ? 200 : 503 });
+        return new Promise((resolve, reject) => options.signal.addEventListener("abort",
+          () => reject(new Error("aborted")), { once: true }));
+      };
+      const pending = calculatePythonMarketMovement(SESSION, BOUNDARY, "history-v1", universe, "config-v1", {}, send);
+      const assertion = assert.rejects(pending, (error) => {
+        assert.match(error.message, /\/v1\/movement\/metrics timed out after 6000 ms/);
+        assert.match(error.message, healthOk ? /health check passed/ : /service busy.*\/health also failed/);
+        return true;
+      });
+      t.mock.timers.tick(6000);
+      await assertion;
+      assert.deepEqual(paths, ["/v1/movement/metrics", "/health"]);
+    } finally { t.mock.timers.reset(); }
+  }
+});

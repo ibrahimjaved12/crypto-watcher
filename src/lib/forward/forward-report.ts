@@ -1,12 +1,13 @@
 /**
  * Forward-test report maths (#239 P20, pure). The database aggregates every final outcome in SQL
  * (`forward_outcome_report`, `forward_nontrade_report`); this module only turns those sums into
- * display rows: mean and standard error in R, the matched random-timing control, a Welch z for the
+ * display rows: mean and UTC exit-day-clustered standard error in R, the matched random-timing control, a Welch z for the
  * difference, a Bonferroni note for the number of strategy rows shown, and a fixed-rule verdict.
  * A verdict is a statement about this sample, not an edge: a positive row is a hypothesis for the
  * next sample.
  */
 export const MIN_TRADES = 30;
+export const MIN_EXIT_DAYS = 10;
 export const Z_NOTABLE = 2;
 const UR = 1e6; // 1 R = 1e6 micro-R in the stored `*_ur` columns
 
@@ -28,6 +29,10 @@ export type OutcomeReportRow = {
   sum_fund_ur: number | string;
   first_exit_ms: number | null;
   last_exit_ms: number | null;
+  exit_days: number | string;
+  cluster_sum_sq_ur: number | string | null;
+  placebo_exit_days: number | string;
+  placebo_cluster_sum_sq_ur: number | string | null;
   placebo_n: number | string;
   placebo_sum_net_ur: number | string;
   placebo_sum_sq_net_ur: number | string;
@@ -55,6 +60,10 @@ export type ReportRow = {
   horizonMin: number;
   rr: string;
   n: number;
+  days: number;
+  placeboDays: number;
+  naiveSe: number | null;
+  placeboNaiveSe: number | null;
   wins: number;
   stops: number;
   expired: number;
@@ -85,6 +94,16 @@ export function moments(n: number, sum: number, sumSq: number): Moments {
   if (n < 2) return { n, mean: meanUr / UR, se: null };
   const variance = Math.max(0, ((sumSq / n - meanUr * meanUr) * n) / (n - 1)); // rounding can dip below 0
   return { n, mean: meanUr / UR, se: Math.sqrt(variance / n) / UR };
+}
+
+/** SQL supplies sum_d (s_d - n_d * mean)^2 in micro-R squared, grouped by UTC exit day.
+ * No finite-sample multiplier: this is the requested cluster-robust mean SE.
+ * Missing cluster data must not silently fall back to the independence-based estimate.
+ */
+export function clusteredMoments(n: number, sum: number, days: number, residualSumSq: number | null): Moments {
+  return { n, mean: n > 0 ? sum / n / UR : null,
+    se: n > 0 && days >= 2 && residualSumSq !== null && Number.isFinite(residualSumSq) && residualSumSq >= 0
+      ? Math.sqrt(residualSumSq) / n / UR : null };
 }
 
 /** Standard normal quantile (Acklam's rational approximation, relative error about 1e-9). */
@@ -118,15 +137,19 @@ export function verdictFor(
   z: number | null,
   hasBaseline: boolean,
   k: number,
+  days = 0,
+  controlDays = 0,
+  controlTrades = 0,
 ): { kind: VerdictKind; text: string } {
-  if (n < MIN_TRADES) return { kind: "too_few", text: "too few trades" };
+  if (n < MIN_TRADES || days < MIN_EXIT_DAYS || (hasBaseline && (controlDays < MIN_EXIT_DAYS || controlTrades < MIN_TRADES))) return { kind: "too_few", text: "too few trades" };
   if (!hasBaseline) return { kind: "no_baseline", text: "no random-timing baseline yet" };
   if (z === null) return { kind: "no_spread", text: "no spread in the results; cannot compare" };
-  if (Math.abs(z) < Z_NOTABLE) return { kind: "no_difference", text: "no difference from random timing" };
-  if (z <= -Z_NOTABLE) return { kind: "worse", text: "worse than random timing" };
+  const critical = Math.max(Z_NOTABLE, bonferroniCritical(k));
+  if (Math.abs(z) < critical) return { kind: "no_difference", text: "no clear difference from random timing" };
+  if (z <= -critical) return { kind: "worse", text: "worse than random timing" };
   return {
     kind: "better",
-    text: `better than random timing, unadjusted for K (threshold for ${k} rows: z > ${bonferroniCritical(k).toFixed(2)})`,
+    text: `better than random timing (day-clustered; Bonferroni threshold for ${k} rows: z ≥ ${critical.toFixed(2)})`,
   };
 }
 
@@ -155,11 +178,11 @@ export function buildReportRows(outcomes: OutcomeReportRow[], nonTrades: NonTrad
   }
   const k = rows.length;
   return rows.map((row) => {
-    const verdict = verdictFor(row.n, row.z, row.placebo !== null && row.placebo.n >= 2, k);
+    const verdict = verdictFor(row.n, row.z, row.placebo !== null && row.placebo.n > 0, k, row.days, row.placeboDays, row.placebo?.n ?? 0);
     return {
       ...row,
       verdict,
-      clearsBonferroni: verdict.kind === "better" && (row.z ?? 0) > bonferroniCritical(k),
+      clearsBonferroni: verdict.kind === "better" && (row.z ?? 0) >= bonferroniCritical(k),
     };
   });
 }
@@ -169,16 +192,21 @@ function partialRow(row: OutcomeReportRow | null, nonTrades: NonTrades, fallback
     const id = fallback!;
     return {
       key: keyOf(id.strategy_id, id.horizon_min, id.rr), strategyId: id.strategy_id, version: "", horizonMin: id.horizon_min,
-      rr: id.rr, n: 0, wins: 0, stops: 0, expired: 0, liquidated: 0, unresolved: 0, ambiguous: 0, winRate: null,
+      rr: id.rr, n: 0, days: 0, placeboDays: 0, naiveSe: null, placeboNaiveSe: null, wins: 0, stops: 0, expired: 0, liquidated: 0, unresolved: 0, ambiguous: 0, winRate: null,
       mean: moments(0, 0, 0), meanCostR: null, meanFundR: null, placebo: null, diffR: null, diffSe: null, z: null,
       verdict: { kind: "too_few", text: "too few trades" }, clearsBonferroni: false, nonTrades,
       firstExitMs: null, lastExitMs: null,
     };
   }
   const n = num(row.n);
-  const mean = moments(n, num(row.sum_net_ur), num(row.sum_sq_net_ur));
+  const days = num(row.exit_days);
+  const placeboDays = num(row.placebo_exit_days);
+  const naiveSe = moments(n, num(row.sum_net_ur), num(row.sum_sq_net_ur)).se;
+  const mean = clusteredMoments(n, num(row.sum_net_ur), days, row.cluster_sum_sq_ur == null ? null : num(row.cluster_sum_sq_ur));
   const placeboN = num(row.placebo_n);
-  const placebo = placeboN > 0 ? moments(placeboN, num(row.placebo_sum_net_ur), num(row.placebo_sum_sq_net_ur)) : null;
+  const placeboNaiveSe = moments(placeboN, num(row.placebo_sum_net_ur), num(row.placebo_sum_sq_net_ur)).se;
+  const placebo = placeboN > 0 ? clusteredMoments(placeboN, num(row.placebo_sum_net_ur), placeboDays,
+    row.placebo_cluster_sum_sq_ur == null ? null : num(row.placebo_cluster_sum_sq_ur)) : null;
   let diffR: number | null = null;
   let diffSe: number | null = null;
   let z: number | null = null;
@@ -195,7 +223,7 @@ function partialRow(row: OutcomeReportRow | null, nonTrades: NonTrades, fallback
     wins: num(row.n_t), stops: num(row.n_s), expired: num(row.n_e), liquidated: num(row.n_l),
     unresolved: num(row.n_x), ambiguous: num(row.n_ambiguous),
     winRate: n ? num(row.n_t) / n : null,
-    mean,
+    mean, days, placeboDays, naiveSe, placeboNaiveSe,
     meanCostR: n ? num(row.sum_cost_ur) / n / UR : null,
     meanFundR: n ? num(row.sum_fund_ur) / n / UR : null,
     placebo, diffR, diffSe, z,
@@ -228,4 +256,14 @@ export function csvCell(value: unknown): string {
 
 export function toCsv(header: string[], rows: unknown[][]): string {
   return [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\n") + "\n";
+}
+
+/** Full displayed report sample; legacy independence-based SE is an export-only audit column. */
+export function reportCsv(rows: ReportRow[]): string {
+  return toCsv(["Strategy", "Version", "Timeframe minutes", "Reward:risk", "Trades", "Days", "Mean net R",
+    "Day-clustered SE", "naive SE", "Control trades", "Control days", "Control mean net R",
+    "Control day-clustered SE", "Control naive SE", "Difference R", "Welch z", "Verdict"],
+  rows.map((r) => [r.strategyId, r.version, r.horizonMin, r.rr, r.n, r.days, r.mean.mean, r.mean.se,
+    r.naiveSe, r.placebo?.n ?? 0, r.placeboDays, r.placebo?.mean, r.placebo?.se, r.placeboNaiveSe,
+    r.diffR, r.z, r.verdict.text]));
 }

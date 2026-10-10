@@ -73,12 +73,12 @@ async function shutdown(code = 0) {
   process.exit(code);
 }
 
-function requireLocalUrl(value) {
+function requireLocalUrl(value, name = "PYTHON_ANALYSIS_URL") {
   let url;
   try {
     url = new URL(value);
   } catch {
-    throw new Error("PYTHON_ANALYSIS_URL must be a valid local HTTP URL.");
+    throw new Error(`${name} must be a valid local HTTP URL.`);
   }
   if (
     url.protocol !== "http:" ||
@@ -89,7 +89,7 @@ function requireLocalUrl(value) {
     url.search ||
     url.hash
   ) {
-    throw new Error("PYTHON_ANALYSIS_URL must be a loopback HTTP origin.");
+    throw new Error(`${name} must be a loopback HTTP origin.`);
   }
   return url;
 }
@@ -169,49 +169,65 @@ async function main() {
       throw new Error("PYTHON_ANALYSIS_TOKEN must contain 32–256 URL-safe characters.");
     }
 
-    if (await healthy(url)) {
-      console.log(`[local-dev] Reusing FastAPI at ${url.origin}.`);
-    } else {
-      const python = resolve(
-        root,
-        process.platform === "win32"
-          ? "python/.venv/Scripts/python.exe"
-          : "python/.venv/bin/python",
-      );
-      if (!existsSync(python)) {
-        throw new Error(
-          "Python environment missing. Run: python3 -m venv python/.venv && python/.venv/bin/python -m pip install -r python/requirements.txt",
+    // Movement sessions are process-local: isolate forward CPU work instead of
+    // round-robin workers, which would split the movement session store.
+    const forwardUrl = requireLocalUrl(
+      process.env.PYTHON_FORWARD_URL ?? `http://${url.hostname}:${Number(url.port || 80) + 1}`,
+      "PYTHON_FORWARD_URL",
+    );
+    if (forwardUrl.port === url.port)
+      throw new Error("Forward service needs a separate local port.");
+    process.env.PYTHON_FORWARD_URL = forwardUrl.origin;
+    for (const [name, serviceUrl] of [
+      ["FastAPI", url],
+      ["Forward API", forwardUrl],
+    ]) {
+      if (await healthy(serviceUrl)) {
+        console.log(`[local-dev] Reusing FastAPI at ${serviceUrl.origin}.`);
+      } else {
+        const python = resolve(
+          root,
+          process.platform === "win32"
+            ? "python/.venv/Scripts/python.exe"
+            : "python/.venv/bin/python",
         );
-      }
-      const imports = spawnSync(python, ["-c", "import fastapi, uvicorn, numpy"], { stdio: "ignore" });
-      if (imports.status !== 0) {
-        throw new Error(
-          "Python API dependencies missing. Run: python/.venv/bin/python -m pip install -r python/requirements.txt",
-        );
-      }
+        if (!existsSync(python)) {
+          throw new Error(
+            "Python environment missing. Run: python3 -m venv python/.venv && python/.venv/bin/python -m pip install -r python/requirements.txt",
+          );
+        }
+        const imports = spawnSync(python, ["-c", "import fastapi, uvicorn, numpy"], {
+          stdio: "ignore",
+        });
+        if (imports.status !== 0) {
+          throw new Error(
+            "Python API dependencies missing. Run: python/.venv/bin/python -m pip install -r python/requirements.txt",
+          );
+        }
 
-      const port = url.port || "80";
-      const host = url.hostname === "[::1]" ? "::1" : url.hostname;
-      console.log(`[local-dev] Starting FastAPI at ${url.origin}…`);
-      const api = start(
-        "FastAPI",
-        python,
-        [
-          "-m",
-          "uvicorn",
-          "market_analysis.api:app",
-          "--host",
-          host,
-          "--port",
-          port,
-          "--no-access-log",
-          "--limit-concurrency",
-          "32",
-        ],
-        { cwd: resolve(root, "python") },
-      );
-      await waitForHealth(url, api);
-      console.log("[local-dev] FastAPI is healthy.");
+        const port = serviceUrl.port || "80";
+        const host = serviceUrl.hostname === "[::1]" ? "::1" : serviceUrl.hostname;
+        console.log(`[local-dev] Starting FastAPI at ${serviceUrl.origin}…`);
+        const api = start(
+          name,
+          python,
+          [
+            "-m",
+            "uvicorn",
+            "market_analysis.api:app",
+            "--host",
+            host,
+            "--port",
+            port,
+            "--no-access-log",
+            "--limit-concurrency",
+            "32",
+          ],
+          { cwd: resolve(root, "python") },
+        );
+        await waitForHealth(serviceUrl, api);
+        console.log("[local-dev] FastAPI is healthy.");
+      }
     }
   } else {
     console.log("[local-dev] FastAPI skipped because PYTHON_ANALYSIS_ENABLED is not true.");

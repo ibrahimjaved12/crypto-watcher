@@ -556,5 +556,50 @@ class CompletedCandleApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 422)
 
 
+
+class ConcurrencyTests(unittest.TestCase):
+    def test_cpu_routes_are_sync_and_health_is_async(self):
+        import inspect
+        routes = {route.path: route.endpoint for route in create_app(TOKEN).routes}
+        for path, endpoint in routes.items():
+            if path.startswith(("/v1/forward/", "/v1/movement/", "/v1/technical-analysis", "/v1/completed-candles")):
+                self.assertFalse(inspect.iscoroutinefunction(endpoint), path)
+        self.assertTrue(inspect.iscoroutinefunction(routes["/health"]))
+
+    def test_blocked_forward_handler_leaves_health_responsive(self):
+        from threading import Event, get_ident
+        from unittest.mock import patch
+        started, release = Event(), Event()
+        loop_thread = get_ident()
+
+        def calculate(**kwargs):
+            self.assertNotEqual(get_ident(), loop_thread)
+            started.set()
+            if not release.wait(2):
+                raise AssertionError("handler was not released")
+            return {"done": True}
+
+        async def scenario():
+            app = create_app(TOKEN)
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                body = {"schema_version": 1, "symbols": [{"symbol": "BTCUSDT", "rows": [
+                    {"open_time_ms": NOW, "open": 100, "high": 101, "low": 99,
+                     "close": 100, "transport": "rest"}]}],
+                    "strategy_ids": ["ema_cross_20_50:15"], "from_ms": NOW, "to_ms": NOW}
+                task = asyncio.create_task(client.post("/v1/forward/evaluate", json=body, headers=HEADERS))
+                try:
+                    self.assertTrue(await asyncio.to_thread(started.wait, 1))
+                    health = await asyncio.wait_for(client.get("/health"), timeout=1)
+                    self.assertEqual(health.status_code, 200)
+                finally:
+                    release.set()
+                    response = await task
+                self.assertEqual(response.status_code, 200)
+
+        with patch("market_analysis.api.forward_evaluate", calculate):
+            asyncio.run(scenario())
+
+
 if __name__ == "__main__":
     unittest.main()

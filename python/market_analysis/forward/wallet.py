@@ -1,13 +1,14 @@
 """Paper wallet step (pure, append-only): ``step(state, events, config) -> (state, ledger_entries)``.
 
-Follows docs/futures-simulation.md for an automated fake-money wallet (isolated margin, one-way):
+Follows docs/futures-simulation.md for an automated fake-money wallet (isolated margin, positions per setup):
 - Amounts are integers in 10**-8 USDT (``*_e8``), quantities exact fractions of base units (text).
   Each ledger amount is rounded half-even once and the same integer moves the balance, so
   ``initial + sum(ledger amounts) == balance`` exactly.
 - Sizing: risk = ``risk_fraction`` x balance (default 1 % = 1 R); quantity = risk / |entry fill - stop|.
 - Leverage chosen by the program: the largest integer leverage (cap ``leverage_cap``) whose
   liquidation price is at least ``liquidation_buffer`` (2) x the stop distance beyond the entry
-  (``costs.max_admissible_leverage`` with that buffer). No symbol has a maintenance-margin tier
+  (``costs.max_admissible_leverage`` with that buffer and a closing taker-fee reserve).
+  Entry fees are paid separately from free balance. No symbol has a maintenance-margin tier
   table in the code yet, so a conservative flat tier (``costs.COST_MODEL_V1.mmr``) is used and every
   ledger line carries ``assumption: flat-tier``.
 - Costs: taker fee on entry and exit, a slippage floor (``market_slip_floor_bps``) against the
@@ -31,7 +32,7 @@ from ..benchmark.bars import BarSeries
 from ..benchmark.canonical import exact_from_str, exact_to_str
 from .bars_adapter import MINUTE_MS
 
-WALLET_VERSION = "wallet-v1"
+WALLET_VERSION = "wallet-v2"
 E8 = 10 ** 8
 FLAT_TIER = "flat-tier"
 _ORDER = {"liquidation": 0, "close": 1, "funding": 2, "open": 3}
@@ -82,7 +83,9 @@ def position_terms(setup: dict, config: WalletConfig) -> tuple[Fraction, int, Fr
     """(entry fill, leverage, liquidation price) of a setup under the wallet's rule; None if no leverage."""
     side, stop = setup["side"], setup["stop"]
     fill = _slipped(setup["p0"], side, config, True)
-    model = config.model()
+    # Entry fees are paid from free balance, outside isolated margin. Reserve the
+    # closing taker fee at the liquidation mark in addition to maintenance margin.
+    model = replace(config.model(), mmr=config.mmr + config.taker_rate)
     leverage = costs.max_admissible_leverage(side, fill, abs(fill - stop), model)
     if leverage is None:
         return None
@@ -116,7 +119,7 @@ def liquidation_events(positions: dict, bars: BarSeries, resolutions: dict, conf
 
 def step(state: dict, events, config: WalletConfig = WalletConfig()) -> tuple[dict, list]:
     """Apply events in (ms, liquidation < close < funding < open, id) order; returns (new state, ledger)."""
-    state = {"version": state["version"], "balance_e8": int(state["balance_e8"]),
+    state = {"version": WALLET_VERSION, "balance_e8": int(state["balance_e8"]),
              "used_margin_e8": int(state["used_margin_e8"]), "seq": int(state["seq"]),
              "positions": {key: dict(value) for key, value in state["positions"].items()},
              "done": list(state["done"])}
@@ -170,7 +173,8 @@ def step(state: dict, events, config: WalletConfig = WalletConfig()) -> tuple[di
             state["positions"][setup_id] = {
                 "symbol": setup["symbol"], "side": setup["side"], "entry_ms": setup["entry_ms"],
                 "stop": setup["stop"], "target": setup["target"], "qty": exact_to_str(qty),
-                "entry_fill": exact_to_str(fill), "leverage": leverage, "liquidation_price": exact_to_str(lp),
+                "entry_fill": exact_to_str(fill), "leverage": leverage, "leverage_cap": config.leverage_cap,
+                "liquidation_rule": WALLET_VERSION, "liquidation_price": exact_to_str(lp),
                 "margin_e8": margin_e8, "notional_e8": exact_to_str(notional)}
             entry("open_fee", ms, -fee_e8, leverage=leverage, qty=exact_to_str(qty), margin_e8=margin_e8, **base)
         elif kind in ("close", "liquidation"):

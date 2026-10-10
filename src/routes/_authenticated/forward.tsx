@@ -1,7 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { ArrowDownRight, ArrowUpRight, FlaskConical, Radar, RefreshCw, Satellite, Wallet } from "lucide-react";
+import {
+  ArrowDownRight,
+  ArrowUpRight,
+  FlaskConical,
+  Radar,
+  RefreshCw,
+  Satellite,
+  Wallet,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -24,7 +32,14 @@ import {
   runForwardNow,
   runForwardTrendNow,
 } from "@/lib/forward.functions";
-import { humanizeReason, relativeTime, strategyLabel, summarizeReasons } from "@/lib/labels";
+import {
+  humanizeReason,
+  relativeTime,
+  strategyLabel,
+  summarizeReasons,
+  walletAmountLabel,
+  walletRejectionLabel,
+} from "@/lib/labels";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_authenticated/forward")({
@@ -99,20 +114,38 @@ function ForwardPage() {
         >
           <FlaskConical className="mt-0.5 size-4 shrink-0 text-warn" aria-hidden />
           <p>
-            <strong className="font-semibold">No strategy has a validated edge; this is a forward test.</strong>{" "}
+            <strong className="font-semibold">
+              No strategy has a validated edge; this is a forward test.
+            </strong>{" "}
             <span className="text-muted-foreground">
-              Paper results show what happened, not what will happen. Real orders are always placed by you.
+              Paper results show what happened, not what will happen. Real orders are always placed
+              by you.
             </span>
           </p>
         </div>
 
         <Tabs defaultValue="signals">
           <TabsList className="h-auto w-full flex-wrap justify-start gap-1 bg-muted/60 p-1 sm:w-auto">
-            <LabTab value="signals" line={signalLine} icon={Radar} label="Signals & paper trading" />
-            <LabTab value="trend" line={trendLine} icon={Satellite} label="Daily trend portfolios" />
+            <LabTab
+              value="signals"
+              line={signalLine}
+              icon={Radar}
+              label="Signals & paper trading"
+            />
+            <LabTab
+              value="trend"
+              line={trendLine}
+              icon={Satellite}
+              label="Daily trend portfolios"
+            />
           </TabsList>
           <TabsContent value="signals" className="mt-4">
-            <SignalsSection data={data} line={signalLine} filters={filters} onFilters={setFilters} />
+            <SignalsSection
+              data={data}
+              line={signalLine}
+              filters={filters}
+              onFilters={setFilters}
+            />
           </TabsContent>
           <TabsContent value="trend" className="mt-4">
             <TrendSection data={trend} line={trendLine} />
@@ -171,7 +204,8 @@ function SignalsSection({
   });
   const latest = data.data?.latestRun as unknown as SignalRun | null | undefined;
   const equity = data.data?.equity ?? [];
-  const positions = Object.entries(latest?.wallet_state?.positions ?? {});
+  const positions = data.data?.openPositions ?? [];
+  const rejected = data.data?.rejectedPositions ?? [];
   const signals = (data.data?.signals ?? []).slice(0, 20);
   const openSetups = (data.data?.openSetups ?? []).slice(0, 20);
 
@@ -203,7 +237,10 @@ function SignalsSection({
 
       <section className="grid gap-6 md:grid-cols-2">
         <div className="panel p-4 sm:p-5">
-          <SectionTitle title="Latest signals" hint="Moments a strategy said “enter now” (newest first)." />
+          <SectionTitle
+            title="Latest signals"
+            hint="Moments a strategy said “enter now” (newest first)."
+          />
           {signals.length === 0 ? (
             <EmptyState
               icon={Radar}
@@ -217,8 +254,13 @@ function SignalsSection({
                 <li key={signal.signal_id} className="flex flex-wrap items-center gap-2 py-2">
                   <span className="num w-12 font-medium">{coin(signal.symbol)}</span>
                   <Side side={signal.side} />
-                  <span className="min-w-0 flex-1 truncate">{strategyLabel(signal.strategy_id).name}</span>
-                  <span className="num text-xs text-muted-foreground" title={time(signal.signal_ms)}>
+                  <span className="min-w-0 flex-1 truncate">
+                    {strategyLabel(signal.strategy_id).name}
+                  </span>
+                  <span
+                    className="num text-xs text-muted-foreground"
+                    title={time(signal.signal_ms)}
+                  >
                     {relativeTime(signal.signal_ms)}
                   </span>
                 </li>
@@ -228,7 +270,7 @@ function SignalsSection({
         </div>
         <div className="panel p-4 sm:p-5">
           <SectionTitle
-            title="Open paper trades"
+            title="Open strategy setups"
             hint="Entered with fake money and waiting for target, stop or time limit."
           />
           {openSetups.length === 0 ? (
@@ -244,8 +286,13 @@ function SignalsSection({
                 <li key={setup.setup_id} className="flex flex-wrap items-center gap-2 py-2">
                   <span className="num w-12 font-medium">{coin(setup.symbol)}</span>
                   <Side side={setup.side} />
-                  <span className="min-w-0 flex-1 truncate">{strategyLabel(setup.strategy_id).name}</span>
-                  <span className="num text-xs text-muted-foreground" title={`Entered ${time(setup.entry_ms)}`}>
+                  <span className="min-w-0 flex-1 truncate">
+                    {strategyLabel(setup.strategy_id).name}
+                  </span>
+                  <span
+                    className="num text-xs text-muted-foreground"
+                    title={`Entered ${time(setup.entry_ms)}`}
+                  >
                     {relativeTime(setup.entry_ms)} · max {frame(setup.horizon_min)} · {setup.rr}
                   </span>
                 </li>
@@ -264,7 +311,10 @@ function SignalsSection({
           <EquityCurve points={equity} />
         </div>
         <div className="panel p-4 sm:p-5">
-          <SectionTitle title="Open positions" hint="What the paper wallet currently holds." />
+          <SectionTitle
+            title="Open positions"
+            hint="One simulated position per accepted setup; several may share a coin. Open strategy setups can outnumber funded positions."
+          />
           {positions.length === 0 ? (
             <EmptyState
               icon={Wallet}
@@ -274,17 +324,75 @@ function SignalsSection({
             />
           ) : (
             <ul className="divide-y divide-border/50 text-sm">
-              {positions.map(([id, position]) => (
-                <li key={id} className="flex items-center gap-2 py-2">
-                  <span className="num w-12 font-medium">{coin(position["symbol"])}</span>
-                  <Side side={position["side"]} />
-                  <span className="num ml-auto text-xs text-muted-foreground">
-                    {String(position["leverage"])}× leverage
-                  </span>
+              {positions.map(({ setupId, position, strategyId, horizonMin, leverageCap }) => (
+                <li key={setupId} className="space-y-2 py-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="num font-medium">{coin(position["symbol"])}</span>
+                    <Side side={position["side"]} />
+                    <span className="num ml-auto text-xs">
+                      {String(position["leverage"])}× leverage
+                      {leverageCap !== null && Number(position["leverage"]) === leverageCap
+                        ? ` · at ${leverageCap}× cap`
+                        : ""}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {strategyLabel(strategyId).name}
+                    {horizonMin !== null ? ` · ${frame(horizonMin)} holding horizon` : ""}
+                  </p>
+                  <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3">
+                    {[
+                      ["Entry price", position["entry_fill"]],
+                      ["Stop", position["stop"]],
+                      ["Target", position["target"]],
+                      ["Liquidation price", position["liquidation_price"]],
+                      ["Margin used (USDT)", position["margin_e8"]],
+                    ].map(([label, value]) => (
+                      <div key={String(label)}>
+                        <dt className="text-muted-foreground">{String(label)}</dt>
+                        <dd className="num mt-1">{walletAmountLabel(value)}</dd>
+                      </div>
+                    ))}
+                    <div>
+                      <dt className="text-muted-foreground">Opened / age</dt>
+                      <dd className="mt-1">{relativeTime(Number(position["entry_ms"]))}</dd>
+                      <dd className="text-muted-foreground">
+                        {time(Number(position["entry_ms"]))}
+                      </dd>
+                    </div>
+                  </dl>
                 </li>
               ))}
             </ul>
           )}
+          <p className="mt-3 text-xs text-muted-foreground">
+            Wallet snapshot: {time(data.data?.walletAsOf)}. Leverage is capped and chosen to keep
+            liquidation at least twice the stop distance from entry.
+          </p>
+          <details className="mt-4 border-t border-border pt-3">
+            <summary className="cursor-pointer text-sm font-medium">
+              Recent trades not taken ({rejected.length})
+            </summary>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Latest 20 recorded wallet rejections. The wallet has no one-position-per-coin
+              restriction.
+            </p>
+            {rejected.length === 0 ? (
+              <p className="mt-2 text-sm">No recorded wallet rejections.</p>
+            ) : (
+              <ul className="divide-y divide-border/50 text-xs">
+                {rejected.map((r) => (
+                  <li key={r.seq} className="space-y-1 py-3">
+                    <p className="font-medium">
+                      {coin(r.symbol)} · {strategyLabel(r.strategyId).name}
+                    </p>
+                    <p>{walletRejectionLabel(r.payload.reason)}</p>
+                    <p className="text-muted-foreground">{time(r.ms)}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </details>
         </div>
       </section>
 
@@ -294,7 +402,9 @@ function SignalsSection({
 }
 
 const pct = (value: number | null, digits = 3) =>
-  value === null ? "—" : `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value * 100).toFixed(digits)}%`;
+  value === null
+    ? "—"
+    : `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value * 100).toFixed(digits)}%`;
 const day = (ms: number | null | undefined) =>
   ms === null || ms === undefined ? "—" : new Date(ms).toISOString().slice(0, 10);
 
@@ -360,7 +470,9 @@ function TrendSection({
                 onChange={(event) => setSample(event.target.value as typeof sample)}
               >
                 <option value="prospective">Live days (scored after they happened)</option>
-                <option value="retrospective">Back-filled days (replayed from history, less trustworthy)</option>
+                <option value="retrospective">
+                  Back-filled days (replayed from history, less trustworthy)
+                </option>
               </select>
             </label>
           }
@@ -368,10 +480,11 @@ function TrendSection({
         <details className="mb-3 text-xs text-muted-foreground">
           <summary>How these portfolios are simulated</summary>
           <p className="mt-2 max-w-3xl">
-            A hypothetical volatility-targeted portfolio per variant, charged 11 bp per unit of turnover plus
-            funding, with no margin, liquidation or position limits. No variant has a validated edge. Live
-            means the position was recorded before the daily close (it may have been recorded after the open);
-            back-filled days are reported separately. Returns are hypothetical open-to-close returns.
+            A hypothetical volatility-targeted portfolio per variant, charged 11 bp per unit of
+            turnover plus funding, with no margin, liquidation or position limits. No variant has a
+            validated edge. Live means the position was recorded before the daily close (it may have
+            been recorded after the open); back-filled days are reported separately. Returns are
+            hypothetical open-to-close returns.
           </p>
         </details>
         {data.isPending ? (
@@ -435,7 +548,11 @@ function TrendSection({
                       <td
                         className={cn(
                           "num py-2 pr-3 text-right",
-                          track.meanDaily === null ? "" : track.meanDaily > 0 ? "text-bull" : "text-bear",
+                          track.meanDaily === null
+                            ? ""
+                            : track.meanDaily > 0
+                              ? "text-bull"
+                              : "text-bear",
                         )}
                       >
                         {pct(track.meanDaily)}
@@ -447,7 +564,9 @@ function TrendSection({
                         {pct(equalWeight?.meanDaily ?? null)}
                       </td>
                       <td className="num py-2 pr-3 text-right">
-                        {track.meanTurnover === null ? "—" : `${(track.meanTurnover * 100).toFixed(1)}%`}
+                        {track.meanTurnover === null
+                          ? "—"
+                          : `${(track.meanTurnover * 100).toFixed(1)}%`}
                       </td>
                       <td className="num py-2 pr-3 text-right">
                         {track.meanGross === null ? "—" : `${track.meanGross.toFixed(2)}×`}
@@ -514,16 +633,31 @@ function Weights({ weights, note }: { weights: Record<string, number>; note: str
         {entries.map(([symbol, weight]) => {
           const share = (Math.abs(weight) / max) * 50;
           return (
-            <li key={symbol} className="grid grid-cols-[2.75rem_1fr_3rem] items-center gap-1.5 text-[11px]">
+            <li
+              key={symbol}
+              className="grid grid-cols-[2.75rem_1fr_3rem] items-center gap-1.5 text-[11px]"
+            >
               <span className="num">{coin(symbol)}</span>
               <span className="relative h-1.5 rounded-full bg-muted" aria-hidden>
                 <span className="absolute inset-y-0 left-1/2 w-px bg-muted-foreground/50" />
                 <span
-                  className={cn("absolute inset-y-0 rounded-full", weight >= 0 ? "bg-bull" : "bg-bear")}
-                  style={weight >= 0 ? { left: "50%", width: `${share}%` } : { right: "50%", width: `${share}%` }}
+                  className={cn(
+                    "absolute inset-y-0 rounded-full",
+                    weight >= 0 ? "bg-bull" : "bg-bear",
+                  )}
+                  style={
+                    weight >= 0
+                      ? { left: "50%", width: `${share}%` }
+                      : { right: "50%", width: `${share}%` }
+                  }
                 />
               </span>
-              <span className={cn("num text-right", weight > 0 ? "text-bull" : weight < 0 ? "text-bear" : "text-muted-foreground")}>
+              <span
+                className={cn(
+                  "num text-right",
+                  weight > 0 ? "text-bull" : weight < 0 ? "text-bear" : "text-muted-foreground",
+                )}
+              >
                 {weight > 0 ? "+" : ""}
                 {weight.toFixed(2)}
               </span>
@@ -548,7 +682,15 @@ function CurveLegend() {
       {CURVES.map((curve) => (
         <li key={curve.label} className="flex items-center gap-1.5">
           <svg width="20" height="6" className={curve.className} aria-hidden>
-            <line x1="0" y1="3" x2="20" y2="3" stroke="currentColor" strokeWidth="2" strokeDasharray={curve.dash} />
+            <line
+              x1="0"
+              y1="3"
+              x2="20"
+              y2="3"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeDasharray={curve.dash}
+            />
           </svg>
           {curve.label}
         </li>
@@ -622,7 +764,10 @@ function EquityCurve({ points }: { points: { ms: number; balance: number }[] }) 
   const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
   const coords = points.map(
     (p) =>
-      [((p.ms - x0) / (x1 - x0 || 1)) * width, height - ((p.balance - y0) / (y1 - y0 || 1)) * height] as const,
+      [
+        ((p.ms - x0) / (x1 - x0 || 1)) * width,
+        height - ((p.balance - y0) / (y1 - y0 || 1)) * height,
+      ] as const,
   );
   const path = coords.map(([x, y], i) => `${i ? "L" : "M"}${x},${y}`).join(" ");
   const first = points[0]!.balance;
@@ -635,7 +780,12 @@ function EquityCurve({ points }: { points: { ms: number; balance: number }[] }) 
         <span className="num text-2xl font-semibold">
           {last.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDT
         </span>
-        <span className={cn("num text-sm", change > 0 ? "text-bull" : change < 0 ? "text-bear" : "text-muted-foreground")}>
+        <span
+          className={cn(
+            "num text-sm",
+            change > 0 ? "text-bull" : change < 0 ? "text-bear" : "text-muted-foreground",
+          )}
+        >
           {change > 0 ? "▲ +" : change < 0 ? "▼ −" : ""}
           {Math.abs(change * 100).toFixed(2)}% since start
         </span>
@@ -663,7 +813,13 @@ function EquityCurve({ points }: { points: { ms: number; balance: number }[] }) 
           </linearGradient>
         </defs>
         <path d={`${path} L${width},${height} L0,${height} Z`} fill="url(#wallet-fill)" />
-        <path d={path} fill="none" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+        <path
+          d={path}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          vectorEffect="non-scaling-stroke"
+        />
       </svg>
       <p className="num mt-1 text-[11px] text-muted-foreground">
         {time(points[0]!.ms)} → {time(points.at(-1)!.ms)} · realised balance only

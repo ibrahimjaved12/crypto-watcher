@@ -73,6 +73,19 @@ const responseSchema = z
   })
   .strict();
 
+/** Bounded liveness probe; errors contain the call path and timing, never credentials. */
+async function movementTimeout(path: string, url: string, elapsedMs: number, send: typeof fetch): Promise<string> {
+  let healthy = false;
+  try {
+    const response = await send(new URL("/health", url), {
+      method: "GET", redirect: "manual", signal: AbortSignal.timeout(1_000),
+    });
+    healthy = response.ok;
+    await response.body?.cancel().catch(() => undefined);
+  } catch { /* An unavailable health endpoint is useful context, not a second failure. */ }
+  return `${path} timed out after ${elapsedMs} ms; ${healthy ? "health check passed" : "service busy or unavailable (/health also failed)"}`;
+}
+
 export async function advancePythonMovementBoundary(
   sessionId: string,
   boundaryTime: number,
@@ -102,6 +115,7 @@ export async function advancePythonMovementBoundary(
   });
   let lastFailure = "unavailable";
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const started = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
@@ -155,10 +169,11 @@ export async function advancePythonMovementBoundary(
       };
     } catch (error) {
       lastFailure = controller.signal.aborted
-        ? "timed out"
+        ? await movementTimeout("/v1/movement/boundary", config.url, Date.now() - started, send)
         : error instanceof Error
           ? error.message
           : String(error);
+      if (controller.signal.aborted) console.warn(`[movement-python] ${lastFailure} (attempt ${attempt}/${MAX_ATTEMPTS})`);
       if (attempt === MAX_ATTEMPTS || /invalid|oversized|mismatched|failed \(4\d\d\)/.test(lastFailure)) {
         break;
       }
@@ -444,6 +459,7 @@ async function postCanonicalMovement(
   path: string, body: unknown, env: Record<string, string | undefined>, send: typeof fetch,
 ): Promise<unknown> {
   const config = pythonServiceConfig(path, env);
+  const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
@@ -462,6 +478,11 @@ async function postCanonicalMovement(
       throw new Error("Python movement response is oversized");
     }
     return JSON.parse(raw) as unknown;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`Python movement ${await movementTimeout(path, config.url, Date.now() - started, send)}`);
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
