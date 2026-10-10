@@ -293,3 +293,50 @@ The first real-month parity run failed rules (ii) and (v). Both are findings, wi
   (`markPrice` of `fundingRate`) and `evaluate` sets the settlement minute's mark with it (`apply_funding_marks`); the
   parity request passes the lake's settlement mark so the check compares like with like. Live uses the API's markPrice, which
   may differ from the lake's mark-kline open by a little; the parity report shows what remains.
+
+### P26b / P27: funding parity and separate market/wallet evaluation
+
+Rule (ii) stays **FAIL** until exact c_h state (#263), so the overall verdict is **FAIL** even when rule (v) passes.
+Rule (v) now applies settlement funding marks to its copied request bars before building funding,
+exactly as the forward outcome engine does.
+
+`POST /v1/forward/evaluate` keeps its existing request/response contract and TypeScript caller.
+It composes `market_evaluate` once per symbol with the pure `wallet_step`; adapted bar arrays
+are released after each symbol, rather than retained for a second liquidation pass.
+
+The two additional authenticated routes are synchronous in the same forward Python process
+as `/v1/forward/evaluate`, with no movement-process dispatch:
+
+- `/v1/forward/market_evaluate`: `schema_version: 1`, `symbol`, `rows`, optional `funding` and
+  `funding_available`, `strategy_ids`, `from_ms`, `to_ms`, optional `open_setups`, `positions`
+  (the persisted wallet position map), and `wallet_config`. Returns `symbol`, `signals`,
+  `setups`, `resolutions`, `reasons`, `processed_to_ms`, `funding_available`, and `events`.
+- `/v1/forward/wallet_step`: `schema_version: 1`, optional `state` (defaults to the initial
+  wallet), `events` (concatenated market event lists), and optional `config`. Returns
+  `schema_version`, `wallet_state`, and `ledger`. Use the same wallet configuration for both
+  endpoints; omitted configuration uses the existing defaults. Exact fractional configuration
+  fields are strings, e.g. `risk_fraction: "1/100"`.
+
+Events contain `type` (`open`, `close`, `funding`, `liquidation`), `ms`, `symbol`, and a per-symbol
+`sequence`, plus the existing wallet event payload. Transport merging uses `(ms, symbol, sequence)`;
+wallet execution preserves the existing liquidation-before-close-before-funding-before-open
+priority and setup-ID ties. New-position liquidation candidates are filtered using the same
+portfolio-wide opens-only preflight as before, including caps and insufficient-margin rejection.
+Persisted positions retain their saved liquidation terms. The composed endpoint attaches
+`compatibility_order` to preserve historical stable ties in caller symbol order; split callers
+requiring those same ties should assign this increasing index by caller symbol order and then
+per-symbol sequence before submitting events. With no such index, stable ties use the deterministic
+transport order. Neither wallet function mutates its inputs, reads a clock, or performs I/O.
+
+Peak-memory expectation: separate one-symbol requests hold **one sixth of the rows** of a
+six-symbol request with equal history lengths. This is a rows-held expectation, not a measured
+sixfold reduction in process RSS: Python overhead, sigma working arrays, retained output events,
+and wallet state still contribute. The compatibility endpoint still receives all six symbols'
+raw rows; use sequential market requests followed by one wallet step to obtain the input-memory
+benefit. Do not execute each symbol's wallet independently, because sizing and caps are portfolio-wide.
+
+CI regressions use short synthetic inputs. `python/tests/fixtures/forward_evaluate_before_p27.py`
+is the evaluator copied before the refactor; `forward_split_golden.json` contains fixed expectations
+hand-derived from that code without running a server or evaluating the fixture locally. Tests
+compare complete composed responses to the frozen path, as well as that fixed golden projection,
+including funding, liquidation, capped entries, reversed symbol order, and per-symbol market slices.

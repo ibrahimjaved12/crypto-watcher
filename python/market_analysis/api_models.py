@@ -469,6 +469,106 @@ class ForwardEvaluateRequest(InputModel):
         }
 
 
+class ForwardWalletConfig(InputModel):
+    """Exact wallet configuration shared by the two split endpoints."""
+    initial_balance_e8: Annotated[int, Field(strict=True, gt=0)] = 100 * 10**8
+    risk_fraction: str = "1/100"
+    max_positions: Annotated[int, Field(strict=True, ge=1, le=2000)] = 6
+    max_exposure_multiple: str = "5"
+    leverage_cap: Annotated[int, Field(strict=True, ge=1, le=125)] = 20
+    liquidation_buffer: Annotated[int, Field(strict=True, ge=1)] = 2
+    taker_rate: str = "0.0005"
+    slip_floor_bps: str = "1"
+    mmr: str = "0.01"
+
+    @field_validator("risk_fraction", "max_exposure_multiple", "taker_rate", "slip_floor_bps", "mmr")
+    @classmethod
+    def exact_nonnegative(cls, value):
+        from fractions import Fraction
+        try:
+            number = Fraction(value)
+        except (ValueError, ZeroDivisionError):
+            raise ValueError("expected an exact nonnegative fraction") from None
+        if number < 0:
+            raise ValueError("expected an exact nonnegative fraction")
+        return value
+
+    def config(self):
+        from fractions import Fraction
+        from .forward.wallet import WalletConfig
+        values = self.model_dump()
+        for key in ("risk_fraction", "max_exposure_multiple", "taker_rate", "slip_floor_bps", "mmr"):
+            values[key] = Fraction(values[key])
+        return WalletConfig(**values)
+
+
+class ForwardMarketRequest(ForwardSymbolInput):
+    schema_version: Literal[1]
+    strategy_ids: Annotated[tuple[str, ...], Field(min_length=1, max_length=200)]
+    from_ms: Timestamp
+    to_ms: Timestamp
+    open_setups: Annotated[tuple[ForwardOpenSetup, ...], Field(max_length=2000)] = ()
+    positions: dict[str, Any] = Field(default_factory=dict)
+    wallet_config: ForwardWalletConfig | None = None
+
+    @model_validator(mode="after")
+    def window(self):
+        if self.to_ms < self.from_ms:
+            raise ValueError("to_ms precedes from_ms")
+        return self
+
+    def evaluate_input(self):
+        from .forward.wallet import WalletConfig
+        return {"symbol": self.symbol, "bars": [row.model_dump() for row in self.rows],
+                "funding": [{"calc_time_ms": f.calc_time_ms, "rate": str(f.rate),
+                             "interval_hours": f.interval_hours,
+                             **({"mark": str(f.mark)} if f.mark is not None else {})} for f in self.funding],
+                "funding_available": self.funding_available, "strategy_ids": self.strategy_ids,
+                "from_ms": self.from_ms, "to_ms": self.to_ms,
+                "open_setups": [item.model_dump() for item in self.open_setups],
+                "positions": self.positions,
+                "wallet_config": self.wallet_config.config() if self.wallet_config else WalletConfig()}
+
+
+class ForwardWalletEvent(InputModel):
+    type: Literal["open", "close", "funding", "liquidation"]
+    ms: Timestamp
+    symbol: str = Field(min_length=5, max_length=16, pattern=r"^[A-Z0-9]+$")
+    sequence: Annotated[int, Field(strict=True, ge=0)]
+    compatibility_order: Annotated[int, Field(strict=True, ge=0)] | None = None
+    setup: dict[str, Any] | None = None
+    setup_id: str | None = None
+    outcome: str | None = None
+    exit_ref_price: Annotated[int, Field(strict=True, gt=0)] | None = None
+    rate: str | None = None
+    mark: Annotated[int, Field(strict=True, gt=0)] | None = None
+
+    @model_validator(mode="after")
+    def required_payload(self):
+        from fractions import Fraction
+        if self.type == "open" and (not self.setup or self.setup.get("symbol") != self.symbol):
+            raise ValueError("open requires a setup for the event symbol")
+        if self.type in ("close", "liquidation") and not self.setup_id:
+            raise ValueError("exit requires setup_id")
+        if self.type == "funding":
+            if self.rate is None or self.mark is None:
+                raise ValueError("funding requires rate and mark")
+            try:
+                rate = Fraction(self.rate)
+            except (ValueError, ZeroDivisionError):
+                raise ValueError("invalid funding rate") from None
+            if abs(rate) > 1:
+                raise ValueError("invalid funding rate")
+        return self
+
+
+class ForwardWalletRequest(InputModel):
+    schema_version: Literal[1]
+    state: dict[str, Any] | None = None
+    events: Annotated[tuple[ForwardWalletEvent, ...], Field(max_length=200_000)]
+    config: ForwardWalletConfig | None = None
+
+
 class ForwardDailyBar(InputModel):
     """One completed UTC-day Binance kline as stored in ``forward_daily_bars`` (#239 P14)."""
     day_ms: Timestamp

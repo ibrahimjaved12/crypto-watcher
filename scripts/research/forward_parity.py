@@ -40,7 +40,7 @@ from market_analysis.benchmark.hidden_guard import HiddenStretchLocked  # noqa: 
 from market_analysis.benchmark.market_data import load_symbol_bars, load_symbol_funding  # noqa: E402
 from market_analysis.forward import parity  # noqa: E402
 from label_build import label_tag  # noqa: E402
-from market_analysis.forward.bars_adapter import bars_from_collector_rows  # noqa: E402
+from market_analysis.forward.bars_adapter import apply_funding_marks, bars_from_collector_rows  # noqa: E402
 from market_analysis.forward.evaluate import _funding, evaluate  # noqa: E402
 from market_analysis.forward.setups import FORWARD_PARAMS  # noqa: E402
 from market_analysis.forward.signals import FORWARD_STRATEGIES  # noqa: E402
@@ -200,6 +200,7 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     result = _quiet(run_forward, call)
     request_item = call["symbols"][0]
     request_bars = _quiet(bars_from_collector_rows, symbol, request_item["rows"])
+    _quiet(apply_funding_marks, request_bars, request_item.get("funding"))
     request_funding = _quiet(_funding, request_bars, request_item.get("funding"))
     progress.phase("compare", rows=len(result["setups"]))
     robust = reference.robust
