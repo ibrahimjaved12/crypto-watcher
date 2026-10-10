@@ -9,12 +9,9 @@
     "test_historical_market_state_candidate_evidence",
     "test_historical_market_state_forward_outcomes",
     "test_historical_market_state_hmm_crossfit",
-    "test_historical_market_state_study",
-    "test_historical_market_state_study_evaluation",
     "test_historical_market_state_study_execution",
     "test_historical_market_state_study_features",
     "test_historical_market_state_study_models",
-    "test_historical_market_state_study_part_c",
     "test_historical_market_state_study_resolver",
     "test_historical_market_state_study_statistics",
     "test_historical_ohlc_evidence",
@@ -25,7 +22,6 @@
     "test_market_state_correlation_clusters_experiment",
     "test_market_state_cusum_experiment",
     "test_market_state_ewma_experiment",
-    "test_market_state_hmm_regimes_experiment",
     "test_market_state_kalman_experiment",
     "test_market_state_pca_common_factor_experiment",
     "test_market_state_pelt_experiment",
@@ -33,5 +29,11 @@
     "test_market_state_regression_acceleration_experiment",
     "test_market_state_shared_v1_branch_parity",
     "test_performance_equivalence"
+  ],
+  "study-heavy": [
+    "test_historical_market_state_study_part_c",
+    "test_historical_market_state_study",
+    "test_market_state_hmm_regimes_experiment",
+    "test_historical_market_state_study_evaluation"
   ]
 }

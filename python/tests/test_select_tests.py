@@ -73,8 +73,8 @@ class RealRepositorySelectionTests(unittest.TestCase):
         self.assertEqual(self.run_select("python/tests/test_forward_engine.py", "src/lib/forward/x.ts"), [])
 
     def test_study_source_and_shared_live_code_select_study_modules(self):
-        self.assertIn("test_historical_market_state_study_part_c",
-                      self.run_select("python/market_analysis/historical_market_state_study_part_c.py"))
+        self.assertIn("test_historical_market_state_study_models",
+                      self.run_select("python/market_analysis/historical_market_state_study_models.py"))
         self.assertTrue(self.run_select("python/market_analysis/canonical_identity.py"))
         self.assertEqual(self.run_select("python/tests/shards.json"), load_shards()["study"])
 

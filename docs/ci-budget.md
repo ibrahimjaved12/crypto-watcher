@@ -32,7 +32,12 @@ One job `Verify`, three lanes sharing one checkout and one setup:
 - **Pull request:** core Python tier, the Node tests + `tsc` + both builds, and only the study-tier
   modules whose imports reach a changed file (`python/tests/select_tests.py`). Python and Node run
   concurrently on the two vCPUs; one failing lane never hides the other.
-- **Weekly (Monday 04:41 UTC) and manual dispatch:** everything, including the whole study tier.
+- **Weekly (Monday 04:41 UTC) and manual dispatch:** everything, including the whole study tier and
+  `study-heavy`.
+- **`study-heavy`** (`shards.json`: `study_part_c`, `study`, `study_evaluation`, `hmm_regimes_experiment`,
+  about 120 s of the 119 s the study tier cost on the first run) runs only weekly and on dispatch, never
+  on a PR. A PR that changes study code is checked by the lighter study modules; run `Verify` by hand
+  (workflow_dispatch) on the branch before merging a change to those four modules' sources.
 - **No push-to-main run:** merged code was verified on its PR; the weekly run is the net.
 - Changes to `python/requirements*.txt`, `run_shard.py`, `shards.json`, `select_tests.py`, the
   fixtures directory or `verify.yml` select the whole study tier. Dynamic imports (`importlib`) are

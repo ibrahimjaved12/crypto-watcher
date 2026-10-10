@@ -73,8 +73,10 @@ jobs:
             python/.venv/bin/python python/tests/run_shard.py core --jobs 1 || status=1
             if [ "$full" = "true" ]; then
               python/.venv/bin/python python/tests/run_shard.py study --jobs 1 || status=1
+              python/.venv/bin/python python/tests/run_shard.py study-heavy --jobs 1 || status=1
             else
               python/.venv/bin/python python/tests/run_shard.py study --jobs 1 --changed-file changed.txt || status=1
+              echo "run_shard: study-heavy: deferred to the weekly full run (4 modules, about 2 minutes)"
             fi
             echo "$((SECONDS - start))" > python.seconds
             return "$status"

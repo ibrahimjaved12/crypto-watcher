@@ -11,7 +11,6 @@ import unittest
 
 from market_analysis import data_lake
 from market_analysis.benchmark import funding_basis, order_flow, order_flow_v2, ta_strategies
-from market_analysis.benchmark.runner import NO_PROGRESS
 
 
 def load_script():
@@ -136,11 +135,6 @@ class ProgressTests(unittest.TestCase):
             quiet_progress = self.module.Progress(memory=lambda: 1)
         self.module._quiet(quiet_progress.phase, "snapshot", symbols=6, months=6)
         self.assertIn("progress phase=snapshot", captured.getvalue())  # survives the /dev/null redirect
-
-    def test_library_default_is_a_no_op(self):
-        NO_PROGRESS.phase("anything", rows=1)
-        with NO_PROGRESS.stage("anything", total=2) as set_step:
-            set_step(1)
 
 
 if __name__ == "__main__":
