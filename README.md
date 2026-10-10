@@ -224,6 +224,12 @@ npx supabase start --workdir operational-db
 npx supabase db reset --local --workdir operational-db
 ```
 
+For local migrations:
+```sh
+supabase migration list --local
+supabase migration up --local
+```
+
 The repository pins Node 22 in `.nvmrc` and the Supabase CLI in `package-lock.json`.
 
 Architecture: [operational PostgreSQL](docs/operational-database.md) and the
