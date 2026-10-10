@@ -37,8 +37,26 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
     throw new Error("The forward job needs the operational database (OPERATIONAL_DB_ENABLED=true)");
   // Relative import: the local job runs through Vite's module runner without the "@" alias.
   const { supabaseAdmin } = await import("../../integrations/supabase/client.server");
+  const callSplit = async (path: string, body: unknown) => {
+    const config = pythonServiceConfig(path);
+    const response = await send(config.url, { method: "POST", signal: AbortSignal.timeout(60_000),
+      headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body) });
+    if (!response.ok) {
+      if (response.status === 409) {
+        const error = await response.json().catch(() => ({})) as { detail?: string };
+        if (error.detail === "sigma_state_rebuild_required") throw new Error(error.detail);
+      }
+      throw new Error(`Forward split evaluation failed with HTTP ${response.status}`);
+    }
+    return response.json();
+  };
   return {
     now: () => Date.now(),
+    firstMinute: (symbol) => store.firstForwardMinute!(symbol),
+    callMarket: (body) => callSplit("/v1/forward/market_evaluate", body),
+    callWallet: (body) => callSplit("/v1/forward/wallet_step", body),
+    log: (message) => console.log(`[forward-sigma] ${message}`),
     readMinutes: (symbol, sinceMs, beforeMs) =>
       store.readForwardMinuteCandles(symbol, sinceMs, beforeMs),
     listHealth: (symbols) => store.listCollectorHealth(symbols),

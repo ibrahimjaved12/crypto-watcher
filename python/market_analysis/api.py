@@ -29,6 +29,7 @@ from .api_models import (
 from .forward.bars_adapter import CollectorRowError
 from .forward.evaluate import evaluate as forward_evaluate, market_evaluate
 from .forward.wallet import WalletConfig, initial_state, wallet_step
+from .forward.sigma_state import SigmaStateMismatch
 from .forward.trend_track import evaluate as forward_trend
 from .movement_service import MovementBoundaryService
 from .service import analyze_request
@@ -169,6 +170,8 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
     def forward_market_route(body: ForwardMarketRequest):
         try:
             return market_evaluate(**body.evaluate_input())
+        except SigmaStateMismatch:
+            raise HTTPException(409, "sigma_state_rebuild_required") from None
         except CollectorRowError as error:
             raise HTTPException(422, f"Invalid collector rows: {error.code}") from None
         except (ValueError, KeyError, TypeError, ZeroDivisionError):

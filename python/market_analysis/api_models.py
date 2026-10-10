@@ -503,6 +503,9 @@ class ForwardWalletConfig(InputModel):
 
 
 class ForwardMarketRequest(ForwardSymbolInput):
+    sigma_state: dict[str, Any] | None = None
+    use_sigma_state: bool = False
+    sigma_only: bool = False
     schema_version: Literal[1]
     strategy_ids: Annotated[tuple[str, ...], Field(min_length=1, max_length=200)]
     from_ms: Timestamp
@@ -520,6 +523,7 @@ class ForwardMarketRequest(ForwardSymbolInput):
     def evaluate_input(self):
         from .forward.wallet import WalletConfig
         return {"symbol": self.symbol, "bars": [row.model_dump() for row in self.rows],
+                "sigma_state": self.sigma_state, "use_sigma_state": self.use_sigma_state, "sigma_only": self.sigma_only,
                 "funding": [{"calc_time_ms": f.calc_time_ms, "rate": str(f.rate),
                              "interval_hours": f.interval_hours,
                              **({"mark": str(f.mark)} if f.mark is not None else {})} for f in self.funding],

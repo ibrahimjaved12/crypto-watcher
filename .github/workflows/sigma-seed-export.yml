@@ -1,0 +1,61 @@
+name: Sigma seed export
+
+# Manual only: production history crosses the hidden stretch and requires a preregistered
+# private plan. No seed payload, plan contents, or private repository output enters public logs.
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated subset of the six symbols"
+        type: string
+        required: true
+        default: "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT"
+      cutoff:
+        description: "Exclusive UTC month boundary, e.g. 2026-10-01T00:00:00Z"
+        type: string
+        required: true
+      plan_id:
+        description: "SHA-256 of a committed private forward-sigma-seed plan; required for hidden months"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sigma-seed-export
+  cancel-in-progress: false
+
+jobs:
+  export:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            python/requirements.txt
+            python/requirements-research.txt
+      - name: Install dependencies
+        run: |
+          python -m venv python/.venv
+          python/.venv/bin/python -m pip install -q -r python/requirements.txt -r python/requirements-research.txt
+      - name: Export guarded seeds to private repository
+        env:
+          SEED_SYMBOLS: ${{ inputs.symbols }}
+          SEED_CUTOFF: ${{ inputs.cutoff }}
+          SEED_PLAN_ID: ${{ inputs.plan_id }}
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: |
+          python/.venv/bin/python scripts/research/export_sigma_seed.py \
+            --symbols "$SEED_SYMBOLS" --cutoff "$SEED_CUTOFF" --plan-id "$SEED_PLAN_ID"
+      - name: Remove private working files
+        if: always()
+        run: rm -rf sigma-seed-export-work

@@ -296,7 +296,7 @@ The first real-month parity run failed rules (ii) and (v). Both are findings, wi
 
 ### P26b / P27: funding parity and separate market/wallet evaluation
 
-Rule (ii) stays **FAIL** until exact c_h state (#263), so the overall verdict is **FAIL** even when rule (v) passes.
+For unseeded rolling-history requests, rule (ii) stays **FAIL** because exact c_h state is absent (#263), so the overall verdict is **FAIL** even when rule (v) passes; P28a adds the seeded mode described below.
 Rule (v) now applies settlement funding marks to its copied request bars before building funding,
 exactly as the forward outcome engine does.
 
@@ -340,3 +340,128 @@ is the evaluator copied before the refactor; `forward_split_golden.json` contain
 hand-derived from that code without running a server or evaluating the fixture locally. Tests
 compare complete composed responses to the frozen path, as well as that fixed golden projection,
 including funding, liquidation, capped entries, reversed symbol order, and per-symbol market slices.
+
+### P28a: exact sigma state
+
+The c_h decision is an **exact expanding ratio list**, seeded once and appended chronologically
+as windows complete. Neither a rolling-window length nor a longer request-window option is adopted.
+`forward/sigma_state.py` stores EWMA `(A, W, n)` per half-life, published levels, the previous
+block close, the current day's returns, the last 28 days of seasonal summaries, pending calibration
+windows, each horizon's ratios and `first_counted_ms`, and `as_of_ms` (last consumed minute's open).
+Advancing overlap is a no-op. Completed window opens at t enter the median before sigma(t);
+the minute's close cannot affect sigma(t). A two-day decision cache supports normal hourly retries;
+older decisions require rebuilding from history. Historical decisions produced during a long advance
+are available to that evaluation without keeping them all in the persisted state.
+
+The benchmark computes ratios using binary `log`/division and rounds only the final c_h. To preserve
+its exact result, each stored ratio is a lossless integer numerator/denominator pair **in HCAL_SCALE
+units**, rather than prematurely rounding the ratio to integer ppm. Median and final rounding match
+`horizon_calibration`/`_RunningMedian`. All payload integers travel as decimal strings to survive
+JavaScript JSON round trips; the envelope has a version, symbol, safe millisecond timestamp and SHA-256
+checksum of canonical JSON excluding the checksum itself. Wrong versions/checksums are rejected.
+
+Export a seed from already-downloaded lake files (exclusive cutoff, hidden-month guard applies):
+
+```sh
+python scripts/research/seed_sigma_state.py --bars-dir /path/to/lake --symbol BTCUSDT \
+  --first-month 2024-01 --last-month 2025-04 --cutoff-ms 1746057600000 --output /tmp/BTCUSDT-sigma.json
+```
+
+`forward_parity.py --seed-sigma-state` (workflow input `seed_sigma_state: true`) seeds all available pre-month history before the existing
+request, so rule (ii) can pass with identical sigma/geometry; an unseeded rolling-history run still
+has the previously documented c_h discrepancy. A pass is measured by the report, not assumed.
+This does not persist TA indicators or reduce their warm-up requirement to a few rows.
+
+### P28b: persistence and hourly wiring
+
+Apply both migrations: application DB `20261011130000_forward_sigma_state.sql` and operational DB
+`20261011130000_forward_sigma_history.sql` (earliest stored minute discovery). The global
+`forward_sigma_state` key is `(symbol, sigma_version)`; it contains market data only and is accessible
+only by the service role. Account wallet/run/output records retain their existing ownership.
+
+The production hourly runner loads and verifies state, sends sequential `/v1/forward/market_evaluate`
+requests with `use_sigma_state: true` and `sigma_state`, then submits the merged events to
+`/v1/forward/wallet_step`. It still reads the **existing 120-day TA lookback**, extended back to
+`as_of_ms + 1 minute` if needed. Indicators are not checkpointed, and this does not claim requests
+shrink to a few rows. The sigma engine ignores already-consumed history in that lookback.
+
+Missing/version/checksum/identity-mismatched or out-of-cache state produces a `sigma_rebuild` log
+and run reason. The runner discovers the first stored 1m candle and rebuilds in bounded 30-day
+requests (`sigma_only: true`) before evaluating the decision interval. No other sigma model is used.
+A rebuild from limited stored history cannot recreate an older lake origin: import the matching lake
+seed to preserve that origin. If history remains insufficient, outcomes retain the existing no-sigma
+behavior. Repairing candles at/before a valid checkpoint does not retroactively change it; corrections
+require a deliberate reseed/version migration, not a silent alteration of past decisions.
+
+`commit_forward_sigma_run` inserts the run, signals, setups, outcomes, ledger, and advanced states in
+one transaction. It checks the expected wallet run and sigma checksums under ordered locks; a racing
+run must reload unless the other account produced the identical market state. A completed hour is a
+no-op, including checkpoint `updated_at`. Retryable `skipped_stale`/`no_sigma` attempts do not advance
+sigma state. Failures roll back the run and checkpoint together; future/newer checkpoints are never
+rolled back by a lagging account.
+
+Import an exported seed before enabling the hourly job:
+
+```sh
+# Credentials come from the existing service environment; do not put them in the file or command.
+node scripts/seed-sigma-state.mjs /tmp/BTCUSDT-sigma.json
+```
+
+The loader reads `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, checks the version and checksum, and
+calls the service-only seed RPC. Re-importing the identical file is a no-op; a different existing
+checkpoint is refused. This command does not run Python, start a server, or alter a wallet.
+
+### P28c: provenance, gaps, and private seed export
+
+Every state payload now includes `source: "lake_seed" | "store_rebuild"`, covered by its checksum.
+`seed_state(..., source="lake_seed")` identifies a lake export; production initialization and
+sigma-only rebuilds use `store_rebuild`. Advancing a state preserves its source. Untagged older
+payloads are rejected and take the explicit rebuild path rather than being assigned an invented
+origin. A store rebuild can have a different `first_counted_ms` and c_h from a full lake seed.
+Filter forward evidence using `paper_runs.freshness.<symbol>.sigma_source`; each symbol also has
+`sigma_payload_bytes`, the canonical UTF-8 size of the **payload**, excluding the envelope/checksum.
+The runner logs this byte count without logging the payload. These measurements expose expanding
+ratio-list growth and hourly JSONB rewrite cost; storage layout and median behavior are unchanged.
+
+`advance` refuses a request starting after `as_of_ms + 1 minute` with `SigmaStateMismatch` before
+mutating the state. The market endpoint also checks the first supplied collector minute, so 4h
+adapter padding cannot disguise omitted history. The runner rebuilds or refuses such requests.
+Interior missing candles still carry the explicit missing flags. A missing minute already consumed
+outside the recent stale window stays missing in the checkpoint: a later REST fill at or before
+`as_of_ms` is ignored by overlap/idempotency. If such a discrepancy appears, rebuild from the corrected
+history deliberately; merely passing overlapping bars again does not repair the state.
+
+The manual **Sigma seed export** workflow (`sigma-seed-export.yml`) runs only on `main`. Inputs:
+`symbols` (comma-separated subset of the six), `cutoff` (exclusive UTC month boundary, e.g.
+`2026-10-01T00:00:00Z`), and `plan_id` (required whenever the history intersects hidden months).
+It loads verified rd-r1 releases from `2024-01` through the month before the cutoff, one symbol at a
+time, using the same guarded loader as parity. Seeds and manifests are committed **only** to the
+private research-data repository under `seeds/sigma/`; public script output contains counts and
+checksums, never seed payloads or plan contents. The offline exporter remains useful for already
+available development/validation lake files; sampled local days are not a production seed.
+
+A production cutoff of October 2026 includes the hidden months January–September 2026. First register
+and commit a plan in the private repo using the existing `Plan`/`write_plan` format; this workflow does
+not generate or approve a plan. Alongside the normal private plan fields, its `variants` must be `1`
+and `strategies` must contain exactly this technical entry (symbols sorted lexicographically):
+
+```json
+{"strategy_id":"forward-sigma-seed","strategy_version":"forward-sigma-v1","config":{"symbols":["BTCUSDT"],"cutoff":"2026-10-01T00:00:00Z","first_month":"2024-01","data_revision":1}}
+```
+
+Use the actual selected symbol list/cutoff in that private plan. Pass its full SHA-256 `plan_id` to
+the workflow. The exporter verifies the committed plan matches the selection, then appends and
+pushes `hidden-opens.jsonl` **before** downloading or reading hidden history. A failed log push aborts;
+a repeat opening of the same question is refused, with no automatic force/reopen option. Development
+seed exports do not require a plan.
+
+Deployment order: **apply both migrations → import the exported seed → start the first hourly run**.
+Retrieve the desired JSON from the private `seeds/sigma/<symbol>/` directory and import it with:
+
+```sh
+node scripts/seed-sigma-state.mjs /path/to/private-seed.json
+```
+
+Use the existing service environment for credentials. Identical imports are idempotent and a different
+live checkpoint cannot be overwritten. Starting the hourly job without a seed explicitly uses
+`store_rebuild` provenance; it is not equivalent to a lake-seeded run.
