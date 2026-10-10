@@ -16,6 +16,13 @@ export const STATUS_FILE_NAME = ".worker-host.status.json";
 export const STATUS_WRITE_INTERVAL_MS = 15_000;
 /** `mvp:check` calls the file fresh when it was updated within this long. */
 export const STATUS_FRESH_MS = 120_000;
+/** `mvp:check` fails when a child has been down this long. */
+export const DOWN_FAIL_MS = 3_600_000;
+export const ESSENTIAL_CHILD = "collector";
+export const FORWARD_CHILDREN = ["forward-hourly", "forward-trend"] as const;
+/** Every child down for this long makes the supervisor exit. */
+export const ALL_DOWN_GRACE_MS = 60_000;
+export const SHUTDOWN_HARD_DEADLINE_MS = 15_000;
 
 // ── Preflight ──────────────────────────────────────────────────────────────────────────────────
 
@@ -53,20 +60,56 @@ function attempt(problems: string[], run: () => void) {
   }
 }
 
+/** Names the host's own file must define: Vite would otherwise fill a missing one from `.env.local`. */
+export const REQUIRED_ENV_FILE_NAMES = [
+  "APP_PROFILE",
+  "ALLOW_HOSTED_SUPABASE",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "OPERATIONAL_DB_ENABLED",
+  "OPERATIONAL_SUPABASE_URL",
+  "OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY",
+  "BINANCE_COLLECTOR_ENABLED",
+  "PYTHON_ANALYSIS_ENABLED",
+  "PYTHON_ANALYSIS_URL",
+  "PYTHON_FORWARD_URL",
+  "PYTHON_ANALYSIS_TOKEN",
+] as const;
+
+/** Names assigned in dotenv text (`NAME=…`, optional `export`); comments and values are ignored. */
+export function envFileNames(text: string): Set<string> {
+  const names = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=/.exec(line);
+    if (match) names.add(match[1]!);
+  }
+  return names;
+}
+
+export function missingEnvFileNames(text: string): string[] {
+  const present = envFileNames(text);
+  return REQUIRED_ENV_FILE_NAMES.filter((name) => !present.has(name));
+}
+
 /**
  * Everything that must hold before the worker host starts anything. Returns the list of problems
- * (empty = go). `envFileExists` is whether `.env.production.local` exists; `env` is the merged
- * production-mode environment the children will see. The existing validators are reused: their
+ * (empty = go). `envFileText` is the content of `.env.production.local` (null when it does not
+ * exist); `env` is the merged production-mode environment the children will see. The existing validators are reused: their
  * messages carry variable names only, never values.
  */
-export function preflight(input: { env: Env; envFileExists: boolean }): string[] {
-  const { env, envFileExists } = input;
-  if (!envFileExists) {
+export function preflight(input: { env: Env; envFileText: string | null }): string[] {
+  const { env, envFileText } = input;
+  if (envFileText === null) {
     return [
       ".env.production.local is missing. Create it (gitignored, mode 0600) with the variables listed in docs/worker-host.md.",
     ];
   }
   const problems: string[] = [];
+  const missing = missingEnvFileNames(envFileText);
+  if (missing.length)
+    problems.push(
+      `.env.production.local must define these names itself (a name missing there would silently take its value from .env.local, the local stack): ${missing.join(", ")}.`,
+    );
 
   if (env["APP_PROFILE"] !== "production") problems.push("APP_PROFILE must be production.");
   const main = parse(env["SUPABASE_URL"]);
@@ -193,16 +236,22 @@ export type RestartDecision =
  * A child exited unexpectedly at `nowMs` after running since `startedAtMs`. Returns the new state
  * and whether to relaunch (after `delayMs`) or give up. The delay doubles per crash from
  * `initialMs` up to `capMs`; a run of `stableMs` or more resets it. A crash counts toward the
- * breaker while it is less than `loopWindowMs` old.
+ * breaker while it is less than `loopWindowMs` old. With `neverGiveUp` the breaker is replaced by a
+ * restart at the cap.
  */
 export function nextRestart(
   state: RestartState,
   event: { nowMs: number; startedAtMs: number },
   policy: RestartPolicy = RESTART_POLICY,
+  options: { neverGiveUp?: boolean } = {},
 ): { state: RestartState; decision: RestartDecision } {
   const stable = event.nowMs - event.startedAtMs >= policy.stableMs;
   const base = stable ? policy.initialMs : state.backoffMs;
   const crashes = [...state.crashes.filter((at) => event.nowMs - at < policy.loopWindowMs), event.nowMs];
+  if (crashes.length >= policy.loopCrashes && options.neverGiveUp) {
+    // Essential child (the collector): never a permanent stop, keep retrying at the cap.
+    return { state: { backoffMs: policy.capMs, crashes }, decision: { kind: "restart", delayMs: policy.capMs } };
+  }
   if (crashes.length >= policy.loopCrashes) {
     return { state: { backoffMs: base, crashes }, decision: { kind: "crash-loop", crashesInWindow: crashes.length } };
   }
@@ -228,6 +277,8 @@ export type ChildStatus = {
   lastRestartAt: string | null;
   lastExit: string | null;
   nextRestartAt: string | null;
+  /** When the child last stopped unexpectedly and has not since run for `stableMs`; else null. */
+  downSince?: string | null;
 };
 
 export type WorkerHostStatus = {
@@ -319,6 +370,11 @@ export function classifyWorkerHost(
   const ageS = Math.round((nowMs - Date.parse(status.updatedAt)) / 1000);
   if (looping.length)
     return { level: "FAIL", detail: `crash loop, restarts stopped: ${looping.join(", ")}${isStatusFresh(status, nowMs) ? "" : ` (status also stale, ${ageS}s old)`}` };
+  const downTooLong = status.children
+    .filter((child) => child.downSince && nowMs - Date.parse(child.downSince) >= DOWN_FAIL_MS)
+    .map((child) => child.name);
+  if (downTooLong.length)
+    return { level: "FAIL", detail: `down for more than an hour: ${downTooLong.join(", ")}` };
   if (!isStatusFresh(status, nowMs))
     return {
       level: "FAIL",
@@ -335,4 +391,48 @@ export function classifyWorkerHost(
       detail: `not running: ${notRunning.map((child) => `${child.name} ${child.state}`).join(", ") || "host shutting down"}`,
     };
   return { level: "PASS", detail: `${status.children.length} children running, ${restarts} restart(s) since start, updated ${ageS}s ago` };
+}
+
+// ── Orphans and exit rules ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Process ids a previous run left in the status file: the supervisor and every child that was
+ * running. A file last written before the machine booted cannot refer to live processes of ours
+ * (pids are reused), so it yields none. The caller checks which are alive.
+ */
+export function recordedPids(
+  status: WorkerHostStatus | null,
+  bootMs: number,
+): { label: string; pid: number }[] {
+  if (!status || Date.parse(status.updatedAt) < bootMs) return [];
+  const out: { label: string; pid: number }[] = [];
+  if (Number.isInteger(status.supervisorPid)) out.push({ label: "worker host", pid: status.supervisorPid });
+  for (const child of status.children)
+    if (typeof child.pid === "number" && Number.isInteger(child.pid)) out.push({ label: child.name, pid: child.pid });
+  return out;
+}
+
+/**
+ * When the supervisor must give up and exit non-zero (so systemd/pm2 can restart it cleanly): the
+ * collector in a crash loop (the collector policy never reaches it; kept as a guard), both forward
+ * jobs in a crash loop, or every child not running for `ALL_DOWN_GRACE_MS`. `allDownSinceMs` is the
+ * caller-held tracker; pass back what this returns.
+ */
+export function exitDecision(
+  children: readonly { name: string; state: ChildRunState }[],
+  allDownSinceMs: number | null,
+  nowMs: number,
+): { reason: string | null; allDownSinceMs: number | null } {
+  const state = (name: string) => children.find((child) => child.name === name)?.state;
+  if (state(ESSENTIAL_CHILD) === "crash-loop")
+    return { reason: `${ESSENTIAL_CHILD} is in a crash loop`, allDownSinceMs };
+  if (FORWARD_CHILDREN.every((name) => state(name) === "crash-loop"))
+    return { reason: "both forward jobs are in a crash loop", allDownSinceMs };
+  if (children.length && children.every((child) => child.state !== "running")) {
+    const since = allDownSinceMs ?? nowMs;
+    if (nowMs - since >= ALL_DOWN_GRACE_MS)
+      return { reason: `every child has been down for ${ALL_DOWN_GRACE_MS / 1000}s`, allDownSinceMs: since };
+    return { reason: null, allDownSinceMs: since };
+  }
+  return { reason: null, allDownSinceMs: null };
 }

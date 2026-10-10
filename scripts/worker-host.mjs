@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { uptime } from "node:os";
 import { resolve } from "node:path";
 import { loadEnv, runnerImport } from "vite";
 
@@ -23,6 +24,7 @@ let shuttingDown = false;
 let crashLoopSeen = false;
 let forceSignalSeen = false;
 let statusWarned = false;
+let allDownSinceMs = null;
 const KILL_AFTER_MS = 10_000; // SIGTERM first, SIGKILL after this long
 
 const importLib = async (path) =>
@@ -44,6 +46,17 @@ function signalChild(record, signal) {
     }
   } catch (error) {
     if (error.code !== "ESRCH") logError(`could not signal ${record.name}: ${error.message}`);
+  }
+}
+
+const isAlive = (proc) => !!proc && proc.pid !== undefined && proc.exitCode === null && proc.signalCode === null;
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
   }
 }
 
@@ -77,19 +90,26 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 function writeStatus() {
   if (!lib || records.size === 0) return;
+  const now = Date.now();
+  for (const r of records.values()) {
+    // Down until the relaunched child has run for the stable period.
+    if (r.downSince && r.state === "running" && now - r.startedAt >= lib.RESTART_POLICY.stableMs) r.downSince = null;
+  }
   const status = lib.buildStatus({
     supervisorPid: process.pid,
     startedAtMs,
-    nowMs: Date.now(),
+    nowMs: now,
     shuttingDown,
     children: [...records.values()].map((r) => ({
       name: r.name,
       state: r.state,
-      pid: r.state === "running" || r.state === "stopping" ? (r.proc?.pid ?? null) : null,
+      // Every live child pid is recorded (also while stopping), so a later start can find orphans.
+      pid: isAlive(r.proc) ? r.proc.pid : null,
       restartCount: r.restartCount,
       lastRestartAt: r.lastRestartAt,
       lastExit: r.lastExit,
       nextRestartAt: r.nextRestartAt,
+      downSince: r.downSince,
     })),
   });
   try {
@@ -115,6 +135,7 @@ function writeStatus() {
 function launch(record) {
   record.startedAt = Date.now();
   record.nextRestartAt = null;
+  record.downSince ??= null;
   let handled = false;
   const proc = spawn(record.command, record.args, {
     cwd: record.cwd,
@@ -138,21 +159,26 @@ function launch(record) {
       writeStatus();
       return;
     }
-    const { state, decision } = lib.nextRestart(record.restartState, {
-      nowMs: Date.now(),
-      startedAtMs: record.startedAt,
-    });
+    record.downSince ??= new Date().toISOString();
+    const { state, decision } = lib.nextRestart(
+      record.restartState,
+      { nowMs: Date.now(), startedAtMs: record.startedAt },
+      lib.RESTART_POLICY,
+      { neverGiveUp: record.name === lib.ESSENTIAL_CHILD },
+    );
     record.restartState = state;
     if (decision.kind === "crash-loop") {
       record.state = "crash-loop";
       crashLoopSeen = true;
       logError(
-        `${record.name} stopped with ${reason}: ${decision.crashesInWindow} crashes within 10 minutes. Not restarting it; the other children keep running and the host will exit non-zero.`,
+        `${record.name} stopped with ${reason}: ${decision.crashesInWindow} crashes within 10 minutes. Not restarting it; the other children keep running.`,
       );
     } else {
       record.state = "backoff";
       record.nextRestartAt = new Date(Date.now() + decision.delayMs).toISOString();
       logError(`${record.name} stopped with ${reason}; restarting in ${Math.round(decision.delayMs / 1000)}s.`);
+      if (record.name === lib.ESSENTIAL_CHILD && decision.delayMs === lib.RESTART_POLICY.capMs)
+        logError(`${record.name} is never stopped for good: it keeps retrying every ${decision.delayMs / 1000}s.`);
       record.timer = setTimeout(() => {
         record.timer = null;
         if (shuttingDown) return;
@@ -163,6 +189,7 @@ function launch(record) {
       }, decision.delayMs);
     }
     writeStatus();
+    evaluateExit();
   };
   proc.once("exit", (code, signal) => onGone(lib.describeExit(code, signal)));
   proc.once("error", (error) => onGone(`spawn error: ${error.message}`));
@@ -186,6 +213,21 @@ async function startAfterPython(record, endpoints, pythonNames) {
     if (!announced) log(`${record.name} waiting for both Python health endpoints…`);
     announced = true;
     await sleep(500);
+  }
+}
+
+/** Exit non-zero when the forward test cannot go on (rules in `exitDecision`). */
+function evaluateExit() {
+  if (shuttingDown || !lib || records.size === 0) return;
+  const result = lib.exitDecision(
+    [...records.values()].map((r) => ({ name: r.name, state: r.state })),
+    allDownSinceMs,
+    Date.now(),
+  );
+  allDownSinceMs = result.allDownSinceMs;
+  if (result.reason) {
+    logError(`${result.reason}; exiting so the process manager can restart the host.`);
+    void shutdown(result.reason, 1);
   }
 }
 
@@ -218,9 +260,21 @@ async function shutdown(reason, requestedCode = 0) {
   const killTimer = setTimeout(() => {
     for (const record of records.values()) if (record.state === "stopping") signalChild(record, "SIGKILL");
   }, KILL_AFTER_MS);
-  await Promise.all(exits);
+  // Hard deadline: a child that survives SIGKILL (possible with taskkill) must not hold the host forever.
+  let deadlineTimer;
+  const deadline = new Promise((done) => {
+    deadlineTimer = setTimeout(() => done("deadline"), lib?.SHUTDOWN_HARD_DEADLINE_MS ?? 15_000);
+  });
+  const outcome = await Promise.race([Promise.all(exits).then(() => "exited"), deadline]);
   clearTimeout(killTimer);
-  const code = crashLoopSeen ? 1 : requestedCode;
+  clearTimeout(deadlineTimer);
+  const survivors = [...records.values()].filter((r) => isAlive(r.proc));
+  if (outcome === "deadline" && survivors.length) {
+    logError(
+      `shutdown deadline reached; still alive: ${survivors.map((r) => `${r.name} (pid ${r.proc.pid})`).join(", ")}. Their pids stay in the status file and block the next start until they are gone.`,
+    );
+  }
+  const code = crashLoopSeen || survivors.length ? 1 : requestedCode;
   if (code === 0) {
     rmSync(statusPath, { force: true }); // deliberate stop: the host is simply no longer in use
   } else {
@@ -232,6 +286,32 @@ async function shutdown(reason, requestedCode = 0) {
 
 // ── Startup ────────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Processes a previous run recorded in the status file (the host and its children) that are still
+ * alive. A host killed without cleanup, or a closed terminal, leaves its children running; a second
+ * collector next to one would double-write.
+ */
+function orphanProblems() {
+  if (!existsSync(statusPath)) return [];
+  let raw;
+  try {
+    raw = readFileSync(statusPath, "utf8");
+  } catch (error) {
+    return [`Cannot read ${statusPath}: ${error.message}. It may list running workers.`];
+  }
+  const previous = lib.parseStatus(raw);
+  if (!previous)
+    return [".worker-host.status.json exists but is unreadable, so running workers cannot be ruled out. Check for stray processes, then delete it."];
+  const bootMs = Date.now() - uptime() * 1000;
+  return lib
+    .recordedPids(previous, bootMs)
+    .filter(({ pid }) => pid !== process.pid && pidAlive(pid))
+    .map(
+      ({ label, pid }) =>
+        `${label} from a previous run is still alive (pid ${pid}). Stop it first (Linux/macOS: kill -TERM -- -${pid}; Windows: taskkill /pid ${pid} /T /F), or delete .worker-host.status.json if the pid now belongs to something unrelated.`,
+    );
+}
+
 function runtimeProblems(python) {
   const problems = [];
   if (!existsSync(python)) {
@@ -241,26 +321,16 @@ function runtimeProblems(python) {
   } else if (spawnSync(python, ["-c", "import fastapi, uvicorn, numpy"], { stdio: "ignore" }).status !== 0) {
     problems.push("Python API dependencies missing. Run: python/.venv/bin/python -m pip install -r python/requirements.txt");
   }
-  if (existsSync(statusPath)) {
-    const previous = lib.parseStatus(readFileSync(statusPath, "utf8"));
-    if (previous && previous.supervisorPid !== process.pid && lib.isStatusFresh(previous, Date.now())) {
-      try {
-        process.kill(previous.supervisorPid, 0);
-        problems.push(`Another worker host is running (pid ${previous.supervisorPid}). Stop it first.`);
-      } catch (error) {
-        if (error.code === "EPERM") problems.push(`Another worker host may be running (pid ${previous.supervisorPid}).`);
-      }
-    }
-  }
+  problems.push(...orphanProblems());
   return problems;
 }
 
 async function main() {
-  const envFileExists = existsSync(envFile);
+  const envFileText = existsSync(envFile) ? readFileSync(envFile, "utf8") : null;
   const env = { ...loadEnv(MODE, root, ""), ...process.env };
   lib = await importLib("/src/lib/worker-host.ts");
 
-  const problems = lib.preflight({ env, envFileExists });
+  const problems = lib.preflight({ env, envFileText });
   if (!problems.length) {
     try {
       // The collector's own contract (retention days, Python URL/token, grace period).
@@ -270,6 +340,8 @@ async function main() {
     }
   }
   let endpoints;
+  // Orphans are checked even when the configuration is wrong: they are a fact, not a setting.
+  if (problems.length) problems.push(...orphanProblems());
   const python = resolve(root, process.platform === "win32" ? "python/.venv/Scripts/python.exe" : "python/.venv/bin/python");
   if (!problems.length) {
     endpoints = lib.pythonEndpoints(env);
@@ -328,6 +400,7 @@ async function main() {
   }
 
   setInterval(writeStatus, lib.STATUS_WRITE_INTERVAL_MS);
+  setInterval(evaluateExit, 5_000);
   log(`Preflight passed (${MODE}, hosted main Supabase). Starting ${specs.length} children.`);
   for (const name of ["fastapi-analysis", "fastapi-forward", "collector"]) launch(records.get(name));
   const pythonNames = ["fastapi-analysis", "fastapi-forward"];
@@ -336,9 +409,12 @@ async function main() {
   void startAfterPython(records.get("forward-trend"), urls, pythonNames);
 }
 
-for (const signal of process.platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK"] : ["SIGINT", "SIGTERM"]) {
+// SIGHUP is what a closed terminal sends; without it the children would outlive the host.
+for (const signal of process.platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"] : ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => void shutdown(`received ${signal}`));
 }
+// A closed terminal also breaks the log pipes; that must not crash the host before it can clean up.
+for (const stream of [process.stdout, process.stderr]) stream.on("error", () => {});
 process.on("uncaughtException", (error) => {
   logError(`unexpected error: ${error.message}`);
   void shutdown("unexpected error", 1);

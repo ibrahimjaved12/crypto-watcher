@@ -26,22 +26,24 @@ The host does not start Docker or Supabase. The local operational stack must alr
 
 ## Setup
 
-Variable **names** only; values live in the gitignored `.env.production.local` (mode 0600) or the
-host's secret store, never in the repository and never in `VITE_*`.
+Variable **names** only; values live in the gitignored `.env.production.local` (mode 0600), never in the
+repository and never in `VITE_*`.
 
 Vite loads `.env`, `.env.local`, `.env.production`, then `.env.production.local` (last wins; shell
 variables beat all). The committed `.env.production` already selects the production profile and the
 hosted main project, but it sets `OPERATIONAL_DB_ENABLED=false` and `BINANCE_COLLECTOR_ENABLED=false`, so
 the host's file must override them. Values in `.env.local` still fill any name the production file
-leaves unset, so set every name below in `.env.production.local` explicitly.
+leaves unset. That would silently mix in the local stack's keys, so the host **refuses to start unless
+`.env.production.local` itself defines every name marked below** (checked in the file, not in the merged
+environment; an empty value counts as defined and is then caught by the value checks).
 
-- Main project: `APP_PROFILE=production`, `ALLOW_HOSTED_SUPABASE=true`, `SUPABASE_URL`,
-  `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
-- Operational project (local stack): `OPERATIONAL_DB_ENABLED=true`, `OPERATIONAL_SUPABASE_URL`,
-  `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`, `OPERATIONAL_CANDLE_RETENTION_DAYS` (default 8 is enough)
-- `BINANCE_COLLECTOR_ENABLED=true`
-- Python: `PYTHON_ANALYSIS_ENABLED=true`, `PYTHON_ANALYSIS_URL` and `PYTHON_FORWARD_URL` (two different
-  loopback HTTP origins with explicit ports, for example ports 8000 and 8001), `PYTHON_ANALYSIS_TOKEN`
+- Main project: `APP_PROFILE=production`\*, `ALLOW_HOSTED_SUPABASE=true`\*, `SUPABASE_URL`\*,
+  `SUPABASE_SERVICE_ROLE_KEY`\*
+- Operational project (local stack): `OPERATIONAL_DB_ENABLED=true`\*, `OPERATIONAL_SUPABASE_URL`\*,
+  `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`\*, `OPERATIONAL_CANDLE_RETENTION_DAYS` (default 8 is enough)
+- `BINANCE_COLLECTOR_ENABLED=true`\*
+- Python: `PYTHON_ANALYSIS_ENABLED=true`\*, `PYTHON_ANALYSIS_URL`\* and `PYTHON_FORWARD_URL`\* (two different
+  loopback HTTP origins with explicit ports, for example ports 8000 and 8001), `PYTHON_ANALYSIS_TOKEN`\*
   (32–256 URL-safe characters)
 - Optional: `FORWARD_USER_ID` (narrow the jobs to one account), `MOVEMENT_FINALIZATION_GRACE_MS`
 
@@ -68,7 +70,7 @@ Prerequisites: Node 22.12+, `npm ci`, and the Python environment
 
 The host refuses to start (exit 1, one line per problem, no secret values) when:
 
-- `.env.production.local` is missing;
+- `.env.production.local` is missing, or does not itself define every required name (marked \* above);
 - `APP_PROFILE` is not `production`, `SUPABASE_URL` is not a hosted HTTPS origin, or
   `ALLOW_HOSTED_SUPABASE` is not exactly `true`;
 - the operational database is disabled, its URL is neither loopback nor HTTPS, or it is the same project
@@ -79,7 +81,8 @@ The host refuses to start (exit 1, one line per problem, no secret values) when:
 - `BINANCE_COLLECTOR_ENABLED` is not `true`;
 - the service-role key (or any secret) appears in a `VITE_*` variable;
 - the collector's own environment contract fails, the Python environment is missing, something already
-  serves either Python port, or another worker host is running.
+  serves either Python port, or **any process recorded in the previous status file is still alive** (see
+  below).
 
 The checks reuse `validateServerSupabase`, `validatePublicSecrets`, `operationalDbConfig`,
 `pythonServiceConfig` and `validateCollectorWorkerEnvironment`; the pure part is
@@ -88,34 +91,55 @@ The checks reuse `validateServerSupabase`, `validatePublicSecrets`, `operational
 ## Restart policy and status
 
 Per child: exponential backoff starting at 2 s, doubling to a 5 minute cap; a run of 10 minutes or more
-resets it. **Crash-loop breaker:** 5 crashes within 10 minutes stop restarting that child; the others
-keep running and the host exits non-zero at shutdown. Any exit while the host is running counts as a
-crash (the children are meant to run forever). After the breaker opens, fix the cause and restart the
-host.
+resets it. Any exit while the host is running counts as a crash (the children are meant to run forever).
+
+- **Crash-loop breaker (all children except the collector):** 5 crashes within 10 minutes stop restarting
+  that child.
+- **The collector never enters the permanent stop.** A gap in the 1m history makes the forward job skip,
+  so after the fifth crash in ten minutes it keeps retrying at the 5 minute cap (and goes back to short
+  backoff after a 10 minute stable run). `mvp:check` fails once any child has been down for an hour.
+
+**The host exits non-zero** (so systemd/pm2 restart it from a clean slate) when both forward jobs are in a
+crash loop, when the collector is (a guard; its policy never gets there), or when every child has been
+not running for 60 s. Other children in a crash loop (for example one FastAPI service) do not end the
+host; `mvp:check` shows them as FAIL, and forward jobs that were waiting for that service stay waiting.
+A FastAPI service in a crash loop therefore needs a look; the host does not exit for it alone.
 
 `.worker-host.status.json` (gitignored, written atomically every 15 s and on every change) holds each
-child's state (`waiting`, `running`, `backoff`, `crash-loop`, `stopping`, `stopped`), pid, restart count,
-last restart time and last exit. On a clean stop the file is removed; after a non-zero exit it is kept.
+child's state (`waiting`, `running`, `backoff`, `crash-loop`, `stopping`, `stopped`), pid (whenever the
+child process is alive), restart count, last restart time, last exit and `downSince`. On a clean stop the
+file is removed; after a non-zero exit it is kept.
 
 `npm run mvp:check` gets one new line, `worker host`: **PASS** fresh (updated within 2 minutes) and all
 children running; **WARN** file missing (host not used, e.g. the `dev:local:all` flow) or fresh but a
-child is waiting, backing off or stopping; **FAIL** stale, unreadable, or any child in a crash loop.
-Existing lines are unchanged.
+child is waiting, backing off or stopping; **FAIL** stale, unreadable, any child in a crash loop, or any
+child down for an hour or more. Existing lines are unchanged.
+
+## Orphans
+
+Children run as their own process groups, so a host that dies without cleanup (SIGKILL, power loss)
+leaves them running. A closed terminal sends SIGHUP, which the host handles like SIGTERM. On every start
+the host reads the previous status file, whatever its age, and **refuses to start while the recorded
+supervisor or any recorded child pid is still alive**, naming the pid and the command to stop it. A file
+last written before the machine booted is ignored (pids are reused). If a pid now belongs to something
+unrelated, delete `.worker-host.status.json`. Orphans whose status file was deleted are not found;
+FastAPI ones are still caught by the port check.
 
 ## Stopping
 
-Ctrl+C, SIGINT or SIGTERM: the host sends SIGTERM to every child, then SIGKILL to any still alive after
-10 s; a second signal kills at once. It exits 0, or 1 if a crash-loop was seen.
+Ctrl+C, SIGINT, SIGTERM or SIGHUP: the host sends SIGTERM to every child, SIGKILL to any still alive after
+10 s, and exits after at most **15 s** whatever happens. A child that survives SIGKILL is named in the log
+and its pid stays in the status file; the exit code is then 1, and the next start refuses until it is
+gone. A second signal kills at once. Otherwise it exits 0 (1 if a crash-loop was seen).
 
 - **Linux/macOS:** each child leads its own process group, and signals go to the group. This is the
   handled and intended path.
-- **Windows:** Node has no POSIX signals there. `SIGINT`/`SIGBREAK`/`SIGTERM` are handled by the host;
-  the "SIGTERM" step is a forced terminate of the direct child and the 10 s step is
+- **Windows:** Node has no POSIX signals there. `SIGINT`/`SIGBREAK`/`SIGTERM`/`SIGHUP` are handled by the
+  host; the "SIGTERM" step is a forced terminate of the direct child and the 10 s step is
   `taskkill /pid N /T /F` for its tree. There is no graceful shutdown on this path. The code path exists
   but has **not been run on Windows**.
 
-If the host itself is SIGKILLed, children are orphaned and keep the Python ports, so the next start
-refuses until they are stopped. Under systemd (control-group kill) this does not happen.
+Under systemd (control-group kill) orphans do not survive a host crash.
 
 ## Keep it running
 

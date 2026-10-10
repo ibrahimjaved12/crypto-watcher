@@ -42,13 +42,15 @@ const good = () => ({
   PYTHON_FORWARD_URL: "http://127.0.0.1:8001",
   PYTHON_ANALYSIS_TOKEN: TOKEN,
 });
-const run = (patch = {}, envFileExists = true) => {
+// The host's own file defines every name by default; `fileText` overrides it (null = file missing).
+const fileFor = (env) => Object.keys(env).map((name) => `${name}=x`).join("\n");
+const run = (patch = {}, fileText = undefined) => {
   const env = { ...good(), ...patch };
   for (const [k, v] of Object.entries(patch)) if (v === undefined) delete env[k];
-  return w.preflight({ env, envFileExists });
+  return w.preflight({ env, envFileText: fileText === undefined ? fileFor(env) : fileText });
 };
-const refuses = (patch, pattern, envFileExists = true) => {
-  const problems = run(patch, envFileExists);
+const refuses = (patch, pattern, fileText = undefined) => {
+  const problems = run(patch, fileText);
   assert.ok(problems.some((p) => pattern.test(p)), `expected ${pattern}, got ${JSON.stringify(problems)}`);
 };
 
@@ -58,7 +60,7 @@ test("preflight passes a complete hosted production configuration", () => {
 });
 
 test("preflight refuses each unsafe condition with a clear message", () => {
-  refuses({}, /\.env\.production\.local is missing/, false);
+  refuses({}, /\.env\.production\.local is missing/, null);
   refuses({ SUPABASE_URL: "http://127.0.0.1:54321" }, /SUPABASE_URL must be the hosted main/);
   refuses({ SUPABASE_URL: "http://abc.supabase.co" }, /SUPABASE_URL must be the hosted main/);
   refuses({ ALLOW_HOSTED_SUPABASE: "TRUE" }, /ALLOW_HOSTED_SUPABASE must be exactly true/);
@@ -76,6 +78,26 @@ test("preflight refuses each unsafe condition with a clear message", () => {
   refuses({ PYTHON_ANALYSIS_URL: "https://py.example.com" }, /loopback HTTP origin/);
   refuses({ BINANCE_COLLECTOR_ENABLED: "false" }, /BINANCE_COLLECTOR_ENABLED must be true/);
   refuses({ SUPABASE_SERVICE_ROLE_KEY: undefined }, /SUPABASE_SERVICE_ROLE_KEY is required/);
+});
+
+test("names must be defined in .env.production.local itself, not inherited from .env.local", () => {
+  assert.deepEqual(w.missingEnvFileNames(fileFor(good())), []);
+  // A value present only in the merged environment (as if filled from .env.local) is not enough.
+  const { SUPABASE_SERVICE_ROLE_KEY: _omitted, ...withoutKey } = good();
+  refuses({}, /must define these names itself.*SUPABASE_SERVICE_ROLE_KEY/, fileFor(withoutKey));
+  const missing = w.missingEnvFileNames("APP_PROFILE=production\n");
+  assert.ok(missing.includes("PYTHON_ANALYSIS_TOKEN") && !missing.includes("APP_PROFILE"));
+  // Comments, values mentioning a name, and prefixes do not count; export and spacing do.
+  const text = [
+    "# SUPABASE_SERVICE_ROLE_KEY=commented",
+    "NOTE=SUPABASE_SERVICE_ROLE_KEY=inside a value",
+    "X_SUPABASE_SERVICE_ROLE_KEY=prefixed",
+    "export  APP_PROFILE = production",
+    "OPERATIONAL_DB_ENABLED=",
+  ].join("\r\n");
+  const names = w.envFileNames(text);
+  assert.ok(!names.has("SUPABASE_SERVICE_ROLE_KEY"));
+  assert.ok(names.has("APP_PROFILE") && names.has("OPERATIONAL_DB_ENABLED"), "empty values still count as defined");
 });
 
 test("preflight refuses a service-role key copied into a VITE_ variable", () => {
@@ -163,6 +185,60 @@ test("five crashes within ten minutes open the breaker; slower crashes do not", 
   assert.deepEqual(after.state.crashes, [700_000]);
 });
 
+test("the collector never enters the permanent stop; it retries at the cap", () => {
+  let state = w.initialRestartState();
+  const delays = [];
+  for (const nowMs of [0, 10_000, 30_000, 60_000, 100_000, 200_000, 400_000]) {
+    const out = w.nextRestart(state, { nowMs, startedAtMs: nowMs - 500 }, w.RESTART_POLICY, { neverGiveUp: true });
+    assert.equal(out.decision.kind, "restart");
+    delays.push(out.decision.delayMs / 1000);
+    state = out.state;
+  }
+  assert.deepEqual(delays, [2, 4, 8, 16, 300, 300, 300]);
+  // A stable run still resets it.
+  const reset = w.nextRestart(state, { nowMs: 5_000_000, startedAtMs: 5_000_000 - 600_000 }, w.RESTART_POLICY, { neverGiveUp: true });
+  assert.equal(reset.decision.delayMs, 2_000);
+  // Without the option the same sequence still stops (other children).
+  let other = w.initialRestartState();
+  let kind;
+  for (const nowMs of [0, 10_000, 30_000, 60_000, 100_000]) {
+    const out = w.nextRestart(other, { nowMs, startedAtMs: nowMs - 500 });
+    other = out.state;
+    kind = out.decision.kind;
+  }
+  assert.equal(kind, "crash-loop");
+});
+
+test("exit rules: both forward jobs looping, collector looping, or everything down for a minute", () => {
+  const set = (states) => Object.entries(states).map(([name, state]) => ({ name, state }));
+  const up = { "fastapi-analysis": "running", "fastapi-forward": "running", collector: "running", "forward-hourly": "running", "forward-trend": "running" };
+  assert.deepEqual(w.exitDecision(set(up), null, 1000), { reason: null, allDownSinceMs: null });
+  assert.equal(w.exitDecision(set({ ...up, "forward-hourly": "crash-loop" }), null, 0).reason, null, "one forward job alone does not stop the host");
+  assert.match(w.exitDecision(set({ ...up, "forward-hourly": "crash-loop", "forward-trend": "crash-loop" }), null, 0).reason, /both forward jobs/);
+  assert.match(w.exitDecision(set({ ...up, collector: "crash-loop" }), null, 0).reason, /collector/);
+  assert.equal(w.exitDecision(set({ ...up, collector: "backoff" }), null, 0).reason, null, "a collector in backoff keeps the host alive");
+  const down = Object.fromEntries(Object.keys(up).map((n) => [n, "backoff"]));
+  const first = w.exitDecision(set(down), null, 10_000);
+  assert.deepEqual(first, { reason: null, allDownSinceMs: 10_000 });
+  assert.equal(w.exitDecision(set(down), first.allDownSinceMs, 69_999).reason, null);
+  assert.match(w.exitDecision(set(down), first.allDownSinceMs, 70_000).reason, /every child has been down/);
+  assert.equal(w.exitDecision(set({ ...down, collector: "running" }), 10_000, 80_000).allDownSinceMs, null, "any child up resets the timer");
+});
+
+test("a previous run's pids are found unless the file predates the boot", () => {
+  const status = w.buildStatus({
+    supervisorPid: 100, startedAtMs: 0, nowMs: Date.parse("2026-10-10T10:00:00Z"), shuttingDown: false,
+    children: [
+      { name: "collector", state: "running", pid: 201, restartCount: 0, lastRestartAt: null, lastExit: null, nextRestartAt: null },
+      { name: "forward-trend", state: "backoff", pid: null, restartCount: 1, lastRestartAt: null, lastExit: "exit code 1", nextRestartAt: null },
+    ],
+  });
+  const boot = Date.parse("2026-10-10T08:00:00Z");
+  assert.deepEqual(w.recordedPids(status, boot), [{ label: "worker host", pid: 100 }, { label: "collector", pid: 201 }]);
+  assert.deepEqual(w.recordedPids(status, Date.parse("2026-10-10T11:00:00Z")), [], "pids from before a reboot are not ours");
+  assert.deepEqual(w.recordedPids(null, boot), []);
+});
+
 test("the status file is written through a temporary file and renamed", () => {
   const files = new Map();
   const ops = [];
@@ -213,6 +289,12 @@ test("mvp:check worker host line: missing WARN, fresh+running PASS, stale or cra
   assert.equal(backoff.level, "WARN");
   assert.match(backoff.detail, /a backoff/);
   assert.equal(w.classifyWorkerHost(file(1_000, [child("a", "waiting")]), now).level, "WARN");
+  // Down for an hour (the collector retrying at the cap) fails; 59 minutes is still a WARN.
+  const downFor = (ms) => [...running.slice(1), { ...child("a", "backoff"), downSince: new Date(now - ms).toISOString() }];
+  assert.equal(w.classifyWorkerHost(file(1_000, downFor(59 * 60_000)), now).level, "WARN");
+  const longDown = w.classifyWorkerHost(file(1_000, downFor(3_600_000)), now);
+  assert.equal(longDown.level, "FAIL");
+  assert.match(longDown.detail, /more than an hour: a/);
   assert.equal(w.classifyWorkerHost("{not json", now).level, "FAIL");
   assert.equal(w.classifyWorkerHost(file(1_000, []), now).level, "FAIL");
   assert.equal(w.classifyWorkerHost(file(-200_000, running), now).level, "FAIL", "a future timestamp is not fresh");
