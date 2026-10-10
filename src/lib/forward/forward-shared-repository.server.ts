@@ -91,6 +91,7 @@ export function createSharedRepository(client: SupabaseClient): SharedRepository
       fail(initError, "account initialization");
       const { data: account, error } = await client.from("forward_wallet_accounts").select("*").eq("user_id", userId).single();
       fail(error, "account read");
+      if (!account) throw new Error("Forward wallet account missing after initialization");
       const { data: latest, error: runError } = await client.from("paper_runs")
         .select("id,boundary_ms,consumed_boundary_ms,wallet_state").eq("user_id", userId).eq("paper_account", account.account_id)
         .eq("status", "ok").order("boundary_ms", { ascending: false }).order("created_at", { ascending: false })
@@ -114,6 +115,7 @@ export function createSharedRepository(client: SupabaseClient): SharedRepository
       const { data: account, error: accountError } = await client.from("forward_wallet_accounts")
         .select("account_id").eq("user_id", userId).single();
       fail(accountError, "retry account read");
+      if (!account) throw new Error("Forward retry wallet account missing");
       const { error } = await client.from("paper_runs").insert({ user_id: userId, paper_account: account.account_id,
         run_key: `hour:${boundary}`, boundary_ms: boundary, status, trigger: "hourly", reason: reason.slice(0, 2000) });
       fail(error, "retry audit");

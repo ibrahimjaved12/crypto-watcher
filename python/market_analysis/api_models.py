@@ -1,6 +1,7 @@
 """Versioned server-to-server input. Never accepts DB credentials or a user JWT."""
 from decimal import Decimal
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
