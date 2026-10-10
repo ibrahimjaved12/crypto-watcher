@@ -91,6 +91,6 @@ runs because evaluation is stateless over bars; BTCUSDT also checks that on a 3-
 **Pass rule, fixed before any run:** (i) 0 unmatched setups; (ii) among setups with identical geometry (tick, entry price,
 stop and target in ticks) 100 % identical status, exit and net R; (iii) >= 95 % of setups have identical geometry or
 |delta sigma| / sigma <= 3 %; (iv) median |delta c_h| / c_h <= 3 %. A failed rule is a finding to investigate, not a threshold to
-loosen. `label_revision` defaults to `auto`: the lb3h revision whose sigma-relevant params equal FORWARD_PARAMS' is
+loosen. Rule (ii) fails when the identical-geometry set is empty. Overall PASS also requires rule (v): reference-geometry setups resolved by the forward outcome engine on the request bars and funding must match status (including ambiguity), exit offset, exit_ms and net_ur for 100 % of joined setups, with counts public and up to five mismatching keys only in the private report; unevaluated rows or an empty join fail. `label_revision` defaults to `auto`: the lb3h revision whose sigma-relevant params equal FORWARD_PARAMS' is
 cross-checked on sigma and stops (informational; published releases use the default k/rr grids, so their full params
 identity cannot equal FORWARD_PARAMS').

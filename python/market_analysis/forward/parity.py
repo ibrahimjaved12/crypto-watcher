@@ -9,9 +9,11 @@ Pass rule (pre-declared in ``.github/workflows/forward-parity.yml`` before any r
 finding, never something to fix by loosening the rule):
   (i)   0 unmatched forward setups;
   (ii)  among setups with identical geometry (same tick, stop and target in ticks), 100 % identical status,
-        exit offset, exit time and net R;
+        exit offset, exit time and net R (empty set fails);
   (iii) >= 95 % of setups have identical geometry OR |delta sigma| / sigma <= 3 %;
-  (iv)  median |delta c_h| / c_h <= 3 %.
+  (iv)  median |delta c_h| / c_h <= 3 %;
+  (v)   all joined setups resolved with reference geometry: 100 % identical status, exit offset,
+        exit_ms and net_ur; unevaluated rows or an empty join fail.
 """
 from __future__ import annotations
 
@@ -20,9 +22,12 @@ from math import ceil
 
 from ..benchmark.canonical import exact_from_str, exact_to_str
 from .bars_adapter import MINUTE_MS
+from . import outcomes
+from .setups import Setup
 
 PASS_RULE = {"unmatched_max": 0, "identical_geometry_status_exit_share_min": 1.0,
-             "geometry_or_sigma_share_min": 0.95, "sigma_tolerance": 0.03, "median_c_h_tolerance": 0.03}
+             "geometry_or_sigma_share_min": 0.95, "sigma_tolerance": 0.03, "median_c_h_tolerance": 0.03,
+             "reference_geometry_status_exit_net_share_min": 1.0}
 SCALE = 10 ** 8
 
 
@@ -68,17 +73,48 @@ def median(values: list):
     return ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
 
 
-def compare(setups: list[dict], resolutions: list[dict], reference, level_of, multiplier_of, tick_of, params) -> dict:
+def reference_setup(setup: dict, ref, tick_of, params, symbol: str) -> Setup:
+    """Ephemeral audit input, never persisted as a product setup or assigned a new identity.
+
+    LabelRow encodes entry as signal_ms and stop/targets through d_ticks and the rr grid;
+    tick comes from the reference row factory, not the forward request's inferred tick.
+    """
+    rr = params.rr_grid[[exact_to_str(r) for r in params.rr_grid].index(setup["rr"])]
+    tick = tick_of(ref.signal_ms)
+    target_ticks = -(-rr.numerator * ref.d_ticks // rr.denominator)
+    return Setup(
+        setup_id=setup["setup_id"], signal_id=setup.get("signal_id", ""),
+        strategy_id=setup.get("strategy_id", ""), version=setup.get("version", ""), symbol=symbol,
+        side=ref.side, horizon_min=ref.horizon_min, signal_ms=ref.signal_ms, entry_ms=ref.signal_ms,
+        k=exact_to_str(ref.k), rr=exact_to_str(rr), status=ref.status,
+        half_life_days=params.half_life(ref.horizon_min), window_minutes=params.window(ref.horizon_min),
+        sigma=ref.sigma, p0=ref.p0, tick=tick, d_ticks=ref.d_ticks,
+        stop=ref.p0 - ref.side * ref.d_ticks * tick,
+        target=ref.p0 + ref.side * target_ticks * tick)
+
+
+def _resolution_matches(resolution, pair, entry_ms: int) -> bool:
+    return (resolution is not None
+            and resolution["status"] == ("ambiguous" if pair.opt is not None else pair.pess.outcome)
+            and resolution.get("exit_offset") == pair.pess.exit_offset
+            and resolution.get("exit_ms") == entry_ms + pair.pess.exit_offset * MINUTE_MS
+            and resolution.get("net_ur") == pair.pess.net_ur)
+
+
+def compare(setups: list[dict], resolutions: list[dict], reference, level_of, multiplier_of, tick_of, params, *, bars, funding) -> dict:
     """Join every forward setup to its label row and measure the differences.
 
     ``reference(signal_ms, horizon, side, k) -> LabelRow``; ``level_of(horizon, signal_ms)`` and
     ``multiplier_of(horizon, signal_ms)`` give the reference robust level and c_h (HCAL_SCALE fixed point);
     ``tick_of(entry_ms)`` is the label engine's (monthly) tick at an entry.
     """
+    # Use bars/funding adapted from the exact forward request, including mark-proxy semantics.
     by_setup = {item["setup_id"]: item for item in resolutions}
     rr_index = {exact_to_str(rr): index for index, rr in enumerate(params.rr_grid)}
     cache: dict = {}
     unmatched, status_pairs = [], Counter()
+    joined = copied_evaluated = copied_ok = 0
+    copied_diffs = []
     rel_sigma, rel_ch, rel_level = [], [], []
     identical = identical_ok = sigma_ok_or_identical = 0
     resolution_diffs = []
@@ -93,6 +129,22 @@ def compare(setups: list[dict], resolutions: list[dict], reference, level_of, mu
         if key not in cache:
             cache[key] = reference(setup["signal_ms"], setup["horizon_min"], setup["side"], exact_from_str(setup["k"]))
         ref = cache[key]
+        joined += 1
+        copied_match = False
+        if ref.status == "T" and len(ref.cells) > rr_index[setup["rr"]]:
+            copied = reference_setup(setup, ref, tick_of, params, bars.symbol)
+            try:
+                resolved = outcomes.resolve_setup(copied, bars, funding)
+            except ValueError:
+                # Reference tradeability can differ on the request's bars (e.g. gaps/mark proxy).
+                # Keep this as an unevaluated finding; never drop it from rule (v)'s denominator.
+                resolved = None
+            if resolved is not None:
+                copied_evaluated += 1
+                copied_match = _resolution_matches(resolved.to_dict(), ref.cells[rr_index[setup["rr"]]], copied.entry_ms)
+        copied_ok += bool(copied_match)
+        if not copied_match and len(copied_diffs) < 5:
+            copied_diffs.append(key + (setup["rr"],))
         status_pairs[(setup["status"], ref.status)] += 1
         if not (setup["status"] == "T" and ref.status == "T"):
             continue
@@ -123,11 +175,7 @@ def compare(setups: list[dict], resolutions: list[dict], reference, level_of, mu
             sigma_ok_or_identical += 1
             resolution = by_setup.get(setup["setup_id"])
             pair = ref.cells[rr_index[setup["rr"]]]
-            expected_status = "ambiguous" if pair.opt else pair.pess.outcome
-            ok = (resolution is not None and resolution["status"] == expected_status
-                  and resolution.get("exit_offset") == pair.pess.exit_offset
-                  and resolution.get("exit_ms") == setup["entry_ms"] + pair.pess.exit_offset * MINUTE_MS
-                  and resolution.get("net_ur") == pair.pess.net_ur)
+            ok = _resolution_matches(resolution, pair, ref.signal_ms)
             identical_ok += bool(ok)
             if not ok:
                 resolution_diffs.append((setup["setup_id"][:12], setup["signal_ms"], setup["rr"]))
@@ -141,6 +189,13 @@ def compare(setups: list[dict], resolutions: list[dict], reference, level_of, mu
     stats = {
         "setups": n, "unmatched": len(unmatched), "unmatched_first_keys": unmatched[:5],
         "status_pairs": {f"{a}/{b}": c for (a, b), c in sorted(status_pairs.items())},
+        "reference_geometry_joined": joined,
+        "reference_geometry_evaluated": copied_evaluated,
+        "reference_geometry_unevaluated": joined - copied_evaluated,
+        "reference_geometry_status_exit_net_ok": copied_ok,
+        "reference_geometry_mismatches": copied_evaluated - copied_ok,
+        "reference_geometry_status_exit_net_share": copied_ok / joined if joined else None,
+        "reference_geometry_mismatches_first_keys": copied_diffs,
         "both_tradeable": comparable_sigma,
         "identical_geometry": identical,
         "identical_geometry_share": identical / n if n else None,
@@ -165,13 +220,16 @@ def verdict(stats: dict) -> dict:
     n = stats["setups"]
     rule_i = n > 0 and stats["unmatched"] <= PASS_RULE["unmatched_max"]
     share_ii = stats["identical_geometry_status_exit_net_share"]
-    rule_ii = share_ii is None or share_ii >= PASS_RULE["identical_geometry_status_exit_share_min"]
+    rule_ii = share_ii is not None and share_ii >= PASS_RULE["identical_geometry_status_exit_share_min"]
     share_iii = stats["geometry_or_sigma_share"]
     rule_iii = share_iii is not None and share_iii >= PASS_RULE["geometry_or_sigma_share_min"]
     median_c = stats["abs_rel_delta_c_h"]["median"]
     rule_iv = median_c is not None and median_c <= PASS_RULE["median_c_h_tolerance"]
+    share_v = stats["reference_geometry_status_exit_net_share"]
+    rule_v = share_v is not None and share_v >= PASS_RULE["reference_geometry_status_exit_net_share_min"]
     return {"i_no_unmatched": rule_i, "ii_identical_geometry_agrees": rule_ii, "iii_geometry_or_sigma_95": rule_iii,
-            "iv_median_c_h_3pct": rule_iv, "pass": bool(rule_i and rule_ii and rule_iii and rule_iv)}
+            "iv_median_c_h_3pct": rule_iv, "v_reference_geometry_agrees": rule_v,
+            "pass": bool(rule_i and rule_ii and rule_iii and rule_iv and rule_v)}
 
 
 def public_line(symbol: str, month: str, stats: dict) -> str:
@@ -179,8 +237,14 @@ def public_line(symbol: str, month: str, stats: dict) -> str:
     v = stats["verdict"]
     return (f"{symbol} {month} setups={stats['setups']} unmatched={stats['unmatched']} "
             f"identical_geometry={stats['identical_geometry']} "
+            f"reference_joined={stats['reference_geometry_joined']} "
+            f"reference_evaluated={stats['reference_geometry_evaluated']} "
+            f"reference_ok={stats['reference_geometry_status_exit_net_ok']} "
+            f"reference_mismatches={stats['reference_geometry_mismatches']} "
+            f"reference_unevaluated={stats['reference_geometry_unevaluated']} "
             f"rules i={_p(v['i_no_unmatched'])} ii={_p(v['ii_identical_geometry_agrees'])} "
-            f"iii={_p(v['iii_geometry_or_sigma_95'])} iv={_p(v['iv_median_c_h_3pct'])} {_p(v['pass'])}")
+            f"iii={_p(v['iii_geometry_or_sigma_95'])} iv={_p(v['iv_median_c_h_3pct'])} "
+            f"v={_p(v['v_reference_geometry_agrees'])} {_p(v['pass'])}")
 
 
 def _p(value: bool) -> str:
