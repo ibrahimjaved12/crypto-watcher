@@ -214,6 +214,16 @@ npm run dev
 npm run dev:local
 ```
 
+To reset both local databases:
+
+```sh
+npx supabase start
+npx supabase db reset --local
+
+npx supabase start --workdir operational-db
+npx supabase db reset --local --workdir operational-db
+```
+
 The repository pins Node 22 in `.nvmrc` and the Supabase CLI in `package-lock.json`.
 
 Architecture: [operational PostgreSQL](docs/operational-database.md) and the
