@@ -62,7 +62,12 @@ def market_evaluate(symbol: str, bars, funding=None, open_setups=(), *, strategy
     incremental = None
     if use_sigma_state:
         incremental = (SigmaState.from_record(sigma_state, symbol=symbol) if sigma_state is not None
-                       else empty_state(symbol, bars.start_ms))
+                       else empty_state(symbol, bars.start_ms, source="store_rebuild"))
+        if sigma_state is not None:
+            # The adapter pads back to a 4h boundary; padding is not supplied history.
+            first_row_ms = bars.start_ms + next(i for i, price in enumerate(bars.open) if price > 0) * MINUTE_MS
+            if bars.start_ms > incremental.as_of_ms + MINUTE_MS or first_row_ms > incremental.as_of_ms + MINUTE_MS:
+                raise SigmaStateMismatch("sigma history has an omitted leading interval")
         if incremental.as_of_ms >= bars.end_ms or (not sigma_only and incremental.day is not None
                 and from_ms < incremental.day * 86_400_000 - POINT_HISTORY_MS):
             raise SigmaStateMismatch("sigma state decision history mismatch")

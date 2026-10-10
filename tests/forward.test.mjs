@@ -344,7 +344,7 @@ test("wholly no-sigma runs retry, while partial evaluations remain idempotent", 
 async function sigmaRecord(asOf, patch = {}) {
   const { createHash } = await import("node:crypto");
   const body = { symbol: "BTCUSDT", sigma_version: contract.SIGMA_VERSION, as_of_ms: asOf,
-    payload: { symbol: "BTCUSDT", as_of_ms: String(asOf), ewma: { "1": ["12345678901234567890", "2", "3", "4"] } }, ...patch };
+    payload: { source: "store_rebuild", symbol: "BTCUSDT", as_of_ms: String(asOf), ewma: { "1": ["12345678901234567890", "2", "3", "4"] } }, ...patch };
   return { ...body, checksum: createHash("sha256").update(contract.sigmaCanonical(body)).digest("hex") };
 }
 
@@ -459,4 +459,20 @@ test("repository sends outputs, expected wallet revision, and sigma state in one
   assert.equal(calls[0].args.p_expected_run_id, "prior-run");
   assert.equal(calls[0].args.p_records.signals.length, 1);
   assert.equal(calls[0].args.p_records.ledger.length, 1);
+});
+
+test("sigma provenance and payload bytes are recorded per symbol in run freshness", async () => {
+  const f = await splitDeps();
+  await run.runForward(f.deps, splitInput);
+  const freshness = f.calls.commits[0][1].freshness.BTCUSDT;
+  const payload = f.calls.commits[0][5][0].payload;
+  assert.equal(freshness.sigma_source, "store_rebuild");
+  assert.equal(freshness.sigma_payload_bytes, Buffer.byteLength(contract.sigmaCanonical(payload), "utf8"));
+  assert.ok(f.calls.log.some((line) => line === `sigma_payload_bytes: BTCUSDT ${freshness.sigma_payload_bytes}`));
+  const { source, ...untagged } = payload;
+  const old = await sigmaRecord(BOUNDARY - 60_000, { payload: untagged });
+  await assert.rejects(contract.validateSigmaState(old, "BTCUSDT"));
+  const tampered = await sigmaRecord(BOUNDARY - 60_000);
+  tampered.payload.source = "lake_seed";
+  await assert.rejects(contract.validateSigmaState(tampered, "BTCUSDT"));
 });

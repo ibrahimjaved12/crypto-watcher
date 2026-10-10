@@ -410,3 +410,58 @@ node scripts/seed-sigma-state.mjs /tmp/BTCUSDT-sigma.json
 The loader reads `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, checks the version and checksum, and
 calls the service-only seed RPC. Re-importing the identical file is a no-op; a different existing
 checkpoint is refused. This command does not run Python, start a server, or alter a wallet.
+
+### P28c: provenance, gaps, and private seed export
+
+Every state payload now includes `source: "lake_seed" | "store_rebuild"`, covered by its checksum.
+`seed_state(..., source="lake_seed")` identifies a lake export; production initialization and
+sigma-only rebuilds use `store_rebuild`. Advancing a state preserves its source. Untagged older
+payloads are rejected and take the explicit rebuild path rather than being assigned an invented
+origin. A store rebuild can have a different `first_counted_ms` and c_h from a full lake seed.
+Filter forward evidence using `paper_runs.freshness.<symbol>.sigma_source`; each symbol also has
+`sigma_payload_bytes`, the canonical UTF-8 size of the **payload**, excluding the envelope/checksum.
+The runner logs this byte count without logging the payload. These measurements expose expanding
+ratio-list growth and hourly JSONB rewrite cost; storage layout and median behavior are unchanged.
+
+`advance` refuses a request starting after `as_of_ms + 1 minute` with `SigmaStateMismatch` before
+mutating the state. The market endpoint also checks the first supplied collector minute, so 4h
+adapter padding cannot disguise omitted history. The runner rebuilds or refuses such requests.
+Interior missing candles still carry the explicit missing flags. A missing minute already consumed
+outside the recent stale window stays missing in the checkpoint: a later REST fill at or before
+`as_of_ms` is ignored by overlap/idempotency. If such a discrepancy appears, rebuild from the corrected
+history deliberately; merely passing overlapping bars again does not repair the state.
+
+The manual **Sigma seed export** workflow (`sigma-seed-export.yml`) runs only on `main`. Inputs:
+`symbols` (comma-separated subset of the six), `cutoff` (exclusive UTC month boundary, e.g.
+`2026-10-01T00:00:00Z`), and `plan_id` (required whenever the history intersects hidden months).
+It loads verified rd-r1 releases from `2024-01` through the month before the cutoff, one symbol at a
+time, using the same guarded loader as parity. Seeds and manifests are committed **only** to the
+private research-data repository under `seeds/sigma/`; public script output contains counts and
+checksums, never seed payloads or plan contents. The offline exporter remains useful for already
+available development/validation lake files; sampled local days are not a production seed.
+
+A production cutoff of October 2026 includes the hidden months January–September 2026. First register
+and commit a plan in the private repo using the existing `Plan`/`write_plan` format; this workflow does
+not generate or approve a plan. Alongside the normal private plan fields, its `variants` must be `1`
+and `strategies` must contain exactly this technical entry (symbols sorted lexicographically):
+
+```json
+{"strategy_id":"forward-sigma-seed","strategy_version":"forward-sigma-v1","config":{"symbols":["BTCUSDT"],"cutoff":"2026-10-01T00:00:00Z","first_month":"2024-01","data_revision":1}}
+```
+
+Use the actual selected symbol list/cutoff in that private plan. Pass its full SHA-256 `plan_id` to
+the workflow. The exporter verifies the committed plan matches the selection, then appends and
+pushes `hidden-opens.jsonl` **before** downloading or reading hidden history. A failed log push aborts;
+a repeat opening of the same question is refused, with no automatic force/reopen option. Development
+seed exports do not require a plan.
+
+Deployment order: **apply both migrations → import the exported seed → start the first hourly run**.
+Retrieve the desired JSON from the private `seeds/sigma/<symbol>/` directory and import it with:
+
+```sh
+node scripts/seed-sigma-state.mjs /path/to/private-seed.json
+```
+
+Use the existing service environment for credentials. Identical imports are idempotent and a different
+live checkpoint cannot be overwritten. Starting the hourly job without a seed explicitly uses
+`store_rebuild` provenance; it is not equivalent to a lake-seeded run.

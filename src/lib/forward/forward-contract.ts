@@ -156,7 +156,8 @@ export function validateForwardResponse(value: unknown): ForwardEvaluateResponse
 export const SIGMA_VERSION = "forward-sigma-v1";
 export const sigmaStateSchema = z.object({
   symbol: z.string().regex(/^[A-Z0-9]{5,16}$/), sigma_version: z.literal(SIGMA_VERSION),
-  as_of_ms: z.number().int().nonnegative().safe(), payload: z.record(z.string(), z.unknown()), checksum: sha256,
+  as_of_ms: z.number().int().nonnegative().safe(),
+  payload: z.object({ source: z.enum(["lake_seed", "store_rebuild"]) }).catchall(z.unknown()), checksum: sha256,
 }).strict();
 export type SigmaStateRecord = z.infer<typeof sigmaStateSchema>;
 

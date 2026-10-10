@@ -1,7 +1,7 @@
 import type { CollectorHealth, ForwardMinuteRow } from "../operational/types";
 import {
   FINAL_STATUSES,
-  validateSigmaState, forwardMarketResponseSchema,
+  validateSigmaState, forwardMarketResponseSchema, sigmaCanonical,
   type SigmaStateRecord,
   type FundingEvent,
   validateForwardResponse,
@@ -181,7 +181,10 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
     symbols.map((symbol) => {
       const series = rows.get(symbol) ?? [];
       return [symbol, { rows: series.length, last_open_ms: series[series.length - 1]?.open_time_ms ?? null,
-        missing_minutes: missingMinutes(series, sinceMs, boundaryMs) }];
+        missing_minutes: missingMinutes(series, sinceMs, boundaryMs),
+        ...(states[symbol] ? { sigma_source: states[symbol]!.payload.source,
+          sigma_payload_bytes: new TextEncoder().encode(sigmaCanonical(states[symbol]!.payload)).byteLength } : {}),
+      }];
     }),
   );
   const stale = staleness(symbols, rows, health, boundaryMs);
@@ -239,6 +242,10 @@ export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Pro
       if (part.symbol !== symbol) throw new Error("Market symbol mismatch");
       const advanced = await validateSigmaState(part.sigma_state, symbol);
       if (advanced.as_of_ms !== boundaryMs - MINUTE_MS) throw new Error("Sigma state boundary mismatch");
+      const payloadBytes = new TextEncoder().encode(sigmaCanonical(advanced.payload)).byteLength;
+      freshness[symbol] = { ...(freshness[symbol] as Record<string, unknown>),
+        sigma_source: advanced.payload.source, sigma_payload_bytes: payloadBytes };
+      deps.log?.(`sigma_payload_bytes: ${symbol} ${payloadBytes}`);
       advancedStates.push(advanced);
       for (const event of [...part.events].sort((a, b) => a.sequence - b.sequence))
         events.push({ ...event, compatibility_order: events.length });

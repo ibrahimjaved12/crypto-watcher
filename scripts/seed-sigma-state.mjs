@@ -17,6 +17,7 @@ export function validateSeed(record) {
   const { checksum, ...body } = record;
   if (body.sigma_version !== "forward-sigma-v1" || !/^[A-Z0-9]{5,16}$/.test(body.symbol) ||
       !Number.isSafeInteger(body.as_of_ms) || body.as_of_ms < 0 ||
+      !["lake_seed", "store_rebuild"].includes(body.payload?.source) ||
       body.payload?.symbol !== body.symbol || body.payload?.as_of_ms !== String(body.as_of_ms) ||
       createHash("sha256").update(canonical(body)).digest("hex") !== checksum)
     throw new Error("Sigma seed version, identity, or checksum mismatch");

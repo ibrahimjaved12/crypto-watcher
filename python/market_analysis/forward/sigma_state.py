@@ -51,6 +51,7 @@ class SigmaState:
     as_of_ms: int
     params_hash: str
     grids: list  # [horizon, half_life, step]
+    source: str  # lake_seed | store_rebuild; part of the checksummed payload
     ewma: dict = field(default_factory=dict)  # half-life -> A, W, n, published
     day: int | None = None
     day_blocks: list = field(default_factory=list)
@@ -60,6 +61,10 @@ class SigmaState:
     calibration: dict = field(default_factory=dict)  # horizon -> ratios, first_counted_ms
     pending: list = field(default_factory=list)  # exit, entry, horizon, open, robust sigma
     points: dict = field(default_factory=dict)  # bounded retry cache; horizon -> timestamp -> [level,c,sigma]
+
+    def __post_init__(self):
+        if self.source not in ("lake_seed", "store_rebuild"):
+            raise SigmaStateMismatch("invalid sigma source")
 
     def to_record(self):
         payload = _wire(asdict(self))
@@ -85,11 +90,11 @@ class SigmaState:
         return state
 
 
-def empty_state(symbol, start_ms, params=FORWARD_PARAMS):
+def empty_state(symbol, start_ms, params=FORWARD_PARAMS, *, source="store_rebuild"):
     if start_ms % v.BLOCK_MS:
         raise ValueError("sigma history must start on a five-minute boundary")
     grids = [[h, params.half_life(h), params.step(h)] for h in params.horizons]
-    return SigmaState(symbol, start_ms, start_ms - MINUTE_MS, params.identity(), grids,
+    return SigmaState(symbol, start_ms, start_ms - MINUTE_MS, params.identity(), grids, source,
                       ewma={str(d): [0, 0, 0, MISSING] for _, d, _ in grids},
                       calibration={str(h): {"ratios": [], "first_counted_ms": None} for h, _, _ in grids},
                       points={str(h): {} for h, _, _ in grids})
@@ -120,7 +125,7 @@ def _day(state, day):
 
 
 def advance(state: SigmaState, bars: BarSeries, *, cutoff_ms=None, on_point=None) -> SigmaState:
-    """Mutate state through available minutes < cutoff_ms; overlap is ignored, gaps are missing.
+    """Mutate state through available minutes < cutoff_ms; overlap is ignored; omitted leading history is refused.
 
     as_of_ms is the open timestamp of the last consumed minute. The entry open at t
     completes calibration windows at t before sigma(t) is published; the close at t
@@ -128,6 +133,8 @@ def advance(state: SigmaState, bars: BarSeries, *, cutoff_ms=None, on_point=None
     """
     if bars.symbol != state.symbol:
         raise ValueError("sigma bars belong to another symbol")
+    if bars.start_ms > state.as_of_ms + MINUTE_MS:
+        raise SigmaStateMismatch("sigma history has an omitted leading interval")
     end = min(bars.end_ms, cutoff_ms) if cutoff_ms is not None else bars.end_ms
     if end % MINUTE_MS:
         raise ValueError("sigma cutoff must be minute aligned")
@@ -206,10 +213,11 @@ def sigma_at(state: SigmaState, t: int, horizon=15):
     return None if point is None else point[2]
 
 
-def seed_state(history_bars: BarSeries, cutoff_ms: int, params=FORWARD_PARAMS):
+def seed_state(history_bars: BarSeries, cutoff_ms: int, params=FORWARD_PARAMS, *, source="lake_seed"):
     if not history_bars.start_ms < cutoff_ms <= history_bars.end_ms:
         raise ValueError("seed cutoff outside history")
-    return advance(empty_state(history_bars.symbol, history_bars.start_ms, params), history_bars, cutoff_ms=cutoff_ms)
+    return advance(empty_state(history_bars.symbol, history_bars.start_ms, params, source=source),
+                   history_bars, cutoff_ms=cutoff_ms)
 
 
 class StateSigma:

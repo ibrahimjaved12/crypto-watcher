@@ -21,7 +21,7 @@ def main():
     args = parser.parse_args()
     # Loader authorizes all months before opening files; hidden months remain locked.
     bars = load_symbol_bars(args.bars_dir, args.symbol, args.first_month, args.last_month)
-    state = seed_state(bars, args.cutoff_ms)
+    state = seed_state(bars, args.cutoff_ms, source="lake_seed")
     with args.output.open("xb") as stream:
         stream.write(canonical_bytes(state.to_record()))
     print(f"sigma seed {state.symbol}: as_of_ms={state.as_of_ms}")

@@ -44,7 +44,7 @@ class SigmaStateTests(unittest.TestCase):
         cls.reference = ForwardSigma(cls.history, FORWARD_PARAMS)
 
     def test_chunked_equals_one_shot_and_full_recompute(self):
-        state = empty_state("BTCUSDT", START)
+        state = empty_state("BTCUSDT", START, source="lake_seed")
         for a, b in ((0, 22001), (22001, 30004), (30004, self.history.minutes)):
             advance(state, cut(self.history, a, b))
             state = SigmaState.from_record(json.loads(json.dumps(state.to_record())))
@@ -112,3 +112,49 @@ class MarketStateTests(unittest.TestCase):
         with self.assertRaises(SigmaStateMismatch):
             market_evaluate("BTCUSDT", data, sigma_state=corrupt, **options)
         self.assertEqual(market_evaluate("BTCUSDT", data, **options)["sigma_state"], first["sigma_state"])
+
+
+class SigmaProvenanceAndGapTests(unittest.TestCase):
+    def test_source_is_checksummed_and_does_not_change_calculations(self):
+        from market_analysis.benchmark.canonical import content_hash
+        from market_analysis.forward.sigma_state import SigmaStateMismatch
+        small = cut(bars(), 0, 10)
+        lake = seed_state(small, small.end_ms, source="lake_seed").to_record()
+        store = seed_state(small, small.end_ms, source="store_rebuild").to_record()
+        self.assertEqual(lake["payload"]["source"], "lake_seed")
+        self.assertEqual(store["payload"]["source"], "store_rebuild")
+        self.assertNotEqual(lake["checksum"], store["checksum"])
+        self.assertEqual({k: v for k, v in lake["payload"].items() if k != "source"},
+                         {k: v for k, v in store["payload"].items() if k != "source"})
+        tampered = deepcopy(lake)
+        tampered["payload"]["source"] = "store_rebuild"
+        with self.assertRaises(SigmaStateMismatch):
+            SigmaState.from_record(tampered)
+        del tampered["payload"]["source"]
+        tampered["checksum"] = content_hash({k: v for k, v in tampered.items() if k != "checksum"})
+        with self.assertRaises(SigmaStateMismatch):
+            SigmaState.from_record(tampered)  # never guess provenance of old states
+
+    def test_advance_rejects_an_omitted_interval_before_mutation(self):
+        from market_analysis.forward.sigma_state import SigmaStateMismatch
+        history = cut(bars(), 0, 30)
+        state = seed_state(history, START + 10 * MINUTE)
+        before = state.to_record()
+        with self.assertRaises(SigmaStateMismatch):
+            advance(state, cut(history, 15, 30))
+        self.assertEqual(state.to_record(), before)
+        advance(state, cut(history, 10, 30))
+        self.assertEqual(state.to_record(), seed_state(history, history.end_ms).to_record())
+
+    def test_market_gap_including_adapter_padding_is_rejected(self):
+        from market_analysis.forward.evaluate import market_evaluate
+        from market_analysis.forward.sigma_state import SigmaStateMismatch
+        rows = [{"open_time_ms": START + i * MINUTE, "open": 100.0, "high": 100.1,
+                 "low": 99.9, "close": 100.0, "transport": "rest"} for i in range(250)]
+        options = dict(strategy_ids=[], from_ms=START, to_ms=START + 249 * MINUTE,
+                       use_sigma_state=True, sigma_only=True)
+        record = market_evaluate("BTCUSDT", rows[:10], **options)["sigma_state"]
+        self.assertEqual(record["payload"]["source"], "store_rebuild")
+        for first in (15, 240):  # inside the adapter's 4h padding, and beyond it
+            with self.subTest(first=first), self.assertRaises(SigmaStateMismatch):
+                market_evaluate("BTCUSDT", rows[first:], sigma_state=record, **options)
