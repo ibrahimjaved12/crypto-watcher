@@ -20,7 +20,7 @@ async function read(path) {
 }
 
 // The collector runtime is transpiled with only its operational/market dependencies
-// stubbed. Application modules (the Lovable admin client, the monitor engine, and
+// stubbed. Application modules (the main-database admin client, the monitor engine, and
 // the TA engine) are deliberately not stubbed, so any restored import would fail to
 // resolve and fail this test.
 const collectorReplacements = {
@@ -295,7 +295,7 @@ test("the collector worker reads one shared subscription universe from the opera
     runtime = new module.CollectorRuntime(boundaryStore(["ETHUSDT", "BTCUSDT"]));
     await runtime.tryBecomeActive();
     // One assigned set is reconciled as-is: the collector consumes the application's
-    // shared operational representation rather than querying Lovable user tables.
+    // shared operational representation rather than querying main-database user tables.
     assert.deepEqual(globalThis.__collectorBoundary.reconciled, [["ETHUSDT", "BTCUSDT"]]);
     assert.equal(globalThis.__collectorBoundary.leaseClaims, 1);
     assert.equal(globalThis.__collectorBoundary.universeReads, 1);

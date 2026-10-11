@@ -191,7 +191,7 @@ test("the built worker reads its collector configuration at runtime", async () =
   // The tracked production build bakes BINANCE_COLLECTOR_ENABLED=false. A runtime
   // override must win; otherwise enablement was bound at build time. The worker
   // needs no main-database credential, so the first missing requirement is the
-  // operational database, never a Lovable Supabase value.
+  // operational database, never a main Supabase value.
   const enabled = runWorker(artifact, { BINANCE_COLLECTOR_ENABLED: "true" });
   assert.equal(enabled.status, 1, enabled.stderr);
   assert.match(enabled.stderr, /requires OPERATIONAL_DB_ENABLED=true/);
@@ -215,7 +215,7 @@ test("the built worker reads its collector configuration at runtime", async () =
   ]) {
     assert.match(output, new RegExp(`"${name}"`), `${name} must stay runtime-configurable`);
   }
-  // The worker owns no Lovable state, so its artifact must carry no main-database
+  // The worker owns no main-database state, so its artifact must carry no main-database
   // credential requirement and no application-table name.
   for (const forbidden of [
     '"SUPABASE_SERVICE_ROLE_KEY"',
@@ -332,7 +332,7 @@ test("the built worker reads its subscription universe from the operational data
 
   // The fake operational Supabase grants the lease but fails the subscription
   // universe read. The worker surfaces it and stays in standby: it never opens a
-  // market stream and never contacts a main Lovable database.
+  // market stream and never contacts the main database.
   const operational = await startFakeServer((response, request) => {
     const isLease = String(request.url).includes("claim_collector_lease");
     response.writeHead(isLease ? 200 : 400, { "content-type": "application/json" });

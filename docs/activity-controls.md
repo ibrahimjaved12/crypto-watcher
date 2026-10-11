@@ -36,9 +36,9 @@ and monitoring/TA processing runs on the server:
 | Environment                       | Configuration location               | Applies to                                                          |
 | --------------------------------- | ------------------------------------ | ------------------------------------------------------------------- |
 | Local development                 | Ignored `.env.local`                 | All five controls; restart `npm run dev` after changes.             |
-| Lovable preview/published browser | Committed `.env.production`                     | The two public `VITE_*` controls; publish/rebuild after changes.    |
-| Lovable TanStack server           | Project server configuration/secrets | The three non-`VITE_*` runtime controls read through `process.env`. |
-| Lovable scheduler                 | More → Cloud → Jobs                  | Whether the five-minute job invokes the endpoint at all.            |
+| Published browser | Committed `.env.production`                     | The two public `VITE_*` controls; publish/rebuild after changes.    |
+| Worker server           | Project server configuration/secrets | The three non-`VITE_*` runtime controls read through `process.env`. |
+| scheduled job                 | More → Cloud → Jobs                  | Whether the five-minute job invokes the endpoint at all.            |
 
 The repository's committed `.env` explicitly sets both browser controls to `false`,
 so local, preview, and published builds start in manual-only mode. `.env.local` is
@@ -59,16 +59,15 @@ ACTIVITY_DIAGNOSTICS=true
 ```
 
 Browser variables are embedded by Vite at build time and are visible in the client
-bundle, so they are configuration rather than secrets. Lovable requires `VITE_*`
-values in the committed `.env.production`, not its Secrets manager. Server variables must reach
+bundle, so they are configuration rather than secrets. Keep `VITE_*`
+values in the committed `.env.production`, not in a secrets manager. Server variables must reach
 the TanStack server's request-time environment (`process.env`); configure them in the
-Lovable environment serving the app. Local `.env.local` changes do not change the
-deployed app. Keep the actual Lovable job disabled as well when the goal is to avoid
+Cloudflare Workers environment serving the app. Local `.env.local` changes do not change the
+deployed app. Keep the actual scheduled job disabled as well when the goal is to avoid
 endpoint invocations, because `SCHEDULED_MONITOR_ENABLED=false` only makes each
 authenticated invocation exit early.
 
-References: [Lovable Secrets and `VITE_*` variables](https://docs.lovable.dev/features/secrets),
-[Lovable Jobs](https://docs.lovable.dev/features/jobs), and the project's
+References: the project's
 [TanStack server runtime notes](python-api.md#immediate-failure-before-render-receives-a-request).
 
 To enable the three automatic entry points, set:

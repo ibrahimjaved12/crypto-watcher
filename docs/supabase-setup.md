@@ -2,7 +2,7 @@
 
 The owner's Supabase project holds accounts and published results. Cloudflare
 Workers serves the web app; the owner's machine runs the collector, operational
-Postgres, FastAPI, and forward jobs, as decided in #273. Lovable removal remains
+Postgres, FastAPI, and forward jobs, as decided in #273. Removal of the old host remains
 separate work in #276.
 
 ## Project and public configuration
@@ -41,7 +41,7 @@ One `npx supabase db push` invocation then applied all 21 successfully, from
 version `20260913170352` through `20261011150000`. The PR records the full list.
 
 The September 14 migration was read in full and contains only extension creation
-for `pg_cron` and `pg_net`; it has no Lovable scheduler calls or cron-auth values.
+for `pg_cron` and `pg_net`; it has no scheduled job calls or cron-auth values.
 Both `20261011130000_forward_sigma_state.sql` and
 `20261011150000_forward_shared_stages.sql` were read in full and left unchanged.
 They are not idempotent: do not replay them manually. No existing migration was

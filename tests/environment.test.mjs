@@ -57,7 +57,7 @@ test("rejects server secrets by public name, copied value, opaque key and JWT ro
     "VITE_SUPABASE_SERVICE_ROLE_KEY",
     "VITE_MONITOR_CRON_TOKEN",
     "VITE_PYTHON_ANALYSIS_TOKEN",
-    "VITE_LOVABLE_CRON_SECRET",
+    "VITE_CRON_SECRET",
   ]) {
     assert.throws(() => validateEnvironment({ ...local, [name]: "private" }), /server secret/);
   }

@@ -228,7 +228,7 @@ export interface OperationalStore {
   /**
    * Derived collector input: the shared symbol set the application assigns to the
    * collector worker. The application owns user watchlists; the collector reads
-   * this operational representation instead of querying Lovable user tables.
+   * this operational representation instead of querying main-database user tables.
    */
   assignCollectorSubscriptions(symbols: string[]): Promise<void>;
   readCollectorSubscriptions(): Promise<string[]>;

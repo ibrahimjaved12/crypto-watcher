@@ -92,9 +92,9 @@ Project is roughly 20% complete; things proceed incrementally and in parallel.
 
 ## 5. Stack (current, provisional)
 
-Lovable-hosted React/TanStack frontend + Supabase Postgres; Python (FastAPI + shared
-calculation package under `python/market_analysis`); external operational Postgres for frequent
-writes; Binance USDⓈ-M collector using WebSocket (live) + REST (bootstrap/gap recovery);
+Cloudflare Workers frontend + own Supabase (accounts, published results) + local operational DB;
+external operational Postgres is no longer planned; Python (FastAPI + shared calculation package
+under `python/market_analysis`); Binance USDⓈ-M collector using WebSocket (live) + REST (bootstrap/gap recovery);
 GitHub Actions for heavy studies. Providers: **Binance primary, OKX and Kraken as fallbacks** (owner-confirmed 2026-10-07).
 Keep price types and contract identity explicit when a fallback is used.
 

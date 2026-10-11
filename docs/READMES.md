@@ -1,8 +1,8 @@
 Local setup and hosted profiles: [Environment setup](docs/environments.md).
 
 Frequent completed-candle working state can use a separate bounded
-[operational PostgreSQL](docs/operational-database.md). Lovable remains the permanent application
-database and the movement baseline/cooldown/alert transaction remains entirely in Lovable.
+[operational PostgreSQL](docs/operational-database.md). The main database remains the permanent application
+database and the movement baseline/cooldown/alert transaction remains entirely in the main database.
 
 # Crypto Watcher
 
@@ -46,7 +46,7 @@ the updated monitor.
 Market collection and completed-candle work now use request-scoped sharing,
 due-work gating, bounded catch-up, batched outcomes, and locally measurable run
 metrics. See the [monitor efficiency report](docs/monitor-efficiency.md). This local
-evidence does not claim a Lovable billing reduction while the hosted cron is paused.
+evidence does not claim a hosting billing reduction while the hosted cron is paused.
 
 The futures cutover migration `20260923090000_binance_usdm_futures.sql` is destructive:
 it clears watchlists, notes, alerts, baselines, checkpoints, TA snapshots, and monitor
@@ -69,8 +69,8 @@ fail-closed and are clearly labeled as unavailable.
 
 | Setting                                         | Trigger and effect                                                                                                                        |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Lovable Cloud Job (not an environment variable) | Sends the scheduled monitor request every 5 minutes when the Job is enabled. A disabled Job sends nothing.                                |
-| `SCHEDULED_MONITOR_ENABLED=true`                | Allows an authenticated scheduled request to run. It does not create a timer; with the Lovable Job disabled, it causes no periodic calls. |
+| Supabase scheduled job (not an environment variable) | Sends the scheduled monitor request every 5 minutes when the Job is enabled. A disabled Job sends nothing.                                |
+| `SCHEDULED_MONITOR_ENABLED=true`                | Allows an authenticated scheduled request to run. It does not create a timer; with the scheduled job disabled, it causes no periodic calls. |
 | `VITE_MARKET_AUTO_REFRESH_ENABLED=true`         | Loads market prices when the dashboard opens and every 60 seconds while active. Uses the TanStack server and public exchange APIs.        |
 | `VITE_TA_HISTORY_AUTO_REFRESH_ENABLED=true`     | Reads saved TA history when the dashboard opens and every 60 seconds while active.                                                        |
 | `TA_GENERATION_ENABLED=false`                   | Skips new TA calculations during manual and scheduled monitoring runs. Unset defaults to enabled.                                         |
@@ -78,8 +78,8 @@ fail-closed and are clearly labeled as unavailable.
 | `PYTHON_ANALYSIS_ENABLED=true`                  | Enables manual Python analysis and scheduled TA calculations. It does not create a second scheduler.                                      |
 
 The user monitoring master switch gates manual and scheduled monitoring work. It does
-not stop the Lovable Job from calling the endpoint or stop either browser 60-second
-refresh loop. `MONITOR_CRON_TOKEN` and Lovable's cron secret authenticate scheduled
+not stop the scheduled job from calling the endpoint or stop either browser 60-second
+refresh loop. `MONITOR_CRON_TOKEN` and the cron secret authenticate scheduled
 requests; they do not schedule them.
 
 Set `VITE_*` values in the committed `.env.production` and republish. Configure
@@ -111,7 +111,7 @@ price monitoring.
 
 Platform:
 
-- Use Lovable Cloud for the database, authentication and backend.
+- Use the hosted Supabase project for the database, authentication and backend.
 
 - Require login and restrict each user's records to that user.
 
@@ -182,16 +182,6 @@ first milestone now. Explain what works, what needs configuration,
 and any ongoing usage costs. Do not present placeholders as completed
 
 integrations.
-
-This project was built with [Lovable](https://lovable.dev).
-
-## Build with Lovable
-
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/68fe2179-9a39-4ad0-9473-db2bcbcc8112).
-
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
 
 ## Development
 

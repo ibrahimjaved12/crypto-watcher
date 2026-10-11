@@ -13,7 +13,7 @@ import {
 } from "./market/market-movement-state";
 
 export type OperationalState = {
-  owner: "operational" | "lovable";
+  owner: "operational" | "main";
   runs: MonitorRun[];
   diagnostics: StorageDiagnostics | null;
   collectorHealth: CollectorHealth[];
@@ -139,7 +139,7 @@ export const getOperationalState = createServerFn({ method: "GET" })
     ]);
     if (error) throw new Error(error.message);
     return {
-      owner: "lovable",
+      owner: "main",
       runs: (data ?? []) as unknown as MonitorRun[],
       diagnostics: null,
       collectorHealth: [],

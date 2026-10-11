@@ -176,11 +176,11 @@ directional accuracy alone is not evidence of profitable trading.
 | Capability      | Current implementation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Browser         | React/TanStack dashboard; market quote and TA-history queries default to manual-only, including initial load, focus/reconnect, invalidation, and key-change fetches. Build-time flags can enable 60-second refetch intervals while active. Tabs and query lifecycle events can add requests when automatic fetching is enabled. See [activity controls](activity-controls.md).                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Auth and CRUD   | Supabase Auth and user-JWT/RLS access through the browser or TanStack. Watchlists, settings, notes, and history live in Lovable PostgreSQL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Auth and CRUD   | Supabase Auth and user-JWT/RLS access through the browser or TanStack. Watchlists, settings, notes, and history live in main Supabase Postgres.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Monitoring      | TanStack scheduled route and authenticated manual check invoke the server monitor. Authenticated scheduled requests default to a skipped result before database access and require an explicit runtime flag to run; this does not disable manual checks or the external scheduler invocation itself. User controls independently gate REST collection/checkpointing, movement alerts, and completed-candle TA. TanStack holds privileged write access; PostgreSQL RPCs own ordered latest-candle checkpoints and atomic cumulative baselines, directional cooldowns, and alert insertion. See [independent activity controls](activity-domains.md).                                                                                                                                                                               |
 | TA and outcomes | The shared Python package calculates completed 15m, 1h, and 4h TA. TanStack selects due work, validates responses, and is the sole `ta_signals` writer. While the collector owns market data, TanStack reads canonical completed candles from the operational store through a read-only adapter instead of fetching a second live exchange series, carrying each candle's recorded endpoint, transport, close time, exchange event time when one exists (absent for REST) and receive time into the Python request and the persisted conclusion; candle completion is the deterministic boundary `open + timeframe`; missing or stale history fails visibly. Failures are visible and have no alternate calculator. Outcome evaluation remains in TanStack and measures forward returns, not ordered futures-trade profitability. |
 | Python service  | The authenticated FastAPI service provides pure manual, scheduled, and replay-compatible calculations. It has no application database credentials and performs no persistence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Providers       | Futures trade-price REST polling in order: Binance USDⓈ-M, OKX USDT swaps, then Kraken perpetuals. A persistent shared Binance USDⓈ-M collector exists: it ingests public futures klines and aggTrades with REST bootstrap and gap recovery, and it runs as a separate backend worker rather than through TanStack application-server startup. The application assigns its shared subscription universe through the operational database, reconciled by a dedicated authenticated hook that is the initial and ongoing mechanism and a best-effort first-request safety pass, independent of scheduled monitoring, and the worker holds no Lovable credentials. Selecting its production host remains unresolved under [#19](https://github.com/ibrahimjaved12/crypto-watcher/issues/19).                                         |
+| Providers       | Futures trade-price REST polling in order: Binance USDⓈ-M, OKX USDT swaps, then Kraken perpetuals. A persistent shared Binance USDⓈ-M collector exists: it ingests public futures klines and aggTrades with REST bootstrap and gap recovery, and it runs as a separate backend worker rather than through TanStack application-server startup. The application assigns its shared subscription universe through the operational database, reconciled by a dedicated authenticated hook that is the initial and ongoing mechanism and a best-effort first-request safety pass, independent of scheduled monitoring, and the worker holds no main-database credential. Selecting its production host remains unresolved under [#19](https://github.com/ibrahimjaved12/crypto-watcher/issues/19).                                         |
 
 The scheduler's configured intent is a five-minute monitor invocation. However,
 [#13](https://github.com/ibrahimjaved12/crypto-watcher/issues/13) reports that
@@ -191,14 +191,14 @@ remain to be verified there. This documentation neither enables nor changes a jo
 ```mermaid
 flowchart TD
     Browser[React and TanStack browser] -->|User JWT and CRUD|Supabase[Supabase Auth and RLS API]
-    Supabase --> Lovable[(Lovable PostgreSQL)]
+    Supabase --> MainDB[(main Supabase Postgres)]
     Browser -->|Quote refresh and manual check|TS[TanStack server]
     Job[Configured scheduler - active state requires verification] -.->|Authenticated monitor route|TS
     Job -.->|Authenticated collector-universe reconciliation|TS
     TS -->|Futures REST polling|Futures[Binance, OKX, then Kraken perpetual futures]
     TS -->|Due candle batches|API[FastAPI calculation service]
     API -->|Shared deterministic TA|TS
-    TS -->|Privileged orchestration and RPC calls|Lovable
+    TS -->|Privileged orchestration and RPC calls|MainDB
     TS -->|Assigns collector subscription universe|Operational[(External operational PostgreSQL)]
     TS -->|Collector health and diagnostics reads|Operational
     Futures -->|Binance USD-M WebSocket live events|Worker[Leased Binance USD-M collector worker - separate process]
@@ -232,7 +232,7 @@ ML, or email/WhatsApp delivery.
 
 ## Proposed incremental architecture and data flow
 
-Lovable PostgreSQL remains the main application database initially. Add external
+Main Supabase Postgres remains the main application database initially. Add external
 PostgreSQL/Supabase for explicitly allocated frequent operational state and a
 persistent backend process for public futures WebSocket collection. These are
 planned changes, not deployed capabilities or a commitment to a fully external backend.
@@ -240,10 +240,10 @@ planned changes, not deployed capabilities or a commitment to a fully external b
 ```mermaid
 flowchart TD
     Browser[React and TanStack browser] -->|Auth and user-scoped CRUD|Auth[Supabase Auth and RLS API]
-    Auth --> Lovable[(Lovable main application DB)]
+    Auth --> MainDB[(main application DB)]
     Browser -->|Authenticated fresh-state reads and actions|TS[TanStack server orchestration]
     TS -->|Scoped read adapter|External[(External operational PostgreSQL)]
-    TS -->|Privileged application writes|Lovable
+    TS -->|Privileged application writes|MainDB
     TS -->|Due TA and manual analysis|API[FastAPI adapter]
     API --> Core[Shared deterministic Python package]
     Futures[Binance USDT perpetual public data] -->|WebSocket live events|Collector[Persistent shared backend collector]
@@ -253,13 +253,13 @@ flowchart TD
     Core -->|Versioned outputs|Owner[Assigned domain orchestration and persistence adapters]
     Owner -->|Operational transitions and atomic outbox|External
     External -->|Selected durable results and stable IDs|Sync[TanStack sync adapter with idempotent retries]
-    Sync -->|Confirmed batch writes|Lovable
+    Sync -->|Confirmed batch writes|MainDB
     History[Validated historical datasets] --> Replay[Replay and backtest runner]
     Replay -->|Same calculation and strategy functions|Core
 ```
 
 The diagram shows logical adapters, not a decision to give Python database
-credentials. TanStack retains privileged Lovable writes. FastAPI exposes pure
+credentials. TanStack retains privileged main-database writes. FastAPI exposes pure
 calculations over HTTP; replay/backtest runners import the same Python package
 without an HTTP round trip. Provider access, authorization, persistence, scheduling,
 and notifications stay outside the deterministic core. Pass an explicit `as_of`,
@@ -286,20 +286,20 @@ migration. No two databases accept competing writes to the same logical state.
 | Domain                                                                  | Current authority/writer                                                                                    | Proposed authority/writer and storage                                                                                                                                                               |
 | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Browser behavior                                                        | React/TanStack                                                                                              | React/TanStack remains responsible for UI, requests, and freshness display.                                                                                                                         |
-| Identity and user CRUD                                                  | Supabase Auth; browser/TanStack user JWT and RLS; Lovable DB                                                | Retain this boundary and Lovable ownership of watchlists/settings/notes unless explicitly migrated.                                                                                                 |
-| Privileged application orchestration                                    | TanStack server                                                                                             | TanStack retains authorization, due-work orchestration, response validation, and privileged Lovable writes.                                                                                         |
-| Movement baseline/cooldown/alert transaction                            | Lovable PostgreSQL RPC invoked by TanStack                                                                  | Retain current authority until explicitly transferred; any move transfers the whole atomic state domain with one writer.                                                                            |
-| TA calculations                                                         | Shared Python package; TanStack validates and writes scheduled results to Lovable                           | Retain this split unless operational evidence supports a broader orchestration migration.                                                                                                           |
+| Identity and user CRUD                                                  | Supabase Auth; browser/TanStack user JWT and RLS; main DB                                                | Retain this boundary and main-database ownership of watchlists/settings/notes unless explicitly migrated.                                                                                                 |
+| Privileged application orchestration                                    | TanStack server                                                                                             | TanStack retains authorization, due-work orchestration, response validation, and privileged main-database writes.                                                                                         |
+| Movement baseline/cooldown/alert transaction                            | main Supabase Postgres RPC invoked by TanStack                                                                  | Retain current authority until explicitly transferred; any move transfers the whole atomic state domain with one writer.                                                                            |
+| TA calculations                                                         | Shared Python package; TanStack validates and writes scheduled results to the main database                           | Retain this split unless operational evidence supports a broader orchestration migration.                                                                                                           |
 | Collector checkpoints, rolling prices/candles, gap and due-work cursors | Lease-elected shared Binance collector worker; external operational DB for candles, checkpoints, and health | Assigned collector/orchestration persistence adapter is sole writer to external operational tables.                                                                                                 |
 | Developing/active setup state and paper positions                       | Not implemented                                                                                             | One designated setup engine/simulation controller per state domain; external operational DB is proposed. Wallet, fills, and ledger transitions must commit atomically.                              |
-| Immutable conclusions, outcomes, reports                                | Current TA/alerts in Lovable via TanStack                                                                   | Existing records retain their authority. For selected newly external-owned result domains, source commits result plus outbox; Lovable holds a read projection/history copy, not a second authority. |
-| Sync outbox and receipts                                                | Not implemented                                                                                             | Source transaction owns external outbox; TanStack sync adapter alone writes selected Lovable projections/receipts and acknowledges delivery.                                                        |
+| Immutable conclusions, outcomes, reports                                | Current TA/alerts in the main database via TanStack                                                                   | Existing records retain their authority. For selected newly external-owned result domains, source commits result plus outbox; the main database holds a read projection/history copy, not a second authority. |
+| Sync outbox and receipts                                                | Not implemented                                                                                             | Source transaction owns external outbox; TanStack sync adapter alone writes selected main-database projections/receipts and acknowledges delivery.                                                        |
 | Historical research data                                                | No replay dataset store                                                                                     | Validated bulk files/archive outside small operational DBs; dataset manifests and checksums under a designated ingestion owner.                                                                     |
 | Notification delivery                                                   | Not implemented                                                                                             | A dedicated delivery adapter owns each outbox delivery state; channel failures never discard domain evidence.                                                                                       |
 
 Synchronization generates stable globally unique IDs at the authoritative source.
 Commit a durable result and pending outbox entry together. Batch only selected
-conclusions, meaningful transitions, completed outcomes, and summaries into Lovable
+conclusions, meaningful transitions, completed outcomes, and summaries into the main database
 with duplicate-safe keys including immutable version. Acknowledge after destination
 confirmation; retry uncertain outcomes with bounded backoff, retain dead letters,
 and define ordering for superseding versions. Daily archival sync is insufficient
@@ -314,7 +314,7 @@ silently using a second calculator or stale inputs.
 
 ## Decisions and deployment gates
 
-- **Current:** React/TanStack, Supabase auth/CRUD, TanStack privileged Lovable writes,
+- **Current:** React/TanStack, Supabase auth/CRUD, TanStack privileged main-database writes,
   ordered futures REST monitoring, and canonical Python TA calculations.
 - **Proposed:** external operational PostgreSQL with selective sync; persistent public futures
   collector with REST recovery; evidence-backed setups, evaluation, and paper trading.

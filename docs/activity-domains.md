@@ -20,7 +20,7 @@ the shared subscription universe, and assigns it to the operational database. Th
 independent persistent worker reads that assignment and owns Binance public
 WebSocket collection plus REST bootstrap/recovery. Current collector health and
 bounded completed-candle history live in the operational database; the worker never
-reads Lovable watchlists/settings. See [collector ownership](binance-futures-collector.md).
+reads main-database watchlists/settings. See [collector ownership](binance-futures-collector.md).
 
 Disabling collection or removing the final eligible watcher removes the symbol
 from the shared universe. Assignment atomically makes its current health
