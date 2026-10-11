@@ -59,6 +59,24 @@ test("preflight passes a complete hosted production configuration", () => {
   assert.deepEqual(run({ OPERATIONAL_SUPABASE_URL: "https://ops.supabase.co" }), []);
 });
 
+test("preflight refuses every REPLACE_ placeholder and names only the variable", () => {
+  const placeholder = "REPLACE_private_placeholder_value";
+  for (const name of [...w.REQUIRED_ENV_FILE_NAMES, "FORWARD_USER_ID", "VITE_SUPABASE_PUBLISHABLE_KEY"]) {
+    const problems = run({ [name]: placeholder });
+    assert.ok(problems.includes(`${name} must be configured; placeholder values are not allowed.`));
+    for (const problem of problems) assert.ok(!problem.includes(placeholder));
+  }
+  const placeholders = {
+    SUPABASE_URL: "REPLACE_HOSTED_SUPABASE_URL",
+    SUPABASE_SERVICE_ROLE_KEY: "REPLACE_HOSTED_SUPABASE_SERVICE_ROLE_KEY",
+  };
+  const problems = run(placeholders);
+  for (const [name, value] of Object.entries(placeholders)) {
+    assert.ok(problems.includes(`${name} must be configured; placeholder values are not allowed.`));
+    for (const problem of problems) assert.ok(!problem.includes(value));
+  }
+});
+
 test("preflight refuses each unsafe condition with a clear message", () => {
   refuses({}, /\.env\.production\.local is missing/, null);
   refuses({ SUPABASE_URL: "http://127.0.0.1:54321" }, /SUPABASE_URL must be the hosted main/);

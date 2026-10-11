@@ -101,10 +101,14 @@ export function preflight(input: { env: Env; envFileText: string | null }): stri
   const { env, envFileText } = input;
   if (envFileText === null) {
     return [
-      ".env.production.local is missing. Create it (gitignored, mode 0600) with the variables listed in docs/worker-host.md.",
+      ".env.production.local is missing. Run npm run env:production, then configure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (see docs/worker-host.md).",
     ];
   }
   const problems: string[] = [];
+  for (const [name, value] of Object.entries(env)) {
+    if (value?.startsWith("REPLACE_"))
+      problems.push(`${name} must be configured; placeholder values are not allowed.`);
+  }
   const missing = missingEnvFileNames(envFileText);
   if (missing.length)
     problems.push(

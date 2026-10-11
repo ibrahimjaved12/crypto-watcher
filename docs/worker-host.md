@@ -29,6 +29,13 @@ The host does not start Docker or Supabase. The local operational stack must alr
 Variable **names** only; values live in the gitignored `.env.production.local` (mode 0600), never in the
 repository and never in `VITE_*`.
 
+With the local operational Supabase stack running, use `npm run env:production` to create
+`.env.production.local` with mode 0600. The command reads only the local operational stack's status,
+generates the Python token and sets the worker flags and separate Python endpoints. It refuses to
+overwrite an existing file. Fill in `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` yourself: they start
+as `REPLACE_` placeholders, and hosted values are never fetched. The worker host refuses any variable
+whose value still starts with `REPLACE_`, reporting only its name.
+
 Vite loads `.env`, `.env.local`, `.env.production`, then `.env.production.local` (last wins; shell
 variables beat all). The committed `.env.production` already selects the production profile and the
 hosted main project, but it sets `OPERATIONAL_DB_ENABLED=false` and `BINANCE_COLLECTOR_ENABLED=false`, so
@@ -56,21 +63,25 @@ Prerequisites: Node 22.12+, `npm ci`, and the Python environment
    project (P29's migration must be there before the runner). Start the local operational stack and apply
    its migrations as `dev-local.mjs` does:
    `supabase start --workdir operational-db` then `supabase migration up --local --workdir operational-db`.
-2. **Restart Python.** Make sure no old FastAPI is running; the host refuses to start while anything
+2. **Create the host environment:** `npm run env:production`. Replace the `SUPABASE_URL` and
+   `SUPABASE_SERVICE_ROLE_KEY` placeholders in `.env.production.local` with the hosted main project's
+   values before proceeding.
+3. **Restart Python.** Make sure no old FastAPI is running; the host refuses to start while anything
    already answers on either Python port.
-3. **Seed import** (sigma state, see [forward harness](forward-harness.md)). The loader reads only the
+4. **Seed import** (sigma state, see [forward harness](forward-harness.md)). The loader reads only the
    process environment, so pass the files explicitly:
    `node --env-file=.env.production --env-file=.env.production.local scripts/seed-sigma-state.mjs <seed.json>`
-4. **Backfill the 1m history** once, in production mode (the plain npm script would load the
+5. **Backfill the 1m history** once, in production mode (the plain npm script would load the
    development environment): `npm run forward:backfill -- --mode production`. Re-running resumes.
-5. **Start the host:** `npm run worker:host`.
-6. **Check:** `npm run mvp:check -- --mode production` (its `worker host` line, below).
+6. **Start the host:** `npm run worker:host`.
+7. **Check:** `npm run mvp:check -- --mode production` (its `worker host` line, below).
 
 ## Preflight
 
 The host refuses to start (exit 1, one line per problem, no secret values) when:
 
 - `.env.production.local` is missing, or does not itself define every required name (marked \* above);
+- any environment value still starts with `REPLACE_`;
 - `APP_PROFILE` is not `production`, `SUPABASE_URL` is not a hosted HTTPS origin, or
   `ALLOW_HOSTED_SUPABASE` is not exactly `true`;
 - the operational database is disabled, its URL is neither loopback nor HTTPS, or it is the same project

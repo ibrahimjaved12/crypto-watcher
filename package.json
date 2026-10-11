@@ -26,6 +26,7 @@
     "format": "prettier --write .",
     "env:local": "node scripts/local-env.mjs",
     "env:local:operational": "node scripts/operational-env.mjs",
+    "env:production": "node scripts/production-env.mjs",
     "test:environment": "node tests/environment.test.mjs"
   },
   "overrides": {
