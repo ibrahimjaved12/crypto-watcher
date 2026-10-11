@@ -161,7 +161,7 @@ function clientFixture(initial = []) {
       return { data: null, error: null };
     },
   };
-  return { client, queries, writes, account, latest };
+  return { client, queries, writes, account, latest, rows };
 }
 
 test("market RPC carries empty sigma, measures actual JSON bodies and reuses in-memory stages", async () => {
@@ -193,6 +193,17 @@ test("uncached catch-up stages hydrate once across accounts and repository recre
   assert.equal(f.queries.filter(q => q.selection === "*").length, 1);
   assert.equal(f.queries.filter(q => q.table === "forward_market_events").length, 1);
   assert.equal(f.queries.filter(q => q.table === "forward_market_paths").length, 1);
+});
+
+test("cursor JSON must be a map of safe millisecond values, not a malformed replay range", async () => {
+  const f = clientFixture([stage()]);
+  const repo = createSharedRepository(f.client, undefined, () => {});
+  for (const value of ["bad cursor", [], { BTCUSDT: "123" }, { BTCUSDT: -1 }, { BTCUSDT: 2 ** 53 }]) {
+    f.rows[0].payload.processed_to_ms = value;
+    await assert.rejects(repo.latestStage(), /Invalid market processed cursor/);
+  }
+  f.rows[0].payload.processed_to_ms = { BTCUSDT: 0 };
+  assert.deepEqual((await repo.latestStage()).processed_to_ms, { BTCUSDT: 0 });
 });
 
 test("wallet_state reads and daily checkpoint writes are included in paper run freshness", async () => {

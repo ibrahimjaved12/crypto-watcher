@@ -11,6 +11,18 @@ function fail(error: { message: string } | null, operation: string) {
   if (error) throw new Error(`Forward ${operation} failed: ${error.message}`);
 }
 
+function processedCursor(value: unknown): Record<string, number> {
+  if (value == null) return {};
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid market processed cursor");
+  const cursor: Record<string, number> = {};
+  for (const [symbol, ms] of Object.entries(value)) {
+    if (typeof ms !== "number" || !Number.isSafeInteger(ms) || ms < 0)
+      throw new Error(`Invalid market processed cursor: ${symbol}`);
+    cursor[symbol] = ms;
+  }
+  return cursor;
+}
+
 /** Service-only writes; authenticated reads are enforced separately by table RLS. */
 export function createSharedRepository(client: SupabaseClient, traffic: HostedTraffic = createHostedTraffic(),
   log: (line: string) => void = console.log): SharedRepository {
@@ -73,7 +85,7 @@ export function createSharedRepository(client: SupabaseClient, traffic: HostedTr
         .order("boundary_ms", { ascending: false }).limit(1).maybeSingle();
       traffic.read(data);
       fail(error, "latest market stage read");
-      return data ? { id: data.id, boundary_ms: Number(data.boundary_ms), processed_to_ms: data.processed_to_ms ?? {} } : null;
+      return data ? { id: data.id, boundary_ms: Number(data.boundary_ms), processed_to_ms: processedCursor(data.processed_to_ms) } : null;
     },
     async stagesAfter(cursor, boundary, current) {
       if (current) remember(current);
