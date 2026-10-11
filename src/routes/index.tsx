@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Bell, FlaskConical, Gauge, LineChart, Orbit, ShieldCheck } from "lucide-react";
+import { Activity, Bell, FlaskConical, Gauge, LineChart, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
@@ -58,9 +58,7 @@ function Landing() {
     <div className="min-h-screen overflow-x-hidden">
       <header className="mx-auto flex max-w-6xl items-center px-4 py-5">
         <span className="flex items-center gap-2 font-display text-lg font-semibold">
-          <span className="grid size-8 place-items-center rounded-full bg-gradient-to-br from-primary/40 to-aurora/30 ring-1 ring-primary/40">
-            <Orbit className="size-4" aria-hidden />
-          </span>
+          <Activity className="size-5 text-primary" aria-hidden />
           Crypto Watch
         </span>
         <Button asChild className="ml-auto">
