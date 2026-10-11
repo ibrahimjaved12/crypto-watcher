@@ -29,7 +29,7 @@ settings. Node must satisfy the repository's `>=22.12.0 <23` requirement.
 
 | Variable | Value supplied by the owner |
 | --- | --- |
-| `NODE_VERSION` | `22.23.2` |
+| `NODE_VERSION` | `22` |
 | `APP_PROFILE`, `VITE_APP_PROFILE` | `production` for both |
 | `ALLOW_HOSTED_SUPABASE`, `VITE_ALLOW_HOSTED_SUPABASE` | `true` for both |
 | `SUPABASE_URL`, `VITE_SUPABASE_URL` | The same hosted Supabase HTTPS origin |
@@ -72,20 +72,10 @@ Under the Worker's **Settings > Variables and Secrets**, separately set
 `SUPABASE_PUBLISHABLE_KEY` to match the build. `keep_vars` preserves dashboard
 runtime variables across Wrangler deployments.
 
-Add secrets using the dashboard's **Secret** type, or run these locally after
-building and authenticating Wrangler; enter values at the prompts:
-
-```sh
-npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-npx wrangler secret put CRON_SECRET
-```
-
-`SUPABASE_SERVICE_ROLE_KEY` authorizes server-side database operations.
-`CRON_SECRET` already is the cron authentication name; callers send it as
-`Authorization: Bearer <secret>`. Optional `CRON_SECRET_PREVIOUS` allows rotation
-overlap. The separate existing `MONITOR_CRON_TOKEN` is an optional alternative
-credential for the monitor/collector-subscription hooks; `CRON_SECRET` works for
-both without setting it. No scheduler is created by this deployment.
+The first deployment runs with only the public build and runtime values. Leave
+`SUPABASE_SERVICE_ROLE_KEY` and `CRON_SECRET` unset for that deployment. Add them
+only after #278 gates the machine-only routes (`runForwardNow` and
+`runForwardTrendNow`), and only if a deployed route needs them.
 
 Start with `SCHEDULED_MONITOR_ENABLED=false`, `BINANCE_COLLECTOR_ENABLED=false`,
 `OPERATIONAL_DB_ENABLED=false`, and `PYTHON_ANALYSIS_ENABLED=false`. If enabling
@@ -93,6 +83,25 @@ remote services later, set a reachable `OPERATIONAL_SUPABASE_URL` and secret
 `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`, or `PYTHON_ANALYSIS_URL` and secret
 `PYTHON_ANALYSIS_TOKEN`, respectively. Loopback URLs cannot reach the owner's
 machine from a Worker. See [environment setup](environments.md) for activity gates.
+
+### Later: add secrets after #278
+
+After #278 gates the machine-only routes, add only the secrets required by the
+routes deployed to Workers. Use the dashboard's **Secret** type, or run the
+applicable command locally after building and authenticating Wrangler; enter
+values at the prompts:
+
+```sh
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+npx wrangler secret put CRON_SECRET
+```
+
+`SUPABASE_SERVICE_ROLE_KEY` authorizes server-side database operations.
+`CRON_SECRET` is the cron authentication name; callers send it as
+`Authorization: Bearer <secret>`. Optional `CRON_SECRET_PREVIOUS` allows rotation
+overlap. The separate existing `MONITOR_CRON_TOKEN` is an optional alternative
+credential for the monitor/collector-subscription hooks; `CRON_SECRET` works for
+both without setting it. No scheduler is created by this deployment.
 
 Keep all actual secret values in Cloudflare, never in `wrangler.jsonc`, docs,
 commits, browser variables, or build logs. `.dev.vars` and local environment
@@ -107,7 +116,7 @@ overrides are gitignored.
 3. In Supabase **Authentication > URL Configuration > Redirect URLs**, add
    `<url>/auth/callback`, replacing `<url>` with the Workers origin. Use the
    production origin as Site URL where appropriate. Repeat for a custom domain.
-4. Once runtime values and secrets are set, check sign-in and the callback on the
+4. Once the public runtime values are set, check sign-in and the callback on the
    deployed site. See [Supabase setup](supabase-setup.md) for provider configuration.
 
 ## Known limitations deferred to #278

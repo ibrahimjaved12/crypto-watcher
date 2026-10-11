@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "crypto-watcher",
-  "compatibility_date": "2026-10-12",
+  "compatibility_date": "2026-10-06",
   "compatibility_flags": ["nodejs_compat"],
   // Nitro emits the Worker and static assets separately.
   "main": ".output/server/index.mjs",
