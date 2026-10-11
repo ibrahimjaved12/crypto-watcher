@@ -79,6 +79,7 @@ The non-secret runtime variables are committed in the `vars` block of
 | `ALLOW_HOSTED_SUPABASE` | `true` |
 | `APP_PROFILE` | `production` |
 | `BINANCE_COLLECTOR_ENABLED` | `false` |
+| `MACHINE_ONLY_ENABLED` | `false` |
 | `OPERATIONAL_DB_ENABLED` | `false` |
 | `PYTHON_ANALYSIS_ENABLED` | `false` |
 | `SCHEDULED_MONITOR_ENABLED` | `false` |
@@ -97,10 +98,17 @@ not resolve a missing runtime profile. Rebuild and redeploy with the committed
 runtime configuration, and set the runtime publishable key in its separate
 dashboard list.
 
+`MACHINE_ONLY_ENABLED=false` disables `runForwardNow` and `runForwardTrendNow`
+on the Worker. Authenticated calls receive HTTP 403 with `{"error":"machine_only"}`
+before machine dependencies are loaded. Both routes still require Supabase user
+authentication. A read-only server capability hides their buttons in the UI;
+the server gate is authoritative. Do not enable this flag on Cloudflare. Local
+development and `worker:host` explicitly enable it on the owner's machine.
+
 The first deployment runs with only the public build and runtime values. Leave
 `SUPABASE_SERVICE_ROLE_KEY` and `CRON_SECRET` unset for that deployment. Add them
-only after #278 gates the machine-only routes (`runForwardNow` and
-`runForwardTrendNow`), and only if a deployed route needs them.
+only if another deployed route needs them. The #278 gate prevents the two
+machine-only routes from running even when those secrets are present.
 
 The committed runtime flags start scheduled monitoring, the collector, the
 operational database and Python analysis disabled. If enabling
@@ -109,9 +117,9 @@ remote services later, set a reachable `OPERATIONAL_SUPABASE_URL` and secret
 `PYTHON_ANALYSIS_TOKEN`, respectively. Loopback URLs cannot reach the owner's
 machine from a Worker. See [environment setup](environments.md) for activity gates.
 
-### Later: add secrets after #278
+### Later: add secrets for enabled routes
 
-After #278 gates the machine-only routes, add only the secrets required by the
+With the #278 machine-only gate in place, add only the secrets required by the
 routes deployed to Workers. Use the dashboard's **Secret** type, or run the
 applicable command locally after building and authenticating Wrangler; enter
 values at the prompts:
@@ -144,20 +152,25 @@ overrides are gitignored.
 4. Once the public runtime values are set, check sign-in and the callback on the
    deployed site. See [Supabase setup](supabase-setup.md) for provider configuration.
 
-## Known limitations deferred to #278
+## Machine-only work and stale data
 
-The forward-run server functions (`runForwardNow`, `runForwardTrendNow`) reach
+When enabled on the owner's machine, the forward-run server functions reach
 `forward-sigma-cache.server.ts`, which uses host filesystem paths, persistent
 `.forward-state` files, PID locks and `process.kill`. Workers' virtual filesystem
 does not provide those host semantics. Python analysis requires a reachable
 external service; local FastAPI/operational database endpoints will not work.
 The `worker:host` supervisor spawns child processes and the collector and forward
 CLI jobs expect a long-lived machine; none is started by this web deployment.
-These routes/jobs are not made Workers-compatible here.
+The two routes are disabled on Workers; their host implementation is unchanged.
+The Market dashboard and Strategy Lab show a stale-data banner when the newest
+hosted forward run's processed boundary is more than two hours old, using the
+existing authenticated hosted read. A recent retry timestamp does not hide old
+processed data. Empty and failed reads show separate availability messages.
+See the [forward outage runbook](forward-outage-runbook.md) for recovery.
 
 Free-plan upload size, CPU and subrequest limits still apply. A successful build
 does not prove expensive monitor/analysis routes fit the free runtime budget;
-review deployment size and runtime behavior when handling #278.
+review deployment size and runtime behavior before enabling other expensive routes.
 
 References: [Nitro Cloudflare preset](https://nitro.build/deploy/providers/cloudflare),
 [Workers Builds configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/),

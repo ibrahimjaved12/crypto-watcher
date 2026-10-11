@@ -332,7 +332,7 @@ function runtimeProblems(python) {
 
 async function main() {
   const envFileText = existsSync(envFile) ? readFileSync(envFile, "utf8") : null;
-  const env = { ...loadEnv(MODE, root, ""), ...process.env };
+  const env = { ...loadEnv(MODE, root, ""), ...process.env, MACHINE_ONLY_ENABLED: "true" };
   lib = await importLib("/src/lib/worker-host.ts");
 
   const problems = lib.preflight({ env, envFileText });

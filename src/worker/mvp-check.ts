@@ -30,6 +30,7 @@ import {
 } from "../lib/forward/mvp-check";
 import { getOperationalStore } from "../lib/operational/repository.server";
 import { STATUS_FILE_NAME, classifyWorkerHost } from "../lib/worker-host";
+import { hostedDatabaseSizeCheck } from "./hosted-db-size";
 
 // `npm run mvp:check` (#239 P21): READ-ONLY health table for the local MVP. It reads the operational
 // and application databases and GET <python>/health; it writes nothing. Exit code 1 on any FAIL;
@@ -171,6 +172,7 @@ function workerHostCheck(): Check {
 
 async function main() {
   const checks: Check[] = [];
+  checks.push(await hostedDatabaseSizeCheck());
   checks.push(await pythonCheck());
   checks.push(workerHostCheck());
   checks.push(...(await collectorChecks()));

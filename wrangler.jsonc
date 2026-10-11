@@ -15,6 +15,7 @@
     "ALLOW_HOSTED_SUPABASE": "true",
     "APP_PROFILE": "production",
     "BINANCE_COLLECTOR_ENABLED": "false",
+    "MACHINE_ONLY_ENABLED": "false",
     "OPERATIONAL_DB_ENABLED": "false",
     "PYTHON_ANALYSIS_ENABLED": "false",
     "SCHEDULED_MONITOR_ENABLED": "false",
