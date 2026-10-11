@@ -15,6 +15,7 @@ try {
   if (!status.ANON_KEY || !status.SERVICE_ROLE_KEY) throw new Error("missing credentials");
   const values = {
     APP_PROFILE: "local",
+    MACHINE_ONLY_ENABLED: "true",
     VITE_APP_PROFILE: "local",
     ALLOW_HOSTED_SUPABASE: "false",
     VITE_ALLOW_HOSTED_SUPABASE: "false",

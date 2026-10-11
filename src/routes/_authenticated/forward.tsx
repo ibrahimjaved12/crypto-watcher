@@ -14,6 +14,7 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
+import { ForwardFreshnessBanner } from "@/components/forward-freshness-banner";
 import { Hint } from "@/components/hint";
 import { EmptyState, PageHeader, SectionTitle, StatusCard, levelStyle } from "@/components/plain";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ import {
 } from "@/lib/forward/forward-status";
 import {
   getForwardDashboard,
+  getMachineCapabilities,
   getTrendDashboard,
   runForwardNow,
   runForwardTrendNow,
@@ -86,6 +88,12 @@ function ForwardPage() {
   const filters = useMemo(() => withDefaultRange(search), [search]);
   const setFilters = (patch: Partial<ForwardFilters>) =>
     void navigate({ search: (previous) => ({ ...previous, ...patch }), replace: true });
+  const loadCapabilities = useServerFn(getMachineCapabilities);
+  const capabilities = useQuery({
+    queryKey: ["machine-capabilities"],
+    queryFn: () => loadCapabilities(),
+  });
+  const machineOnlyEnabled = capabilities.data?.machineOnlyEnabled === true;
   const loadTrend = useServerFn(getTrendDashboard);
   // Same query (and key) the trend tab uses; loaded on mount as before so both statuses show.
   const trend = useQuery({ queryKey: ["forward-trend-dashboard"], queryFn: () => loadTrend() });
@@ -103,6 +111,7 @@ function ForwardPage() {
   return (
     <AppShell>
       <div className="space-y-6">
+        <ForwardFreshnessBanner />
         <PageHeader
           eyebrow="Forward test"
           title="Strategy Lab"
@@ -145,10 +154,11 @@ function ForwardPage() {
               line={signalLine}
               filters={filters}
               onFilters={setFilters}
+              machineOnlyEnabled={machineOnlyEnabled}
             />
           </TabsContent>
           <TabsContent value="trend" className="mt-4">
-            <TrendSection data={trend} line={trendLine} />
+            <TrendSection data={trend} line={trendLine} machineOnlyEnabled={machineOnlyEnabled} />
           </TabsContent>
         </Tabs>
       </div>
@@ -186,11 +196,13 @@ function SignalsSection({
   line,
   filters,
   onFilters,
+  machineOnlyEnabled,
 }: {
   data: UseQueryResult<Awaited<ReturnType<typeof getForwardDashboard>>>;
   line: StatusLine;
   filters: ForwardFilters;
   onFilters: (patch: Partial<ForwardFilters>) => void;
+  machineOnlyEnabled: boolean;
 }) {
   const queryClient = useQueryClient();
   const run = useServerFn(runForwardNow);
@@ -220,10 +232,12 @@ function SignalsSection({
         raw={line.raw}
       >
         <div className="flex flex-wrap items-center gap-3 pt-2">
-          <Button onClick={() => runNow.mutate()} disabled={runNow.isPending}>
-            <RefreshCw className={cn("size-4", runNow.isPending && "animate-spin")} aria-hidden />
-            Check for new signals now
-          </Button>
+          {machineOnlyEnabled && (
+            <Button onClick={() => runNow.mutate()} disabled={runNow.isPending}>
+              <RefreshCw className={cn("size-4", runNow.isPending && "animate-spin")} aria-hidden />
+              Check for new signals now
+            </Button>
+          )}
           {latest ? (
             <span className="text-xs text-muted-foreground">
               Last run for the hour ending {time(latest.boundary_ms)}
@@ -411,8 +425,10 @@ const day = (ms: number | null | undefined) =>
 function TrendSection({
   data,
   line,
+  machineOnlyEnabled,
 }: {
   data: UseQueryResult<Awaited<ReturnType<typeof getTrendDashboard>>>;
+  machineOnlyEnabled: boolean;
   line: StatusLine;
 }) {
   const queryClient = useQueryClient();
@@ -444,10 +460,12 @@ function TrendSection({
         raw={line.raw}
       >
         <div className="flex flex-wrap items-center gap-3 pt-2">
-          <Button onClick={() => runNow.mutate()} disabled={runNow.isPending}>
-            <RefreshCw className={cn("size-4", runNow.isPending && "animate-spin")} aria-hidden />
-            Update trend portfolios now
-          </Button>
+          {machineOnlyEnabled && (
+            <Button onClick={() => runNow.mutate()} disabled={runNow.isPending}>
+              <RefreshCw className={cn("size-4", runNow.isPending && "animate-spin")} aria-hidden />
+              Update trend portfolios now
+            </Button>
+          )}
           {latest ? (
             <span className="text-xs text-muted-foreground">
               Scored through {day(latest.through_day_ms)} (daily close, UTC)

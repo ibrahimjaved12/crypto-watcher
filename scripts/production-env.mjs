@@ -32,6 +32,7 @@ if (existsSync(path)) {
       throw new Error("missing service-role key");
     const values = {
       APP_PROFILE: "production",
+      MACHINE_ONLY_ENABLED: "true",
       ALLOW_HOSTED_SUPABASE: "true",
       SUPABASE_URL: "REPLACE_HOSTED_SUPABASE_URL",
       SUPABASE_SERVICE_ROLE_KEY: "REPLACE_HOSTED_SUPABASE_SERVICE_ROLE_KEY",

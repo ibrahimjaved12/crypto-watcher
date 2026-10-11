@@ -157,6 +157,7 @@ async function main() {
     }
   }
   loadEnvFile(envPath);
+  process.env.MACHINE_ONLY_ENABLED = "true";
   // The launcher mode is the ownership cutover. Never leave the second writer
   // enabled merely because credentials remain in the reusable local env file.
   process.env.OPERATIONAL_DB_ENABLED = String(withOperational);

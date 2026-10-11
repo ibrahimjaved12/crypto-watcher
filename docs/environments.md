@@ -101,6 +101,12 @@ A hosted URL must use HTTPS. Activity flags do not authorize a hosted target.
 
 ## Variables
 
+`MACHINE_ONLY_ENABLED` is server-only and defaults off unless exactly `true`.
+Local Vite development (`.env.development`), the local launcher and `worker:host`
+enable it; Cloudflare commits `false`. It gates the two on-demand forward actions
+before machine imports. The UI reads the capability through an authenticated,
+read-only server function; never create a `VITE_MACHINE_ONLY_ENABLED` variable.
+
 All variables are listed in the root [.env.example](../.env.example). Empty required
 values fail validation. Browser values are public and embedded at build time; server
 values are runtime configuration (loaded into the dev process by Vite locally).

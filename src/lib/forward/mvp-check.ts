@@ -6,6 +6,15 @@
 export type Level = "PASS" | "WARN" | "FAIL";
 export type Check = { name: string; level: Level; detail: string };
 
+export function classifyHostedDatabaseSize(bytes: number): Check {
+  const mb = bytes / 1_000_000;
+  return {
+    name: "hosted public-schema size",
+    level: mb >= 450 ? "FAIL" : mb >= 350 ? "WARN" : "PASS",
+    detail: `${mb.toFixed(1)} MB (public tables, indexes and TOAST; WARN at 350 MB, FAIL at 450 MB)`,
+  };
+}
+
 export const HOUR_MS = 3_600_000;
 export const DAY_MS = 86_400_000;
 export const THRESHOLDS = {

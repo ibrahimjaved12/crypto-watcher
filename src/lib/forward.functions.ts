@@ -10,10 +10,20 @@ import {
 import { forwardFiltersSchema } from "./forward/forward-filters";
 import { loadTrendDashboard } from "./forward/forward-trend-dashboard";
 
+/** Read-only capability; the browser cannot enable machine work. */
+export const getMachineCapabilities = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async () => {
+    const { machineOnlyEnabled } = await import("./machine-only.server");
+    return { machineOnlyEnabled: machineOnlyEnabled() };
+  });
+
 /** On-demand forward run for the signed-in account (#239 P11); the hourly job uses the same path. */
 export const runForwardNow = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
+    const { requireMachineOnly } = await import("./machine-only.server");
+    requireMachineOnly();
     const { forwardDeps, FORWARD_STRATEGY_IDS } = await import("./forward/forward-deps.server");
     const { runForward } = await import("./forward/forward-run.server");
     return runForward(await forwardDeps(), {
@@ -58,6 +68,8 @@ export const exportForwardLogCsv = createServerFn({ method: "POST" })
 export const runForwardTrendNow = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
+    const { requireMachineOnly } = await import("./machine-only.server");
+    requireMachineOnly();
     const { forwardTrendDeps } = await import("./forward/forward-deps.server");
     const { runForwardTrend } = await import("./forward/forward-trend-run.server");
     return runForwardTrend(await forwardTrendDeps(), { userId: context.userId, trigger: "on_demand" });

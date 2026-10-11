@@ -5,6 +5,10 @@ hosted main Supabase, local operational Supabase, everything the machine does is
 (discussion #167, hosting plan v4). It exists because `npm run dev:local:all` starts the _local_ main
 stack and points the jobs at it.
 
+The host explicitly sets `MACHINE_ONLY_ENABLED=true` for its child environment.
+Cloudflare keeps this server-only capability off. For stale hosted results and
+restart/catch-up steps, see the [forward outage runbook](forward-outage-runbook.md).
+
 It supervises five children, each with a log prefix and its own restart policy:
 
 | Child             | Command (same as the npm script / `dev-local.mjs`)                                                                 |

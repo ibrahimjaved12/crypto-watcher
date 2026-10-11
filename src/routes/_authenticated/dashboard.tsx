@@ -7,6 +7,7 @@ import { Plus, RefreshCw, PlayCircle } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
+import { ForwardFreshnessBanner } from "@/components/forward-freshness-banner";
 import { QuoteCard } from "@/components/market/quote-card";
 import { MarketRead } from "@/components/market/market-read";
 import { TechnicalAnalysis } from "@/components/market/technical-analysis";
@@ -128,6 +129,7 @@ function Dashboard() {
 
   return (
     <AppShell>
+      <ForwardFreshnessBanner />
       <PageHeader
         eyebrow="Live market"
         title="Market"
