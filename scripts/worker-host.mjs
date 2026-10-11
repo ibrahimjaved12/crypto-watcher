@@ -27,8 +27,13 @@ let statusWarned = false;
 let allDownSinceMs = null;
 const KILL_AFTER_MS = 10_000; // SIGTERM first, SIGKILL after this long
 
-const importLib = async (path) =>
-  (await runnerImport(path, { root, mode: MODE, configFile: false, envDir: false })).module;
+const importLib = async (path) => {
+  const loaded = (await runnerImport(path, { root, mode: MODE, configFile: false, envDir: false })).module;
+  if (loaded === null || typeof loaded !== "object") {
+    throw new Error(`${path} did not load as a module object; the Vite runner returned ${loaded === null ? "null" : typeof loaded}.`);
+  }
+  return loaded;
+};
 
 // ── Process helpers ────────────────────────────────────────────────────────────────────────────
 

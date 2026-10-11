@@ -116,7 +116,7 @@ export function preflight(input: { env: Env; envFileText: string | null }): stri
   if (!main || main.protocol !== "https:" || LOOPBACK_HOSTS.includes(main.hostname))
     problems.push("SUPABASE_URL must be the hosted main project: an HTTPS, non-loopback origin.");
   if (env["ALLOW_HOSTED_SUPABASE"] !== "true") problems.push("ALLOW_HOSTED_SUPABASE must be exactly true.");
-  if (!problems.length) attempt(problems, () => void validateServerSupabase(env));
+  attempt(problems, () => void validateServerSupabase(env));
   attempt(problems, () => validatePublicSecrets(env));
 
   attempt(problems, () => {
