@@ -26,6 +26,10 @@ put that token in Git. Set the variables below before starting/retrying the buil
 
 Set these in **Settings > Build > Variables and secrets**, not just the runtime
 settings. Node must satisfy the repository's `>=22.12.0 <23` requirement.
+Cloudflare has two separate lists: build variables (including `VITE_*` values
+compiled into the browser bundle) and Worker runtime variables under **Settings >
+Variables and Secrets**. Setting a build variable does not configure the running
+Worker; the runtime values are supplied separately as described below.
 
 | Variable | Value supplied by the owner |
 | --- | --- |
@@ -67,18 +71,39 @@ crypto usage; it does not make host processes or persistent local disk available
 
 ## Runtime configuration and secrets
 
-Under the Worker's **Settings > Variables and Secrets**, separately set
-`APP_PROFILE=production`, `ALLOW_HOSTED_SUPABASE=true`, `SUPABASE_URL`, and
-`SUPABASE_PUBLISHABLE_KEY` to match the build. `keep_vars` preserves dashboard
-runtime variables across Wrangler deployments.
+The non-secret runtime variables are committed in the `vars` block of
+[`wrangler.jsonc`](../wrangler.jsonc), except the publishable key:
+
+| Runtime variable | Committed value |
+| --- | --- |
+| `ALLOW_HOSTED_SUPABASE` | `true` |
+| `APP_PROFILE` | `production` |
+| `BINANCE_COLLECTOR_ENABLED` | `false` |
+| `OPERATIONAL_DB_ENABLED` | `false` |
+| `PYTHON_ANALYSIS_ENABLED` | `false` |
+| `SCHEDULED_MONITOR_ENABLED` | `false` |
+| `SUPABASE_URL` | `https://xshzjhocpcenuumdrhdh.supabase.co` |
+
+Set `SUPABASE_PUBLISHABLE_KEY` in the Worker's **Settings > Variables and Secrets**
+to match the public key used by the build. Keys and secrets stay in the dashboard;
+none belongs in the committed `vars` block. `keep_vars: true` preserves dashboard
+runtime variables across Wrangler deployments. Build profiles, hosted opt-ins,
+URLs and public keys must match these runtime values.
+
+If runtime variables are missing, the app fails validation; a missing
+`APP_PROFILE` produces `[Environment] APP_PROFILE must be local or production`.
+Setting `VITE_APP_PROFILE` or `APP_PROFILE` only in the build-variable list does
+not resolve a missing runtime profile. Rebuild and redeploy with the committed
+runtime configuration, and set the runtime publishable key in its separate
+dashboard list.
 
 The first deployment runs with only the public build and runtime values. Leave
 `SUPABASE_SERVICE_ROLE_KEY` and `CRON_SECRET` unset for that deployment. Add them
 only after #278 gates the machine-only routes (`runForwardNow` and
 `runForwardTrendNow`), and only if a deployed route needs them.
 
-Start with `SCHEDULED_MONITOR_ENABLED=false`, `BINANCE_COLLECTOR_ENABLED=false`,
-`OPERATIONAL_DB_ENABLED=false`, and `PYTHON_ANALYSIS_ENABLED=false`. If enabling
+The committed runtime flags start scheduled monitoring, the collector, the
+operational database and Python analysis disabled. If enabling
 remote services later, set a reachable `OPERATIONAL_SUPABASE_URL` and secret
 `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`, or `PYTHON_ANALYSIS_URL` and secret
 `PYTHON_ANALYSIS_TOKEN`, respectively. Loopback URLs cannot reach the owner's

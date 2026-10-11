@@ -11,6 +11,15 @@
   },
   "no_bundle": true,
   "rules": [{ "type": "ESModule", "globs": ["**/*.mjs", "**/*.js"] }],
-  // Runtime configuration is managed in the Cloudflare dashboard.
+  "vars": {
+    "ALLOW_HOSTED_SUPABASE": "true",
+    "APP_PROFILE": "production",
+    "BINANCE_COLLECTOR_ENABLED": "false",
+    "OPERATIONAL_DB_ENABLED": "false",
+    "PYTHON_ANALYSIS_ENABLED": "false",
+    "SCHEDULED_MONITOR_ENABLED": "false",
+    "SUPABASE_URL": "https://xshzjhocpcenuumdrhdh.supabase.co"
+  },
+  // Preserve the publishable key and other dashboard runtime variables.
   "keep_vars": true
 }
