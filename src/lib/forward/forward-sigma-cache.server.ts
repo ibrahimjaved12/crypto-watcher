@@ -17,7 +17,7 @@ export interface SigmaCache {
 
 let directoryLogged = false;
 function defaultDirectory(): string {
-  if (process.env.FORWARD_STATE_DIR) return process.env.FORWARD_STATE_DIR;
+  if (process.env["FORWARD_STATE_DIR"]) return process.env["FORWARD_STATE_DIR"];
   let root = process.cwd();
   for (;;) {
     if (existsSync(resolve(root, "package.json")) && existsSync(resolve(root, "supabase")) &&
