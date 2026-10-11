@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { supabaseAdmin } from "../integrations/supabase/client.server";
@@ -26,6 +29,7 @@ import {
   type RunRow,
 } from "../lib/forward/mvp-check";
 import { getOperationalStore } from "../lib/operational/repository.server";
+import { STATUS_FILE_NAME, classifyWorkerHost } from "../lib/worker-host";
 
 // `npm run mvp:check` (#239 P21): READ-ONLY health table for the local MVP. It reads the operational
 // and application databases and GET <python>/health; it writes nothing. Exit code 1 on any FAIL;
@@ -152,9 +156,23 @@ async function pythonCheck(): Promise<Check> {
   }
 }
 
+// `npm run worker:host` (#270) writes .worker-host.status.json in the repository root; npm runs
+// this script from there. Missing = the host is not in use (the local dev:local:all flow).
+function workerHostCheck(): Check {
+  const path = resolve(process.cwd(), STATUS_FILE_NAME);
+  let raw: string | null = null;
+  try {
+    if (existsSync(path)) raw = readFileSync(path, "utf8");
+  } catch (error) {
+    return { name: "worker host", level: "FAIL", detail: `cannot read ${STATUS_FILE_NAME}: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  return { name: "worker host", ...classifyWorkerHost(raw, Date.now()) };
+}
+
 async function main() {
   const checks: Check[] = [];
   checks.push(await pythonCheck());
+  checks.push(workerHostCheck());
   checks.push(...(await collectorChecks()));
   const users = await listForwardUsers(db, process.env["FORWARD_USER_ID"]);
   const [counts, ledgers, strategies, missingApp] = await Promise.all([
