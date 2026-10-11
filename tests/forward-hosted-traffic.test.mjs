@@ -39,6 +39,15 @@ async function withCache(work) {
   finally { await rm(dir, { recursive: true, force: true }); }
 }
 
+test("cache directory uses the supplied logger once across cache instances", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "forward-log-")), lines = [];
+  try {
+    createSigmaCache(dir, () => Date.now(), line => lines.push(line));
+    createSigmaCache(dir, () => Date.now(), line => lines.push(line));
+    assert.deepEqual(lines, [`[forward-sigma] cache dir=${dir}`]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("valid local sigma avoids hosted reads; missing or corrupt files restore and validate", async () => {
   await withCache(async (cache, dir) => {
     let reads = 0;

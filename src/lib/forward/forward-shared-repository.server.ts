@@ -105,8 +105,8 @@ export function createSharedRepository(client: SupabaseClient, traffic: HostedTr
       const setups = await pages("forward_market_open_setups", "setup_id", (q) => q.select("setup_id,payload"));
       const open: StoredOpenSetup[] = [];
       const outcomes = new Map<string, { status: string; payload: ForwardResolution }[]>();
-      for (let start = 0; start < setups.length; start += 100) {
-        const ids = setups.slice(start, start + 100).map(row => row["setup_id"]);
+      for (let start = 0; start < setups.length; start += 50) {
+        const ids = setups.slice(start, start + 50).map(row => row["setup_id"]);
         for (let offset = 0; ; offset += 500) {
           const { data, error } = await client.from("forward_market_outcomes").select("setup_id,status,payload")
             .in("setup_id", ids).order("setup_id", { ascending: true })

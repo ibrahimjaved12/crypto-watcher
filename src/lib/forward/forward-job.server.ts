@@ -63,7 +63,7 @@ export async function runHourlyForAccounts(io: ForwardJobIo): Promise<{ users: n
         try {
           if (result.stages.length) {
             const summary = await runUserStage(deps, account, result.boundary, "hourly", result.stages);
-            if (!result.stop) io.log(`[forward-run] ${account.userId} ${summary.runKey} ${summary.status}`);
+            io.log(`[forward-run] ${account.userId} ${summary.runKey} ${summary.status}`);
           }
           if (result.stop) {
             const stage = result.stop;

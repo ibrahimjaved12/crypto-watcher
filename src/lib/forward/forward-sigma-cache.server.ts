@@ -29,9 +29,9 @@ function defaultDirectory(): string {
 }
 
 /** One atomic file per symbol. Lock directories serialize writers across worker processes. */
-export function createSigmaCache(directory?: string, now = () => Date.now()): SigmaCache {
+export function createSigmaCache(directory?: string, now = () => Date.now(), log: (message: string) => void = console.log): SigmaCache {
   const cacheDirectory = resolve(directory ?? defaultDirectory());
-  if (!directoryLogged) { console.log(`[forward-sigma] cache dir=${cacheDirectory}`); directoryLogged = true; }
+  if (!directoryLogged) { log(`[forward-sigma] cache dir=${cacheDirectory}`); directoryLogged = true; }
   function path(symbol: string) {
     if (!/^[A-Z0-9]{5,16}$/.test(symbol)) throw new Error("Invalid sigma cache symbol");
     return resolve(cacheDirectory, `${symbol}.json`);

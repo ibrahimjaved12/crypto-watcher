@@ -59,7 +59,7 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
     callMarket: (body) => callSplit("/v1/forward/market_evaluate", body),
     callWallet: (body) => callSplit("/v1/forward/wallet_step", body),
     log,
-    sigmaCache: createSigmaCache(undefined, () => Date.now()),
+    sigmaCache: createSigmaCache(undefined, () => Date.now(), log),
     readMinutes: (symbol, sinceMs, beforeMs) =>
       store.readForwardMinuteCandles(symbol, sinceMs, beforeMs),
     listHealth: (symbols) => store.listCollectorHealth(symbols),

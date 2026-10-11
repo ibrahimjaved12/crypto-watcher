@@ -340,19 +340,35 @@ test("first run clamps to retained candles, records freshness and uses the same 
   assert.equal(f.accounts.get(B).cursor, BOUNDARY - 150 * 24 * HOUR);
 });
 
-test("a non-stage stops catch-up after replaying already committed chunks", async () => {
-  const f = gapFixture(3);
-  const market = f.deps.callMarket;
-  f.deps.callMarket = async body => {
-    const response = await market(body);
-    if (body.to_ms === BOUNDARY - 24 * HOUR - MINUTE) response.reasons = { sigma: "no_sigma: fixture" };
-    return response;
-  };
-  await hourly(f);
-  assert.equal(f.stages.length, 2);
-  assert.equal(f.calls.commits.length, 2);
-  assert.equal(f.calls.retryable.length, 2);
-  assert.equal(f.accounts.get(A).cursor, BOUNDARY - 48 * HOUR);
+test("a non-stage stops catch-up while logging each account's successful earlier replay", async () => {
+  for (const status of ["no_sigma", "skipped_stale"]) {
+    const f = gapFixture(3);
+    if (status === "no_sigma") {
+      const market = f.deps.callMarket;
+      f.deps.callMarket = async body => {
+        const response = await market(body);
+        if (body.to_ms === BOUNDARY - 24 * HOUR - MINUTE) response.reasons = { sigma: "no_sigma: fixture" };
+        return response;
+      };
+    } else {
+      const health = f.deps.listHealth;
+      let chunks = 0;
+      f.deps.listHealth = async symbols => ++chunks === 1 ? health(symbols)
+        : symbols.map(symbol => ({ symbol, timeframe_minutes: 1, status: "STALE" }));
+    }
+    await hourly(f);
+    assert.equal(f.stages.length, 2);
+    assert.equal(f.calls.commits.length, 2);
+    assert.equal(f.calls.retryable.length, 2);
+    for (const user of [A, B]) {
+      assert.equal(f.accounts.get(user).cursor, BOUNDARY - 48 * HOUR);
+      const lines = f.calls.logs.filter(line => line.startsWith(`[forward-run] ${user} `));
+      assert.deepEqual(lines, [
+        `[forward-run] ${user} hour:${BOUNDARY - 48 * HOUR} ok`,
+        `[forward-run] ${user} hour:${BOUNDARY - 24 * HOUR} ${status}`,
+      ]);
+    }
+  }
 });
 
 const { createSharedRepository } = await import(await moduleUrl("../src/lib/forward/forward-shared-repository.server.ts", {
@@ -373,7 +389,7 @@ function outcomesFixture(extra = false, failPage = false) {
     queries.push(query);
     const builder = {
       select() { return builder; },
-      in(key, ids) { assert.equal(key, "setup_id"); assert.ok(ids.length <= 100); query.ids = ids; return builder; },
+      in(key, ids) { assert.equal(key, "setup_id"); assert.ok(ids.length <= 50); query.ids = ids; return builder; },
       gt(_key, value) { query.after = value; return builder; },
       order(key, options) { query.orders.push([key, options.ascending]); return builder; },
       limit(count) { query.count = count; return builder; },
@@ -401,12 +417,12 @@ function outcomesFixture(extra = false, failPage = false) {
   return { client, queries, expected };
 }
 
-test("250 open setups use three bulk outcome reads with the old final-status and newest-payload semantics", async () => {
+test("250 open setups use five bulk outcome reads with the old final-status and newest-payload semantics", async () => {
   const f = outcomesFixture(), traffic = createHostedTraffic();
   const result = await createSharedRepository(f.client, traffic).openSetups();
   assert.deepEqual(result, f.expected);
   const reads = f.queries.filter(query => query.table === "forward_market_outcomes");
-  assert.equal(reads.length, 3);
+  assert.equal(reads.length, 5);
   assert.ok(reads.every(query => JSON.stringify(query.orders) === JSON.stringify([["setup_id", true], ["created_at", false]])));
   assert.equal(traffic.snapshot().reads, f.queries.length);
 });

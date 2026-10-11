@@ -528,7 +528,7 @@ freshness. Each chunk reloads the cursor and open setups, so it sees earlier chu
 reports work left for the next run. A normal hour remains one chunk. A stale/no-sigma result
 stops catch-up. Accounts replay the successful stages in order through the last processed
 boundary, using the run's in-memory array and fetching only missing older stages for lagging
-accounts. Open setup outcomes are read in batches of 100 setup IDs and paged without dropping
+accounts. Open setup outcomes are read in batches of 50 setup IDs and paged without dropping
 outcomes across page boundaries. Checkpoints run after the account loop and cannot change
 account results.
 
