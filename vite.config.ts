@@ -60,7 +60,6 @@ export default async (context: ConfigEnv): Promise<UserConfig> => {
     ...(context.command === "build" && context.mode === "development"
       ? {
           environments: { client: { define: { "process.env.NODE_ENV": JSON.stringify("development") } } },
-          esbuild: { keepNames: true },
         }
       : {}),
     css: { transformer: "lightningcss" },
