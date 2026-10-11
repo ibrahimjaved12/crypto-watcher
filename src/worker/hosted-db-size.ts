@@ -2,17 +2,14 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { classifyHostedDatabaseSize, type Check } from "../lib/forward/mvp-check";
 
-// Count table storage, including indexes and TOAST, once per relation.
-// Partition leaves are relkind 'r'; parent partitions have no storage of their own.
+// Measure the whole hosted database, the same scope as Supabase's database size limit.
 export const PUBLIC_SCHEMA_SIZE_SQL = `BEGIN READ ONLY;
-SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0)::bigint
-FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'public' AND c.relkind IN ('r', 'm');
+SELECT pg_database_size(current_database())::bigint;
 COMMIT;`;
 
 /** Use an existing local libpq service; never create credentials or a database RPC. */
 export async function hostedDatabaseSizeCheck(): Promise<Check> {
-  const name = "hosted public-schema size";
+  const name = "hosted database size";
   const skipped = (detail: string): Check => ({ name, level: "WARN", detail: `SKIP: ${detail}` });
   if (!process.env["PGSERVICE"]) {
     return skipped("no local PGSERVICE connection configured for the hosted DB; service-role API keys cannot run SQL");

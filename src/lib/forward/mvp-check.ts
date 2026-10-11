@@ -9,9 +9,9 @@ export type Check = { name: string; level: Level; detail: string };
 export function classifyHostedDatabaseSize(bytes: number): Check {
   const mb = bytes / 1_000_000;
   return {
-    name: "hosted public-schema size",
+    name: "hosted database size",
     level: mb >= 450 ? "FAIL" : mb >= 350 ? "WARN" : "PASS",
-    detail: `${mb.toFixed(1)} MB (public tables, indexes and TOAST; WARN at 350 MB, FAIL at 450 MB)`,
+    detail: `${mb.toFixed(1)} MB (whole hosted database, including Supabase system schemas; WARN at 350 MB, FAIL at 450 MB)`,
   };
 }
 

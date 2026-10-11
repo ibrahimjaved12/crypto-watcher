@@ -107,7 +107,7 @@ test("hosted data becomes stale strictly after two hours, with missing data hand
 
 const rulesUrl = await moduleUrl("../src/lib/forward/mvp-check.ts");
 const { classifyHostedDatabaseSize } = await import(rulesUrl);
-test("public-schema size warns at 350 MB and fails at 450 MB", () => {
+test("whole hosted database size warns at 350 MB and fails at 450 MB", () => {
   for (const [bytes, level] of [[0, "PASS"], [349999999, "PASS"], [350000000, "WARN"],
     [449999999, "WARN"], [450000000, "FAIL"]])
     assert.equal(classifyHostedDatabaseSize(bytes).level, level);

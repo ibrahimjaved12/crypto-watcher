@@ -81,7 +81,7 @@ children should be healthy. Check the daily trend job separately: its schedule i
 
 ## Read-only hosted size check
 
-`mvp:check` adds `hosted public-schema size`. It uses `psql` and an **existing local
+`mvp:check` adds `hosted database size`. It uses `psql` and an **existing local
 libpq service** selected by `PGSERVICE`, which must point to the same hosted main
 database as the production profile. Connection settings/credentials remain in the
 owner's local service/password configuration. The Supabase HTTP service-role key
@@ -92,11 +92,9 @@ level. Connection/query failures also skip without printing sensitive details.
 The query runs in a read-only transaction with connection and statement timeouts:
 
 ```sql
-SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0)::bigint
-FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'public' AND c.relkind IN ('r', 'm');
+SELECT pg_database_size(current_database())::bigint;
 ```
 
-It includes public table/materialized-view storage, indexes and TOAST, counting
-partition leaves once. Thresholds use decimal MB (1 MB = 1,000,000 bytes): WARN
-at 350 MB and FAIL at 450 MB. Other schemas are outside this line's scope.
+It measures the whole hosted database, including Supabase system schemas, matching
+the scope of Supabase's 500 MB database size limit. Thresholds use decimal MB
+(1 MB = 1,000,000 bytes): WARN at 350 MB and FAIL at 450 MB.
