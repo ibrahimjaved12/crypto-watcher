@@ -17,11 +17,14 @@ const contractUrl = await moduleUrl("../src/lib/forward/forward-contract.ts", { 
 const runUrl = await moduleUrl("../src/lib/forward/forward-run.server.ts", { "./forward-contract": contractUrl });
 const contract = await import(contractUrl);
 const run = await import(runUrl);
+const trafficUrl = await moduleUrl("../src/lib/forward/forward-hosted-traffic.server.ts");
 const sharedRepositoryUrl = await moduleUrl("../src/lib/forward/forward-shared-repository.server.ts", {
-  "./forward-contract": contractUrl, "./forward-run.server": runUrl });
+  "./forward-contract": contractUrl, "./forward-run.server": runUrl,
+  "./forward-hosted-traffic.server": trafficUrl });
 const { createForwardRepository } = await import(await moduleUrl("../src/lib/forward/forward-repository.server.ts", {
   "./forward-contract": contractUrl, "./forward-run.server": runUrl,
-  "./forward-shared-repository.server": sharedRepositoryUrl }));
+  "./forward-shared-repository.server": sharedRepositoryUrl,
+  "./forward-hosted-traffic.server": trafficUrl }));
 
 const HOUR = 3_600_000;
 const NOW = 1_760_000_000_000 - (1_760_000_000_000 % HOUR) + 5 * 60_000;

@@ -1,4 +1,5 @@
 import type { SharedRepository } from "./forward-stages.server";
+import type { SigmaCache } from "./forward-sigma-cache.server";
 import type { CollectorHealth, ForwardMinuteRow } from "../operational/types";
 import {
   FINAL_STATUSES,
@@ -35,6 +36,7 @@ import {
  */
 export const FORWARD_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT"] as const;
 export const FORWARD_HISTORY_DAYS = 120;
+export const FORWARD_MAX_CATCHUP_CHUNKS = 7;
 /** P16: days of 1m history fetched from REST when the stored history starts too late. */
 export const BACKFILL_DAYS = 130;
 export const HOUR_MS = 3_600_000;
@@ -53,6 +55,9 @@ export type LatestRun = { id?: string; processedToMs: Record<string, number>; wa
 
 export interface ForwardRepository {
   shared?: SharedRepository;
+  restoreSigmaState?(symbol: string): Promise<{ state: unknown; checkpointed_at: number } | null>;
+  checkpointSigmaState?(state: SigmaStateRecord, expected: string | null): Promise<void>;
+  // Legacy combined-run path only; the shared hourly path uses restoreSigmaState on cache misses.
   loadSigmaStates?(symbols: readonly string[]): Promise<Record<string, unknown>>;
   commitRun?(userId: string, row: Record<string, unknown>, response: ForwardEvaluateResponse,
              previous: Map<string, string | null>, candleVersions: Map<string, string | null>,
@@ -76,6 +81,7 @@ export type ForwardDeps = {
   callWallet?(body: unknown): Promise<unknown>;
   firstMinute?(symbol: string): Promise<number | null>;
   log?(message: string): void;
+  sigmaCache?: SigmaCache;
   /** Public funding history from `startMs` (Binance `/fapi/v1/fundingRate`, limit 1000). */
   fetchFunding(symbol: string, startMs: number): Promise<FundingEvent[]>;
   /** P16: fetch and record 1m REST candles for [startMs, endMs); returns candles offered. */

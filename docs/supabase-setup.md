@@ -23,7 +23,9 @@ Keep `REPLACE_` placeholders for values awaiting owner setup; the production
 preflight rejects them.
 
 The private server file is `.env.production.local` at the repository root.
-It is gitignored, untracked, mode `0600`, and holds `SUPABASE_SERVICE_ROLE_KEY`.
+It is gitignored, untracked, mode `0600`, and holds all 12 required names listed in
+[Worker host setup](worker-host.md#setup), including `SUPABASE_SERVICE_ROLE_KEY`,
+the operational database credentials, worker flags, and Python endpoints/token.
 Never commit its contents or give a secret a `VITE_` prefix. Its permissions were
 verified as `0600` without opening it.
 

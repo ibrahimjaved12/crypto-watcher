@@ -1,4 +1,5 @@
 import { createSharedRepository } from "./forward-shared-repository.server";
+import { createHostedTraffic } from "./forward-hosted-traffic.server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   FINAL_STATUSES,
@@ -19,7 +20,8 @@ function fail(error: { message: string } | null, operation: string): void {
   if (error) throw new Error(`Forward ${operation} failed: ${error.message}`);
 }
 
-export function createForwardRepository(client: SupabaseClient): ForwardRepository {
+export function createForwardRepository(client: SupabaseClient, log: (line: string) => void = console.log): ForwardRepository {
+  const traffic = createHostedTraffic();
   async function insert(table: string, rows: Record<string, unknown>[], conflict: string) {
     for (let i = 0; i < rows.length; i += 500) {
       const { error } = await client.from(table).upsert(rows.slice(i, i + 500),
@@ -30,7 +32,28 @@ export function createForwardRepository(client: SupabaseClient): ForwardReposito
   }
 
   return {
-    shared: createSharedRepository(client),
+    shared: createSharedRepository(client, traffic, log),
+    async restoreSigmaState(symbol) {
+      const { data, error } = await client.from("forward_sigma_state")
+        .select("symbol,sigma_version,as_of_ms,payload,checksum,updated_at")
+        .eq("sigma_version", SIGMA_VERSION).eq("symbol", symbol).maybeSingle();
+      traffic.read(data);
+      fail(error, "sigma restore read");
+      if (!data) return null;
+      const { updated_at, ...state } = data;
+      const checkpointedAt = Date.parse(updated_at);
+      return { state, checkpointed_at: Number.isFinite(checkpointedAt) ? checkpointedAt : 0 };
+    },
+    async checkpointSigmaState(state, expected) {
+      const args = { p_state: state, p_expected_checksum: expected };
+      traffic.write(args);
+      const { error } = await client.rpc("commit_forward_sigma_checkpoint", args);
+      if (error) {
+        const failure = new Error(`Forward sigma checkpoint failed: ${error.message}`);
+        if (error.code === "40001") Object.assign(failure, { code: error.code });
+        throw failure;
+      }
+    },
     async loadSigmaStates(symbols) {
       const { data, error } = await client.from("forward_sigma_state")
         .select("symbol,sigma_version,as_of_ms,payload,checksum").eq("sigma_version", SIGMA_VERSION).in("symbol", [...symbols]);

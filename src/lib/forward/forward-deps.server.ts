@@ -3,6 +3,7 @@ import { getOperationalStore } from "../operational/repository.server";
 import { pythonServiceConfig } from "../python-service.server";
 import { parseBinanceFunding, type FundingEvent } from "./forward-contract";
 import { createForwardRepository } from "./forward-repository.server";
+import { createSigmaCache } from "./forward-sigma-cache.server";
 import type { ForwardDeps } from "./forward-run.server";
 import {
   parseBinanceDailyKlines,
@@ -37,6 +38,7 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
     throw new Error("The forward job needs the operational database (OPERATIONAL_DB_ENABLED=true)");
   // Relative import: the local job runs through Vite's module runner without the "@" alias.
   const { supabaseAdmin } = await import("../../integrations/supabase/client.server");
+  const log = (message: string) => console.log(message.startsWith("[") ? message : `[forward-sigma] ${message}`);
   const callSplit = async (path: string, body: unknown) => {
     const config = pythonServiceConfig(path);
     const response = await send(config.url, { method: "POST", signal: AbortSignal.timeout(60_000),
@@ -56,7 +58,8 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
     firstMinute: (symbol) => store.firstForwardMinute!(symbol),
     callMarket: (body) => callSplit("/v1/forward/market_evaluate", body),
     callWallet: (body) => callSplit("/v1/forward/wallet_step", body),
-    log: (message) => console.log(`[forward-sigma] ${message}`),
+    log,
+    sigmaCache: createSigmaCache(undefined, () => Date.now(), log),
     readMinutes: (symbol, sinceMs, beforeMs) =>
       store.readForwardMinuteCandles(symbol, sinceMs, beforeMs),
     listHealth: (symbols) => store.listCollectorHealth(symbols),
@@ -88,7 +91,7 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
         startMs,
         endMs,
       ),
-    repository: createForwardRepository(supabaseAdmin as unknown as SupabaseClient),
+    repository: createForwardRepository(supabaseAdmin as unknown as SupabaseClient, log),
   };
 }
 

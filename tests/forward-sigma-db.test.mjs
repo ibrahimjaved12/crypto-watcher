@@ -17,7 +17,7 @@ before(async () => {
     GRANT USAGE ON SCHEMA public,auth TO anon,authenticated,service_role;
     INSERT INTO auth.users VALUES ('${USER}');`);
   for (const file of ["20261009120000_forward_harness.sql", "20261010121000_forward_retryable_runs.sql",
-                      "20261011130000_forward_sigma_state.sql"])
+                      "20261011130000_forward_sigma_state.sql", "20261011172231_forward_sigma_checkpoint.sql"])
     await db.exec(await readFile(new URL(`../supabase/migrations/${file}`, import.meta.url), "utf8"));
 });
 beforeEach(() => db.exec("RESET ROLE; TRUNCATE paper_runs,forward_signals,forward_setups,forward_outcomes,paper_ledger,forward_sigma_state CASCADE"));
@@ -58,4 +58,41 @@ test("seed import is idempotent and refuses overwriting a live checkpoint", asyn
   await assert.rejects(db.query("SELECT seed_forward_sigma_state($1)", [JSON.stringify({ ...seed, checksum: "b".repeat(64) })]));
   await db.exec("SET ROLE authenticated");
   await assert.rejects(db.query("SELECT * FROM forward_sigma_state"));
+});
+
+async function checkpoint(state = seed, expected = null) {
+  await db.query("SELECT commit_forward_sigma_checkpoint($1,$2)", [JSON.stringify(state), expected]);
+}
+
+test("one-symbol checkpoint enforces expected checksum, monotonic time and equal-checksum no-op", async () => {
+  await db.exec("SET ROLE service_role");
+  await checkpoint();
+  const saved = (await db.query("SELECT * FROM forward_sigma_state")).rows;
+  await checkpoint(seed, checksum);
+  assert.deepEqual((await db.query("SELECT * FROM forward_sigma_state")).rows, saved);
+  await assert.rejects(checkpoint(seed, null), /checksum conflict/);
+  await assert.rejects(checkpoint({ ...seed, as_of_ms: seed.as_of_ms - 60000, checksum: "b".repeat(64) }, checksum), /backwards/);
+  assert.deepEqual((await db.query("SELECT * FROM forward_sigma_state")).rows, saved);
+  await checkpoint({ ...seed, as_of_ms: seed.as_of_ms + 60000, checksum: "b".repeat(64) }, checksum);
+  assert.equal((await db.query("SELECT checksum FROM forward_sigma_state")).rows[0].checksum, "b".repeat(64));
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM paper_runs")).rows[0].n, 0);
+});
+
+test("checkpoint privileges are service-only and symbols advance independently", async () => {
+  const privileges = (await db.query(`SELECT
+    has_function_privilege('anon','commit_forward_sigma_checkpoint(jsonb,text)','EXECUTE') AS anon,
+    has_function_privilege('authenticated','commit_forward_sigma_checkpoint(jsonb,text)','EXECUTE') AS auth,
+    has_function_privilege('service_role','commit_forward_sigma_checkpoint(jsonb,text)','EXECUTE') AS service`)).rows[0];
+  assert.deepEqual(privileges, { anon: false, auth: false, service: true });
+  for (const role of ["anon", "authenticated"]) {
+    await db.exec(`SET ROLE ${role}`);
+    await assert.rejects(checkpoint(), /permission denied/);
+    await db.exec("RESET ROLE");
+  }
+  await db.exec("SET ROLE service_role");
+  await checkpoint();
+  await checkpoint({ ...seed, symbol: "ETHUSDT", checksum: "b".repeat(64) });
+  await checkpoint({ ...seed, as_of_ms: seed.as_of_ms + 60000, checksum: "c".repeat(64) }, checksum);
+  const rows = (await db.query("SELECT symbol,checksum FROM forward_sigma_state ORDER BY symbol")).rows;
+  assert.deepEqual(rows, [{ symbol: "BTCUSDT", checksum: "c".repeat(64) }, { symbol: "ETHUSDT", checksum: "b".repeat(64) }]);
 });
