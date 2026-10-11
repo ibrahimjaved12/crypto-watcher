@@ -61,6 +61,12 @@ declare global {
             },
           ): void;
           cancel(): void;
+          prompt(
+            listener?: (notification: {
+              isNotDisplayed(): boolean;
+              isSkippedMoment(): boolean;
+            }) => void,
+          ): void;
         };
       };
     };
