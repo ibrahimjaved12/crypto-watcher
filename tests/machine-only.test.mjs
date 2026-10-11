@@ -16,12 +16,27 @@ async function moduleUrl(path, imports = {}) {
 const gateUrl = await moduleUrl("../src/lib/machine-only.server.ts");
 const { machineOnlyEnabled } = await import(gateUrl);
 const functionsUrl = await moduleUrl("../src/lib/forward.functions.ts", {
-  "@tanstack/react-start": stub(`export const createServerFn=()=>{
-    let middleware=[];
-    const chain={middleware(m){middleware=m;return chain},validator(){return chain},
-      handler(fn){return async()=>{for(const m of middleware)await m();return fn({context:{userId:'user'}})}};
-    return chain;
-  }`),
+  "@tanstack/react-start": stub(`
+    export const createServerFn = () => {
+      let middleware = [];
+      const chain = {
+        middleware(value) {
+          middleware = value;
+          return chain;
+        },
+        validator() {
+          return chain;
+        },
+        handler(fn) {
+          return async () => {
+            for (const item of middleware) await item();
+            return fn({ context: { userId: 'user' } });
+          };
+        },
+      };
+      return chain;
+    };
+  `),
   "@/integrations/supabase/auth-middleware": stub(`export const requireSupabaseAuth=()=>{
     globalThis.__machineAuthCalls++;if(!globalThis.__machineAuthenticated)throw new Error('Unauthorized');
   }`),
