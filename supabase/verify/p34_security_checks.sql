@@ -10,15 +10,42 @@ WHERE n.nspname = 'public'
   AND c.relkind IN ('r', 'p')
   AND NOT c.relrowsecurity;
 
--- b. Write grants: expect zero rows for protected_results_table = true.
--- Return other write grants too: each must be justified in the PR or fixed.
-SELECT grantee, table_name, privilege_type,
-       table_name ~ '(forward|paper|signal|outcome|setup)' AS protected_results_table
-FROM information_schema.role_table_grants
-WHERE table_schema = 'public'
-  AND grantee IN ('anon', 'authenticated')
-  AND privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')
-ORDER BY table_name, grantee, privilege_type;
+-- b. Effective write access: expect zero protected_results_table = true rows.
+-- Report INSERT/UPDATE/DELETE privileges when RLS is off or no policy applies
+-- to that role and command. Other returned rows need PR justification or a fix.
+-- Applicable policies include ALL commands, PUBLIC, and inherited role access.
+SELECT access_role.rolname AS role_name, c.relname AS table_name,
+       write_command.command,
+       c.relname ~ '(forward|paper|signal|outcome|setup)' AS protected_results_table
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+CROSS JOIN pg_roles access_role
+CROSS JOIN (VALUES ('INSERT', 'a'::"char"),
+                   ('UPDATE', 'w'::"char"),
+                   ('DELETE', 'd'::"char")) AS write_command(command, policy_command)
+WHERE n.nspname = 'public'
+  AND c.relkind IN ('r', 'p')
+  AND access_role.rolname IN ('anon', 'authenticated')
+  AND has_table_privilege(access_role.oid, c.oid, write_command.command)
+  AND (
+    NOT c.relrowsecurity
+    OR NOT EXISTS (
+      SELECT 1
+      FROM pg_policy policy
+      WHERE policy.polrelid = c.oid
+        AND (policy.polcmd = '*' OR policy.polcmd = write_command.policy_command)
+        AND (
+          0::oid = ANY (policy.polroles)
+          OR EXISTS (
+            SELECT 1
+            FROM pg_roles policy_role
+            WHERE policy_role.oid = ANY (policy.polroles)
+              AND pg_has_role(access_role.oid, policy_role.oid, 'USAGE')
+          )
+        )
+    )
+  )
+ORDER BY table_name, role_name, write_command.command;
 
 -- c. List every public SECURITY DEFINER function and every commit function.
 -- Commit RPCs also use SECURITY INVOKER, so include them explicitly.

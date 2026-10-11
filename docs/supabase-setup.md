@@ -14,11 +14,13 @@ separate work in #276.
   seven days without activity. The owner must confirm the organization is on
   Free with no payment method.
 
-`supabase/config.toml`, `.env`, and `.env.production` point to this project.
-The committed environment files contain only public Supabase configuration and
-existing safe defaults. Publishable keys belong there; service-role keys and
-passwords do not. Keep `REPLACE_` placeholders for values awaiting owner setup;
-the production preflight rejects them.
+`supabase/config.toml` selects this project. Production Supabase URLs, publishable
+keys, and project metadata belong only in `.env.production`. `.env` retains the
+development defaults from `origin/main`; local credentials are generated in the
+gitignored `.env.local`. Keep hosted values out of files loaded by development.
+Service-role keys and passwords do not belong in committed environment files.
+Keep `REPLACE_` placeholders for values awaiting owner setup; the production
+preflight rejects them.
 
 The private server file is `.env.production.local` at the repository root.
 It is gitignored, untracked, mode `0600`, and holds `SUPABASE_SERVICE_ROLE_KEY`.
@@ -53,9 +55,16 @@ separately so that all four result sets are available.
 | Check | Required result |
 | --- | --- |
 | a: RLS | Zero public tables without RLS. |
-| b: Write grants | Zero grants where `protected_results_table` is true. Other returned write grants need justification in the PR or a fix. |
+| b: Effective write access | Zero rows where `protected_results_table` is true. Other returned rows need justification in the PR or a fix. |
 | c: Function execution | Every `commit*` function has `anon_exec = false`, `auth_exec = false`, and `service_role_exec = true`. All public SECURITY DEFINER functions are also listed for review. |
 | d: Extensions | Two rows: `pg_cron` and `pg_net`. |
+
+Check b considers public tables and the `anon` and `authenticated` roles for
+`INSERT`, `UPDATE`, and `DELETE`. It returns a row only when
+`has_table_privilege(role, table, command)` is true and either RLS is off or no
+policy applies to that role and command. Policy matching includes policies for
+all commands, PUBLIC, and roles whose privileges are inherited without `SET ROLE`.
+It checks policy applicability, not the policy's row expressions.
 
 Return the four row counts, any rows from a or b, the function privilege flags
 from c, and the extension names from d. Function and extension row counts alone
