@@ -39,7 +39,6 @@ function AuthPage() {
   const [busy, setBusy] = useState(false);
   const googleButton = useRef<HTMLDivElement>(null);
   const [googleReady, setGoogleReady] = useState(false);
-  const [logoMissing, setLogoMissing] = useState(false);
   const googleClientId = import.meta.env["VITE_GOOGLE_CLIENT_ID"] as string | undefined;
 
   useEffect(() => {
@@ -156,18 +155,7 @@ function AuthPage() {
     <div className="flex min-h-screen items-center justify-center px-4 py-12">
       <div className="panel relative w-full max-w-md p-6">
         <Link to="/" className="mb-6 flex items-center gap-2 font-display text-xl font-semibold">
-          {logoMissing ? (
-            <Orbit className="size-5 text-primary" aria-hidden />
-          ) : (
-            <img
-              src="/logo.png"
-              alt="Crypto Watcher"
-              width={24}
-              height={24}
-              className="size-6"
-              onError={() => setLogoMissing(true)}
-            />
-          )}
+          <Orbit className="size-5 text-primary" aria-hidden />
           Crypto Watch
         </Link>
         <Tabs defaultValue="signin">
