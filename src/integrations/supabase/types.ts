@@ -10,7 +10,7 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.5"
+    PostgrestVersion: "14.17"
   }
   public: {
     Tables: {
@@ -22,13 +22,10 @@ export type Database = {
           comparison_mode: string
           created_at: string
           data_source: string
-          endpoint: string
           id: string
-          instrument_id: string
           is_test: boolean
           observed_at: string | null
           price: number | null
-          price_type: string
           rule: string
           symbol: string
           threshold_pct: number
@@ -43,13 +40,10 @@ export type Database = {
           comparison_mode?: string
           created_at?: string
           data_source: string
-          endpoint?: string
           id?: string
-          instrument_id: string
           is_test?: boolean
           observed_at?: string | null
           price?: number | null
-          price_type?: string
           rule: string
           symbol: string
           threshold_pct: number
@@ -64,13 +58,10 @@ export type Database = {
           comparison_mode?: string
           created_at?: string
           data_source?: string
-          endpoint?: string
           id?: string
-          instrument_id?: string
           is_test?: boolean
           observed_at?: string | null
           price?: number | null
-          price_type?: string
           rule?: string
           symbol?: string
           threshold_pct?: number
@@ -78,190 +69,34 @@ export type Database = {
           user_id?: string
           window_minutes?: number | null
         }
-        Relationships: [
-          {
-            foreignKeyName: "alerts_instrument_identity_fkey"
-            columns: ["instrument_id", "symbol"]
-            isOneToOne: false
-            referencedRelation: "market_instruments"
-            referencedColumns: ["id", "native_symbol"]
-          },
-        ]
-      }
-      analysis_conclusions: {
-        Row: {
-          classification: string
-          completed_candle_at: string | null
-          configuration_version: string
-          contract_type: string
-          detected_at: string
-          direction: string
-          endpoint: string
-          evaluated_at: string
-          factor_breakdown: Json
-          id: string
-          idempotency_key: string
-          input_hash: string | null
-          input_reference: string | null
-          instrument_id: string
-          market_type: string
-          model_version: string | null
-          persisted_at: string
-          price_type: string
-          provider: string
-          reasons: Json
-          reference_price: number | null
-          schema_version: number
-          score: number | null
-          score_kind: string
-          source_event_at: string | null
-          source_freshness_ms: number | null
-          source_instrument_id: string
-          source_native_symbol: string
-          source_retrieved_at: string | null
-          status: string
-          strategy_version: string
-          supersedes_id: string | null
-          symbol: string
-          ta_version: string
-          timeframe_minutes: number
-          user_id: string
-        }
-        Insert: {
-          classification: string
-          completed_candle_at?: string | null
-          configuration_version: string
-          contract_type?: string
-          detected_at: string
-          direction: string
-          endpoint: string
-          evaluated_at: string
-          factor_breakdown: Json
-          id?: string
-          idempotency_key: string
-          input_hash?: string | null
-          input_reference?: string | null
-          instrument_id: string
-          market_type?: string
-          model_version?: string | null
-          persisted_at?: string
-          price_type: string
-          provider: string
-          reasons: Json
-          reference_price?: number | null
-          schema_version: number
-          score?: number | null
-          score_kind?: string
-          source_event_at?: string | null
-          source_freshness_ms?: number | null
-          source_instrument_id: string
-          source_native_symbol: string
-          source_retrieved_at?: string | null
-          status: string
-          strategy_version: string
-          supersedes_id?: string | null
-          symbol: string
-          ta_version: string
-          timeframe_minutes: number
-          user_id: string
-        }
-        Update: {
-          classification?: string
-          completed_candle_at?: string | null
-          configuration_version?: string
-          contract_type?: string
-          detected_at?: string
-          direction?: string
-          endpoint?: string
-          evaluated_at?: string
-          factor_breakdown?: Json
-          id?: string
-          idempotency_key?: string
-          input_hash?: string | null
-          input_reference?: string | null
-          instrument_id?: string
-          market_type?: string
-          model_version?: string | null
-          persisted_at?: string
-          price_type?: string
-          provider?: string
-          reasons?: Json
-          reference_price?: number | null
-          schema_version?: number
-          score?: number | null
-          score_kind?: string
-          source_event_at?: string | null
-          source_freshness_ms?: number | null
-          source_instrument_id?: string
-          source_native_symbol?: string
-          source_retrieved_at?: string | null
-          status?: string
-          strategy_version?: string
-          supersedes_id?: string | null
-          symbol?: string
-          ta_version?: string
-          timeframe_minutes?: number
-          user_id?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "analysis_conclusions_instrument_identity_fkey"
-            columns: ["instrument_id", "symbol"]
-            isOneToOne: false
-            referencedRelation: "market_instruments"
-            referencedColumns: ["id", "native_symbol"]
-          },
-          {
-            foreignKeyName: "analysis_conclusions_supersedes_fkey"
-            columns: ["user_id", "supersedes_id"]
-            isOneToOne: false
-            referencedRelation: "analysis_conclusions"
-            referencedColumns: ["user_id", "id"]
-          },
-        ]
+        Relationships: []
       }
       market_data_checkpoints: {
         Row: {
           data_source: string
-          endpoint: string
-          instrument_id: string
           observed_at: string
           price: number
-          price_type: string
           symbol: string
           updated_at: string
           user_id: string
         }
         Insert: {
           data_source: string
-          endpoint?: string
-          instrument_id: string
           observed_at: string
           price: number
-          price_type?: string
           symbol: string
           updated_at?: string
           user_id: string
         }
         Update: {
           data_source?: string
-          endpoint?: string
-          instrument_id?: string
           observed_at?: string
           price?: number
-          price_type?: string
           symbol?: string
           updated_at?: string
           user_id?: string
         }
         Relationships: [
-          {
-            foreignKeyName: "market_data_checkpoints_instrument_identity_fkey"
-            columns: ["instrument_id", "symbol"]
-            isOneToOne: false
-            referencedRelation: "market_instruments"
-            referencedColumns: ["id", "native_symbol"]
-          },
           {
             foreignKeyName: "market_data_checkpoints_user_id_symbol_fkey"
             columns: ["user_id", "symbol"]
@@ -271,59 +106,14 @@ export type Database = {
           },
         ]
       }
-      market_instruments: {
-        Row: {
-          base_asset: string
-          contract_multiplier: number
-          contract_type: string
-          exchange: string
-          id: string
-          is_linear: boolean
-          margin_asset: string
-          market_type: string
-          native_symbol: string
-          quote_asset: string
-          settlement_asset: string
-        }
-        Insert: {
-          base_asset: string
-          contract_multiplier: number
-          contract_type: string
-          exchange: string
-          id: string
-          is_linear: boolean
-          margin_asset: string
-          market_type: string
-          native_symbol: string
-          quote_asset: string
-          settlement_asset: string
-        }
-        Update: {
-          base_asset?: string
-          contract_multiplier?: number
-          contract_type?: string
-          exchange?: string
-          id?: string
-          is_linear?: boolean
-          margin_asset?: string
-          market_type?: string
-          native_symbol?: string
-          quote_asset?: string
-          settlement_asset?: string
-        }
-        Relationships: []
-      }
       monitor_baselines: {
         Row: {
           baseline_at: string
           baseline_price: number
           data_source: string
-          endpoint: string
-          instrument_id: string
           last_down_alert_at: string | null
           last_observed_at: string
           last_up_alert_at: string | null
-          price_type: string
           symbol: string
           threshold_pct: number
           user_id: string
@@ -332,12 +122,9 @@ export type Database = {
           baseline_at: string
           baseline_price: number
           data_source: string
-          endpoint?: string
-          instrument_id: string
           last_down_alert_at?: string | null
           last_observed_at: string
           last_up_alert_at?: string | null
-          price_type?: string
           symbol: string
           threshold_pct: number
           user_id: string
@@ -346,24 +133,14 @@ export type Database = {
           baseline_at?: string
           baseline_price?: number
           data_source?: string
-          endpoint?: string
-          instrument_id?: string
           last_down_alert_at?: string | null
           last_observed_at?: string
           last_up_alert_at?: string | null
-          price_type?: string
           symbol?: string
           threshold_pct?: number
           user_id?: string
         }
         Relationships: [
-          {
-            foreignKeyName: "monitor_baselines_instrument_identity_fkey"
-            columns: ["instrument_id", "symbol"]
-            isOneToOne: false
-            referencedRelation: "market_instruments"
-            referencedColumns: ["id", "native_symbol"]
-          },
           {
             foreignKeyName: "monitor_baselines_user_id_symbol_fkey"
             columns: ["user_id", "symbol"]
@@ -377,10 +154,8 @@ export type Database = {
         Row: {
           alerts_created: number
           data_source: string | null
-          duration_ms: number | null
           error_message: string | null
           id: string
-          metrics: Json
           ran_at: string
           status: string
           symbols_checked: number
@@ -389,10 +164,8 @@ export type Database = {
         Insert: {
           alerts_created?: number
           data_source?: string | null
-          duration_ms?: number | null
           error_message?: string | null
           id?: string
-          metrics?: Json
           ran_at?: string
           status: string
           symbols_checked?: number
@@ -401,38 +174,12 @@ export type Database = {
         Update: {
           alerts_created?: number
           data_source?: string | null
-          duration_ms?: number | null
           error_message?: string | null
           id?: string
-          metrics?: Json
           ran_at?: string
           status?: string
           symbols_checked?: number
           user_id?: string | null
-        }
-        Relationships: []
-      }
-      monitor_run_leases: {
-        Row: {
-          acquired_at: string
-          leased_until: string
-          owner_id: string
-          updated_at: string
-          user_id: string
-        }
-        Insert: {
-          acquired_at?: string
-          leased_until: string
-          owner_id: string
-          updated_at?: string
-          user_id: string
-        }
-        Update: {
-          acquired_at?: string
-          leased_until?: string
-          owner_id?: string
-          updated_at?: string
-          user_id?: string
         }
         Relationships: []
       }
@@ -481,6 +228,36 @@ export type Database = {
         }
         Relationships: []
       }
+      notes: {
+        Row: {
+          body: string
+          created_at: string
+          id: string
+          symbol: string | null
+          title: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          body?: string
+          created_at?: string
+          id?: string
+          symbol?: string | null
+          title: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          id?: string
+          symbol?: string | null
+          title?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       notification_channel_preferences: {
         Row: {
           channel: string
@@ -505,219 +282,86 @@ export type Database = {
         }
         Relationships: []
       }
-      notes: {
-        Row: {
-          body: string
-          created_at: string
-          id: string
-          instrument_id: string | null
-          symbol: string | null
-          title: string
-          updated_at: string
-          user_id: string
-        }
-        Insert: {
-          body?: string
-          created_at?: string
-          id?: string
-          instrument_id?: string | null
-          symbol?: string | null
-          title: string
-          updated_at?: string
-          user_id: string
-        }
-        Update: {
-          body?: string
-          created_at?: string
-          id?: string
-          instrument_id?: string | null
-          symbol?: string | null
-          title?: string
-          updated_at?: string
-          user_id?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "notes_instrument_identity_fkey"
-            columns: ["instrument_id", "symbol"]
-            isOneToOne: false
-            referencedRelation: "market_instruments"
-            referencedColumns: ["id", "native_symbol"]
-          },
-        ]
-      }
       ta_signals: {
         Row: {
-          atr_pct: number | null
           candle_at: string
-          classification: string
           detected_at: string
-          endpoint: string
-          evaluated_at: string
-          factor_breakdown: Json
           id: string
           indicators: Json
-          instrument_id: string
           outcome_at: string | null
           outcome_price: number | null
           outcome_status: string
           patterns: string[]
           price: number
-          price_type: string
-          reasons: string[]
           return_pct: number | null
-          score: number | null
           source: string
-          source_event_at: string | null
-          source_instrument_id: string
-          source_native_symbol: string
-          strategy_version: string
           symbol: string
           timeframe: number
           user_id: string
           version: string
         }
         Insert: {
-          atr_pct?: number | null
           candle_at: string
-          classification: string
-          detected_at: string
-          endpoint?: string
-          evaluated_at: string
-          factor_breakdown: Json
+          detected_at?: string
           id?: string
           indicators: Json
-          instrument_id: string
           outcome_at?: string | null
           outcome_price?: number | null
           outcome_status?: string
           patterns: string[]
           price: number
-          price_type?: string
-          reasons: string[]
           return_pct?: number | null
-          score?: number | null
           source: string
-          source_event_at?: string | null
-          source_instrument_id: string
-          source_native_symbol: string
-          strategy_version: string
           symbol: string
           timeframe: number
           user_id: string
           version: string
         }
         Update: {
-          atr_pct?: number | null
           candle_at?: string
-          classification?: string
           detected_at?: string
-          endpoint?: string
-          evaluated_at?: string
-          factor_breakdown?: Json
           id?: string
           indicators?: Json
-          instrument_id?: string
           outcome_at?: string | null
           outcome_price?: number | null
           outcome_status?: string
           patterns?: string[]
           price?: number
-          price_type?: string
-          reasons?: string[]
           return_pct?: number | null
-          score?: number | null
           source?: string
-          source_event_at?: string | null
-          source_instrument_id?: string
-          source_native_symbol?: string
-          strategy_version?: string
           symbol?: string
           timeframe?: number
           user_id?: string
           version?: string
         }
-        Relationships: [
-          {
-            foreignKeyName: "ta_signals_instrument_identity_fkey"
-            columns: ["instrument_id", "symbol"]
-            isOneToOne: false
-            referencedRelation: "market_instruments"
-            referencedColumns: ["id", "native_symbol"]
-          },
-        ]
+        Relationships: []
       }
       watchlist_items: {
         Row: {
           created_at: string
           id: string
-          instrument_id: string
           symbol: string
           user_id: string
         }
         Insert: {
           created_at?: string
           id?: string
-          instrument_id: string
           symbol: string
           user_id: string
         }
         Update: {
           created_at?: string
           id?: string
-          instrument_id?: string
           symbol?: string
           user_id?: string
         }
-        Relationships: [
-          {
-            foreignKeyName: "watchlist_instrument_identity_fkey"
-            columns: ["instrument_id", "symbol"]
-            isOneToOne: false
-            referencedRelation: "market_instruments"
-            referencedColumns: ["id", "native_symbol"]
-          },
-        ]
+        Relationships: []
       }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      apply_ta_outcomes: {
-        Args: {
-          p_outcomes: Json
-          p_user_id: string
-        }
-        Returns: number
-      }
-      claim_monitor_run_lease: {
-        Args: {
-          p_lease_seconds?: number
-          p_owner_id: string
-          p_user_id: string
-        }
-        Returns: boolean
-      }
-      get_ta_due_work: {
-        Args: {
-          p_include_generation: boolean
-          p_include_outcomes: boolean
-          p_now: string
-          p_symbol: string
-          p_user_id: string
-          p_version: string
-        }
-        Returns: {
-          candle_at: string
-          detected_at: string
-          id: string
-          price: number
-          source: string
-          timeframe: number
-          work_kind: string
-        }[]
-      }
       process_cumulative_observation: {
         Args: {
           p_observed_at: string
@@ -727,21 +371,6 @@ export type Database = {
           p_user_id: string
         }
         Returns: Json
-      }
-      release_monitor_run_lease: {
-        Args: {
-          p_owner_id: string
-          p_user_id: string
-        }
-        Returns: undefined
-      }
-      renew_monitor_run_lease: {
-        Args: {
-          p_lease_seconds?: number
-          p_owner_id: string
-          p_user_id: string
-        }
-        Returns: boolean
       }
       record_market_data_checkpoint: {
         Args: {
