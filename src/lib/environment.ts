@@ -136,6 +136,14 @@ export function validateEnvironment(env: Env, browser: Env = env) {
     browser["VITE_SUPABASE_URL"],
     browser["VITE_SUPABASE_PUBLISHABLE_KEY"],
   );
+  // Optional. Public by design (a Google OAuth client ID is not a secret).
+  const googleClientId = browser["VITE_GOOGLE_CLIENT_ID"];
+  if (
+    googleClientId !== undefined &&
+    googleClientId !== "" &&
+    !(typeof googleClientId === "string" && /^[\w-]+\.apps\.googleusercontent\.com$/.test(googleClientId))
+  )
+    fail("VITE_GOOGLE_CLIENT_ID must be a Google OAuth client ID ending in .apps.googleusercontent.com.");
   if (
     env["APP_PROFILE"] !== browser["VITE_APP_PROFILE"] ||
     serverUrl !== browserUrl ||

@@ -80,9 +80,15 @@ never edit an applied migration. Review its dry run before a single apply. Keep
 
 ## Owner setup still pending
 
-1. Create the Google OAuth client with this authorized redirect URI:
-   `https://xshzjhocpcenuumdrhdh.supabase.co/auth/v1/callback`.
-   Enable the Google provider in Supabase and enter the client credentials there.
+1. Create a Google OAuth client (type: Web application). Google sign-in uses Google Identity
+   Services in the page plus `supabase.auth.signInWithIdToken`, so users never pass through
+   the Supabase domain. Under Authorized JavaScript origins add `http://localhost:8080` and
+   the Workers URL. The authorized redirect URI
+   `https://xshzjhocpcenuumdrhdh.supabase.co/auth/v1/callback` is only needed for the OAuth
+   redirect flow, which Google sign-in no longer uses.
+   Enable the Google provider in Supabase and enter the client ID and secret there, and set
+   the public client ID as `VITE_GOOGLE_CLIENT_ID` in `.env.production` and the local env file.
+   The `/auth/callback` route remains for email-confirmation links (PKCE).
 2. Set the Auth Site URL and redirect allow-list after #277 establishes the web
    app's final URL.
 3. Set up a weekly `npx supabase db dump` in #279. Keep dumps outside this public

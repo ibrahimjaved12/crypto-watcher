@@ -220,3 +220,12 @@ test("generator uses local status, protects permissions, and refuses overwrite/h
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("VITE_GOOGLE_CLIENT_ID is optional but must look like a Google client ID", () => {
+  validateEnvironment({ ...local, VITE_GOOGLE_CLIENT_ID: "" });
+  validateEnvironment({ ...local, VITE_GOOGLE_CLIENT_ID: "123-abc_def.apps.googleusercontent.com" });
+  assert.throws(
+    () => validateEnvironment({ ...local, VITE_GOOGLE_CLIENT_ID: "not-a-client-id" }),
+    /VITE_GOOGLE_CLIENT_ID/,
+  );
+});

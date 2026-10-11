@@ -137,6 +137,7 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `TA_OUTCOME_EVALUATION_ENABLED`                   | TanStack                            | `true`; preserves manual checks                                                                         |
 | `ACTIVITY_DIAGNOSTICS`                            | TanStack                            | `false`                                                                                                 |
 | `VITE_ACTIVITY_DIAGNOSTICS`                       | Browser                             | `false`                                                                                                 |
+| `VITE_GOOGLE_CLIENT_ID`                           | Browser                             | Optional, empty. Google OAuth client ID (public, not a secret) for Google Identity Services sign-in; when empty the sign-in page shows email only. Must end in `.apps.googleusercontent.com`. |
 
 Never prefix tokens, passwords, private keys, or secrets with `VITE_`. Startup rejects
 secret variable names and copied server-secret values in public configuration, as

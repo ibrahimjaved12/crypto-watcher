@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Orbit } from "lucide-react";
 import { toast } from "sonner";
 
@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { supabase } from "@/integrations/supabase/client";
+import { createNonce, loadGoogleScript } from "@/lib/google-identity";
 
 export const Route = createFileRoute("/auth")({
   ssr: false,
@@ -36,6 +37,8 @@ function AuthPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const googleButton = useRef<HTMLDivElement>(null);
+  const googleClientId = import.meta.env["VITE_GOOGLE_CLIENT_ID"] as string | undefined;
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -75,14 +78,57 @@ function AuthPage() {
     navigate({ to: "/dashboard", replace: true });
   }
 
-  async function google() {
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: window.location.origin + "/auth/callback" },
-    });
-    // On success the browser is already navigating to Google.
-    if (error) toast.error("Google sign-in failed. Try email instead.");
-  }
+  // Google Identity Services signs in inside this page, so Google's consent UI never shows the
+  // Supabase domain. Google gets the hashed nonce; Supabase verifies it against the raw one.
+  useEffect(() => {
+    const container = googleButton.current;
+    if (!googleClientId || !container) return;
+    let cancelled = false;
+
+    async function setup(clientId: string, target: HTMLElement) {
+      try {
+        // A new nonce per initialize call, generated before any await that React could cancel.
+        const nonce = await createNonce();
+        await loadGoogleScript();
+        if (cancelled || !window.google) return;
+        window.google.accounts.id.initialize({
+          client_id: clientId,
+          nonce: nonce.hashed,
+          use_fedcm_for_prompt: true,
+          callback: async (response) => {
+            const { error } = await supabase.auth.signInWithIdToken({
+              provider: "google",
+              token: response.credential,
+              nonce: nonce.raw,
+            });
+            if (error) {
+              toast.error(error.message);
+              return;
+            }
+            navigate({ to: "/dashboard", replace: true });
+          },
+        });
+        target.replaceChildren();
+        window.google.accounts.id.renderButton(target, {
+          type: "standard",
+          theme: "outline",
+          size: "large",
+          text: "continue_with",
+        });
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) toast.error("Google sign-in could not load. Use email instead.");
+      }
+    }
+
+    void setup(googleClientId, container);
+    return () => {
+      // StrictMode runs effect, cleanup, effect: the first run is discarded here.
+      cancelled = true;
+      window.google?.accounts.id.cancel();
+      container.replaceChildren();
+    };
+  }, [googleClientId, navigate]);
 
   return (
     <div className="flex min-h-screen items-center justify-center px-4 py-12">
@@ -140,9 +186,13 @@ function AuthPage() {
           or
           <span className="h-px flex-1 bg-border" />
         </div>
-        <Button variant="secondary" className="w-full" onClick={google}>
-          Continue with Google
-        </Button>
+        {googleClientId ? (
+          <div ref={googleButton} className="flex min-h-10 justify-center" />
+        ) : (
+          <p className="text-center text-xs text-muted-foreground">
+            Google sign-in is not configured. Use email instead.
+          </p>
+        )}
       </div>
     </div>
   );
