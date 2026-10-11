@@ -27,7 +27,8 @@
     "env:local": "node scripts/local-env.mjs",
     "env:local:operational": "node scripts/operational-env.mjs",
     "env:production": "node scripts/production-env.mjs",
-    "test:environment": "node tests/environment.test.mjs"
+    "test:environment": "node tests/environment.test.mjs",
+    "deploy": "wrangler deploy"
   },
   "overrides": {
     "rolldown": "1.2.1"
@@ -106,6 +107,7 @@
     "supabase": "2.117.0",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.56.1",
-    "vite": "8.1.5"
+    "vite": "8.1.5",
+    "wrangler": "^4.149.0"
   }
 }
