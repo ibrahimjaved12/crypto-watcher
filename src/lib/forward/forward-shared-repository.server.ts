@@ -88,27 +88,43 @@ export function createSharedRepository(client: SupabaseClient, traffic: HostedTr
       return data ? { id: data.id, boundary_ms: Number(data.boundary_ms), processed_to_ms: processedCursor(data.processed_to_ms) } : null;
     },
     async stagesAfter(cursor, boundary, current) {
-      if (current) remember(current);
+      const supplied = (current ?? []).filter(value => value.boundary_ms > cursor && value.boundary_ms <= boundary);
+      for (const value of supplied) remember(value);
       const records = await pages("forward_market_stages", "boundary_ms", (q) => q.select("id,boundary_ms")
-        .gt("boundary_ms", cursor).lte("boundary_ms", boundary));
-      const stages: MarketStage[] = [];
+        .gt("boundary_ms", cursor).lte("boundary_ms", boundary)
+        .not("boundary_ms", "in", `(${supplied.map(value => value.boundary_ms).join(",") || -1})`));
+      const stages: MarketStage[] = [...supplied];
       for (const row of records) {
         const value = await stage(Number(row["boundary_ms"]));
         if (!value || value.id !== row["id"]) throw new Error("Market stage missing or changed during replay");
         stages.push(value);
       }
-      return stages;
+      return stages.sort((a, b) => a.boundary_ms - b.boundary_ms);
     },
     async openSetups() {
       const setups = await pages("forward_market_open_setups", "setup_id", (q) => q.select("setup_id,payload"));
       const open: StoredOpenSetup[] = [];
+      const outcomes = new Map<string, { status: string; payload: ForwardResolution }[]>();
+      for (let start = 0; start < setups.length; start += 100) {
+        const ids = setups.slice(start, start + 100).map(row => row["setup_id"]);
+        for (let offset = 0; ; offset += 500) {
+          const { data, error } = await client.from("forward_market_outcomes").select("setup_id,status,payload")
+            .in("setup_id", ids).order("setup_id", { ascending: true })
+            .order("created_at", { ascending: false }).range(offset, offset + 499);
+          traffic.read(data);
+          fail(error, "market outcomes read");
+          for (const outcome of data ?? []) {
+            const group = outcomes.get(outcome.setup_id) ?? [];
+            group.push(outcome);
+            outcomes.set(outcome.setup_id, group);
+          }
+          if ((data?.length ?? 0) < 500) break;
+        }
+      }
       for (const row of setups) {
-        const { data, error } = await client.from("forward_market_outcomes").select("status,payload")
-          .eq("setup_id", row["setup_id"]).order("created_at", { ascending: false });
-        traffic.read(data);
-        fail(error, "market outcomes read");
-        if ((data ?? []).some((r) => FINAL_STATUSES.has(r.status))) continue;
-        open.push({ setup: row["payload"], resolution: (data?.[0]?.payload as ForwardResolution | undefined) ?? null });
+        const group = outcomes.get(String(row["setup_id"])) ?? [];
+        if (group.some(outcome => FINAL_STATUSES.has(outcome.status))) continue;
+        open.push({ setup: row["payload"], resolution: group[0]?.payload ?? null });
       }
       return open;
     },

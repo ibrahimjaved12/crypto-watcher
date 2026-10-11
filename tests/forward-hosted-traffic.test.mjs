@@ -82,6 +82,8 @@ test("conflicts survive restart, restore hosted next run and retain a monotonic 
     const local = sigma(2 * HOUR), remote = sigma(HOUR);
     await cache.save({ state: local, hosted: null });
     await cache.conflict("BTCUSDT");
+    assert.deepEqual(JSON.parse(await readFile(join(dir, "BTCUSDT.json"), "utf8")).hosted,
+      { checksum: null, as_of_ms: null, checkpointed_at: null });
     const next = createSigmaCache(dir);
     const loaded = await next.load("BTCUSDT", async () => ({ state: remote, checkpointed_at: HOUR }));
     assert.equal(loaded.source, "restored");
@@ -132,7 +134,7 @@ function clientFixture(initial = []) {
         else if (table === "forward_sigma_state") data = { ...sigma(HOUR), updated_at: "2026-10-11T00:00:00Z" };
         else if (table === "forward_market_stages") {
           let found = rows.filter(row => query.filters.every(([op, key, value]) =>
-            op === "eq" ? row[key] === value : op === "gt" ? row[key] > value : row[key] <= value));
+            op === "not" ? !value.includes(row[key]) : op === "eq" ? row[key] === value : op === "gt" ? row[key] > value : row[key] <= value));
           if (query.descending) found = found.toSorted((a, b) => b.boundary_ms - a.boundary_ms);
           found = found.slice(0, query.count);
           data = found.map(row => query.selection === "*" ? row : query.selection.includes("payload->")
@@ -146,6 +148,7 @@ function clientFixture(initial = []) {
         select(value) { query.selection = value; return builder; },
         eq(key, value) { query.filters.push(["eq", key, value]); return builder; },
         gt(key, value) { query.filters.push(["gt", key, value]); return builder; },
+        not(key, _operator, value) { query.filters.push(["not", key, value.slice(1, -1).split(",").map(Number)]); return builder; },
         lte(key, value) { query.filters.push(["lte", key, value]); return builder; },
         order(_key, options) { query.descending = options.ascending === false; return builder; },
         limit(value) { query.count = value; return builder; },
@@ -177,7 +180,7 @@ test("market RPC carries empty sigma, measures actual JSON bodies and reuses in-
   assert.equal(current.freshness.write_bytes, jsonBytes(args));
   assert.equal(await repo.stage(HOUR), current);
   assert.deepEqual(await repo.latestStage(), { id: current.id, boundary_ms: HOUR, processed_to_ms: { BTCUSDT: HOUR - 60_000 } });
-  assert.deepEqual(await repo.stagesAfter(0, HOUR, current), [current]);
+  assert.deepEqual(await repo.stagesAfter(0, HOUR, [current]), [current]);
   assert.ok(f.queries.every(q => q.selection !== "*"));
   assert.equal(f.queries.filter(q => /events|paths/.test(q.table)).length, 0);
   assert.match(lines[0], /^\[forward-commit\] boundary=.* stage_bytes=\d+ records_bytes=\d+ events=0 adverse_paths=0 rpc_ms=\d+$/);
@@ -224,4 +227,73 @@ test("wallet_state reads and daily checkpoint writes are included in paper run f
   assert.equal(request.p_run.freshness.stage_bytes, current.freshness.stage_bytes);
   assert.equal(request.p_run.freshness.records_bytes, current.freshness.records_bytes);
   assert.equal(metrics.write_bytes, f.writes.reduce((total, value) => total + jsonBytes(value.args), 0));
+});
+
+test("invalid higher local cursor is absent before restore and later save comparisons", async () => {
+  await withCache(async (cache, dir) => {
+    const remote = sigma(2 * HOUR);
+    await writeFile(join(dir, "BTCUSDT.json"), JSON.stringify({ state: { ...sigma(5 * HOUR), checksum: "0".repeat(64) }, hosted: null }));
+    const result = await cache.load("BTCUSDT", async () => ({ state: remote, checkpointed_at: 2 * HOUR }));
+    assert.equal(result.source, "restored");
+    assert.equal(result.state.as_of_ms, 2 * HOUR);
+    assert.deepEqual(JSON.parse(await readFile(join(dir, "BTCUSDT.json"), "utf8")).state, remote);
+    assert.equal(await cache.save({ state: sigma(3 * HOUR), hosted: result.hosted }), true);
+  });
+});
+
+test("valid future state and malformed hosted metadata restore rather than count as local", async () => {
+  await withCache(async (_cache, dir) => {
+    const cache = createSigmaCache(dir, () => 4 * HOUR), remote = sigma(2 * HOUR);
+    for (const entry of [
+      { state: sigma(5 * HOUR), hosted: null },
+      { state: sigma(3 * HOUR), hosted: { checksum: null, as_of_ms: null, checkpointed_at: HOUR } },
+      { state: sigma(3 * HOUR), hosted: { checksum: remote.checksum, as_of_ms: null, checkpointed_at: null } },
+    ]) {
+      await writeFile(join(dir, "BTCUSDT.json"), JSON.stringify(entry));
+      const result = await cache.load("BTCUSDT", async () => ({ state: remote, checkpointed_at: 2 * HOUR }));
+      assert.equal(result.source, "restored");
+      assert.deepEqual(JSON.parse(await readFile(join(dir, "BTCUSDT.json"), "utf8")).state, remote);
+    }
+  });
+});
+
+test("default cache finds the nearest repository ancestor and FORWARD_STATE_DIR overrides lookup", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "forward-root-"));
+  const cwd = process.cwd(), env = process.env.FORWARD_STATE_DIR;
+  try {
+    delete process.env.FORWARD_STATE_DIR;
+    const root = join(dir, "repo"), nested = join(root, "src", "nested");
+    await mkdir(nested, { recursive: true });
+    await mkdir(join(root, "supabase"));
+    await writeFile(join(root, "package.json"), "{}");
+    process.chdir(nested);
+    await createSigmaCache().save({ state: sigma(HOUR), hosted: null });
+    assert.equal(JSON.parse(await readFile(join(root, ".forward-state", "BTCUSDT.json"), "utf8")).state.as_of_ms, HOUR);
+    process.chdir(dir);
+    assert.throws(() => createSigmaCache(), /FORWARD_STATE_DIR/);
+    process.env.FORWARD_STATE_DIR = join(dir, "override");
+    await createSigmaCache().save({ state: sigma(2 * HOUR), hosted: null });
+    assert.equal(JSON.parse(await readFile(join(dir, "override", "BTCUSDT.json"), "utf8")).state.as_of_ms, 2 * HOUR);
+  } finally {
+    process.chdir(cwd);
+    if (env === undefined) delete process.env.FORWARD_STATE_DIR; else process.env.FORWARD_STATE_DIR = env;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("lagging accounts fetch only stages absent from the supplied catch-up array", async () => {
+  const values = [stage(HOUR), stage(2 * HOUR), stage(3 * HOUR)];
+  const f = clientFixture(values), repo = createSharedRepository(f.client, undefined, () => {});
+  const result = await repo.stagesAfter(0, 3 * HOUR, values.slice(1));
+  assert.deepEqual(result.map(value => value.id), values.map(value => value.id));
+  assert.equal(result[1], values[1]); assert.equal(result[2], values[2]);
+  assert.equal(f.queries.filter(query => query.selection === "*").length, 1);
+  assert.deepEqual(f.queries[0].filters.find(filter => filter[0] === "not")[2], [2 * HOUR, 3 * HOUR]);
+});
+
+test("cache read still throws non-ENOENT I/O errors", async () => {
+  await withCache(async (cache, dir) => {
+    await mkdir(join(dir, "BTCUSDT.json"));
+    await assert.rejects(cache.load("BTCUSDT", async () => null), { code: "EISDIR" });
+  });
 });

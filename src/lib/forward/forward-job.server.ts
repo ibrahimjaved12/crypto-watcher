@@ -42,7 +42,7 @@ export async function runHourlyForAccounts(io: ForwardJobIo): Promise<{ users: n
     traffic?.reset();
     traffic?.add(listing.snapshot());
     try {
-      const { runMarketStage, runUserStage } = await import("./forward-stages.server");
+      const { runMarketCatchup, runUserStage, checkpointDueSigma } = await import("./forward-stages.server");
       const boundary = Math.floor(deps.now() / HOUR_MS) * HOUR_MS;
       const accounts = [];
       let failed = 0;
@@ -51,24 +51,29 @@ export async function runHourlyForAccounts(io: ForwardJobIo): Promise<{ users: n
         catch (error) { failed++; io.error(`[forward-run] ${userId}: ${String(error)}`); }
       }
       if (!accounts.length) return { users: users.length, failed };
-      let stage;
-      try { stage = await runMarketStage(deps, { trigger: "hourly", strategyIds: io.strategyIds }, boundary,
-        Math.min(...accounts.map((account) => account.startBoundary))); }
+      const pending = new Map();
+      let result;
+      try { result = await runMarketCatchup(deps, { trigger: "hourly", strategyIds: io.strategyIds }, boundary,
+        Math.min(...accounts.map((account) => account.startBoundary)), pending); }
       catch (error) {
         io.error(`[forward-market] ${String(error)}`);
         return { users: users.length, failed: users.length };
       }
       for (const account of accounts) {
         try {
-          if (!("id" in stage)) {
-            await deps.repository.shared.retryable(account.userId, boundary, stage.status, stage.reason ?? "");
+          if (result.stages.length) {
+            const summary = await runUserStage(deps, account, result.boundary, "hourly", result.stages);
+            if (!result.stop) io.log(`[forward-run] ${account.userId} ${summary.runKey} ${summary.status}`);
+          }
+          if (result.stop) {
+            const stage = result.stop;
+            await deps.repository.shared.retryable(account.userId, Number(stage.runKey.split(":")[1]), stage.status, stage.reason ?? "");
             io.log(`[forward-run] ${account.userId} ${stage.runKey} ${stage.status}`);
-          } else {
-            const result = await runUserStage(deps, account, boundary, "hourly", stage);
-            io.log(`[forward-run] ${account.userId} ${result.runKey} ${result.status}`);
           }
         } catch (error) { failed++; io.error(`[forward-run] ${account.userId}: ${String(error)}`); }
       }
+      try { await checkpointDueSigma(deps, pending); }
+      catch (error) { io.error(`[forward-sigma] checkpoints failed (${String(error)})`); }
       return { users: users.length, failed };
     } finally { if (traffic) io.log(traffic.line()); }
   }

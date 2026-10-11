@@ -1,8 +1,10 @@
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { validateSigmaState, type SigmaStateRecord } from "./forward-contract";
 
-export type HostedCheckpoint = { checksum: string; as_of_ms: number; checkpointed_at: number | null };
+export type HostedCheckpoint = { checksum: string; as_of_ms: number; checkpointed_at: number | null } |
+  { checksum: null; as_of_ms: null; checkpointed_at: null };
 export type SigmaCacheEntry = { state: SigmaStateRecord; hosted: HostedCheckpoint | null };
 export type LoadedSigma = { state: SigmaStateRecord | null; hosted: HostedCheckpoint | null;
   source: "local" | "restored" | "rebuilt" };
@@ -13,21 +15,42 @@ export interface SigmaCache {
   conflict(symbol: string): Promise<void>;
 }
 
+let directoryLogged = false;
+function defaultDirectory(): string {
+  if (process.env.FORWARD_STATE_DIR) return process.env.FORWARD_STATE_DIR;
+  let root = process.cwd();
+  for (;;) {
+    if (existsSync(resolve(root, "package.json")) && existsSync(resolve(root, "supabase")) &&
+        statSync(resolve(root, "supabase")).isDirectory()) return resolve(root, ".forward-state");
+    const parent = dirname(root);
+    if (parent === root) throw new Error("Cannot find repository root; set FORWARD_STATE_DIR");
+    root = parent;
+  }
+}
+
 /** One atomic file per symbol. Lock directories serialize writers across worker processes. */
-export function createSigmaCache(directory = resolve(process.cwd(), ".forward-state")): SigmaCache {
+export function createSigmaCache(directory?: string, now = () => Date.now()): SigmaCache {
+  const cacheDirectory = resolve(directory ?? defaultDirectory());
+  if (!directoryLogged) { console.log(`[forward-sigma] cache dir=${cacheDirectory}`); directoryLogged = true; }
   function path(symbol: string) {
     if (!/^[A-Z0-9]{5,16}$/.test(symbol)) throw new Error("Invalid sigma cache symbol");
-    return resolve(directory, `${symbol}.json`);
+    return resolve(cacheDirectory, `${symbol}.json`);
   }
   async function read(symbol: string): Promise<SigmaCacheEntry | null> {
-    try { return JSON.parse(await readFile(path(symbol), "utf8")); }
+    let entry: SigmaCacheEntry;
+    try { entry = JSON.parse(await readFile(path(symbol), "utf8")); }
     catch (error) {
       if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
+    try {
+      const state = await validateSigmaState(entry.state, symbol);
+      if (!hostedValid(entry.hosted) || !(state.as_of_ms <= now())) return null;
+      return { state, hosted: entry.hosted };
+    } catch { return null; }
   }
   async function locked<T>(symbol: string, operation: () => Promise<T>): Promise<T> {
-    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await mkdir(cacheDirectory, { recursive: true, mode: 0o700 });
     const lock = `${path(symbol)}.lock`;
     const started = Date.now();
     for (;;) {
@@ -77,20 +100,19 @@ export function createSigmaCache(directory = resolve(process.cwd(), ".forward-st
     } finally { await rm(temporary, { force: true }); }
   }
   function hostedValid(value: HostedCheckpoint | null): boolean {
-    return value === null || (typeof value === "object" && value !== null &&
-      /^[0-9a-f]{64}$/.test(value.checksum) && Number.isSafeInteger(value.as_of_ms) && value.as_of_ms >= 0 &&
-      (value.checkpointed_at === null || (Number.isSafeInteger(value.checkpointed_at) && value.checkpointed_at >= 0)));
+    if (value === null) return true;
+    if (typeof value !== "object") return false;
+    if (value.checksum === null || value.as_of_ms === null)
+      return value.checksum === null && value.as_of_ms === null && value.checkpointed_at === null;
+    return typeof value.checksum === "string" && /^[0-9a-f]{64}$/.test(value.checksum) &&
+      Number.isSafeInteger(value.as_of_ms) && value.as_of_ms >= 0 &&
+      (value.checkpointed_at === null || (Number.isSafeInteger(value.checkpointed_at) && value.checkpointed_at >= 0));
   }
   return {
     async load(symbol, restore) {
       const entry = await read(symbol);
-      if (entry) {
-        try {
-          const state = await validateSigmaState(entry.state, symbol);
-          if (hostedValid(entry.hosted) && entry.hosted?.checkpointed_at !== null)
-            return { state, hosted: entry.hosted, source: "local" };
-        } catch { /* Invalid/version-mismatched local state must be restored. */ }
-      }
+      if (entry && entry.hosted?.checkpointed_at !== null)
+        return { state: entry.state, hosted: entry.hosted, source: "local" };
       const restored = await restore();
       // Invalid hosted data fails validation; only a missing row permits a rebuild.
       if (!restored) return { state: null, hosted: null, source: "rebuilt" };
@@ -119,7 +141,7 @@ export function createSigmaCache(directory = resolve(process.cwd(), ".forward-st
       await locked(state.symbol, async () => {
         const current = await read(state.symbol);
         if (!current) return;
-        if (current.hosted && current.hosted.as_of_ms > state.as_of_ms) return;
+        if (current.hosted?.as_of_ms != null && current.hosted.as_of_ms > state.as_of_ms) return;
         await atomic(state.symbol, { state: current.state,
           hosted: { checksum: state.checksum, as_of_ms: state.as_of_ms, checkpointed_at: at } });
       });
@@ -129,8 +151,8 @@ export function createSigmaCache(directory = resolve(process.cwd(), ".forward-st
         const current = await read(symbol);
         if (!current) return;
         // Durable restore marker without discarding or rolling back state.as_of_ms.
-        await atomic(symbol, { state: current.state, hosted: { checksum: current.hosted?.checksum ?? current.state.checksum,
-          as_of_ms: current.hosted?.as_of_ms ?? current.state.as_of_ms, checkpointed_at: null } });
+        await atomic(symbol, { state: current.state, hosted: current.hosted ? { ...current.hosted, checkpointed_at: null }
+          : { checksum: null, as_of_ms: null, checkpointed_at: null } });
       });
     },
   };

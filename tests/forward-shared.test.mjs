@@ -16,7 +16,7 @@ const contractUrl = await moduleUrl("../src/lib/forward/forward-contract.ts", { 
 const runUrl = await moduleUrl("../src/lib/forward/forward-run.server.ts", { "./forward-contract": contractUrl });
 const stageUrl = await moduleUrl("../src/lib/forward/forward-stages.server.ts", {
   "./forward-contract": contractUrl, "./forward-run.server": runUrl });
-const { runMarketStage, runUserStage } = await import(stageUrl);
+const { runMarketStage, runUserStage, runSharedForward, checkpointDueSigma } = await import(stageUrl);
 const trafficUrl = await moduleUrl("../src/lib/forward/forward-hosted-traffic.server.ts");
 const { createHostedTraffic } = await import(trafficUrl);
 const { runHourlyForAccounts } = await import(await moduleUrl("../src/lib/forward/forward-job.server.ts", {
@@ -91,7 +91,7 @@ function fixture({ stale = false, noSigma = false, failingUser = null } = {}) {
     sigmaCache,
     log: line => calls.logs.push(line),
     firstMinute: async () => BOUNDARY - 2 * HOUR,
-    readMinutes: async () => Array.from({ length: 120 }, (_, i) => ({ open_time_ms: clock.boundary - (120 - i) * MINUTE,
+    readMinutes: async (_symbol, _since, before) => Array.from({ length: 120 }, (_, i) => ({ open_time_ms: before - (120 - i) * MINUTE,
       open: 100, high: 101, low: 99, close: 100, transport: "rest" })),
     listHealth: async symbols => symbols.map(symbol => ({ symbol, timeframe_minutes: 1, status: stale ? "STALE" : "LIVE" })),
     fetchFunding: async () => [],
@@ -109,9 +109,9 @@ function fixture({ stale = false, noSigma = false, failingUser = null } = {}) {
       if (body.sigma_only) return { sigma_state: sigma(body.symbol, body.to_ms) };
       return { symbol: body.symbol, signals: [], setups: [], resolutions: [],
         events: [{ stage_run_id: body.stage_run_id, symbol: body.symbol, sequence: 0,
-          type: "funding", ms: clock.boundary - MINUTE, rate: "0.001", mark: 100 }], adverse_paths: [],
-        reasons: noSigma ? { sigma: "no_sigma: fixture" } : {}, processed_to_ms: clock.boundary - MINUTE,
-        funding_available: true, sigma_state: sigma(body.symbol, clock.boundary - MINUTE),
+          type: "funding", ms: body.to_ms, rate: "0.001", mark: 100 }], adverse_paths: [],
+        reasons: noSigma ? { sigma: "no_sigma: fixture" } : {}, processed_to_ms: body.to_ms,
+        funding_available: true, sigma_state: sigma(body.symbol, body.to_ms),
         versions: { forward: "forward-v1" }, params_hash: "a".repeat(64), assumptions: [] };
     },
     callWallet: async body => {
@@ -152,7 +152,7 @@ test("hourly job isolates a failing user after the one shared stage commits", as
   assert.equal(f.stages.length, 1);
   assert.equal(f.calls.market.length, SYMBOLS.length);
   assert.equal(f.calls.stageReads, 0, "the winning calculation is reused without read-back");
-  assert.ok(f.calls.replayStages.every(stage => stage === f.stages[0]));
+  assert.ok(f.calls.replayStages.every(stages => stages.length === 1 && stages[0] === f.stages[0]));
   assert.deepEqual(f.calls.commits.map(c => c.user), [B]);
   assert.equal(f.accounts.get(A).cursor, BOUNDARY - HOUR);
   assert.equal(f.accounts.get(B).cursor, BOUNDARY);
@@ -208,7 +208,10 @@ test("a failed market commit leaves all local files unchanged", async () => {
 test("missing local state restores one symbol; a missing hosted row rebuilds", async () => {
   const f = fixture();
   f.entries.delete("BTCUSDT"); f.entries.delete("ETHUSDT"); delete f.states.ETHUSDT;
-  await runMarketStage(f.deps, { trigger: "hourly", strategyIds: ["test"] });
+  const pending = new Map();
+  await runMarketStage(f.deps, { trigger: "hourly", strategyIds: ["test"] }, BOUNDARY, BOUNDARY - HOUR, pending);
+  assert.equal(f.calls.checkpoints.length, 0);
+  await checkpointDueSigma(f.deps, pending);
   assert.equal(f.calls.sigmaLoads, 2);
   assert.equal(f.calls.market.filter(body => body.sigma_only).length, 1);
   assert.ok(f.calls.logs.some(line => line.includes("BTCUSDT source=restored")));
@@ -222,6 +225,7 @@ test("daily checkpoint failures do not fail accounts and retry the next hour", a
   const f = fixture();
   for (const entry of f.entries.values()) entry.hosted.checkpointed_at = BOUNDARY - 24 * HOUR;
   f.deps.repository.checkpointSigmaState = async (state, expected) => {
+    assert.equal(f.calls.commits.length, 2, "checkpoint happens after both wallets");
     f.calls.checkpoints.push({ state, expected }); throw new Error("checkpoint unavailable");
   };
   const io = { listUsers: async () => [A, B], deps: async () => f.deps, strategyIds: ["test"],
@@ -243,7 +247,10 @@ test("a checksum conflict restores hosted state next hour without retrying an ov
   const f = fixture();
   f.entries.get("BTCUSDT").hosted.checkpointed_at = BOUNDARY - 24 * HOUR;
   f.deps.repository.checkpointSigmaState = async () => { throw Object.assign(new Error("checksum conflict"), { code: "40001" }); };
-  await runMarketStage(f.deps, { trigger: "hourly", strategyIds: ["test"] });
+  const pending = new Map();
+  await runMarketStage(f.deps, { trigger: "hourly", strategyIds: ["test"] }, BOUNDARY, BOUNDARY - HOUR, pending);
+  assert.equal(f.calls.checkpoints.length, 0);
+  await checkpointDueSigma(f.deps, pending);
   assert.deepEqual(f.calls.conflicts, ["BTCUSDT"]);
   assert.equal(f.calls.sigmaLoads, 0);
   f.clock.boundary += HOUR;
@@ -268,4 +275,156 @@ test("hosted summary is logged once, including the account listing, even on mark
     deps: async () => f.deps, strategyIds: ["test"], log: line => lines.push(line), error: () => {} });
   assert.equal(lines.filter(line => line.startsWith("[forward-hosted]")).length, 1);
   assert.match(lines.at(-1), /reads=1 read_bytes=\d+ writes=0 write_bytes=0/);
+});
+
+function hourly(f) {
+  return runHourlyForAccounts({ listUsers: async () => [A, B], deps: async () => f.deps,
+    strategyIds: ["test"], log: line => f.calls.logs.push(line), error: line => f.calls.errors.push(line) });
+}
+function gapFixture(days, committed = true) {
+  const f = fixture(), start = BOUNDARY - days * 24 * HOUR;
+  for (const account of f.accounts.values()) { account.cursor = start; account.startBoundary = start; }
+  for (const [symbol, entry] of f.entries) {
+    entry.state = sigma(symbol, start - MINUTE);
+    entry.hosted = { checksum: entry.state.checksum, as_of_ms: start - MINUTE, checkpointed_at: start };
+  }
+  if (committed) f.stages.push({ id: "previous", boundary_ms: start,
+    response: { processed_to_ms: Object.fromEntries(SYMBOLS.map(symbol => [symbol, start - MINUTE])) } });
+  return f;
+}
+
+test("three-day gap commits three ordered daily chunks and both wallets consume all three", async () => {
+  const f = gapFixture(3);
+  let openReads = 0;
+  f.repository.openSetups = async () => { assert.equal(f.stages.length, ++openReads); return []; };
+  const expectedChecksums = new Map([...f.entries].map(([symbol, entry]) => [symbol, entry.hosted.checksum]));
+  f.deps.repository.checkpointSigmaState = async (state, expected) => {
+    assert.equal(f.calls.commits.length, 6);
+    assert.equal(state.as_of_ms, BOUNDARY - MINUTE);
+    assert.equal(expected, expectedChecksums.get(state.symbol));
+    f.calls.checkpoints.push({ state, expected });
+  };
+  assert.deepEqual(await hourly(f), { users: 2, failed: 0 });
+  const stages = f.stages.slice(1);
+  assert.deepEqual(stages.map(stage => stage.boundary_ms), [BOUNDARY - 48 * HOUR, BOUNDARY - 24 * HOUR, BOUNDARY]);
+  assert.ok(f.calls.market.filter(body => !body.sigma_only).every(body => body.to_ms - body.from_ms <= 24 * HOUR));
+  assert.equal(openReads, 3);
+  for (const user of [A, B]) {
+    assert.deepEqual(f.calls.commits.filter(commit => commit.user === user).map(commit => commit.stage), stages.map(stage => stage.id));
+    assert.equal(f.accounts.get(user).cursor, BOUNDARY);
+  }
+  assert.ok(f.calls.replayStages.every(values => values.length === 3 && values.every((value, i) => value === stages[i])));
+  assert.equal(f.calls.checkpoints.length, SYMBOLS.length);
+});
+
+test("catch-up stops at seven chunks and the next hourly run continues", async () => {
+  const f = gapFixture(10);
+  await hourly(f);
+  assert.equal(f.stages.length, 8);
+  assert.equal(f.accounts.get(A).cursor, BOUNDARY - 3 * 24 * HOUR);
+  assert.ok(f.calls.logs.includes("[forward-catchup] chunks=7 remaining_hours=72"));
+  await hourly(f);
+  assert.equal(f.stages.length, 11);
+  assert.equal(f.accounts.get(A).cursor, BOUNDARY);
+});
+
+test("first run clamps to retained candles, records freshness and uses the same chunks on demand", async () => {
+  const f = gapFixture(150, false);
+  const result = await runSharedForward(f.deps, { userId: A, trigger: "on_demand", strategyIds: ["test"] });
+  assert.equal(result.status, "ok");
+  assert.equal(f.stages.length, 7);
+  assert.equal(f.calls.market.find(body => !body.sigma_only).from_ms, BOUNDARY - 120 * 24 * HOUR);
+  assert.equal(f.stages[0].freshness.range_clamped_hours, 30 * 24);
+  assert.ok(f.calls.logs.includes(`[forward-range] clamped from=${new Date(BOUNDARY - 150 * 24 * HOUR).toISOString()} to=${new Date(BOUNDARY - 120 * 24 * HOUR).toISOString()}`));
+  assert.equal(f.accounts.get(A).cursor, f.stages.at(-1).boundary_ms);
+  assert.equal(f.accounts.get(B).cursor, BOUNDARY - 150 * 24 * HOUR);
+});
+
+test("a non-stage stops catch-up after replaying already committed chunks", async () => {
+  const f = gapFixture(3);
+  const market = f.deps.callMarket;
+  f.deps.callMarket = async body => {
+    const response = await market(body);
+    if (body.to_ms === BOUNDARY - 24 * HOUR - MINUTE) response.reasons = { sigma: "no_sigma: fixture" };
+    return response;
+  };
+  await hourly(f);
+  assert.equal(f.stages.length, 2);
+  assert.equal(f.calls.commits.length, 2);
+  assert.equal(f.calls.retryable.length, 2);
+  assert.equal(f.accounts.get(A).cursor, BOUNDARY - 48 * HOUR);
+});
+
+const { createSharedRepository } = await import(await moduleUrl("../src/lib/forward/forward-shared-repository.server.ts", {
+  "./forward-contract": contractUrl, "./forward-run.server": runUrl, "./forward-hosted-traffic.server": trafficUrl }));
+function outcomesFixture(extra = false, failPage = false) {
+  const setups = Array.from({ length: 250 }, (_, i) => ({ setup_id: String(i).padStart(4, "0"), payload: { setup_id: String(i).padStart(4, "0") } }));
+  const outcomes = setups.flatMap((setup, i) => i % 5 === 0 ? [] : [
+    { setup_id: setup.setup_id, status: "open", created_at: 2, payload: { status: "open", marker: `new-${i}` } },
+    { setup_id: setup.setup_id, status: i % 3 === 0 ? "T" : "open", created_at: 1, payload: { status: i % 3 === 0 ? "T" : "open", marker: `old-${i}` } },
+  ]);
+  if (extra) {
+    // One setup crosses the page boundary; its final outcome is on the second page.
+    outcomes.push(...Array.from({ length: 501 }, (_, i) => ({ setup_id: "0000", status: i === 500 ? "S" : "open",
+      created_at: 1000 - i, payload: { status: i === 500 ? "S" : "open", marker: i } })));
+  }
+  const queries = [], client = { from(table) {
+    const query = { table, orders: [], offset: 0, count: 500, ids: null, after: null };
+    queries.push(query);
+    const builder = {
+      select() { return builder; },
+      in(key, ids) { assert.equal(key, "setup_id"); assert.ok(ids.length <= 100); query.ids = ids; return builder; },
+      gt(_key, value) { query.after = value; return builder; },
+      order(key, options) { query.orders.push([key, options.ascending]); return builder; },
+      limit(count) { query.count = count; return builder; },
+      range(from, to) { query.offset = from; query.count = to - from + 1; return builder; },
+      then(ok, fail) {
+        let rows = table === "forward_market_open_setups" ? setups : outcomes;
+        if (query.ids) rows = rows.filter(row => query.ids.includes(row.setup_id));
+        if (query.after !== null) rows = rows.filter(row => row.setup_id > query.after);
+        rows = rows.toSorted((a, b) => {
+          for (const [key, ascending] of query.orders) {
+            if (a[key] !== b[key]) return (a[key] < b[key] ? -1 : 1) * (ascending ? 1 : -1);
+          }
+          return 0;
+        }).slice(query.offset, query.offset + query.count);
+        return Promise.resolve({ data: rows, error: failPage && query.offset === 500 ? { message: "page unavailable" } : null }).then(ok, fail);
+      },
+    };
+    return builder;
+  } };
+  const expected = setups.flatMap(setup => {
+    const group = outcomes.filter(row => row.setup_id === setup.setup_id).toSorted((a, b) => b.created_at - a.created_at);
+    return group.some(row => ["T", "S", "E", "L", "X", "ambiguous"].includes(row.status)) ? []
+      : [{ setup: setup.payload, resolution: group[0]?.payload ?? null }];
+  });
+  return { client, queries, expected };
+}
+
+test("250 open setups use three bulk outcome reads with the old final-status and newest-payload semantics", async () => {
+  const f = outcomesFixture(), traffic = createHostedTraffic();
+  const result = await createSharedRepository(f.client, traffic).openSetups();
+  assert.deepEqual(result, f.expected);
+  const reads = f.queries.filter(query => query.table === "forward_market_outcomes");
+  assert.equal(reads.length, 3);
+  assert.ok(reads.every(query => JSON.stringify(query.orders) === JSON.stringify([["setup_id", true], ["created_at", false]])));
+  assert.equal(traffic.snapshot().reads, f.queries.length);
+});
+
+test("outcome pagination retains older final outcomes across a page boundary and measures each page", async () => {
+  const f = outcomesFixture(true), traffic = createHostedTraffic();
+  assert.deepEqual(await createSharedRepository(f.client, traffic).openSetups(), f.expected);
+  assert.ok(f.queries.some(query => query.offset === 500));
+  assert.equal(traffic.snapshot().reads, f.queries.length);
+  const broken = outcomesFixture(true, true), failedTraffic = createHostedTraffic();
+  await assert.rejects(createSharedRepository(broken.client, failedTraffic).openSetups(), /market outcomes read.*page unavailable/);
+  assert.equal(failedTraffic.snapshot().reads, broken.queries.length);
+});
+
+test("an old committed cursor is clamped before the next chunk evaluates", async () => {
+  const f = gapFixture(150);
+  await hourly(f);
+  assert.equal(f.calls.market.find(body => !body.sigma_only).from_ms, BOUNDARY - 120 * 24 * HOUR);
+  assert.equal(f.stages[1].freshness.range_clamped_hours, 30 * 24 + MINUTE / HOUR);
+  assert.equal(f.stages[1].boundary_ms, BOUNDARY - 119 * 24 * HOUR);
 });

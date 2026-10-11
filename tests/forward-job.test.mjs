@@ -70,3 +70,32 @@ test("backfill-only reports days stored and minutes still missing per symbol, in
   assert.ok(reports[0].missing > 0);
   assert.match(lines.at(-1), /ETHUSDT: 10 days stored.*FAILED: ETHUSDT: HTTP 429/);
 });
+
+test("shared job checkpoints after all accounts and isolates an unexpected checkpoint-phase failure", async () => {
+  const calls = [], errors = [], stages = [{ id: "one", boundary_ms: 3600000 }, { id: "two", boundary_ms: 7200000 }];
+  const stub = `export async function runMarketCatchup(deps, input, boundary, first, pending) {
+      deps.calls.push("market"); pending.set("BTCUSDT", {});
+      return { stages: deps.stages, boundary: 7200000 };
+    }
+    export async function runUserStage(deps, account, boundary, trigger, stages) {
+      if (boundary !== 7200000 || stages !== deps.stages) throw new Error("lost catch-up context");
+      deps.calls.push(account.userId);
+      return { runKey: "hour:7200000", status: "ok" };
+    }
+    export async function checkpointDueSigma(deps, pending) {
+      if (!pending.has("BTCUSDT")) throw new Error("lost pending checkpoints");
+      deps.calls.push("checkpoint"); throw new Error("checkpoint phase failed");
+    }`;
+  const sharedJob = await import(await load("../src/lib/forward/forward-job.server.ts", {
+    "./forward-run.server": `data:text/javascript;base64,${Buffer.from(runStub).toString("base64")}`,
+    "./forward-stages.server": `data:text/javascript;base64,${Buffer.from(stub).toString("base64")}`,
+    "./forward-hosted-traffic.server": await load("../src/lib/forward/forward-hosted-traffic.server.ts"),
+  }));
+  const result = await sharedJob.runHourlyForAccounts({ listUsers: async () => ["a", "b"],
+    deps: async () => ({ now: () => 10800000, calls, stages,
+      repository: { shared: { account: async userId => ({ userId, startBoundary: 0 }) } } }),
+    strategyIds: [], log: () => {}, error: line => errors.push(line) });
+  assert.deepEqual(result, { users: 2, failed: 0 });
+  assert.deepEqual(calls, ["market", "a", "b", "checkpoint"]);
+  assert.match(errors[0], /checkpoints failed.*checkpoint phase failed/);
+});

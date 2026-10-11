@@ -36,6 +36,7 @@ import {
  */
 export const FORWARD_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT"] as const;
 export const FORWARD_HISTORY_DAYS = 120;
+export const FORWARD_MAX_CATCHUP_CHUNKS = 7;
 /** P16: days of 1m history fetched from REST when the stored history starts too late. */
 export const BACKFILL_DAYS = 130;
 export const HOUR_MS = 3_600_000;

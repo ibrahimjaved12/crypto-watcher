@@ -399,20 +399,24 @@ requests with `use_sigma_state: true` and `sigma_state`, then submits the merged
 shrink to a few rows. The sigma engine ignores already-consumed history in that lookback.
 
 CLAUDE.md §4 (free tiers) decided local-first state and a daily checkpoint over the
-hosted-every-hour design (refs #279, #273). `.forward-state/<SYMBOL>.json` at the repository root
-is gitignored and contains `{state, hosted}`: the validated `SigmaStateRecord`, plus the last
-hosted checksum, `as_of_ms`, and `checkpointed_at` in milliseconds (or `hosted: null`). Each
-hour uses the validated local file without downloading hosted sigma. A missing or invalid file
-restores only that symbol/version's hosted row, verifies its checksum, and writes the local file.
-Only a missing hosted row permits a rebuild; invalid hosted data fails verification. Writes use
-a temporary file and atomic rename under a per-symbol lock and never decrease local `as_of_ms`.
-The advanced state is saved only after this process wins the market-stage commit. An existing
-stage or a concurrent losing calculation does not save advanced state.
+hosted-every-hour design (refs #279, #273). Each gitignored `<cache dir>/<SYMBOL>.json` contains
+`{state, hosted}`. The directory is `FORWARD_STATE_DIR` when set, otherwise `.forward-state/`
+in the nearest ancestor of the working directory containing both `package.json` and `supabase/`;
+if no root is found, set `FORWARD_STATE_DIR`. The resolved directory is logged once per process.
+A local sigma file is used only if its state and hosted metadata validate, it is not dated after
+now, and it is not a conflict marker. Otherwise that symbol/version is restored from hosted.
+Only a missing hosted row permits rebuilding; invalid hosted data fails verification. Validation
+happens before every cursor comparison, so corrupt or future files cannot block restored state.
+Writes use a temporary file and atomic rename under a per-symbol lock and never decrease a valid
+local `as_of_ms`. Advanced state is saved immediately after winning a market-stage commit;
+an existing stage or concurrent losing calculation does not save advanced state. A conflict with
+no known hosted checkpoint records null checksum, null `as_of_ms`, and null `checkpointed_at`.
 
-Apply application migration `20261011172231_forward_sigma_checkpoint.sql` after P29. After a
-successful new stage, each symbol whose hosted checkpoint is missing or at least 24 hours old
-gets one service-only `commit_forward_sigma_checkpoint` RPC. The RPC locks `forward-sigma:<symbol>`,
-requires the expected checksum (including null for a missing row), rejects decreasing time, and
+Apply application migration `20261011172231_forward_sigma_checkpoint.sql` after P29. After the
+account loop, each symbol advanced in this run whose hosted checkpoint is missing or at least
+24 hours old gets one service-only `commit_forward_sigma_checkpoint` RPC. The RPC locks `forward-sigma:<symbol>`,
+uses the newest advanced state and expected checksum from the first load of the run (including
+null for a missing row), rejects decreasing time, and
 makes equal checksums a no-op. Success updates only that file's hosted metadata. Failures are
 logged and retried next hour without failing the stage or wallets. A checksum conflict marks
 `hosted.checkpointed_at: null` durably and restores from hosted on the next run; it never overwrites
@@ -514,13 +518,19 @@ Replay lists stage IDs/boundaries and hydrates only cache misses. A per-process 
 latest 48 hydrated stages across dependency recreation and account replays. After a restart,
 older account cursors may need one hydration per missing stage.
 
-If no market stage exists yet, the first decision range starts at the earliest registered
-account's `start_boundary_ms`, including hours that failed before the first commit. Subsequent
-ranges start at the previous market cursor. **Known risk:** a multi-hour outage is caught up in
-one stage. `runMarketStage` merges all symbols' signals, setups, resolutions, events, and adverse
-paths for that range, and `createSharedRepository.commitMarket` sends them together. That path
-can produce the largest commit; this change measures it and does not split it or claim to fix
-the statement timeout.
+Both hourly and on-demand runs catch up in ascending chunks ending at the earlier of the
+current hour boundary and the latest committed boundary plus 24 hours. Before the first stage,
+the anchor is the earliest account `start_boundary_ms` floored to an hour. First starts and
+previous processed cursors are clamped to the current boundary minus `FORWARD_HISTORY_DAYS`
+(120 days), with `[forward-range] clamped from=<ISO> to=<ISO>` and `range_clamped_hours` in stage
+freshness. Each chunk reloads the cursor and open setups, so it sees earlier chunks' outcomes.
+`FORWARD_MAX_CATCHUP_CHUNKS` defaults to 7; `[forward-catchup] chunks=<n> remaining_hours=<h>`
+reports work left for the next run. A normal hour remains one chunk. A stale/no-sigma result
+stops catch-up. Accounts replay the successful stages in order through the last processed
+boundary, using the run's in-memory array and fetching only missing older stages for lagging
+accounts. Open setup outcomes are read in batches of 100 setup IDs and paged without dropping
+outcomes across page boundaries. Checkpoints run after the account loop and cannot change
+account results.
 
 Shared tables have no `user_id`: `forward_market_stages`, `forward_market_events`,
 `forward_market_paths`, `forward_market_signals`, `forward_market_setups`, and
