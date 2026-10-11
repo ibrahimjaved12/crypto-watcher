@@ -225,7 +225,7 @@ export class CollectorRuntime {
 
   /**
    * Re-reads the application-assigned subscription universe from the operational
-   * store. The worker never reads Lovable user watchlists; the application owns
+   * store. The worker never reads main-database user watchlists; the application owns
    * them and assigns the shared set as derived collector input.
    */
   private async reconcileSubscriptions(): Promise<void> {

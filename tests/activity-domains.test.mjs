@@ -180,7 +180,7 @@ test("the feature flag selects one checkpoint writer without dual writes", async
   assert.equal(calls.rpc, 2);
 });
 
-test("monitor-run ownership switches as one domain without a Lovable dual-write", async () => {
+test("monitor-run ownership switches as one domain without a main-database dual-write", async () => {
   let operationalWrites = 0;
   const store = {
     enabled: true,
@@ -190,7 +190,7 @@ test("monitor-run ownership switches as one domain without a Lovable dual-write"
   };
   const db = {
     from() {
-      throw new Error("Lovable monitor_runs must not be written");
+      throw new Error("Main-database monitor_runs must not be written");
     },
   };
   await recordRun(

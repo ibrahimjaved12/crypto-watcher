@@ -1,9 +1,9 @@
 # Monitor efficiency and local measurements
 
-Issue #14 is implemented and verified locally without enabling the Lovable Job or
+Issue #14 is implemented and verified locally without enabling the scheduled job or
 using a hosted database. Production billing and scheduler verification remain part
 of the paused issue #13 investigation; the measurements below do not claim a
-Lovable credit saving.
+hosting-credit saving.
 
 ## Durable processing contract
 
@@ -78,6 +78,6 @@ Python-analysis diagnostics failures tracked by issue #57. The focused #14 check
 are `activity-controls.test.mjs`, `activity-domains.test.mjs`,
 `cumulative.test.mjs`, `observation.test.mjs`, and `ta.test.mjs`.
 
-Do not enable the Lovable Job to gather these local measurements. When issue #13
+Do not enable the scheduled job to gather these local measurements. When issue #13
 resumes, compare equal dated hosted windows and treat the saved counters as workload
 evidence rather than a direct conversion to credits.

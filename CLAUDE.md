@@ -92,9 +92,9 @@ Project is roughly 20% complete; things proceed incrementally and in parallel.
 
 ## 5. Stack (current, provisional)
 
-Lovable-hosted React/TanStack frontend + Supabase Postgres; Python (FastAPI + shared
-calculation package under `python/market_analysis`); external operational Postgres for frequent
-writes; Binance USDⓈ-M collector using WebSocket (live) + REST (bootstrap/gap recovery);
+Cloudflare Workers frontend + own Supabase (accounts, published results) + local operational DB;
+external operational Postgres is no longer planned; Python (FastAPI + shared calculation package
+under `python/market_analysis`); Binance USDⓈ-M collector using WebSocket (live) + REST (bootstrap/gap recovery);
 GitHub Actions for heavy studies. Providers: **Binance primary, OKX and Kraken as fallbacks** (owner-confirmed 2026-10-07).
 Keep price types and contract identity explicit when a fallback is used.
 
@@ -106,7 +106,6 @@ Keep price types and contract identity explicit when a fallback is used.
 - Do not spawn agents. You may create a branch, push and open a PR (body 'Refs #N'; 'Closes #N' only when the ticket is fully done). Never rewrite pushed history.
 - Be specific: correct architecture, correct math and trading-algorithm technicality.
 - Include good improvements you notice rather than leaving them as optional notes.
-- Lovable sync: never rewrite pushed git history; keep the connected branch working.
 - Never invent prices, news, or certainty. The repo is public: no secrets, no private notes.
 - Python CI budget: the whole Python job must finish in under 3 minutes wall-clock. New test modules should stay under ~10 s; heavier statistical acceptance tests use tests/slow.py and run in slow-tests.yml; update python/tests/shards.json if a module exceeds ~40 s.
 

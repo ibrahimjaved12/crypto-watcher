@@ -9,7 +9,7 @@ import { syncCollectorUniverse } from "@/lib/market/collector-subscriptions.serv
  * deployment schedules; the server's first-request pass is only a safety net. It is
  * deliberately independent of `SCHEDULED_MONITOR_ENABLED`: the collector's input must
  * stay current even while scheduled monitoring is paused. The scheduler authenticates
- * the request; the app remains the only privileged Lovable reader.
+ * the request; the app remains the only privileged main-database reader.
  */
 async function handle(request: Request) {
   const unauthorized = await authenticateScheduledRequest(request);

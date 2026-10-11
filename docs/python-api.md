@@ -1,4 +1,4 @@
-# Python analysis service and Lovable integration
+# Python analysis service and app integration
 
 The service handles authenticated manual analysis, scheduled completed-candle TA,
 and canonical in-memory movement-bucket calculations. It is disabled until the
@@ -47,9 +47,9 @@ The invariant must hold regardless of launch command; this documentation does no
 | Where                            | Variable                  | Value                                                                                                |
 | -------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------- |
 | Python service secret            | `PYTHON_ANALYSIS_TOKEN`   | Random URL-safe token, 32–256 characters (`A-Z`, `a-z`, digits, `_`, `-`)                            |
-| Lovable app server secret        | `PYTHON_ANALYSIS_TOKEN`   | The same value as the Python service                                                                 |
-| Lovable app server configuration | `PYTHON_ANALYSIS_URL`     | Python's HTTPS origin, e.g. `https://analysis.example.com` (no path, credentials, query or fragment) |
-| Lovable app server configuration | `PYTHON_ANALYSIS_ENABLED` | Exactly `true` to enable; unset or any other value disables requests                                 |
+| App server secret                | `PYTHON_ANALYSIS_TOKEN`   | The same value as the Python service                                                                 |
+| App server configuration         | `PYTHON_ANALYSIS_URL`     | Python's HTTPS origin, e.g. `https://analysis.example.com` (no path, credentials, query or fragment) |
+| App server configuration         | `PYTHON_ANALYSIS_ENABLED` | Exactly `true` to enable; unset or any other value disables requests                                 |
 
 These must be runtime **server** environment variables, never `VITE_*` values or
 browser configuration. Neither token nor service URL is returned to the browser.
@@ -75,7 +75,7 @@ Stop the foreground server with **Ctrl+C**. The generated token stays in that
 shell's environment; it is not printed. For a configured local TanStack server,
 set its `PYTHON_ANALYSIS_TOKEN` to the same value, set `PYTHON_ANALYSIS_URL` to
 `http://127.0.0.1:8000`, and enable `PYTHON_ANALYSIS_ENABLED=true`. Authenticated
-browser validation is intended for Lovable's hosted app; no local login bypass exists.
+browser validation is intended for the hosted app; no local login bypass exists.
 
 In another terminal:
 
@@ -213,10 +213,8 @@ never forwarded or logged by the integration. Responses are not cached.
 
 ### Immediate failure before Render receives a request
 
-This is a TanStack Start project, not the older static Lovable stack. Lovable's
-[TanStack runtime documentation](https://lovable.dev/blog/building-apps-using-tanstack-start)
-describes server secrets as request-time Worker bindings. The installed Lovable
-Vite configuration targets Nitro's Cloudflare module handler. The generated server
+This is a TanStack Start project. Server secrets are request-time Worker bindings.
+The Vite configuration targets Nitro's Cloudflare module handler. The generated server
 imports `node:process` and uses `nodejs_compat` with a recent compatibility date;
 Cloudflare [populates process.env from bindings](https://developers.cloudflare.com/workers/runtime-apis/nodejs/process/)
 in that configuration. `analyzeForUser` reads it at invocation time, not module load.
@@ -278,14 +276,14 @@ performed as part of this repair.
 2. Check `/health`, reject an unauthenticated analysis request, then test an
    authenticated request using your secure HTTP tooling. Health alone does not
    prove market-data access. Do not test by calling the monitor's writing endpoint.
-3. Set the three app server variables above in the Lovable environment serving the
+3. Set the three app server variables above in the Cloudflare Workers environment serving the
    intended hosted app, and deploy/restart the app as required for runtime secrets.
    That app server must allow outbound HTTPS and about 30 seconds for this request.
    Platform request-duration/egress limits are not verified by local builds.
 4. Ensure the existing baseline table and owner-read RLS are applied in the database
    used by that environment. No new migration is required. The repository migration
    chain replays cleanly with `npx supabase db reset --local`.
-5. Sign in normally on Lovable, select a watched pair and use **Run Python analysis**.
+5. Sign in normally on the hosted app, select a watched pair and use **Run Python analysis**.
    Check rolling versus baseline results, timestamps, loading/errors and cooldown
    labels. Repeat the request and confirm baseline/alert/run records are unchanged
    by analysis (the independently scheduled monitor may still write during testing).

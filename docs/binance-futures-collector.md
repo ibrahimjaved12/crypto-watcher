@@ -6,7 +6,7 @@ an open dashboard, and is enabled only when both `BINANCE_COLLECTOR_ENABLED=true
 operational database are enabled. The application owns user watchlists; it derives the union of
 watched contracts required by accounts with monitoring and market-data collection enabled
 and assigns that set to the operational database as collector input. The worker reads it
-there rather than querying Lovable user tables. That reconciliation is
+there rather than querying main-database user tables. That reconciliation is
 application-owned and independent of scheduled monitoring: the dedicated authenticated
 `/api/public/hooks/sync-collector-subscriptions` hook is the initial and ongoing mechanism the
 deployment schedules, and the server's best-effort first-request pass is only a safety net for a
@@ -66,7 +66,7 @@ definition of completion, and REST bootstrap/recovery records no exchange event 
 worker owns no TA: the application's completed-candle orchestration determines due work, reads
 canonical completed candles back from the operational store (`readCollectorCompletedCandles`) rather than
 fetching a second live exchange series, calls the shared Python service, validates the response, and
-writes conclusions to Lovable. The direct 15m/1h/4h streams remain
+writes conclusions to the main database. The direct 15m/1h/4h streams remain
 authoritative; they are not assembled from 1m data. Spot or non-USD-M events are rejected.
 
 The endpoint and operating limits were checked against Binance documentation on 2026-09-25:
@@ -130,7 +130,7 @@ they do not restore the original WebSocket receive stream or reconnect history. 
 [archive research](./historical-replay.md#archive-research-and-live-history).
 
 Recovered/bootstrap candles carry their origin and never bypass the application's due-work check;
-the collector performs no TA. Movement baseline/cooldown/alert state remains wholly in its Lovable
+the collector performs no TA. Movement baseline/cooldown/alert state remains wholly in its main-database
 transaction.
 
 ## Ownership and operation
@@ -161,10 +161,10 @@ canonical completed candles back through `get_collector_completed_candles` for i
 transports each candle's recorded endpoint, transport, close time, source event time and receive
 time rather than reconstructing them, and missing or
 stale operational history fails the affected TA frame visibly instead of falling back to a live
-exchange series. Lovable remains
+exchange series. The main database remains
 authoritative for watchlists, settings, movement state/alerts, and permanent TA conclusions, and it
-is written only by TanStack: the worker holds no Lovable credentials and never reads watchlists or
-settings or writes TA. No candle is dual-written to Lovable.
+is written only by TanStack: the worker holds no main-database credential and never reads watchlists or
+settings or writes TA. No candle is dual-written to the main database.
 
 Apply all unapplied SQL migrations in filename order to the application database. Recreate the
 disposable pre-release operational database from its single current baseline. Its final candle writer
@@ -200,13 +200,13 @@ caller's watchlist.
 The worker has its own server-only runtime configuration boundary. When enabled it validates the
 operational database variables and `MOVEMENT_FINALIZATION_GRACE_MS` from the host's runtime
 `process.env`, and fails visibly before starting if any are missing or invalid. It needs no main
-Lovable credential and never reads browser `VITE_*` values or build-time public configuration, so
+main-database credential and never reads browser `VITE_*` values or build-time public configuration, so
 the artifact built once is host-independent. Only the TanStack application additionally proves its
 runtime matches the browser bundle it serves. See [environment setup](./environments.md).
 
 ## Monitor overlap and freshness
 
-Manual and scheduled monitor batches use the same renewable, per-user lease in Lovable. The lease
+Manual and scheduled monitor batches use the same renewable, per-user lease in the main database. The lease
 stores a run owner ID and expires after three minutes unless renewed every minute. Normal completion
 releases it; a crashed process is recoverable after expiry. A competing request returns `skipped`
 without doing market, movement, or TA work. Existing database idempotency remains the final defense:
@@ -217,7 +217,7 @@ owns TA, so enabling it does not disable the application path. In collector mode
 sources its candle history from the operational store; when the collector is disabled it uses the
 exchange REST provider, and the two modes are never mixed for one frame.
 
-Apply `supabase/migrations/20260926090000_monitor_run_leases.sql` through the normal Lovable/main
+Apply `supabase/migrations/20260926090000_monitor_run_leases.sql` through the normal main
 database migration chain. It does not belong in the external operational baseline.
 
 Settings reports the collector's exchange source-event time and latest completed candle separately,

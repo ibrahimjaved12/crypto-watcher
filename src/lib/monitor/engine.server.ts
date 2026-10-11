@@ -125,7 +125,7 @@ export async function runMonitorForUser(
       let checkpointStatus: string;
       if (sharedCollectorOwnsMarketData) {
         // The shared collector owns completed-candle/checkpoint state. Movement
-        // detection remains in its existing Lovable transaction until migrated whole.
+        // detection remains in its existing main-database transaction until migrated whole.
         checkpointStatus = "recorded";
       } else if (operationalStore.enabled) {
         context.metrics.databaseWriteAttempts += 2;
@@ -206,7 +206,7 @@ export async function runMonitorForUser(
     // work, reads canonical completed candles (the operational collector store when
     // the collector owns market data, otherwise the exchange provider), calls the
     // shared Python calculation path, validates responses, and is the privileged
-    // Lovable `ta_signals` writer. The collector worker never owns TA.
+    // main-database `ta_signals` writer. The collector worker never owns TA.
     for (const symbol of symbols) {
       taErrors.push(
         ...(await runTA(supabaseAdmin, userId, symbol, context, undefined, operationalStore)),

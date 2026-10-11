@@ -37,7 +37,7 @@ commands create `.env.local` when it is missing, start FastAPI when
 optimization pass. `supabase start` downloads the local database, auth, and other services
 in Docker; you do not install Postgres separately. The first run needs internet
 access for container images. This repository already has `supabase/config.toml`, so
-skip `supabase init`. No Supabase account, login, hosted link, or Lovable Cloud is
+skip `supabase init`. No Supabase account, login, hosted link, or the hosted Supabase project is
 required. npm adds the project-installed Supabase CLI to `PATH` for this command.
 
 Ctrl+C stops the application and any FastAPI process started by the launcher.
@@ -128,8 +128,8 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `PYTHON_ANALYSIS_URL`                             | TanStack + collector worker         | `http://127.0.0.1:8000`; required when enabled                                                          |
 | `PYTHON_ANALYSIS_TOKEN`                           | TanStack + collector worker + FastAPI secret | Empty/disabled; matching 32–256 URL-safe characters required when enabled                     |
 | `MONITOR_CRON_TOKEN`                              | Scheduler caller + TanStack secret  | Empty; required for the public monitor and collector-universe hooks                                     |
-| `LOVABLE_CRON_SECRET`                             | Lovable scheduler + TanStack secret | Empty; used by Lovable cron authentication                                                              |
-| `LOVABLE_CRON_SECRET_PREVIOUS`                    | TanStack secret                     | Empty; optional rotation overlap                                                                        |
+| `CRON_SECRET`                             | scheduled job + TanStack secret | Empty; used by cron authentication                                                              |
+| `CRON_SECRET_PREVIOUS`                    | TanStack secret                     | Empty; optional rotation overlap                                                                        |
 | `SCHEDULED_MONITOR_ENABLED`                       | TanStack                            | `false`                                                                                                 |
 | `VITE_MARKET_AUTO_REFRESH_ENABLED`                | Browser                             | `false`                                                                                                 |
 | `VITE_TA_HISTORY_AUTO_REFRESH_ENABLED`            | Browser                             | `false`                                                                                                 |
@@ -145,7 +145,7 @@ well as Supabase secret/service-role keys used as publishable keys.
 The collector worker is a headless ingestion process with its own server-only runtime
 configuration boundary. It validates only the operational database variables and
 `MOVEMENT_FINALIZATION_GRACE_MS` from the host's runtime `process.env`; it needs no main
-Lovable credential and never reads browser `VITE_*` values or build-time public
+main-database credential and never reads browser `VITE_*` values or build-time public
 configuration, so one built artifact stays host-independent. Only the TanStack
 application additionally proves its runtime matches the browser bundle it serves and owns
 the main-database credentials. See
@@ -160,9 +160,9 @@ monitoring never leaves the collector empty or stale.
 
 | Action                                                                   | Services used                                                                                                      |
 | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Sign in, initial reads, watchlist/settings changes, default row creation | Selected Supabase auth/database: local by default; shared staging or Lovable only with explicit hosted profile     |
-| Refresh market prices                                                    | Public exchange APIs; independent of Lovable Cloud                                                                 |
-| Run check now / enabled scheduled checks                                 | Lovable permanent-state operations, operational working-state operations when enabled, and public exchange candles |
+| Sign in, initial reads, watchlist/settings changes, default row creation | Selected Supabase auth/database: local by default; shared staging or the hosted project only with explicit hosted profile     |
+| Refresh market prices                                                    | Public exchange APIs; independent of the hosted Supabase project                                                                 |
+| Run check now / enabled scheduled checks                                 | Main-database permanent-state operations, operational working-state operations when enabled, and public exchange candles |
 | Refresh TA history                                                       | Selected Supabase                                                                                                  |
 | Manual Python analysis                                                   | Selected Supabase reads → configured FastAPI → public exchange APIs; local FastAPI by default                      |
 | `npm run dev:local`                                                      | Main local Supabase, optional local FastAPI, and the application; operational ownership forced off                 |

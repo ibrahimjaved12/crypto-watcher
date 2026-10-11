@@ -84,7 +84,7 @@ from the completed candle's observation time.
 ## Deployment and verification
 
 Apply `supabase/migrations/20260915090000_cumulative_monitor.sql` through the normal
-Lovable Cloud migration process **before deploying this app revision**. It adds
+the hosted Supabase project migration process **before deploying this app revision**. It adds
 state and alert metadata, with no changes to existing scheduler registration or
 auth configuration. The new monitor fails explicitly if the RPC is missing; it
 does not silently run the previous algorithm. No live migration or deployment was

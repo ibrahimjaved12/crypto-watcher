@@ -32,7 +32,7 @@ export type CollectorUniverseSync =
   | { status: "skipped"; reason: string };
 
 /**
- * Derives the collector's shared subscription universe from Lovable-owned user
+ * Derives the collector's shared subscription universe from main-database user
  * data. A symbol is included only while at least one account whose settings still
  * require market-data collection watches it (#15); duplicate watchers collapse to
  * one symbol, and removing or disabling the last relevant subscriber removes it.
@@ -63,7 +63,7 @@ export function collectorUniverse(
  * independent of scheduled monitoring: the dedicated authenticated hook
  * (`/api/public/hooks/sync-collector-subscriptions`) is the initial and ongoing
  * mechanism the deployment schedules, so the collector cannot be left empty or stale
- * by a disabled monitor cron. The worker never reads Lovable itself.
+ * by a disabled monitor cron. The worker never reads the main database itself.
  */
 export async function syncCollectorUniverse(
   supabaseAdmin: Client,

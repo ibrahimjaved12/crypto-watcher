@@ -17,6 +17,7 @@ import { Route as AuthenticatedDashboardRouteImport } from './routes/_authentica
 import { Route as AuthenticatedForwardRouteImport } from './routes/_authenticated/forward'
 import { Route as AuthenticatedNotesRouteImport } from './routes/_authenticated/notes'
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
+import { Route as AuthCallbackRouteImport } from './routes/auth_.callback'
 import { Route as ApiPublicHooksMonitorPricesRouteImport } from './routes/api/public/hooks/monitor-prices'
 import { Route as ApiPublicHooksSyncCollectorSubscriptionsRouteImport } from './routes/api/public/hooks/sync-collector-subscriptions'
 
@@ -59,6 +60,11 @@ const AuthenticatedSettingsRoute = AuthenticatedSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthCallbackRoute = AuthCallbackRouteImport.update({
+  id: '/auth_/callback',
+  path: '/auth/callback',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicHooksMonitorPricesRoute =
   ApiPublicHooksMonitorPricesRouteImport.update({
     id: '/api/public/hooks/monitor-prices',
@@ -80,6 +86,7 @@ export interface FileRoutesByFullPath {
   '/forward': typeof AuthenticatedForwardRoute
   '/notes': typeof AuthenticatedNotesRoute
   '/settings': typeof AuthenticatedSettingsRoute
+  '/auth/callback': typeof AuthCallbackRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
@@ -91,6 +98,7 @@ export interface FileRoutesByTo {
   '/forward': typeof AuthenticatedForwardRoute
   '/notes': typeof AuthenticatedNotesRoute
   '/settings': typeof AuthenticatedSettingsRoute
+  '/auth/callback': typeof AuthCallbackRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
@@ -104,6 +112,7 @@ export interface FileRoutesById {
   '/_authenticated/forward': typeof AuthenticatedForwardRoute
   '/_authenticated/notes': typeof AuthenticatedNotesRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
+  '/auth_/callback': typeof AuthCallbackRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
@@ -117,6 +126,7 @@ export interface FileRouteTypes {
     | '/forward'
     | '/notes'
     | '/settings'
+    | '/auth/callback'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
   fileRoutesByTo: FileRoutesByTo
@@ -128,6 +138,7 @@ export interface FileRouteTypes {
     | '/forward'
     | '/notes'
     | '/settings'
+    | '/auth/callback'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
   id:
@@ -140,6 +151,7 @@ export interface FileRouteTypes {
     | '/_authenticated/forward'
     | '/_authenticated/notes'
     | '/_authenticated/settings'
+    | '/auth_/callback'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
   fileRoutesById: FileRoutesById
@@ -148,6 +160,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   AuthRoute: typeof AuthRoute
+  AuthCallbackRoute: typeof AuthCallbackRoute
   ApiPublicHooksMonitorPricesRoute: typeof ApiPublicHooksMonitorPricesRoute
   ApiPublicHooksSyncCollectorSubscriptionsRoute: typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
@@ -210,6 +223,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSettingsRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/auth_/callback': {
+      id: '/auth_/callback'
+      path: '/auth/callback'
+      fullPath: '/auth/callback'
+      preLoaderRoute: typeof AuthCallbackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/hooks/monitor-prices': {
       id: '/api/public/hooks/monitor-prices'
       path: '/api/public/hooks/monitor-prices'
@@ -250,6 +270,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AuthRoute: AuthRoute,
+  AuthCallbackRoute: AuthCallbackRoute,
   ApiPublicHooksMonitorPricesRoute: ApiPublicHooksMonitorPricesRoute,
   ApiPublicHooksSyncCollectorSubscriptionsRoute:
     ApiPublicHooksSyncCollectorSubscriptionsRoute,

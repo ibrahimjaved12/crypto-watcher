@@ -11,7 +11,7 @@ type Env = Record<string, string | undefined>;
  *
  * The worker ingests public market data and owns only operational working state,
  * so it requires the operational database credentials and nothing from the main
- * Lovable application database. It is a headless backend process with no browser
+ * main application database. It is a headless backend process with no browser
  * bundle, so it must never depend on build-time `VITE_*` values. Every requirement
  * below is read from the host's runtime `process.env`, which keeps one built
  * artifact host-independent; #19 selects that host. `BINANCE_COLLECTOR_ENABLED` is

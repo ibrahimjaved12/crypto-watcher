@@ -95,7 +95,7 @@ dependencies already exist.
 | 32 | [#44 — Add WhatsApp delivery and channel-specific notification preferences](https://github.com/ibrahimjaved12/crypto-watcher/issues/44)                                 | Backlog        | #40 reliable email/outbox foundation; official-provider and consent review.                  |
 | 33 | [#47 — Prevent local development from targeting hosted services by default](https://github.com/ibrahimjaved12/crypto-watcher/issues/47)                                 | Ready          | Establish the safe local/hosted environment boundary; foundation work starts in parallel.    |
 | 34 | [#48 — Make the database reproducible with the local Supabase CLI](https://github.com/ibrahimjaved12/crypto-watcher/issues/48)                                          | Ready          | #47; finish deterministic bootstrap, users, RLS/RPC smoke tests, and CI reset coverage.      |
-| 35 | [#50 — Provide reliable local authentication without Lovable Cloud](https://github.com/ibrahimjaved12/crypto-watcher/issues/50)                                         | Ready          | #48 reproducible local database and Auth services.                                           |
+| 35 | [#50 — Provide reliable local authentication without the hosted Supabase project](https://github.com/ibrahimjaved12/crypto-watcher/issues/50)                                         | Ready          | #48 reproducible local database and Auth services.                                           |
 | 36 | [#49 — Add a safe local monitoring runner and end-to-end cycle test](https://github.com/ibrahimjaved12/crypto-watcher/issues/49)                                        | Backlog        | #47, #48, and #50; require loopback targets and mocked market data.                          |
 | 37 | [#51 — Restore one green offline local verification command](https://github.com/ibrahimjaved12/crypto-watcher/issues/51)                                                | Backlog        | #47–#50 local paths and #57 diagnostics-test repair.                                         |
 | 38 | [#52 — Configure optional Google OAuth integration testing](https://github.com/ibrahimjaved12/crypto-watcher/issues/52)                                                 | Backlog        | #50 local auth boundary; email/password remains the default.                                 |
@@ -122,7 +122,7 @@ dependencies already exist.
    Python calculation path are present. TanStack remains the one scheduled writer;
    the movement monitor remains independently owned until explicitly migrated.
 5. **Operational data and collection (13–15):** finalize table ownership, add
-   external PostgreSQL with transactional outbox and selective Lovable sync, prove
+   external PostgreSQL with transactional outbox and selective main-database sync, prove
    authenticated fresh-state reads, then deploy the persistent shared collector.
    Test disconnect/restart, bounded REST recovery, overlap deduplication, and visible
    freshness. Measure storage/WAL growth and verify archival restore before cleanup.
@@ -162,7 +162,7 @@ These notes do not replace the live issue bodies or close an issue automatically
 
 ## Deployment and cost decisions
 
-The immediate baseline retains Lovable as the main application database and
+The immediate baseline retains main Supabase Postgres as the main application database and
 TanStack orchestration, with the optional FastAPI service. The proposed increment
 adds independently hosted persistent collection and external operational data; it
 does not require moving authentication or all application data. External PostgreSQL
@@ -171,8 +171,8 @@ does not host the collector process, and browser tabs are not its runtime.
 Before choosing hosting in #19/#25, compare uptime/sleep behavior, region access to
 public futures data, memory, CPU, outbound bandwidth, database connections,
 backups, storage, worker needs, and maintenance. Compare equal dated usage windows,
-separating Lovable Database server, storage, Compute, and Network. Moving writes
-does not prove that an active Lovable database becomes free. Do not infer prices
+separating main-database server, storage, Compute, and Network. Moving writes
+does not prove that an active main-database project becomes free. Do not infer prices
 from row counts or treat a single web-service price as the cost of workers, broker,
 database, backups, and monitoring combined.
 
@@ -192,7 +192,6 @@ value here is a permanent guarantee.
 | [Binance USDⓈ-M API and limits](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/general-info) | Futures REST uses `fapi.binance.com`; inspect endpoint weights, exchange-info limits, and response headers, and back off on throttling. Verify stream-specific connection/subscription rules when selecting streams in #26. |
 | [Render free-service limits](https://render.com/docs/free) and [pricing](https://render.com/pricing)                           | Free web services can spin down after inactivity. A successful on-demand API trial does not establish suitability for a permanent collector; assess worker hosting separately.                                              |
 | [Supabase Edge Function limits](https://supabase.com/docs/guides/functions/limits) and [pricing](https://supabase.com/pricing) | Hosted functions have bounded execution duration. Use them only for bounded work; independently assess external database capacity, backups, pausing, and connections.                                                       |
-| [Lovable pricing](https://lovable.dev/pricing)                                                                                 | Obtain a dated plan/Cloud usage breakdown during the cost baseline; builder subscription and ongoing backend consumption must be evaluated separately.                                                                      |
 | [DigitalOcean Droplet pricing](https://www.digitalocean.com/pricing/droplets)                                                  | A possible conditional persistent-host comparison, including backups and maintenance; no VM size or monthly total is selected here.                                                                                         |
 
 ## Issue #12 acceptance evidence

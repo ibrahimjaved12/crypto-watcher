@@ -216,11 +216,11 @@ test("collection settings retain another watcher and fall back to the benchmark 
 
 test("the universe sync skips without collector mode or an operational store", async () => {
   const { syncCollectorUniverse } = await load();
-  let lovableReads = 0;
+  let mainReads = 0;
   const forbiddenAdmin = {
     from() {
-      lovableReads += 1;
-      throw new Error("Lovable must not be read");
+      mainReads += 1;
+      throw new Error("Main database must not be read");
     },
   };
   assert.deepEqual(
@@ -235,7 +235,7 @@ test("the universe sync skips without collector mode or an operational store", a
     }),
     { status: "skipped", reason: "Operational store disabled" },
   );
-  assert.equal(lovableReads, 0);
+  assert.equal(mainReads, 0);
 });
 
 test("a failed watchlist read surfaces instead of silently emptying the universe", async () => {
