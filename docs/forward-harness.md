@@ -76,10 +76,11 @@ persists it (`forward_*`, `paper_*` tables).
     median from the request start (point in time, but only about 30 to 60 days of windows), while
     the lb3h labels expand from 2024-01. Forward setups therefore do not use exactly the same sigma
     as the benchmark. The cleaner fix (not done) is seeding c_h from the lake.
-  - **Request size:** each run sends the whole window (up to 120 x 1,440 x 6, about 1 million rows,
-    roughly 100 MB of JSON). Fine for the local MVP, not for free-tier hosting. Each ok run records
-    `freshness.request = {rows, python_ms}`; if it is slow, send only the recent window plus a
-    persisted per-symbol sigma state.
+  - **Request size:** the local request still sends the whole 120-day TA window (up to
+    120 x 1,440 x 6, about 1 million rows, roughly 100 MB of JSON across six sequential requests)
+    to the local Python service. It is not sent to hosted Supabase. Each ok run records
+    `freshness.request = {rows, python_ms}`. Local sigma state and daily hosted checkpoints
+    reduce hosted traffic; they do not shrink this local indicator lookback.
   - Half-lives come from `LabelParams`: 1 day at 15 m, 3 days at 60 m, 7 days at 240 m.
 - **Resolution:** a resolution uses only minutes from the entry onward and is final once an event
   occurs. Calling it again with more bars never changes a final result.
@@ -391,11 +392,32 @@ Apply both migrations: application DB `20261011130000_forward_sigma_state.sql` a
 `forward_sigma_state` key is `(symbol, sigma_version)`; it contains market data only and is accessible
 only by the service role. Account wallet/run/output records retain their existing ownership.
 
-The production hourly runner loads and verifies state, sends sequential `/v1/forward/market_evaluate`
+The production hourly runner loads and verifies **local-first** state, sends sequential `/v1/forward/market_evaluate`
 requests with `use_sigma_state: true` and `sigma_state`, then submits the merged events to
 `/v1/forward/wallet_step`. It still reads the **existing 120-day TA lookback**, extended back to
 `as_of_ms + 1 minute` if needed. Indicators are not checkpointed, and this does not claim requests
 shrink to a few rows. The sigma engine ignores already-consumed history in that lookback.
+
+CLAUDE.md §4 (free tiers) decided local-first state and a daily checkpoint over the
+hosted-every-hour design (refs #279, #273). `.forward-state/<SYMBOL>.json` at the repository root
+is gitignored and contains `{state, hosted}`: the validated `SigmaStateRecord`, plus the last
+hosted checksum, `as_of_ms`, and `checkpointed_at` in milliseconds (or `hosted: null`). Each
+hour uses the validated local file without downloading hosted sigma. A missing or invalid file
+restores only that symbol/version's hosted row, verifies its checksum, and writes the local file.
+Only a missing hosted row permits a rebuild; invalid hosted data fails verification. Writes use
+a temporary file and atomic rename under a per-symbol lock and never decrease local `as_of_ms`.
+The advanced state is saved only after this process wins the market-stage commit. An existing
+stage or a concurrent losing calculation does not save advanced state.
+
+Apply application migration `20261011172231_forward_sigma_checkpoint.sql` after P29. After a
+successful new stage, each symbol whose hosted checkpoint is missing or at least 24 hours old
+gets one service-only `commit_forward_sigma_checkpoint` RPC. The RPC locks `forward-sigma:<symbol>`,
+requires the expected checksum (including null for a missing row), rejects decreasing time, and
+makes equal checksums a no-op. Success updates only that file's hosted metadata. Failures are
+logged and retried next hour without failing the stage or wallets. A checksum conflict marks
+`hosted.checkpointed_at: null` durably and restores from hosted on the next run; it never overwrites
+the conflicting hosted row. If that restore is older than local state, evaluation uses the hosted
+state while the disk cursor stays unchanged until a successful new stage saves advanced state.
 
 Missing/version/checksum/identity-mismatched or out-of-cache state produces a `sigma_rebuild` log
 and run reason. The runner discovers the first stored 1m candle and rebuilds in bounded 30-day
@@ -407,7 +429,8 @@ require a deliberate reseed/version migration, not a silent alteration of past d
 
 P29 supersedes the combined `commit_forward_sigma_run` production path with the separate
 market and user commits below. The old RPC remains available for rollback; the shared
-production runner never calls it. Ordered checkpoint locks and expected checksum checks remain.
+production runner never calls it. Checkpoint locks and expected checksum checks now belong to
+the separate daily RPC. Legacy functions and applied migrations remain unchanged for rollback.
 
 
 Import an exported seed before enabling the hourly job:
@@ -479,13 +502,25 @@ live checkpoint cannot be overwritten. Starting the hourly job without a seed ex
 ### P29: one shared hourly market stage, independent user wallets
 
 Apply application migration `20261011150000_forward_shared_stages.sql` after P28.
-`runMarketStage` checks the persisted boundary before reading sigma, evaluates each symbol
+`runMarketStage` checks only the persisted stage ID before reading sigma, evaluates each symbol
 sequentially once, and commits the shared stage. `runUserStage` only reads committed stages
 and replays them after the account cursor, in boundary order. A second user in the same hour
 adds no market evaluation or sigma rebuild. The hourly job runs the market stage before
 its user loop; account initialization and wallet failures are isolated per user.
-A concurrent market calculation may race, but only one stage commits per boundary and
-both callers reload the winning persisted stage and event keys.
+A concurrent market calculation may race, but only one stage commits per boundary. The winner
+uses its in-memory stage and event keys for every account; only the loser reads back the winning
+stage. The latest-stage read selects only `id`, `boundary_ms`, and `payload->processed_to_ms`.
+Replay lists stage IDs/boundaries and hydrates only cache misses. A per-process cache retains the
+latest 48 hydrated stages across dependency recreation and account replays. After a restart,
+older account cursors may need one hydration per missing stage.
+
+If no market stage exists yet, the first decision range starts at the earliest registered
+account's `start_boundary_ms`, including hours that failed before the first commit. Subsequent
+ranges start at the previous market cursor. **Known risk:** a multi-hour outage is caught up in
+one stage. `runMarketStage` merges all symbols' signals, setups, resolutions, events, and adverse
+paths for that range, and `createSharedRepository.commitMarket` sends them together. That path
+can produce the largest commit; this change measures it and does not split it or claim to fix
+the statement timeout.
 
 Shared tables have no `user_id`: `forward_market_stages`, `forward_market_events`,
 `forward_market_paths`, `forward_market_signals`, `forward_market_setups`, and
@@ -504,9 +539,10 @@ rows. Historical stages have no reconstructed event stream. Old tables, columns,
 remain in place; this migration does not drop legacy data. Rollback requires restoring the old
 application/report definitions; new shared hours are not mirrored into the legacy market tables.
 
-- `commit_market_stage` serializes market commits, takes sigma locks in symbol order, checks
-  expected checksums and stage boundaries, and atomically inserts shared output plus checkpoints.
-  Repeating a boundary is a no-op, including checkpoint timestamps.
+- `commit_market_stage` serializes market commits and atomically inserts shared output. The hourly
+  caller sends `p_states: []` and `p_expected: {}`; sigma is saved locally after success, and the
+  separate daily checkpoint RPC handles hosted state. The existing function keeps its sigma
+  handling for rollback. Repeating a boundary is a no-op and does not touch local state.
 - `commit_user_run` locks the user, checks the expected previous successful run and next stage,
   and inserts that user's run/ledger atomically. Successful `(user, boundary)` retries are no-ops.
   `consumed_boundary_ms` is the cursor; retryable `skipped_stale`/`no_sigma` rows never advance it.
@@ -515,6 +551,21 @@ application/report definitions; new shared hours are not mirrored into the legac
 
 `FORWARD_USER_ID` optionally selects a user, not a shared market namespace. Wallet configuration
 changes are service-side only; there is no client configuration editor in this change.
+
+Each computing run logs one `[forward-sigma] <SYM> source=local|restored|rebuilt as_of=<ISO>
+checksum=<first 8 hex> bytes=<n>` per symbol. Checkpoints log
+`[forward-sigma] checkpoint <SYM> written|failed (<message>) ms=<n>`. Market RPC attempts log
+`[forward-commit] boundary=<ISO> stage_bytes=<n> records_bytes=<n> events=<n> adverse_paths=<n> rpc_ms=<n>`.
+One `[forward-hosted] reads=<n> read_bytes=<n> writes=<n> write_bytes=<n>` summarizes the run, including
+account listing, wallet-state reads, replay hydration, sigma restores, and checkpoint attempts.
+Byte counts are UTF-8 JSON body sizes, excluding HTTP overhead/compression. `stage_bytes` and
+`records_bytes` measure the market RPC arguments; `read_bytes`/`write_bytes` are cumulative snapshots
+at each account commit in `paper_runs.freshness` (including that write). The final log also includes
+subsequent account reads. A normal local-cache hour should read far below 1 MB; restores and
+uncached catch-up stages are exceptions. Daily checkpoints write the roughly 2.4 MB state once per
+symbol instead of sending/downloading all six states every hour. The owner's next logs and hosted
+usage page determine the remaining stage size, timeout behavior, and actual egress.
+
 The Python equivalence, TypeScript call-counter/failure-isolation tests, and PGlite transaction,
 migration, idempotency, and RLS tests are committed for GitHub checks. No local tests, typecheck,
 build, servers, or database migrations were run for P29; no runtime or CI-duration result is claimed.

@@ -13,7 +13,7 @@ import { listForwardUsers } from "../lib/forward/forward-users.server";
 // Production scheduling is not done (docs/production-todo.md).
 async function once() {
   const { failed } = await runHourlyForAccounts({
-    listUsers: () => listForwardUsers(supabaseAdmin as unknown as SupabaseClient, process.env["FORWARD_USER_ID"]),
+    listUsers: (onRead) => listForwardUsers(supabaseAdmin as unknown as SupabaseClient, process.env["FORWARD_USER_ID"], onRead),
     deps: () => forwardDeps(),
     strategyIds: FORWARD_STRATEGY_IDS,
     log: (line) => console.log(line),

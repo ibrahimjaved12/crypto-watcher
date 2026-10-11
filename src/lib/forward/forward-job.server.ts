@@ -8,6 +8,7 @@ import {
   type ForwardDeps,
   type ForwardRunSummary,
 } from "./forward-run.server";
+import { createHostedTraffic } from "./forward-hosted-traffic.server";
 
 /**
  * The local hourly job (#239 P21), separated from the process entry so it can be tested with injected
@@ -15,7 +16,7 @@ import {
  * failing account never stops the others, and the failure count is returned so `--once` can exit 1.
  */
 export type ForwardJobIo = {
-  listUsers(): Promise<string[]>;
+  listUsers(onRead?: (data: unknown) => void): Promise<string[]>;
   deps(): Promise<ForwardDeps>;
   strategyIds: string[];
   log(line: string): void;
@@ -24,39 +25,52 @@ export type ForwardJobIo = {
 };
 
 export async function runHourlyForAccounts(io: ForwardJobIo): Promise<{ users: number; failed: number }> {
-  const users = await io.listUsers();
+  const listing = createHostedTraffic();
+  let users: string[];
+  try { users = await io.listUsers((data) => listing.read(data)); }
+  catch (error) { io.log(listing.line()); throw error; }
   if (!users.length) {
     io.log("[forward-run] no registered accounts yet");
+    io.log(listing.line());
     return { users: 0, failed: 0 };
   }
-  const deps = await io.deps();
+  let deps: ForwardDeps;
+  try { deps = await io.deps(); }
+  catch (error) { io.log(listing.line()); throw error; }
   if (deps.repository?.shared && !io.run) {
-    const { runMarketStage, runUserStage } = await import("./forward-stages.server");
-    const boundary = Math.floor(deps.now() / HOUR_MS) * HOUR_MS;
-    const accounts = [];
-    let failed = 0;
-    for (const userId of users) {
-      try { accounts.push(await deps.repository.shared.account(userId, boundary)); }
-      catch (error) { failed++; io.error(`[forward-run] ${userId}: ${String(error)}`); }
-    }
-    let stage;
-    try { stage = await runMarketStage(deps, { trigger: "hourly", strategyIds: io.strategyIds }, boundary); }
-    catch (error) {
-      io.error(`[forward-market] ${String(error)}`);
-      return { users: users.length, failed: users.length };
-    }
-    for (const account of accounts) {
-      try {
-        if (!("id" in stage)) {
-          await deps.repository.shared.retryable(account.userId, boundary, stage.status, stage.reason ?? "");
-          io.log(`[forward-run] ${account.userId} ${stage.runKey} ${stage.status}`);
-        } else {
-          const result = await runUserStage(deps, account, boundary, "hourly");
-          io.log(`[forward-run] ${account.userId} ${result.runKey} ${result.status}`);
-        }
-      } catch (error) { failed++; io.error(`[forward-run] ${account.userId}: ${String(error)}`); }
-    }
-    return { users: users.length, failed };
+    const traffic = deps.repository.shared.traffic;
+    traffic?.reset();
+    traffic?.add(listing.snapshot());
+    try {
+      const { runMarketStage, runUserStage } = await import("./forward-stages.server");
+      const boundary = Math.floor(deps.now() / HOUR_MS) * HOUR_MS;
+      const accounts = [];
+      let failed = 0;
+      for (const userId of users) {
+        try { accounts.push(await deps.repository.shared.account(userId, boundary)); }
+        catch (error) { failed++; io.error(`[forward-run] ${userId}: ${String(error)}`); }
+      }
+      if (!accounts.length) return { users: users.length, failed };
+      let stage;
+      try { stage = await runMarketStage(deps, { trigger: "hourly", strategyIds: io.strategyIds }, boundary,
+        Math.min(...accounts.map((account) => account.startBoundary))); }
+      catch (error) {
+        io.error(`[forward-market] ${String(error)}`);
+        return { users: users.length, failed: users.length };
+      }
+      for (const account of accounts) {
+        try {
+          if (!("id" in stage)) {
+            await deps.repository.shared.retryable(account.userId, boundary, stage.status, stage.reason ?? "");
+            io.log(`[forward-run] ${account.userId} ${stage.runKey} ${stage.status}`);
+          } else {
+            const result = await runUserStage(deps, account, boundary, "hourly", stage);
+            io.log(`[forward-run] ${account.userId} ${result.runKey} ${result.status}`);
+          }
+        } catch (error) { failed++; io.error(`[forward-run] ${account.userId}: ${String(error)}`); }
+      }
+      return { users: users.length, failed };
+    } finally { if (traffic) io.log(traffic.line()); }
   }
   const run = io.run ?? runForward;
   let failed = 0;

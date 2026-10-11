@@ -24,6 +24,15 @@ immediately so the 1m history does not gap while Python warms up. History is nev
 
 The host does not start Docker or Supabase. The local operational stack must already be running.
 
+The hourly job keeps one atomic, gitignored sigma file per symbol in `.forward-state/` at the
+repository root. Keep that directory across worker restarts. Restore order is: validate the local
+file, then restore and validate that symbol's hosted checkpoint only if the file is missing/invalid,
+then rebuild from local operational minutes only if hosted is also missing. Advanced local state is
+saved after a successful new market-stage commit. Hosted checkpoints are written at most once per
+24 hours per symbol, with failed attempts retried the next hour; checksum conflicts trigger a hosted
+restore on the next run. The 120-day TA window still goes to local Python. See
+[P28b/P29](forward-harness.md#p28b-persistence-and-hourly-wiring) for cache and measurement details.
+
 ## Setup
 
 Variable **names** only; values live in the gitignored `.env.production.local` (mode 0600), never in the

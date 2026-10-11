@@ -16,6 +16,7 @@ dist-ssr
 .nitro
 *.local
 .worker-host.status.json
+.forward-state/
 supabase/.temp/
 supabase/.branches/
 operational-db/supabase/.temp/

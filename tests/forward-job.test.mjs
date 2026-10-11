@@ -22,6 +22,7 @@ const runStub = `export const FORWARD_HISTORY_DAYS = 120, FORWARD_SYMBOLS = ["BT
   export async function runForward() { throw new Error("replaced by the injected run"); }`;
 const job = await import(await load("../src/lib/forward/forward-job.server.ts", {
   "./forward-run.server": `data:text/javascript;base64,${Buffer.from(runStub).toString("base64")}`,
+  "./forward-hosted-traffic.server": await load("../src/lib/forward/forward-hosted-traffic.server.ts"),
 }));
 
 test("the hourly job runs every account; one failing account does not stop the others", async () => {
