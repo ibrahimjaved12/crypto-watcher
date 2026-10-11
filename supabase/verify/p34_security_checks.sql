@@ -11,8 +11,9 @@ WHERE n.nspname = 'public'
   AND NOT c.relrowsecurity;
 
 -- b. Effective write access: expect zero protected_results_table = true rows.
--- Report INSERT/UPDATE/DELETE privileges when RLS is off or no policy applies
--- to that role and command. Other returned rows need PR justification or a fix.
+-- Report rows when the role has INSERT/UPDATE/DELETE privilege and either RLS
+-- is off or a policy applies to that role and command.
+-- Other returned rows need PR justification or a fix.
 -- Applicable policies include ALL commands, PUBLIC, and inherited role access.
 SELECT access_role.rolname AS role_name, c.relname AS table_name,
        write_command.command,
@@ -29,7 +30,7 @@ WHERE n.nspname = 'public'
   AND has_table_privilege(access_role.oid, c.oid, write_command.command)
   AND (
     NOT c.relrowsecurity
-    OR NOT EXISTS (
+    OR EXISTS (
       SELECT 1
       FROM pg_policy policy
       WHERE policy.polrelid = c.oid

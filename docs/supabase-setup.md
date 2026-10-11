@@ -61,7 +61,7 @@ separately so that all four result sets are available.
 
 Check b considers public tables and the `anon` and `authenticated` roles for
 `INSERT`, `UPDATE`, and `DELETE`. It returns a row only when
-`has_table_privilege(role, table, command)` is true and either RLS is off or no
+`has_table_privilege(role, table, command)` is true and either RLS is off or a
 policy applies to that role and command. Policy matching includes policies for
 all commands, PUBLIC, and roles whose privileges are inherited without `SET ROLE`.
 It checks policy applicability, not the policy's row expressions.
