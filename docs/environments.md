@@ -82,7 +82,9 @@ FastAPI. FastAPI needs only its token, not Supabase credentials.
 ## Hosted production and shared staging
 
 `npm run build` selects Vite's production mode and the committed `.env.production`
-public configuration for the existing Lovable project. This file explicitly selects
+public configuration for the owner's Supabase project. See
+[Supabase project setup](supabase-setup.md) for the project reference, migration
+status, pending security verification, and Google OAuth setup. This file explicitly selects
 `production` and opts into hosted Supabase. No service secrets belong in that file.
 Configure the deployed TanStack runtime with `APP_PROFILE=production`,
 `ALLOW_HOSTED_SUPABASE=true`, the matching `SUPABASE_URL` and
