@@ -82,14 +82,16 @@ The non-secret runtime variables are committed in the `vars` block of
 | `MACHINE_ONLY_ENABLED` | `false` |
 | `OPERATIONAL_DB_ENABLED` | `false` |
 | `PYTHON_ANALYSIS_ENABLED` | `false` |
-| `RUNNER_GATEWAY_ENABLED` | `false` |
+| `RUNNER_GATEWAY_ENABLED` | `true` |
+| `RUNNER_JOBS_ENABLED` | `true` |
 | `SCHEDULED_MONITOR_ENABLED` | `false` |
 | `SUPABASE_URL` | `https://xshzjhocpcenuumdrhdh.supabase.co` |
 
 Set `SUPABASE_PUBLISHABLE_KEY` in the Worker's **Settings > Variables and Secrets**
 to match the public key used by the build. Keys and secrets stay in the dashboard;
 none belongs in the committed `vars` block. `keep_vars: true` preserves dashboard
-runtime variables across Wrangler deployments. Build profiles, hosted opt-ins,
+runtime variables that are not defined in the config; it does not protect config-defined vars. Change the runner flags in
+`wrangler.jsonc`, not the dashboard. Build profiles, hosted opt-ins,
 URLs and public keys must match these runtime values.
 
 If runtime variables are missing, the app fails validation; a missing
@@ -99,17 +101,16 @@ not resolve a missing runtime profile. Rebuild and redeploy with the committed
 runtime configuration, and set the runtime publishable key in its separate
 dashboard list.
 
-`MACHINE_ONLY_ENABLED=false` disables `runForwardNow` and `runForwardTrendNow`
-on the Worker. Authenticated calls receive HTTP 403 with `{"error":"machine_only"}`
-before machine dependencies are loaded. Both routes still require Supabase user
-authentication. A read-only server capability hides their buttons in the UI;
-the server gate is authoritative. Do not enable this flag on Cloudflare. Local
-development and `worker:host` explicitly enable it on the owner's machine.
+`MACHINE_ONLY_ENABLED=false` keeps direct machine execution disabled on the
+Worker. With `RUNNER_JOBS_ENABLED=true`, authenticated `runForwardNow` and
+`runForwardTrendNow` calls enqueue durable jobs in hosted Supabase for the host
+instead. Do not enable `MACHINE_ONLY_ENABLED` on Cloudflare; local development
+and `worker:host` explicitly enable it on the owner's machine.
 
 The first deployment runs with only the public build and runtime values. Leave
 `SUPABASE_SERVICE_ROLE_KEY` and `CRON_SECRET` unset for that deployment. Add them
-only if another deployed route needs them. The #278 gate prevents the two
-machine-only routes from running even when those secrets are present.
+only if another deployed route needs them. The #278 gate prevents direct machine
+execution on the Worker even when those secrets are present; durable jobs use the signed-in user’s Supabase client.
 
 The committed runtime flags start scheduled monitoring, the collector, the
 operational database and Python analysis disabled. If enabling
@@ -143,9 +144,15 @@ overrides are gitignored.
 
 ## Runner gateway
 
-Refs #294. To run analysis and manual alert checks on the owner's machine:
+Refs #294. Both runner flags are on in committed `wrangler.jsonc`. Both hosted
+Supabase migrations are applied, and `RUNNER_GATEWAY_URL` / `RUNNER_GATEWAY_SECRET`
+are configured as Cloudflare runtime secrets. The machine must run
+`npm run worker:host` with `RUNNER_GATEWAY_ENABLED=true` and
+`RUNNER_JOBS_ENABLED=true` in `.env.production.local`.
 
-1. On the machine, set `RUNNER_GATEWAY_ENABLED=true` and a valid
+To maintain the gateway and durable jobs setup:
+
+1. On the machine, set `RUNNER_GATEWAY_ENABLED=true`, `RUNNER_JOBS_ENABLED=true` and a valid
    `RUNNER_GATEWAY_SECRET` in `.env.production.local`, then start
    `npm run worker:host` and expose the gateway through an HTTPS tunnel origin.
    See [the host gateway setup](worker-host.md#reaching-the-gateway).
@@ -156,8 +163,8 @@ Refs #294. To run analysis and manual alert checks on the owner's machine:
 3. Set the Worker secret `RUNNER_GATEWAY_SECRET` to exactly the same value as
    `RUNNER_GATEWAY_SECRET` in `.env.production.local` on the machine. It must be
    32–256 characters using only letters, digits, underscores, and hyphens.
-4. Flip `RUNNER_GATEWAY_ENABLED` to `"true"` in the committed `wrangler.jsonc`
-   runtime vars and redeploy. Leave `PYTHON_ANALYSIS_ENABLED=false` on the Worker;
+4. Deploy with both runner flags already set to `"true"` in the committed
+   `wrangler.jsonc` runtime vars. Leave `PYTHON_ANALYSIS_ENABLED=false` on the Worker;
    the machine's Python service configuration handles the actual analysis.
 
 The Worker passes the signed-in user's token to the gateway along with the
@@ -168,7 +175,9 @@ offline notice and the action returns a message asking you to start
 shows a timeout retry message. The status check uses `/health` with a two-second
 timeout, sends no gateway secret, and polls every 30 seconds while configured.
 Keep the HTTPS tunnel and the host supervisor running for the gateway to remain
-reachable. Forward-run and trend-run routing is handled separately in part 3.
+reachable. Run forward and Run trend use `public.runner_jobs` in hosted Supabase; the
+host jobs runner consumes them without using the tunnel. Quick-tunnel URLs change
+on restart; update the Cloudflare runtime URL secret when that happens (see #308).
 
 ## After the first deployment
 
@@ -191,7 +200,8 @@ does not provide those host semantics. Python analysis requires a reachable
 external service; local FastAPI/operational database endpoints will not work.
 The `worker:host` supervisor spawns child processes and the collector and forward
 CLI jobs expect a long-lived machine; none is started by this web deployment.
-The two routes are disabled on Workers; their host implementation is unchanged.
+The Worker enqueues the two on-demand routes as durable jobs; execution remains
+on the host.
 The Market dashboard and Strategy Lab show a stale-data banner when the newest
 hosted forward run's processed boundary is more than two hours old, using the
 existing authenticated hosted read. A recent retry timestamp does not hide old

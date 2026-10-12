@@ -6,8 +6,10 @@ hosted main Supabase, local operational Supabase, the jobs use outbound connecti
 stack and points the jobs at it.
 
 The host explicitly sets `MACHINE_ONLY_ENABLED=true` for its child environment.
-Cloudflare keeps this server-only capability off. For stale hosted results and
-restart/catch-up steps, see the [forward outage runbook](forward-outage-runbook.md).
+Cloudflare keeps this server-only capability off. The committed Worker config has
+`RUNNER_GATEWAY_ENABLED=true` and `RUNNER_JOBS_ENABLED=true`. The machine must run
+`npm run worker:host` with both flags set to `true` in `.env.production.local`.
+For stale hosted results and restart/catch-up steps, see the [forward outage runbook](forward-outage-runbook.md).
 
 It supervises five children, plus an optional gateway and jobs runner, each with a log prefix and its
 own restart policy:
@@ -50,7 +52,9 @@ With the local operational Supabase stack running, use `npm run env:production` 
 `.env.production.local` with mode 0600. The command reads only the local operational stack's status,
 generates the Python token and sets the worker flags and separate Python endpoints. It refuses to
 overwrite an existing file. Fill in `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` yourself: they start
-as `REPLACE_` placeholders, and hosted values are never fetched. The worker host refuses any variable
+as `REPLACE_` placeholders, and hosted values are never fetched. Both runner flags
+are generated as `true`; also define `SUPABASE_PUBLISHABLE_KEY` and replace the
+`RUNNER_GATEWAY_SECRET` placeholder before starting the host. The worker host refuses any variable
 whose value still starts with `REPLACE_`, reporting only its name, except
 `RUNNER_GATEWAY_SECRET` while the gateway is disabled.
 
@@ -71,7 +75,7 @@ environment; an empty value counts as defined and is then caught by the value ch
   loopback HTTP origins with explicit ports, for example ports 8000 and 8001), `PYTHON_ANALYSIS_TOKEN`\*
   (32–256 URL-safe characters)
 - Optional: `FORWARD_USER_ID` (narrow the jobs to one account), `MOVEMENT_FINALIZATION_GRACE_MS`
-- Optional durable jobs: `RUNNER_JOBS_ENABLED=true` enables `runner-jobs`; it uses the existing
+- Durable jobs: `RUNNER_JOBS_ENABLED=true` enables `runner-jobs`; it uses the existing
   `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. No new secrets or publishable key are required on the
   host. `FORWARD_USER_ID` narrows the scheduled jobs only; durable jobs use the user on each queued row.
 
@@ -86,7 +90,8 @@ Prerequisites: Node 22.12+, `npm ci`, and the Python environment
    `supabase start --workdir operational-db` then `supabase migration up --local --workdir operational-db`.
 2. **Create the host environment:** `npm run env:production`. Replace the `SUPABASE_URL` and
    `SUPABASE_SERVICE_ROLE_KEY` placeholders in `.env.production.local` with the hosted main project's
-   values before proceeding.
+   values, define `SUPABASE_PUBLISHABLE_KEY`, and replace the `RUNNER_GATEWAY_SECRET`
+   placeholder before proceeding. Keep both runner flags set to `true`.
 3. **Restart Python.** Make sure no old FastAPI is running; the host refuses to start while anything
    already answers on either Python port.
 4. **Seed import** (sigma state, see [forward harness](forward-harness.md)). The loader reads only the
@@ -204,11 +209,11 @@ on success, failure, expiry or page unmount. A page reload does not cancel durab
 joins the active job of that kind for that user. Each click supplies a UUID retry key, and a duplicate
 key returns the original row even if it has already completed.
 
-Rollout order: apply `supabase/migrations/20261012180000_runner_jobs.sql` to **hosted main** first;
-then enable the host flag and restart `worker:host`, confirming `runner-jobs` is running. Finally,
-the owner changes the committed `RUNNER_JOBS_ENABLED` value in `wrangler.jsonc` from `false` to `true`
-in a separate step and deploys the Worker. The flag is deliberately committed as `false` here.
-The migration creates the queue, user read/insert policies and three service-role-only RPCs; no
+Current rollout state: both #294 migrations are applied to **hosted main**, and
+both runner flags are `true` in committed `wrangler.jsonc`. Run `npm run worker:host`
+with `RUNNER_GATEWAY_ENABLED=true` and `RUNNER_JOBS_ENABLED=true` in the host's
+`.env.production.local`, and confirm both `runner-gateway` and `runner-jobs` are running.
+The runner jobs migration creates the queue, user read/insert policies and three service-role-only RPCs; no
 operational database migration, new credential, gateway configuration or tunnel change is needed.
 
 ## Keep it running
@@ -247,14 +252,16 @@ Scheduled-Task-side size check; the host does not rotate logs itself.
 
 ## Reaching the gateway
 
-The gateway is optional until PR 2 of #294. Worker calls and `dev:local` behavior are unchanged.
-Set these server-only variables in `.env.production.local` to enable the sixth child:
+The Worker gateway is enabled for Analyse and Check. Set these server-only
+variables in `.env.production.local` and run `npm run worker:host`:
 
-- `RUNNER_GATEWAY_ENABLED=true` (default `false`).
+- `RUNNER_GATEWAY_ENABLED=true`.
+- `RUNNER_JOBS_ENABLED=true` for durable Run forward and Run trend jobs.
 - `RUNNER_GATEWAY_PORT=8787` (integer 1024–65535).
 - `RUNNER_GATEWAY_SECRET`: a random secret of 32–256 URL-safe characters (`A-Z`, `a-z`, `0-9`, `_`, `-`).
 
-When enabled, all three names and `SUPABASE_PUBLISHABLE_KEY` must be defined in that file itself.
+When the gateway is enabled, `RUNNER_GATEWAY_ENABLED`, `RUNNER_GATEWAY_PORT`,
+`RUNNER_GATEWAY_SECRET` and `SUPABASE_PUBLISHABLE_KEY` must be defined in that file itself.
 The publishable key must belong to the hosted main project. The gateway also requires the existing
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Replace the generated secret placeholder before enabling.
 Never commit credentials or expose them via `VITE_*` variables.
@@ -284,3 +291,7 @@ To reach it through an optional Cloudflare Tunnel:
 5. Run `cloudflared tunnel run crypto-watcher-runner` with that configuration.
 
 A VM with nginx can later replace the tunnel with the same URL contract.
+
+Keep the host running: with the flags on and the host off, buttons show runner offline.
+Quick-tunnel URLs change on restart; update the Cloudflare `RUNNER_GATEWAY_URL`
+runtime secret if using a quick tunnel (see #308). Never commit the URL or secret.

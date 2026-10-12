@@ -54,7 +54,7 @@ test("host starts the non-essential runner jobs child only behind its flag", asy
   assert.match(preflight, /env\["RUNNER_JOBS_ENABLED"\] === "true"/);
   assert.match(launcher, /runnerImport\("\/src\/worker\/runner-jobs\.ts"/);
   assert.match(launcher, /alias: \{ "@": resolve\(root, "src"\) \}/);
-  assert.match(config, /"RUNNER_JOBS_ENABLED": "false"/);
+  assert.match(config, /"RUNNER_JOBS_ENABLED": "true"/);
 });
 
 test("runner uses leased sequential execution and safe failure messages without gateway calls", async () => {
