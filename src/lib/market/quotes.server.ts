@@ -1,4 +1,4 @@
-import { loadCandles, type Candle } from "./providers.server";
+import { loadCandles, type Candle, type ProviderAttempt } from "./providers.server";
 
 export type SymbolQuote = {
   symbol: string;
@@ -13,6 +13,11 @@ export type SymbolQuote = {
   /** True when the newest candle is older than 10 minutes. */
   stale: boolean;
   error: string | null;
+  /**
+   * Failed provider attempts in fallback order. On a successful quote these are the earlier sources
+   * that failed (empty when the first source answered); on a failed quote, every source.
+   */
+  fallbackReasons: ProviderAttempt[];
   fetchedAt: string;
 };
 
@@ -39,11 +44,12 @@ export async function getQuote(symbol: string): Promise<SymbolQuote> {
       lastCandleAt: null,
       stale: true,
       error: `Futures data unavailable — ${outcome.errors.join(" | ")}`,
+      fallbackReasons: outcome.attempts,
       fetchedAt,
     };
   }
 
-  const { minute, quarter, source } = outcome.result;
+  const { minute, quarter, source, attempts } = outcome.result;
   const last = minute[minute.length - 1]!;
   const lastCandleAt = last.time;
 
@@ -63,6 +69,7 @@ export async function getQuote(symbol: string): Promise<SymbolQuote> {
     lastCandleAt,
     stale: Date.now() - lastCandleAt > 10 * 60 * 1000,
     error: null,
+    fallbackReasons: attempts,
     fetchedAt,
   };
 }

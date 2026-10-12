@@ -24,7 +24,7 @@ import { Hint } from "@/components/hint";
 import { EmptyState, PageHeader, StatusChip, TimeAgo } from "@/components/plain";
 import { humanizeReason, relativeTime, sourceLabel, summarizeReasons, type Level } from "@/lib/labels";
 import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db";
-import { getMarketSnapshot } from "@/lib/market.functions";
+import { getMarketSnapshot, type MarketSnapshot } from "@/lib/market.functions";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
 import { getOperationalState } from "@/lib/operational.functions";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
@@ -45,6 +45,28 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
   }),
   component: Dashboard,
 });
+
+/**
+ * Details lines for the status strip: why earlier exchange sources failed for quotes that a later
+ * source answered. Each reason is listed once, with the pairs it applied to.
+ */
+function fallbackDetailLines(quotes: MarketSnapshot["quotes"]): string[] {
+  const pairsByReason = new Map<string, string[]>();
+  for (const quote of quotes) {
+    if (!quote.ok) continue;
+    for (const attempt of quote.fallbackReasons) {
+      const status = attempt.status === null ? "" : `HTTP ${attempt.status} `;
+      const detail = `${status}${attempt.message}`.trim() || "no details";
+      const reason = `${sourceLabel(attempt.source)}: ${detail}`;
+      pairsByReason.set(reason, [...(pairsByReason.get(reason) ?? []), quote.symbol]);
+    }
+  }
+  if (pairsByReason.size === 0) return [];
+  return [
+    "Fallback used because:",
+    ...Array.from(pairsByReason, ([reason, pairs]) => `${reason} (${pairs.join(", ")})`),
+  ];
+}
 
 function Dashboard() {
   const automatic = automaticQueryOptions(import.meta.env["VITE_MARKET_AUTO_REFRESH_ENABLED"]);
@@ -135,6 +157,7 @@ function Dashboard() {
         : "ok";
   const stripDetails = [
     `Data source: ${sourcesDown ? "no exchange reachable" : source ? sourceLabel(source) : "waiting for the first price load"}`,
+    ...fallbackDetailLines(quotes),
     `Last price update: ${market.data ? new Date(market.data.fetchedAt).toLocaleString() : "not loaded yet"}`,
     `Last monitoring check: ${lastRun ? `${new Date(lastRun.ran_at).toLocaleString()} (${runStatus!.short})` : "none yet"}`,
   ].join("\n");

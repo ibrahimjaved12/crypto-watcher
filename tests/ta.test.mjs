@@ -394,6 +394,9 @@ test("provider HTTP failures cancel unused bodies and preserve errors if cleanup
       globalThis.fetch = async () =>
         new Response(
           new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("maintenance window ".repeat(20)));
+            },
             cancel() {
               canceled++;
               if (cleanupFails) throw new Error("cleanup failed");
@@ -421,6 +424,57 @@ test("provider HTTP failures cancel unused bodies and preserve errors if cleanup
   }
 });
 
+test("failed provider attempts keep bounded, redacted details and carry onto the fallback", async () => {
+  const { clearExchangeInfoCache, loadCandles } = await import(
+    await moduleUrl("../src/lib/market/providers.server.ts", {
+      "./symbols": await moduleUrl("../src/lib/market/symbols.ts"),
+    })
+  );
+  const original = globalThis.fetch;
+  const originalWarn = console.warn;
+  const warnings = [];
+  try {
+    clearExchangeInfoCache();
+    console.warn = (line) => warnings.push(line);
+    const bucket = Math.floor(Date.now() / 900_000) * 900_000 - 3_600_000;
+    globalThis.fetch = async (url) => {
+      if (url.startsWith("https://fapi.binance.com/")) {
+        const body = `{"msg":"restricted https://example.test/geo?token=abc ${"x".repeat(400)}"}`;
+        return new Response(body, { status: 451 });
+      }
+      if (url.startsWith("https://www.okx.com/")) throw new TypeError("fetch failed");
+      return Response.json({
+        candles: [bucket, bucket + 900_000].map((time) => ({
+          time,
+          open: "100",
+          high: "101",
+          low: "99",
+          close: "100.5",
+          volume: "3",
+        })),
+      });
+    };
+    const outcome = await loadCandles("BTCUSDT");
+    assert.equal(outcome.ok, true);
+    assert.equal(outcome.result.source, "kraken-futures");
+    assert.equal(outcome.result.attempts.length, 2);
+    const [binance, okx] = outcome.result.attempts;
+    assert.equal(binance.source, "binance-usdm");
+    assert.equal(binance.status, 451);
+    assert.ok(binance.message.length <= 200);
+    assert.ok(binance.message.startsWith('{"msg":"restricted [url] '));
+    assert.ok(!binance.message.includes("token=abc") && !binance.message.includes("https://"));
+    assert.deepEqual(okx, { source: "okx-usdt-swap", status: null, message: "fetch failed" });
+    assert.deepEqual(warnings, [
+      `[market-providers] source=binance-usdm symbol=BTCUSDT status=451 message=${binance.message}`,
+      "[market-providers] source=okx-usdt-swap symbol=BTCUSDT status=none message=fetch failed",
+    ]);
+  } finally {
+    console.warn = originalWarn;
+    globalThis.fetch = original;
+  }
+});
+
 test("run context shares only identity-equivalent market inputs", async () => {
   globalThis.__contextCalls = { observation: 0, ta: [] };
   const provider = `data:text/javascript,${encodeURIComponent(`
@@ -428,7 +482,7 @@ test("run context shares only identity-equivalent market inputs", async () => {
       globalThis.__contextCalls.observation++;
       observer.request('binance-usdm','candles',1);
       observer.candleRows('binance-usdm',1,2);
-      return {ok:true,result:{source:'binance-usdm',minute:[],quarter:[]}};
+      return {ok:true,result:{source:'binance-usdm',minute:[],quarter:[],attempts:[]}};
     }
     export async function loadTACandles(symbol,timeframe,validate,source,observer) {
       globalThis.__contextCalls.ta.push({symbol,timeframe,source});

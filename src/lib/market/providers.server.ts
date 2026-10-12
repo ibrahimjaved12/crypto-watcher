@@ -32,6 +32,15 @@ export type FuturesContract = FuturesInstrument & {
   minNotional: string | null;
 };
 
+/** One failed provider attempt, kept for the status details and the monitor log. */
+export type ProviderAttempt = {
+  source: MarketSource;
+  /** HTTP status of a non-2xx response; null for timeouts, network and validation failures. */
+  status: number | null;
+  /** Start of the response body for HTTP failures, else the error message. Sanitized, max 200. */
+  message: string;
+};
+
 export type ProviderResult = {
   source: MarketSource;
   instrument: FuturesContract;
@@ -40,6 +49,8 @@ export type ProviderResult = {
   retrievedAt: string;
   minute: Candle[];
   quarter: Candle[];
+  /** Earlier sources that failed before this one answered. Empty when the first source answered. */
+  attempts: ProviderAttempt[];
 };
 
 export type TACandleResult = {
@@ -81,6 +92,10 @@ const ENDPOINTS: Record<MarketSource, string> = {
 const MINUTE_LIMIT = 61;
 const QUARTER_LIMIT = 97;
 const METADATA_TTL_MS = 5 * 60_000;
+/** Longest failure detail kept per attempt (also the log and status-strip limit). */
+const DETAIL_MAX_CHARS = 200;
+/** Upper bound on bytes read from a failed response; the excerpt needs far fewer. */
+const ERROR_BODY_MAX_BYTES = 4096;
 
 type BinanceSymbol = {
   symbol?: string;
@@ -109,6 +124,69 @@ type OkxInstrument = {
 
 let metadataCache = new Map<string, { expiresAt: number; body: unknown }>();
 
+/** Non-2xx response. Its message stays `HTTP <status>`, so existing error text is unchanged. */
+class ProviderHttpError extends Error {
+  readonly status: number;
+  readonly bodyExcerpt: string;
+  constructor(status: number, bodyExcerpt: string) {
+    super(`HTTP ${status}`);
+    this.status = status;
+    this.bodyExcerpt = bodyExcerpt;
+  }
+}
+
+/** Removes URLs (query strings can carry request parameters) and control characters, then caps. */
+function boundedDetail(text: string): string {
+  const flat = text
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[url]")
+    .replace(/[\s\p{Cc}]+/gu, " ")
+    .trim();
+  return Array.from(flat).slice(0, DETAIL_MAX_CHARS).join("");
+}
+
+/** Reads only the start of a failed body, then cancels the rest. Never throws. */
+async function httpFailure(res: Response): Promise<ProviderHttpError> {
+  let excerpt = "";
+  const reader = res.body?.getReader();
+  if (reader) {
+    const decoder = new TextDecoder();
+    let bytes = 0;
+    try {
+      while (excerpt.length < DETAIL_MAX_CHARS && bytes < ERROR_BODY_MAX_BYTES) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        const part = chunk.value.subarray(0, ERROR_BODY_MAX_BYTES - bytes);
+        bytes += part.byteLength;
+        excerpt += decoder.decode(part, { stream: true });
+      }
+    } catch {
+      // A body that fails mid-read only loses its excerpt; the HTTP status still stands.
+    } finally {
+      try {
+        await reader.cancel();
+      } catch {
+        // Cleanup must not replace the HTTP error.
+      }
+    }
+  }
+  return new ProviderHttpError(res.status, boundedDetail(excerpt));
+}
+
+/** Records one failed attempt and logs one line for it. */
+function failedAttempt(source: MarketSource, symbol: string, error: unknown): ProviderAttempt {
+  let attempt: ProviderAttempt;
+  if (error instanceof ProviderHttpError) {
+    attempt = { source, status: error.status, message: error.bodyExcerpt };
+  } else {
+    const message = error instanceof Error ? error.message : String(error);
+    attempt = { source, status: null, message: boundedDetail(message) };
+  }
+  console.warn(
+    `[market-providers] source=${source} symbol=${symbol} status=${attempt.status ?? "none"} message=${attempt.message}`,
+  );
+  return attempt;
+}
+
 async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -117,14 +195,7 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
       signal: controller.signal,
       headers: { accept: "application/json" },
     });
-    if (!res.ok) {
-      try {
-        await res.body?.cancel();
-      } catch {
-        // Cleanup must not replace the HTTP error.
-      }
-      throw new Error(`HTTP ${res.status}`);
-    }
+    if (!res.ok) throw await httpFailure(res);
     return await res.json();
   } finally {
     clearTimeout(timer);
@@ -455,6 +526,7 @@ async function load(
     retrievedAt: new Date().toISOString(),
     minute,
     quarter,
+    attempts: [],
   };
 }
 
@@ -492,7 +564,8 @@ export async function loadTACandles(
 }
 
 export type ProviderOutcome =
-  { ok: true; result: ProviderResult } | { ok: false; errors: string[] };
+  | { ok: true; result: ProviderResult }
+  | { ok: false; errors: string[]; attempts: ProviderAttempt[] };
 
 export async function loadCandles(
   symbol: string,
@@ -500,18 +573,21 @@ export async function loadCandles(
   observer?: ProviderObserver,
 ): Promise<ProviderOutcome> {
   const errors: string[] = [];
+  const attempts: ProviderAttempt[] = [];
   for (const source of MARKET_SOURCES) {
     try {
-      const result = await load(source, symbol, [1, 15], [MINUTE_LIMIT, QUARTER_LIMIT], observer);
-      if (result.minute.length < 2 || result.quarter.length < 2)
+      const loaded = await load(source, symbol, [1, 15], [MINUTE_LIMIT, QUARTER_LIMIT], observer);
+      if (loaded.minute.length < 2 || loaded.quarter.length < 2)
         throw new Error("insufficient data");
+      const result = { ...loaded, attempts: [...attempts] };
       validate?.(result);
       return { ok: true, result };
     } catch (error) {
       errors.push(`${source}: ${error instanceof Error ? error.message : String(error)}`);
+      attempts.push(failedAttempt(source, symbol, error));
     }
   }
-  return { ok: false, errors };
+  return { ok: false, errors, attempts };
 }
 
 /** Monitoring needs only the completed 1m observation, not the dashboard's 15m chart. */
@@ -521,17 +597,20 @@ export async function loadObservationCandles(
   observer?: ProviderObserver,
 ): Promise<ProviderOutcome> {
   const errors: string[] = [];
+  const attempts: ProviderAttempt[] = [];
   for (const source of MARKET_SOURCES) {
     try {
-      const result = await load(source, symbol, [1, 1], [MINUTE_LIMIT, MINUTE_LIMIT], observer);
-      if (result.minute.length < 2) throw new Error("insufficient data");
+      const loaded = await load(source, symbol, [1, 1], [MINUTE_LIMIT, MINUTE_LIMIT], observer);
+      if (loaded.minute.length < 2) throw new Error("insufficient data");
+      const result = { ...loaded, attempts: [...attempts] };
       validate?.(result);
       return { ok: true, result };
     } catch (error) {
       errors.push(`${source}: ${error instanceof Error ? error.message : String(error)}`);
+      attempts.push(failedAttempt(source, symbol, error));
     }
   }
-  return { ok: false, errors };
+  return { ok: false, errors, attempts };
 }
 
 /** Binance-only trade, mark, index and funding snapshot helper. */
