@@ -403,6 +403,10 @@ async function main() {
     nodeJob("forward-hourly", "scripts/forward-run.mjs"),
     nodeJob("forward-trend", "scripts/forward-run.mjs", ["--trend"]),
   ];
+  // The hosted quote publisher (#323) is a sibling of the collector, not part of it, so the collector
+  // artifact keeps no main-database credential. It needs the hosted service credentials to publish.
+  if (env.MARKET_QUOTE_PUBLISHER_ENABLED !== "false" && env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY)
+    specs.push(nodeJob("quote-publisher", "scripts/market-quote-publisher.mjs"));
   if (env.RUNNER_GATEWAY_ENABLED === "true")
     specs.push(nodeJob("runner-gateway", "scripts/runner-gateway.mjs"));
   if (env.RUNNER_JOBS_ENABLED === "true")
@@ -426,6 +430,7 @@ async function main() {
   setInterval(evaluateExit, 5_000);
   log(`Preflight passed (${MODE}, hosted main Supabase). Starting ${specs.length} children.`);
   for (const name of ["fastapi-analysis", "fastapi-forward", "collector"]) launch(records.get(name));
+  if (records.has("quote-publisher")) launch(records.get("quote-publisher"));
   if (records.has("runner-gateway")) launch(records.get("runner-gateway"));
   const pythonNames = ["fastapi-analysis", "fastapi-forward"];
   const urls = [endpoints.analysis.origin, endpoints.forward.origin];

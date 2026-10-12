@@ -14,6 +14,7 @@
     "runner:gateway": "node scripts/runner-gateway.mjs",
     "runner:jobs": "node scripts/runner-jobs.mjs",
     "collector:worker": "node scripts/collector-worker.mjs",
+    "market-quote-publisher": "node scripts/market-quote-publisher.mjs",
     "forward:run": "node scripts/forward-run.mjs",
     "forward:trend": "node scripts/forward-run.mjs --trend",
     "forward:backfill": "node scripts/forward-run.mjs --backfill-only",

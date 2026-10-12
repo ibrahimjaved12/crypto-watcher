@@ -1,8 +1,9 @@
 // Machine-side market quote publisher (#323). It reads the completed candles the collector already
 // stored in the local operational store, builds each quote with the shared functions in
 // `quote-calc.ts` and sends ONE batched upsert of all collected symbols to the hosted
-// `market_quotes` table after each completed 1m candle. It makes no exchange call. It runs inside
-// the collector process (so under the same supervisor) and can never stop it: every step is caught.
+// `market_quotes` table after each completed 1m candle. It makes no exchange call. It runs as a
+// sibling child of the worker host (src/worker/market-quote-publisher.ts), never inside the collector,
+// so the collector artifact holds no service-role credential. Every step here is caught.
 import type { Json } from "../../integrations/supabase/types";
 import type { OperationalStore } from "../operational/types";
 import {

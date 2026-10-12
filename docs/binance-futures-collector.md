@@ -269,17 +269,18 @@ The Cloudflare Worker cannot reach Binance (measured: HTTP 403 on every Binance 
 including the spot data host and the WebSocket upgrade; OKX answered 429), so the dashboard's price
 cards no longer fetch from any exchange. Ingestion and serving are separate:
 
-- **Machine.** `src/worker/collector-worker.ts` starts `startMarketQuotePublisher` next to the
-  collector, in the same process, so the process manager that runs the collector
-  (`npm run up` → `worker:host`) restarts both. A few seconds after each completed 1m candle it
-  reads the collected symbols' completed 1m and 15m candles from the operational store
+- **Machine.** `src/worker/market-quote-publisher.ts` runs as its own child of the worker host (`npm run up`
+  → `worker:host`), beside the collector and not inside it, because the collector artifact must hold no
+  main-database credential and the publisher writes to the main hosted project with the service-role
+  key. A few seconds after each completed 1m candle it reads the collected symbols' completed 1m and 15m candles from the operational store
   (`readCollectorCompletedCandles`), builds each quote with `quote-calc.ts` and sends one batched
   call, `publish_market_quotes`, to hosted `public.market_quotes` with the same service-role client
   the forward jobs use. It makes no exchange call. A symbol whose newest candle did not advance is
   not sent, and the database never moves a row backwards, so restarts and retries are idempotent.
   A failed hosted write is logged and retried on the next candle; the collector is unaffected.
   Heartbeat: `[market-quote-publisher] heartbeat symbols=… published=… behind=… unavailable=…
-  newest_published_at=…` once a minute. `MARKET_QUOTE_PUBLISHER_ENABLED=false` turns it off.
+  newest_published_at=…` once a minute. `MARKET_QUOTE_PUBLISHER_ENABLED=false` turns it off; the worker host also skips it when
+  `SUPABASE_URL` or `SUPABASE_SERVICE_ROLE_KEY` is missing.
 - **Worker.** `getMarketSnapshot` reads `market_quotes` with the publishable key (one query, RLS
   `SELECT` for `anon`/`authenticated`) and maps rows to `SymbolQuote`. A quote is stale after 10
   minutes (from `last_candle_at` or `published_at`); all-stale or empty shows the "showing the last
