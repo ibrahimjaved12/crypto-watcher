@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useState } from "react";
 import { automaticQueryOptions, logActivity } from "@/lib/activity-controls";
@@ -66,6 +66,7 @@ function Dashboard() {
 
   const market = useQuery({
     queryKey: ["market", symbols],
+    placeholderData: keepPreviousData,
     queryFn: () => {
       logActivity(import.meta.env["VITE_ACTIVITY_DIAGNOSTICS"], "market", "request-started");
       return loadMarket({ data: { symbols } });
@@ -82,9 +83,10 @@ function Dashboard() {
 
   const add = useMutation({
     mutationFn: addSymbol,
-    onSuccess: () => {
+    onSuccess: (_data, symbol) => {
       setPending("");
       queryClient.invalidateQueries({ queryKey: ["watchlist"] });
+      toast.success(`${baseAsset(symbol)} added to your watchlist`);
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -157,7 +159,7 @@ function Dashboard() {
         actions={
           <>
             <Select value={pending} onValueChange={(v) => add.mutate(v)}>
-              <SelectTrigger className="h-9 w-[160px]" disabled={available.length === 0} aria-label="Add a pair">
+              <SelectTrigger className="h-9 w-[160px]" disabled={add.isPending || available.length === 0} aria-label="Add a pair">
                 <SelectValue placeholder="Add a pair" />
               </SelectTrigger>
               <SelectContent>
@@ -237,22 +239,39 @@ function Dashboard() {
       ) : null}
 
       <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {watchlist.isLoading || (market.isLoading && symbols.length > 0)
+        {watchlist.isLoading
           ? symbols.map((s) => (
               <div key={s} className="panel h-64 animate-pulse p-5">
                 <span className="num text-sm text-muted-foreground">{s}</span>
               </div>
             ))
-          : quotes.map((quote) => (
-              <QuoteCard
-                key={quote.symbol}
-                quote={quote}
-                onRemove={() => {
-                  const item = watchlist.data?.find((w) => w.symbol === quote.symbol);
-                  if (item) remove.mutate(item.id);
-                }}
-              />
-            ))}
+          : symbols.map((symbol) => {
+              const quote = quotes.find((q) => q.symbol === symbol);
+              return quote ? (
+                <QuoteCard
+                  key={symbol}
+                  quote={quote}
+                  onRemove={() => {
+                    const item = watchlist.data?.find((w) => w.symbol === quote.symbol);
+                    if (item) remove.mutate(item.id);
+                  }}
+                />
+              ) : market.isFetching ? (
+                <div key={symbol} className="panel h-64 animate-pulse p-5">
+                  <span className="num text-sm text-muted-foreground">{symbol}</span>
+                </div>
+              ) : market.isError ? (
+                <div key={symbol} className="panel h-64 p-5">
+                  <span className="num text-sm text-muted-foreground">{symbol}</span>
+                  <p className="mt-2 text-sm text-muted-foreground">Could not load. Press Refresh.</p>
+                </div>
+              ) : (
+                <div key={symbol} className="panel h-64 p-5">
+                  <span className="num text-sm text-muted-foreground">{symbol}</span>
+                  <p className="mt-2 text-sm text-muted-foreground">No data for this pair right now.</p>
+                </div>
+              );
+            })}
       </div>
 
       {symbols.length === 0 && !watchlist.isLoading ? (
