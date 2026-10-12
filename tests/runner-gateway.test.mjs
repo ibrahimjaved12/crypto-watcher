@@ -58,9 +58,12 @@ test("environment validation uses defaults and reports names without values", ()
 
 test("gateway stays loopback-only and host launch is opt-in", async () => {
   const gateway = await readFile(new URL("../src/worker/runner-gateway.ts", import.meta.url), "utf8");
+  const launcher = await readFile(new URL("../scripts/runner-gateway.mjs", import.meta.url), "utf8");
   const host = await readFile(new URL("../scripts/worker-host.mjs", import.meta.url), "utf8");
   assert.match(gateway, /server\.listen\(port, "127\.0\.0\.1"/);
   assert.ok(!gateway.includes("Access-Control"));
+  assert.match(gateway, /error: result\.error \? result\.error\.slice\(0, 1000\) : result\.error/);
+  assert.doesNotMatch(launcher, /safeLog|console\[[^\]]+\]\s*=/);
   assert.match(host, /env\.RUNNER_GATEWAY_ENABLED === "true"/);
   assert.match(host, /nodeJob\("runner-gateway", "scripts\/runner-gateway\.mjs"\)/);
 });

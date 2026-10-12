@@ -4,9 +4,9 @@ export class RunnerConfigurationError extends Error {
   readonly category = "configuration";
 
   constructor(
-    variable: "RUNNER_GATEWAY_ENABLED" | "RUNNER_GATEWAY_URL" | "RUNNER_GATEWAY_SECRET",
+    readonly variable: "RUNNER_GATEWAY_ENABLED" | "RUNNER_GATEWAY_URL" | "RUNNER_GATEWAY_SECRET",
   ) {
-    super(variable);
+    super(`Runner gateway is misconfigured (${variable}).`);
     this.name = "RunnerConfigurationError";
   }
 }
@@ -54,6 +54,13 @@ type RunnerReply<T> = { ok: true; data: T } | RunnerFailure;
 
 /** A response status is the fetch API's evidence that the gateway was reached. */
 export function classifyRunnerFailure(status: number | null, aborted: boolean): RunnerFailure {
+  if (status === null && aborted) {
+    return {
+      ok: false,
+      category: "timeout",
+      error: "The runner did not respond in time. If your computer is on, wait a moment and try again; if it is off, start npm run worker:host.",
+    };
+  }
   if (status === null || [502, 503, 504, 522, 523, 524, 530].includes(status)) {
     return {
       ok: false,

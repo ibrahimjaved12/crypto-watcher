@@ -21,6 +21,11 @@ const offline = {
   category: "runner_offline",
   error: "The runner (your computer) is offline. Start npm run worker:host and try again.",
 };
+const preResponseTimeout = {
+  ok: false,
+  category: "timeout",
+  error: "The runner did not respond in time. If your computer is on, wait a moment and try again; if it is off, start npm run worker:host.",
+};
 
 async function withRunnerFetch(send, action) {
   const originalFetch = globalThis.fetch;
@@ -48,12 +53,13 @@ test("runner config is opt-in and accepts HTTPS or loopback HTTP origins", () =>
   }
 });
 
-test("invalid runner config reports only the variable name with a typed category", () => {
+test("invalid runner config reports a friendly message with the variable and typed category", () => {
   for (const url of [undefined, "", "private-url", "http://runner.example.test", "ftp://localhost", "https://private-user:private-password@runner.example.test", "https://runner.example.test/path", "https://runner.example.test?private-query", "https://runner.example.test#private-fragment"]) {
     assert.throws(() => runnerConfig({ ...env, RUNNER_GATEWAY_URL: url }), (error) => {
       assert.ok(error instanceof RunnerConfigurationError);
       assert.equal(error.category, "configuration");
-      assert.equal(error.message, "RUNNER_GATEWAY_URL");
+      assert.equal(error.variable, "RUNNER_GATEWAY_URL");
+      assert.equal(error.message, "Runner gateway is misconfigured (RUNNER_GATEWAY_URL).");
       return true;
     });
   }
@@ -61,25 +67,45 @@ test("invalid runner config reports only the variable name with a typed category
     assert.throws(() => runnerConfig({ ...env, RUNNER_GATEWAY_SECRET: secret }), (error) => {
       assert.ok(error instanceof RunnerConfigurationError);
       assert.equal(error.category, "configuration");
-      assert.equal(error.message, "RUNNER_GATEWAY_SECRET");
+      assert.equal(error.variable, "RUNNER_GATEWAY_SECRET");
+      assert.equal(error.message, "Runner gateway is misconfigured (RUNNER_GATEWAY_SECRET).");
       return true;
     });
   }
 });
 
-test("tunnel failures including 530 and pre-response aborts classify as runner offline", () => {
-  for (const status of [null, 502, 503, 504, 522, 523, 524, 530]) {
+test("tunnel failures stay offline even when aborted, while pre-response aborts time out", () => {
+  assert.deepEqual(classifyRunnerFailure(null, false), offline);
+  assert.deepEqual(classifyRunnerFailure(null, true), preResponseTimeout);
+  for (const status of [502, 503, 504, 522, 523, 524, 530]) {
     assert.deepEqual(classifyRunnerFailure(status, false), offline);
+    assert.deepEqual(classifyRunnerFailure(status, true), offline);
   }
-  assert.deepEqual(classifyRunnerFailure(null, true), offline);
-  assert.deepEqual(classifyRunnerFailure(200, true), {
-    ok: false, category: "timeout", error: "The runner took too long. Try again.",
-  });
+  for (const status of [200, 401, 409, 429, 500]) {
+    assert.deepEqual(classifyRunnerFailure(status, true), {
+      ok: false, category: "timeout", error: "The runner took too long. Try again.",
+    });
+  }
   assert.equal(classifyRunnerFailure(401, false).category, "unauthorized");
   assert.equal(classifyRunnerFailure(429, false).category, "rate_limited");
   assert.deepEqual(classifyRunnerFailure(409, false), {
     ok: false, category: "busy", error: "A check is already running.",
   });
+});
+
+test("callRunner returns friendly configuration errors without fetching", async () => {
+  for (const [variable, value] of [
+    ["RUNNER_GATEWAY_ENABLED", "false"],
+    ["RUNNER_GATEWAY_URL", "private-url"],
+    ["RUNNER_GATEWAY_SECRET", "private secret!"],
+  ]) {
+    await withRunnerFetch(async () => { assert.fail("Invalid config must not reach fetch"); }, async () => {
+      process.env[variable] = value;
+      assert.deepEqual(await callRunner("/v1/analysis", "user-token", {}), {
+        ok: false, category: "configuration", error: `Runner gateway is misconfigured (${variable}).`,
+      });
+    });
+  }
 });
 
 test("callRunner forwards the user token and secret only to a manual-redirect JSON request", async () => {
@@ -100,17 +126,23 @@ test("callRunner forwards the user token and secret only to a manual-redirect JS
   });
 });
 
-test("callRunner maps HTTP 530, network errors and AbortError to the offline message", async () => {
-  const abort = Object.assign(new Error("private-abort-detail"), { name: "AbortError" });
+test("callRunner maps HTTP 530 and network errors to the offline message", async () => {
   for (const send of [
     async () => new Response("private-tunnel-html", { status: 530 }),
     async () => { throw new TypeError("private-network-detail"); },
-    async () => { throw abort; },
   ]) {
     await withRunnerFetch(send, async () => {
       assert.deepEqual(await callRunner("/v1/monitor/check", "user-token", {}), offline);
     });
   }
+});
+
+test("callRunner maps a pre-response AbortError to the no-response timeout message", async () => {
+  await withRunnerFetch(async () => {
+    throw Object.assign(new Error("private-abort-detail"), { name: "AbortError" });
+  }, async () => {
+    assert.deepEqual(await callRunner("/v1/monitor/check", "user-token", {}), preResponseTimeout);
+  });
 });
 
 test("aborting response parsing after reaching the gateway gives the timeout retry message", async () => {
