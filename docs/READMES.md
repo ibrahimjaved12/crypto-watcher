@@ -220,6 +220,12 @@ supabase migration list --local
 supabase migration up --local
 ```
 Importantly, for machine hosting:
+First start Docker Engine:
+
+```sh
+sudo systemctl start docker
+```
+Then:
 ```sh
 npm run up -- --update-worker-secret
 ```
