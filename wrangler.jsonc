@@ -11,6 +11,8 @@
   },
   "no_bundle": true,
   "rules": [{ "type": "ESModule", "globs": ["**/*.mjs", "**/*.js"] }],
+  // Experiment: run the Worker near this cloud region to see whether Binance stops returning 403.
+  "placement": { "region": "aws:ap-southeast-1" },
   "vars": {
     "ALLOW_HOSTED_SUPABASE": "true",
     "APP_PROFILE": "production",
