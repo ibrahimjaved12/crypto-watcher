@@ -98,10 +98,19 @@ function Dashboard() {
   const check = useMutation({
     mutationFn: () => runCheck({ data: undefined }),
     onSuccess: (result) => {
-      toast.success(
-        `Alert check ${humanizeReason(result.status).short.toLowerCase()}: ${result.symbolsChecked} pairs checked, ${result.alertsCreated} new alert(s).`,
-      );
-      if (result.error) toast.warning(summarizeReasons(result.error).items.join("; "));
+      const detail = result.error ? summarizeReasons(result.error).items.join("; ") : undefined;
+      if (result.status === "partial") {
+        toast.warning(`Alert check partly completed: ${result.alertsCreated} new alert(s).`, {
+          description: detail,
+        });
+      } else if (result.status === "failed") {
+        toast.error("Alert check failed. No analysis completed.", { description: detail });
+      } else {
+        toast.success(
+          `Alert check ${humanizeReason(result.status).short.toLowerCase()}: ${result.symbolsChecked} pairs checked, ${result.alertsCreated} new alert(s).`,
+        );
+        if (detail) toast.warning(detail);
+      }
       queryClient.invalidateQueries({ queryKey: ["operational-state"] });
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
       queryClient.invalidateQueries({ queryKey: ["ta"] });
