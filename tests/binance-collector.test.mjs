@@ -5,10 +5,15 @@ import ts from "../node_modules/typescript/lib/typescript.js";
 
 const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const movementUrl = stub("export const MOVEMENT_OBSERVATION_BATCH_MAX=20000;");
+const loggingSource = await readFile(new URL("../src/lib/market/collector-logging.ts", import.meta.url), "utf8");
+const loggingUrl = stub(ts.transpileModule(loggingSource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText);
 const source = await readFile(new URL("../src/lib/market/collector.ts", import.meta.url), "utf8");
 let { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
+outputText = outputText.replaceAll(JSON.stringify("./collector-logging"), JSON.stringify(loggingUrl));
 outputText = outputText.replaceAll(
   JSON.stringify("./symbols"),
   JSON.stringify(
