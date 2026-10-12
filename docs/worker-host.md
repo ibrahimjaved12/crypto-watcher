@@ -121,7 +121,10 @@ existing development startup behavior is unchanged.
 
 The launcher then streams `npm run worker:host` output and starts
 `cloudflared tunnel --url http://127.0.0.1:8787`. It prints the public quick-tunnel
-URL after `/health` returns 200 (polls every 2 seconds for up to 60 seconds).
+URL after `/health` returns 200. The 90-second health window starts when the URL
+is captured, with a 5-second DNS grace period before the first request. Requests
+start every 3 seconds, or when the previous request finishes if it takes longer,
+with a 5-second per-request timeout capped by the remaining window.
 Set `RUNNER_GATEWAY_URL` in Cloudflare to that URL, or use
 `npm run up -- --update-worker-secret` to update it automatically after health
 passes. Automatic updates require Wrangler login and Worker access on this
@@ -132,10 +135,16 @@ to a tracked file. No gateway authentication secret is changed.
 A tunnel exit triggers retries from 2 seconds up to 60 seconds, resetting after
 5 minutes of stable uptime, without restarting the host. Each new URL is checked
 and printed again, and the optional secret update repeats. A host exit stops the
-launcher. Before any URL has been published, a 60-second health timeout stops the
-launcher with exit code 1. After a URL has been published, a health timeout kills
+launcher. Before any URL has been published, a 90-second health timeout kills and
+restarts the tunnel with a fresh URL, up to two more times using the same backoff.
+Only after all three startup health windows fail does the launcher stop with exit
+code 1. After a URL has been published, a health timeout kills
 only that tunnel and retries with the same backoff; the host and collector keep
 running. Cloudflare API URLs in tunnel logs are ignored.
+On each health-window failure, the launcher reports the last HTTP status or
+network error and prints that tunnel's last 30 stdout/stderr lines prefixed
+`[up] [cloudflared]`. This buffer stays in memory, is never written to disk, and
+is not printed during normal operation.
 Ctrl+C/SIGTERM stops both children and allows up to 75 seconds for the
 host's job drain before forcing remaining processes to stop; the operational
 Docker stack stays running.
