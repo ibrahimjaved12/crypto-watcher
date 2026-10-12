@@ -389,6 +389,8 @@ async function main() {
     nodeJob("forward-hourly", "scripts/forward-run.mjs"),
     nodeJob("forward-trend", "scripts/forward-run.mjs", ["--trend"]),
   ];
+  if (env.RUNNER_GATEWAY_ENABLED === "true")
+    specs.push(nodeJob("runner-gateway", "scripts/runner-gateway.mjs"));
   for (const spec of specs) {
     records.set(spec.name, {
       ...spec,
@@ -408,6 +410,7 @@ async function main() {
   setInterval(evaluateExit, 5_000);
   log(`Preflight passed (${MODE}, hosted main Supabase). Starting ${specs.length} children.`);
   for (const name of ["fastapi-analysis", "fastapi-forward", "collector"]) launch(records.get(name));
+  if (records.has("runner-gateway")) launch(records.get("runner-gateway"));
   const pythonNames = ["fastapi-analysis", "fastapi-forward"];
   const urls = [endpoints.analysis.origin, endpoints.forward.origin];
   void startAfterPython(records.get("forward-hourly"), urls, pythonNames);

@@ -15,6 +15,7 @@ async function load(path, imports = {}) {
 }
 const w = await import(
   await load("../src/lib/worker-host.ts", {
+    "./runner/gateway-core": await load("../src/lib/runner/gateway-core.ts"),
     "./environment": await load("../src/lib/environment.ts"),
     "./operational/config.server": await load("../src/lib/operational/config.server.ts"),
     "./python-service.server": await load("../src/lib/python-service.server.ts"),
@@ -323,4 +324,21 @@ test("the status parser rejects other shapes and the exit text names signal or c
   assert.equal(w.parseStatus(JSON.stringify({ schema: 2 })), null);
   assert.equal(w.describeExit(1, null), "exit code 1");
   assert.equal(w.describeExit(null, "SIGKILL"), "signal SIGKILL");
+});
+
+
+test("gateway is opt-in and requires its own file names when enabled", () => {
+  assert.deepEqual(run({ RUNNER_GATEWAY_SECRET: "REPLACE_WITH_RANDOM_32_PLUS_CHARS" }), []);
+  const gateway = {
+    RUNNER_GATEWAY_ENABLED: "true", RUNNER_GATEWAY_PORT: "8787",
+    RUNNER_GATEWAY_SECRET: "x".repeat(40), SUPABASE_PUBLISHABLE_KEY: jwt("anon"),
+  };
+  assert.deepEqual(run(gateway), []);
+  for (const name of Object.keys(gateway)) {
+    const env = { ...good(), ...gateway };
+    delete env[name];
+    refuses(gateway, new RegExp(name), fileFor(env));
+  }
+  refuses({ ...gateway, RUNNER_GATEWAY_PORT: "1000" }, /RUNNER_GATEWAY_PORT/);
+  refuses({ ...gateway, RUNNER_GATEWAY_SECRET: "REPLACE_WITH_RANDOM_32_PLUS_CHARS" }, /RUNNER_GATEWAY_SECRET/);
 });

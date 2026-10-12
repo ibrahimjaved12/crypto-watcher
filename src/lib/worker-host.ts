@@ -1,3 +1,4 @@
+import { validateGatewayEnv } from "./runner/gateway-core";
 import { validatePublicSecrets, validateServerSupabase } from "./environment";
 import { operationalDbConfig } from "./operational/config.server";
 import { pythonServiceConfig } from "./python-service.server";
@@ -106,10 +107,17 @@ export function preflight(input: { env: Env; envFileText: string | null }): stri
   }
   const problems: string[] = [];
   for (const [name, value] of Object.entries(env)) {
+    if (name === "RUNNER_GATEWAY_SECRET" && env["RUNNER_GATEWAY_ENABLED"] !== "true") continue;
     if (value?.startsWith("REPLACE_"))
       problems.push(`${name} must be configured; placeholder values are not allowed.`);
   }
   const missing = missingEnvFileNames(envFileText);
+  if (env["RUNNER_GATEWAY_ENABLED"] === "true") {
+    problems.push(...validateGatewayEnv(env));
+    const present = envFileNames(envFileText);
+    for (const name of ["RUNNER_GATEWAY_ENABLED", "RUNNER_GATEWAY_PORT", "RUNNER_GATEWAY_SECRET", "SUPABASE_PUBLISHABLE_KEY"])
+      if (!present.has(name)) missing.push(name);
+  }
   if (missing.length)
     problems.push(
       `.env.production.local must define these names itself (a name missing there would silently take its value from .env.local, the local stack): ${missing.join(", ")}.`,
