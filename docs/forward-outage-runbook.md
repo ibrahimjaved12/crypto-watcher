@@ -1,12 +1,22 @@
 # Forward worker outage runbook
 
 The public Worker serves hosted results. It has `MACHINE_ONLY_ENABLED=false` and
-cannot run `runForwardNow` or `runForwardTrendNow`; do recovery on the owner's
-machine. The Strategy Lab and Market dashboard warn when the latest hosted
+cannot execute `runForwardNow` or `runForwardTrendNow` directly; with
+`RUNNER_JOBS_ENABLED=true` it can enqueue that on-demand work for the owner's
+machine. Do scheduled-job recovery on the owner's machine. The Strategy Lab and Market dashboard
+warn when the latest hosted
 `paper_runs.boundary_ms` is more than two hours behind. This is the processed
 boundary, not a fresh insertion timestamp on a retry. Missing runs and failed
 reads have separate messages. A banner indicates stale data, not proof of a host
 outage: an input gap, failed Python request or database outage can also stop progress.
+
+Durable on-demand jobs use hosted `runner_jobs` and the optional `runner-jobs` child, independently
+of the gateway and tunnel. Queued jobs expire after 15 minutes and are **not replayed**; expiry is
+recorded on the next claim sweep when the host comes online. A running job left behind by a restart
+fails once its 120-second lease expires and another claim sweeps it. Check that
+`RUNNER_JOBS_ENABLED=true` on the Worker and host and that the jobs child is healthy, then submit a
+new request after the old job becomes terminal. This expiry rule does not change hourly or daily
+scheduled catch-up.
 
 ## Identify an outage
 

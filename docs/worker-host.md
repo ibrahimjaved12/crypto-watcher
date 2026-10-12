@@ -9,7 +9,8 @@ The host explicitly sets `MACHINE_ONLY_ENABLED=true` for its child environment.
 Cloudflare keeps this server-only capability off. For stale hosted results and
 restart/catch-up steps, see the [forward outage runbook](forward-outage-runbook.md).
 
-It supervises five children, plus an optional sixth gateway, each with a log prefix and its own restart policy:
+It supervises five children, plus an optional gateway and jobs runner, each with a log prefix and its
+own restart policy:
 
 | Child             | Command (same as the npm script / `dev-local.mjs`)                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -18,15 +19,16 @@ It supervises five children, plus an optional sixth gateway, each with a log pre
 | `collector`        | `node scripts/collector-worker.mjs --mode production` (`npm run collector:worker`)                                  |
 | `forward-hourly`   | `node scripts/forward-run.mjs --mode production` (`npm run forward:run`)                                            |
 | `forward-trend`    | `node scripts/forward-run.mjs --trend --mode production` (`npm run forward:trend`)                                  |
-
 | `runner-gateway` | `node scripts/runner-gateway.mjs --mode production` (only when `RUNNER_GATEWAY_ENABLED=true`; non-essential) |
+| `runner-jobs` | `node scripts/runner-jobs.mjs --mode production` (`npm run runner:jobs`; only when `RUNNER_JOBS_ENABLED=true`; non-essential) |
 
 The jobs are launched with `node` directly rather than through `npm`, so the supervisor owns the real
 process (no wrapper to signal through). `--workers 1` is explicit because uvicorn otherwise takes its
 worker count from `WEB_CONCURRENCY`, and movement sessions are process-local: the analysis service must
 stay one process. The FastAPI children do not receive the Supabase or operational credentials, only
-their token. The forward jobs start only after **both** `/health` endpoints answer. The collector starts
-immediately so the 1m history does not gap while Python warms up. History is never seeded by the host.
+their token. The forward jobs and `runner-jobs` start only after **both** `/health` endpoints answer.
+The collector starts immediately so the 1m history does not gap while Python warms up. History is
+never seeded by the host.
 
 The host does not start Docker or Supabase. The local operational stack must already be running.
 
@@ -69,6 +71,9 @@ environment; an empty value counts as defined and is then caught by the value ch
   loopback HTTP origins with explicit ports, for example ports 8000 and 8001), `PYTHON_ANALYSIS_TOKEN`\*
   (32–256 URL-safe characters)
 - Optional: `FORWARD_USER_ID` (narrow the jobs to one account), `MOVEMENT_FINALIZATION_GRACE_MS`
+- Optional durable jobs: `RUNNER_JOBS_ENABLED=true` enables `runner-jobs`; it uses the existing
+  `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. No new secrets or publishable key are required on the
+  host. `FORWARD_USER_ID` narrows the scheduled jobs only; durable jobs use the user on each queued row.
 
 Prerequisites: Node 22.12+, `npm ci`, and the Python environment
 (`python3 -m venv python/.venv && python/.venv/bin/python -m pip install -r python/requirements.txt`).
@@ -154,8 +159,12 @@ FastAPI ones are still caught by the port check.
 
 ## Stopping
 
-Ctrl+C, SIGINT, SIGTERM or SIGHUP: the host sends SIGTERM to every child, SIGKILL to any still alive after
-10 s, and exits after at most **15 s** whatever happens. A child that survives SIGKILL is named in the log
+Ctrl+C, SIGINT, SIGTERM or SIGHUP: when `runner-jobs` is alive, the host sends it SIGTERM first and gives
+it up to **60 s** to finish active work, keeping Python and the collector alive during that drain.
+It then sends SIGTERM to the remaining children, SIGKILL to any still alive after 10 s, and waits up to
+15 s for this final phase. Total shutdown is at most **75 s** with the jobs child, or **15 s** without it.
+Configure any service manager's stop timeout to allow that window.
+A child that survives SIGKILL is named in the log
 and its pid stays in the status file; the exit code is then 1, and the next start refuses until it is
 gone. A second signal kills at once. Otherwise it exits 0 (1 if a crash-loop was seen).
 
@@ -168,16 +177,50 @@ gone. A second signal kills at once. Otherwise it exits 0 (1 if a crash-loop was
 
 Under systemd (control-group kill) orphans do not survive a host crash.
 
+## Durable on-demand jobs (#294)
+
+The Strategy Lab's signal and trend buttons enqueue rows in `public.runner_jobs` in hosted main
+Supabase when the Worker has `RUNNER_JOBS_ENABLED=true` and `MACHINE_ONLY_ENABLED=false`. The Worker
+uses the signed-in user's own Supabase client, so RLS limits inserts and polling to their own rows.
+Local app setups with `MACHINE_ONLY_ENABLED=true` retain the direct run behavior. The hourly and daily
+scheduled jobs keep their existing schedules and execution path.
+
+This queue is independent of `RUNNER_GATEWAY_ENABLED`: jobs use outbound Supabase connections and
+**do not use the gateway or tunnel**. Enable `RUNNER_JOBS_ENABLED=true` separately in the host's
+gitignored `.env.production.local`. The jobs child is non-essential and follows the usual crash-loop
+policy; its failure leaves other children running.
+
+The host claims the oldest queued job every 2 seconds with its existing hosted service-role client,
+runs one job at a time for the row's user, and writes the existing forward summary back to that row.
+Each claim has a 120-second lease, renewed every 30 seconds while work runs. A claim error backs off
+for 10 seconds. A running job whose lease has elapsed becomes `failed` with
+`Runner restarted before finishing` on the next claim sweep; it is not requeued. An unfinished job
+after the shutdown drain is left for this lease-expiry handling.
+
+Queued jobs older than **15 minutes** become `expired` on the next claim sweep and are never replayed.
+If the host is offline, a stale row can still display as queued until it reconnects and sweeps it.
+The browser polls every 2 seconds, shows a waiting message after 30 seconds queued, and stops polling
+on success, failure, expiry or page unmount. A page reload does not cancel durable work; clicking again
+joins the active job of that kind for that user. Each click supplies a UUID retry key, and a duplicate
+key returns the original row even if it has already completed.
+
+Rollout order: apply `supabase/migrations/20261012180000_runner_jobs.sql` to **hosted main** first;
+then enable the host flag and restart `worker:host`, confirming `runner-jobs` is running. Finally,
+the owner changes the committed `RUNNER_JOBS_ENABLED` value in `wrangler.jsonc` from `false` to `true`
+in a separate step and deploys the Worker. The flag is deliberately committed as `false` here.
+The migration creates the queue, user read/insert policies and three service-role-only RPCs; no
+operational database migration, new credential, gateway configuration or tunnel change is needed.
+
 ## Keep it running
 
 Start on boot (examples, adjust paths; none were run):
 
 - **systemd user unit** (`~/.config/systemd/user/worker-host.service`): `WorkingDirectory=` the
   repository, `ExecStart=` the absolute `node` path with `scripts/worker-host.mjs`, `Restart=on-failure`,
-  `RestartSec=30`, `TimeoutStopSec=20`, `KillMode=control-group`; then
+  `RestartSec=30`, `TimeoutStopSec=90`, `KillMode=control-group`; then
   `loginctl enable-linger $USER` and `systemctl --user enable --now worker-host`. The host's own
   `Restart` handling is per child; systemd only covers the supervisor.
-- **pm2:** `pm2 start scripts/worker-host.mjs --name worker-host --kill-timeout 15000`, then
+- **pm2:** `pm2 start scripts/worker-host.mjs --name worker-host --kill-timeout 90000`, then
   `pm2 save` and `pm2 startup`. Install `pm2-logrotate`.
 - **Windows Task Scheduler:** a task at logon/startup running `node scripts\worker-host.mjs` in the
   repository directory, "run whether user is logged on or not", restart on failure.
