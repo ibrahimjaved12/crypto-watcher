@@ -20,7 +20,7 @@ const { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser, runMonitorForUser 
     "@/lib/market/providers.server": stub(`
       export async function loadCandles(symbol) {
         globalThis.__domains.market.push(symbol);
-        return {ok:true,result:{source:'binance-usdm',minute:[],quarter:[]}};
+        return {ok:true,result:{source:'binance-usdm',minute:[],quarter:[],attempts:[]}};
       }
     `),
     "./run-context": stub(`
@@ -29,7 +29,7 @@ const { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser, runMonitorForUser 
         metrics:zero(),
         async observation(symbol) {
           globalThis.__domains.market.push(symbol);
-          return {ok:true,result:{source:'binance-usdm',minute:[],quarter:[]}};
+          return {ok:true,result:{source:'binance-usdm',minute:[],quarter:[],attempts:[]}};
         }
       });
       export const metricsSnapshot=(value)=>({...value});
