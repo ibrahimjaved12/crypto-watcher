@@ -10,8 +10,7 @@ test("TA history exposes candle close and expands across all nine columns", asyn
   assert.match(source, /colSpan=\{9\}/);
   assert.match(source, /queryKey: \["watchlist"\]/);
   assert.match(source, /\?\? "BTCUSDT"/);
-  assert.match(source, /useState\(defaultSymbol\)/);
-  assert.match(source, /if \(!symbolTouched\) setSymbol\(defaultSymbol\)/);
+  assert.match(source, /symbolTouched \? typedSymbol : defaultSymbol/);
   assert.match(source, /setSymbolTouched\(true\)/);
   assert.match(source, /symbolReady/);
 });

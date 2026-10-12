@@ -30,12 +30,10 @@ export function TechnicalAnalysis() {
   const [frame, setFrame] = useState(15);
   const watchlist = useQuery({ queryKey: ["watchlist"], queryFn: fetchWatchlist });
   const defaultSymbol = watchlist.data?.[0]?.symbol ?? "BTCUSDT";
-  const [symbol, setSymbol] = useState(defaultSymbol);
+  const [typedSymbol, setTypedSymbol] = useState("");
   const [symbolTouched, setSymbolTouched] = useState(false);
+  const symbol = symbolTouched ? typedSymbol : defaultSymbol;
   const symbolReady = symbolTouched || watchlist.isSuccess || watchlist.isError;
-  useEffect(() => {
-    if (!symbolTouched) setSymbol(defaultSymbol);
-  }, [defaultSymbol, symbolTouched]);
   const [page, setPage] = useState(0);
   const history = useQuery({
     queryKey: ["ta", frame, symbol, page],
@@ -90,7 +88,7 @@ export function TechnicalAnalysis() {
               value={symbol}
               onChange={(e) => {
                 setSymbolTouched(true);
-                setSymbol(e.target.value);
+                setTypedSymbol(e.target.value);
                 setPage(0);
               }}
               className="h-9 w-40 rounded-md border border-input bg-background px-3 text-sm"
