@@ -87,7 +87,7 @@ const collectorReplacements = {
   "./movement-metrics-contract": stub(`
     export const DEFAULT_MARKET_MOVEMENT_CONFIG = { historicalLookbackMs: 604800000 };
   `),
-  "./collector-worker-env.server": stub(`export function validateCollectorWorkerEnvironment() {}`),
+  "./collector-worker-env.server": stub(`export function validateCollectorWorkerEnvironment() {} export function collectorCandleSettleSeconds() { return 15; }`),
 };
 
 function boundaryStore(universe) {

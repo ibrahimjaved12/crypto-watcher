@@ -15,7 +15,7 @@ import { advancePythonMovementBoundary, calculatePythonMarketLifecycle,
   registerPythonMovementHistory } from "./movement-python-client.server";
 import { movementFinalizationConfig } from "./movement-finalization";
 import { DEFAULT_MARKET_MOVEMENT_CONFIG } from "./movement-metrics-contract";
-import { validateCollectorWorkerEnvironment } from "./collector-worker-env.server";
+import { validateCollectorWorkerEnvironment, collectorCandleSettleSeconds } from "./collector-worker-env.server";
 
 const SUBSCRIPTION_REFRESH_MS = 30_000;
 const LEASE_SECONDS = 60;
@@ -70,6 +70,7 @@ export class CollectorRuntime {
   private historyBackfillGeneration = 0;
 
   constructor(private readonly store: OperationalStore) {
+    const settleSeconds = collectorCandleSettleSeconds();
     this.collector = new BinanceFuturesCollector({
       store,
       loadRest: async ({ symbol, timeframeMinutes, limit, startTime, endTime }) => {
@@ -83,6 +84,7 @@ export class CollectorRuntime {
           timeframeMinutes,
           candles: result.candles,
           retrievedAt: Date.parse(result.retrievedAt),
+          settleSeconds,
         });
       },
       loadHistoryListingTime: loadBinanceFuturesListingTime,

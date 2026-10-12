@@ -23,6 +23,7 @@ const {
   BinanceFuturesCollector,
   candleIdentity,
   normalizeRestCandles,
+  isRestCandleSettled,
   parseBinanceMarketMessage,
   COLLECTOR_BOOTSTRAP_LIMIT,
   MOVEMENT_HISTORY_BACKFILL_PAGE_LIMIT,
@@ -1057,7 +1058,7 @@ test("Python cumulative late diagnostics cannot decrease transport late counts",
 
 test("WebSocket event and receive times are preserved exactly; REST invents no event", () => {
   const duration = 60_000;
-  const openTime = BASE - duration;
+  const openTime = BASE - 2 * duration;
 
   // REST bootstrap/recovery has no exchange event time, so the absence is recorded
   // honestly as null. The completion boundary stays open + timeframe.
@@ -1368,4 +1369,30 @@ test("movement-history backfill retry does not prevent later Python bucket final
 
   assert.equal(movementCalls.length, 1);
   assert.equal(movementCalls[0].boundaryTime, BASE);
+});
+
+test("REST settle decision uses the exact inclusive boundary and leaves other intervals unchanged", () => {
+  const closeTime = BASE - 1;
+  for (const delay of [0, 700, 4_700, 14_999]) {
+    assert.equal(isRestCandleSettled(closeTime, 1, closeTime + delay), false);
+  }
+  assert.equal(isRestCandleSettled(closeTime, 1, closeTime + 15_000), true);
+  assert.equal(isRestCandleSettled(closeTime, 1, closeTime + 15_001), true);
+  for (const seconds of [5, 60]) {
+    assert.equal(isRestCandleSettled(closeTime, 1, closeTime + seconds * 1_000 - 1, seconds), false);
+    assert.equal(isRestCandleSettled(closeTime, 1, closeTime + seconds * 1_000, seconds), true);
+  }
+  for (const minutes of [15, 60, 240]) {
+    assert.equal(isRestCandleSettled(closeTime, minutes, closeTime), false);
+    assert.equal(isRestCandleSettled(closeTime, minutes, closeTime + 1), true);
+  }
+});
+
+test("REST normalization discards provisional responses until a fresh settled fetch", () => {
+  const candles = [{ time: BASE - 60_000, open: 100, high: 102, low: 99,
+    close: 101, volume: 12, quoteVolume: 1234, complete: true }];
+  const input = { symbol: "BTCUSDT", timeframeMinutes: 1, candles };
+  assert.deepEqual(normalizeRestCandles({ ...input, retrievedAt: BASE + 4_699 }), []);
+  assert.equal(normalizeRestCandles({ ...input, retrievedAt: BASE + 14_999 }).length, 1);
+  assert.deepEqual(normalizeRestCandles({ ...input, retrievedAt: BASE + 14_999, settleSeconds: 60 }), []);
 });
