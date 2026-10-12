@@ -23,7 +23,16 @@ async function load(imports = {}) {
   let { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   });
-  const replacements = { "../monitor/engine.server": engineStub, ...imports };
+  const replacements = {
+    "../monitor/engine.server": engineStub,
+    "../../integrations/supabase/client.server": stub(`
+      export const supabaseAdmin = { from() { throw new Error("Unexpected main database access"); } };
+    `),
+    "../operational/repository.server": stub(`
+      export function getOperationalStore() { throw new Error("Unexpected operational store access"); }
+    `),
+    ...imports,
+  };
   for (const [specifier, target] of Object.entries(replacements)) {
     outputText = outputText.replaceAll(JSON.stringify(specifier), JSON.stringify(target));
   }
@@ -252,7 +261,7 @@ test("a failed watchlist read surfaces instead of silently emptying the universe
 
 test("the first-request safety pass reconciles only in collector mode and only once per process", async () => {
   const bootstrapImports = {
-    "@/integrations/supabase/client.server": stub(`
+    "../../integrations/supabase/client.server": stub(`
       export const supabaseAdmin = {
         from(table) {
           if (table === "watchlist_items") {

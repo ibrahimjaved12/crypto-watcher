@@ -1,22 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import ts from "../node_modules/typescript/lib/typescript.js";
+import { createModuleLoader } from "./module-loader.mjs";
 
-async function moduleUrl(path, imports = {}) {
-  let { outputText } = ts.transpileModule(await readFile(new URL(path, import.meta.url), "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  });
-  for (const [specifier, target] of Object.entries(imports))
-    outputText = outputText.replaceAll(JSON.stringify(specifier), JSON.stringify(target));
-  return `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`;
-}
+const moduleUrl = createModuleLoader(import.meta.url);
+
 const contractUrl = await moduleUrl("../src/lib/forward/forward-contract.ts", { zod: import.meta.resolve("zod") });
 const runUrl = await moduleUrl("../src/lib/forward/forward-run.server.ts", { "./forward-contract": contractUrl });
 const stageUrl = await moduleUrl("../src/lib/forward/forward-stages.server.ts", {
   "./forward-contract": contractUrl, "./forward-run.server": runUrl });
-const { runMarketStage, runUserStage, runSharedForward, checkpointDueSigma } = await import(stageUrl);
+const { runMarketStage, runUserStage, checkpointDueSigma } = await import(stageUrl);
+const { runForward } = await import(runUrl);
 const trafficUrl = await moduleUrl("../src/lib/forward/forward-hosted-traffic.server.ts");
 const { createHostedTraffic } = await import(trafficUrl);
 const { runHourlyForAccounts } = await import(await moduleUrl("../src/lib/forward/forward-job.server.ts", {
@@ -330,7 +324,7 @@ test("catch-up stops at seven chunks and the next hourly run continues", async (
 
 test("first run clamps to retained candles, records freshness and uses the same chunks on demand", async () => {
   const f = gapFixture(150, false);
-  const result = await runSharedForward(f.deps, { userId: A, trigger: "on_demand", strategyIds: ["test"] });
+  const result = await runForward(f.deps, { userId: A, trigger: "on_demand", strategyIds: ["test"] });
   assert.equal(result.status, "ok");
   assert.equal(f.stages.length, 7);
   assert.equal(f.calls.market.find(body => !body.sigma_only).from_ms, BOUNDARY - 120 * 24 * HOUR);
