@@ -4,16 +4,10 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import ts from "../node_modules/typescript/lib/typescript.js";
+import { createModuleLoader } from "./module-loader.mjs";
 
-async function moduleUrl(path, imports = {}) {
-  let { outputText } = ts.transpileModule(await readFile(new URL(path, import.meta.url), "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-  });
-  for (const [specifier, target] of Object.entries(imports))
-    outputText = outputText.replaceAll(JSON.stringify(specifier), JSON.stringify(target));
-  return `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`;
-}
+const moduleUrl = createModuleLoader(import.meta.url);
+
 const contractUrl = await moduleUrl("../src/lib/forward/forward-contract.ts", { zod: import.meta.resolve("zod") });
 const runUrl = await moduleUrl("../src/lib/forward/forward-run.server.ts", { "./forward-contract": contractUrl });
 const trafficUrl = await moduleUrl("../src/lib/forward/forward-hosted-traffic.server.ts");

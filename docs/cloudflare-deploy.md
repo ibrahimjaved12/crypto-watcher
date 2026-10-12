@@ -144,6 +144,12 @@ overrides are gitignored.
 
 ## Runner gateway
 
+Gateway and jobs modules, including their transitive dependencies, must use static
+imports: Vite's `runnerImport` closes its module runner after loading the entry
+module, so later dynamic imports can fail with "Vite module runner has been closed".
+Keep the Worker-side dynamic imports in `src/lib/monitor.functions.ts`; those
+preserve the Cloudflare server-function boundary.
+
 Refs #294. Both runner flags are on in committed `wrangler.jsonc`. Both hosted
 Supabase migrations are applied, and `RUNNER_GATEWAY_URL` / `RUNNER_GATEWAY_SECRET`
 are configured as Cloudflare runtime secrets. The machine must run

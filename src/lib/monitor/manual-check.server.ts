@@ -1,20 +1,18 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "../../integrations/supabase/types";
+import { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser } from "./engine.server";
+import { syncCollectorUniverse } from "../market/collector-subscriptions.server";
+import { getOperationalStore } from "../operational/repository.server";
 
 export async function runManualMonitorCheck(
   supabase: SupabaseClient<Database>,
   supabaseAdmin: SupabaseClient<Database>,
   userId: string,
 ) {
-  const { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser } =
-    await import("@/lib/monitor/engine.server");
-
   // Safety net: make sure the collector is subscribed before checking, so a run right after
   // start-up does not find an empty candle store. Best effort; a failure surfaces per symbol
   // below as missing history.
   try {
-    const { syncCollectorUniverse } = await import("@/lib/market/collector-subscriptions.server");
-    const { getOperationalStore } = await import("@/lib/operational/repository.server");
     await syncCollectorUniverse(supabaseAdmin, getOperationalStore());
   } catch (error) {
     console.error(
