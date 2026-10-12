@@ -32,6 +32,7 @@ export function TechnicalAnalysis() {
   const defaultSymbol = watchlist.data?.[0]?.symbol ?? "BTCUSDT";
   const [symbol, setSymbol] = useState(defaultSymbol);
   const [symbolTouched, setSymbolTouched] = useState(false);
+  const symbolReady = symbolTouched || watchlist.isSuccess || watchlist.isError;
   useEffect(() => {
     if (!symbolTouched) setSymbol(defaultSymbol);
   }, [defaultSymbol, symbolTouched]);
@@ -40,6 +41,7 @@ export function TechnicalAnalysis() {
     queryKey: ["ta", frame, symbol, page],
     queryFn: () => loadHistory(frame, symbol, page * 25, 26),
     ...automatic,
+    enabled: symbolReady && automatic.enabled,
   });
   const selectedSymbol = symbol.trim().toUpperCase();
   const latestByFrame = useQueries({
@@ -47,7 +49,7 @@ export function TechnicalAnalysis() {
       queryKey: ["ta", timeframe, selectedSymbol, "latest"],
       queryFn: () => loadHistory(timeframe, selectedSymbol, 0, 1),
       ...automatic,
-      enabled: automatic.enabled && selectedSymbol.length > 0,
+      enabled: symbolReady && automatic.enabled && selectedSymbol.length > 0,
     })),
   });
   const refreshing = history.isFetching || latestByFrame.some((query) => query.isFetching);
@@ -154,7 +156,7 @@ export function TechnicalAnalysis() {
                   <span className="ml-2 text-destructive">Could not load</span>
                 ) : query.isPending ? (
                   <span className="ml-2 text-muted-foreground">
-                    {query.isFetching ? "Loading…" : "Press Refresh to load"}
+                    {!symbolReady || query.isFetching ? "Loading…" : "Press Refresh to load"}
                   </span>
                 ) : (
                   <span className="ml-2 text-muted-foreground">no data yet</span>
@@ -164,9 +166,9 @@ export function TechnicalAnalysis() {
           })}
         </div>
       </div>
-      {history.isPending && !history.isFetching && !automatic.enabled ? (
+      {symbolReady && history.isPending && !history.isFetching && !automatic.enabled ? (
         <p className="py-4 text-sm">Press Refresh to load the indicator history.</p>
-      ) : history.isPending ? (
+      ) : !symbolReady || history.isPending ? (
         <p className="py-4 text-sm text-muted-foreground">Loading indicator history…</p>
       ) : history.error ? (
         <p role="alert" className="py-4 text-sm text-destructive">
