@@ -2,6 +2,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { OperationalStore } from "../operational/types";
 import { DEFAULT_SETTINGS } from "../monitor/engine.server";
+import { supabaseAdmin } from "../../integrations/supabase/client.server";
+import { getOperationalStore } from "../operational/repository.server";
 
 type Client = Pick<SupabaseClient<Database>, "from">;
 
@@ -127,8 +129,6 @@ export function bootstrapCollectorUniverse(
   if (env["BINANCE_COLLECTOR_ENABLED"] !== "true") return Promise.resolve(true);
   if (bootstrap) return bootstrap;
   bootstrap = (async () => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { getOperationalStore } = await import("../operational/repository.server");
     await syncCollectorUniverse(supabaseAdmin, getOperationalStore(), env);
     return true;
   })().catch((error) => {

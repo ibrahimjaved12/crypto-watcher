@@ -1,4 +1,4 @@
-import type { SharedRepository } from "./forward-stages.server";
+import { runSharedForward, type SharedRepository } from "./forward-stages.server";
 import type { SigmaCache } from "./forward-sigma-cache.server";
 import type { CollectorHealth, ForwardMinuteRow } from "../operational/types";
 import {
@@ -154,7 +154,6 @@ export function staleness(
 
 export async function runForward(deps: ForwardDeps, input: ForwardRunInput): Promise<ForwardRunSummary> {
   if (deps.repository.shared) {
-    const { runSharedForward } = await import("./forward-stages.server");
     return runSharedForward(deps, input);
   }
   const symbols = input.symbols ?? FORWARD_SYMBOLS;

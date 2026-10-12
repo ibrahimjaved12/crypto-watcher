@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { supabaseAdmin } from "../../integrations/supabase/client.server";
 import { getOperationalStore } from "../operational/repository.server";
 import { pythonServiceConfig } from "../python-service.server";
 import { parseBinanceFunding, type FundingEvent } from "./forward-contract";
@@ -36,8 +37,6 @@ export async function forwardDeps(send: typeof fetch = fetch): Promise<ForwardDe
   const store = getOperationalStore();
   if (!store.enabled)
     throw new Error("The forward job needs the operational database (OPERATIONAL_DB_ENABLED=true)");
-  // Relative import: the local job runs through Vite's module runner without the "@" alias.
-  const { supabaseAdmin } = await import("../../integrations/supabase/client.server");
   const log = (message: string) => console.log(message.startsWith("[") ? message : `[forward-sigma] ${message}`);
   const callSplit = async (path: string, body: unknown) => {
     const config = pythonServiceConfig(path);
@@ -162,7 +161,6 @@ export async function forwardTrendDeps(send: typeof fetch = fetch): Promise<Tren
     throw new Error(
       "The forward trend job needs the operational database (OPERATIONAL_DB_ENABLED=true)",
     );
-  const { supabaseAdmin } = await import("../../integrations/supabase/client.server");
   return {
     now: () => Date.now(),
     readDailyBars: (symbol, sinceMs) => store.readForwardDailyBars(symbol, sinceMs),
