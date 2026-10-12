@@ -39,8 +39,8 @@ if (existsSync(path)) {
       OPERATIONAL_DB_ENABLED: "true",
       OPERATIONAL_SUPABASE_URL: url.origin,
       OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY: status.SERVICE_ROLE_KEY,
-      RUNNER_GATEWAY_ENABLED: "false",
-      RUNNER_JOBS_ENABLED: "false",
+      RUNNER_GATEWAY_ENABLED: "true",
+      RUNNER_JOBS_ENABLED: "true",
       RUNNER_GATEWAY_PORT: "8787",
       RUNNER_GATEWAY_SECRET: "REPLACE_WITH_RANDOM_32_PLUS_CHARS",
       BINANCE_COLLECTOR_ENABLED: "true",
@@ -57,7 +57,7 @@ if (existsSync(path)) {
       { flag: "wx", mode: 0o600 },
     );
     console.log(
-      "Created .env.production.local from local operational Supabase status. Configure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY before running npm run worker:host.",
+      "Created .env.production.local from local operational Supabase status. Configure SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_PUBLISHABLE_KEY and RUNNER_GATEWAY_SECRET before running npm run worker:host.",
     );
   } catch (error) {
     console.error(
