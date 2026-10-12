@@ -97,6 +97,44 @@ Prerequisites: Node 22.12+, `npm ci`, and the Python environment
 6. **Start the host:** `npm run worker:host`.
 7. **Check:** `npm run mvp:check -- --mode production` (its `worker host` line, below).
 
+## One-command laptop startup (#308)
+
+After completing the host setup above, run `npm run up`. It requires Docker Engine
+running and accessible to your user, `cloudflared` on PATH, the installed npm/Python
+dependencies, and both `RUNNER_GATEWAY_ENABLED=true` and `RUNNER_JOBS_ENABLED=true`
+in `.env.production.local`. The gateway must use port 8787. The launcher checks
+Docker and prints manual service, context and group-permission hints if needed;
+it never starts Docker, changes context, calls sudo, or launches Docker Desktop.
+
+`up` reuses `npm run dev:local:all -- --operational-only`. This mode checks the
+operational stack's status and exits successfully without changing anything if
+it is already running. Otherwise it starts only `operational-db/supabase`; it does
+not start the main/app database, the dev server, or other development services.
+It does not apply migrations or edit environment files. Docker failures exit
+non-zero. `npm run dev:local:all -- --help` lists the mode; without this flag the
+existing development startup behavior is unchanged.
+
+The launcher then streams `npm run worker:host` output and starts
+`cloudflared tunnel --url http://127.0.0.1:8787`. It prints the public quick-tunnel
+URL after `/health` returns 200 (polls every 2 seconds for up to 60 seconds).
+Set `RUNNER_GATEWAY_URL` in Cloudflare to that URL, or use
+`npm run up -- --update-worker-secret` to update it automatically after health
+passes. Automatic updates require Wrangler login and Worker access on this
+machine; the URL is passed to Wrangler through stdin, and neither Wrangler output
+nor the secret input is logged. The public URL is printed for use but never saved
+to a tracked file. No gateway authentication secret is changed.
+
+A tunnel exit triggers retries from 2 seconds up to 60 seconds, resetting after
+5 minutes of stable uptime, without restarting the host. Each new URL is checked
+and printed again, and the optional secret update repeats. A host exit stops the
+launcher. Ctrl+C/SIGTERM stops both children and allows up to 75 seconds for the
+host's job drain before forcing remaining processes to stop; the operational
+Docker stack stays running.
+
+Quick-tunnel URLs change on restart. A Cloudflare named tunnel with an owned
+domain will replace the quick-tunnel step later; see #308. Until then, without
+the update flag, update the Cloudflare runtime URL secret after each URL change.
+
 ## Preflight
 
 The host refuses to start (exit 1, one line per problem, no secret values) when:

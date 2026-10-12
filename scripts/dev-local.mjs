@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { loadEnvFile } from "node:process";
 
 const root = resolve(import.meta.dirname, "..");
+const operationalOnly = process.argv.includes("--operational-only");
 const withOperational = process.argv.includes("--with-operational");
 // With the operational database the forward test (hourly signals/paper trading and the daily trend
 // portfolios) runs too, unless --no-forward is given.
@@ -49,7 +50,7 @@ function start(name, command, args, options = {}) {
 function stop(child, signal) {
   if (!child.pid) return;
   try {
-    if (process.platform === "win32") child.kill(signal);
+    if (process.platform === "win32" || child === children.get("operational-start")) child.kill(signal);
     else process.kill(-child.pid, signal);
   } catch (error) {
     if (error.code !== "ESRCH") throw error;
@@ -114,6 +115,40 @@ async function waitForHealth(url, child) {
 }
 
 async function main() {
+  if (process.argv.includes("--help")) {
+    console.log("Usage: npm run dev:local:all -- [--no-forward | --operational-only]");
+    console.log("--operational-only: start only operational Supabase if stopped, then exit; no app database or development services.");
+    return;
+  }
+  if (operationalOnly) {
+    // This branch must return before any main database, environment-file or service work.
+    if (spawnSync("docker", ["info"], { stdio: "ignore", timeout: 30_000 }).status !== 0)
+      throw new Error("Docker Engine is unavailable. Start it manually and check Docker socket permissions/context; no changes were made.");
+    const status = spawnSync("supabase", ["status", "--workdir", "operational-db"], {
+      cwd: root, stdio: "ignore", timeout: 30_000,
+    });
+    if (status.error)
+      throw new Error("Could not check operational Supabase status. Check that the Supabase CLI is installed and responsive.");
+    if (status.status === 0) {
+      console.log("[local-dev] Operational Supabase is already running; nothing to do.");
+      return;
+    }
+    console.log("[local-dev] Starting only operational Supabase…");
+    // Suppress CLI output because it can include local credentials.
+    const stack = spawn("supabase", ["start", "--workdir", "operational-db"], {
+      cwd: root, stdio: "ignore",
+    });
+    // Inherit the launcher's process group so up can terminate startup on Ctrl+C.
+    children.set("operational-start", stack);
+    const code = await new Promise((done) => {
+      stack.once("error", () => done(1));
+      stack.once("exit", (value) => done(value ?? 1));
+    });
+    children.delete("operational-start");
+    if (code !== 0) throw new Error("Could not start operational Supabase. Check Docker Engine and the operational-db configuration.");
+    console.log("[local-dev] Operational Supabase is ready.");
+    return;
+  }
   console.log("[local-dev] Starting local Supabase if needed…");
   run("supabase", ["start"], "Could not start local Supabase. Ensure Docker is running.", {
     quiet: true,
