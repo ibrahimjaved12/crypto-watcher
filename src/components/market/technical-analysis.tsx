@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { automaticQueryOptions, logActivity } from "@/lib/activity-controls";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -17,6 +17,7 @@ import { Hint } from "@/components/hint";
 import { EmptyState, SectionTitle, SignedBar } from "@/components/plain";
 import { humanizeReason, humanizeToken, sourceLabel } from "@/lib/labels";
 import { explainTA } from "@/lib/ta/interpretation";
+import { TA_FRAMES } from "@/lib/ta/schedule";
 import { cn } from "@/lib/utils";
 
 export function TechnicalAnalysis() {
@@ -30,24 +31,19 @@ export function TechnicalAnalysis() {
   const [page, setPage] = useState(0);
   const history = useQuery({
     queryKey: ["ta", frame, symbol, page],
-    queryFn: async () => {
-      logActivity(import.meta.env["VITE_ACTIVITY_DIAGNOSTICS"], "ta-history", "request-started");
-      let query = supabase
-        .from("ta_signals")
-        .select(
-          "id, symbol, timeframe, candle_at, source, source_native_symbol, version, strategy_version, price, classification, score, atr_pct, factor_breakdown, reasons, indicators, patterns, outcome_status, return_pct",
-        )
-        .order("candle_at", { ascending: false })
-        .order("id", { ascending: false })
-        .range(page * 25, page * 25 + 25);
-      if (frame !== 0) query = query.eq("timeframe", frame);
-      if (symbol.trim()) query = query.eq("symbol", symbol.trim().toUpperCase());
-      const { data, error } = await query;
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => loadHistory(frame, symbol, page * 25, 26),
     ...automatic,
   });
+  const selectedSymbol = symbol.trim().toUpperCase();
+  const latestByFrame = useQueries({
+    queries: TA_FRAMES.map((timeframe) => ({
+      queryKey: ["ta", timeframe, selectedSymbol, "latest"],
+      queryFn: () => loadHistory(timeframe, selectedSymbol, 0, 1),
+      ...automatic,
+      enabled: automatic.enabled && selectedSymbol.length > 0,
+    })),
+  });
+  const refreshing = history.isFetching || latestByFrame.some((query) => query.isFetching);
   const [showAll, setShowAll] = useState(false);
   const rows = (history.data ?? []).slice(0, 25);
   const visible = showAll ? rows : rows.slice(0, 10);
@@ -94,10 +90,15 @@ export function TechnicalAnalysis() {
               size="icon"
               title="Refresh indicator history"
               aria-label="Refresh indicator history"
-              disabled={history.isFetching}
-              onClick={() => history.refetch()}
+              disabled={refreshing}
+              onClick={() => {
+                void history.refetch();
+                if (selectedSymbol) {
+                  for (const query of latestByFrame) void query.refetch();
+                }
+              }}
             >
-              <RefreshCw className={cn("size-4", history.isFetching && "animate-spin")} />
+              <RefreshCw className={cn("size-4", refreshing && "animate-spin")} />
             </Button>
           </>
         }
@@ -107,6 +108,54 @@ export function TechnicalAnalysis() {
           Automatic refresh is paused. Press Refresh after changing filters or pages.
         </p>
       )}
+      <div className="mb-4" role="group" aria-label="Latest by timeframe">
+        <p className="mb-2 text-xs font-medium">
+          Latest by timeframe{selectedSymbol ? ` · ${selectedSymbol}` : " · enter a pair above"}
+        </p>
+        <div className="grid gap-2 sm:grid-cols-3">
+          {TA_FRAMES.map((timeframe, index) => {
+            const query = latestByFrame[index]!;
+            const row = query.data?.[0];
+            return (
+              <button
+                key={timeframe}
+                type="button"
+                aria-pressed={frame === timeframe}
+                className={cn(
+                  "min-w-0 rounded-md border p-3 text-left text-xs hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  frame === timeframe ? "border-primary bg-accent/30" : "border-border",
+                )}
+                onClick={() => {
+                  setFrame(timeframe);
+                  setPage(0);
+                }}
+              >
+                <span className="font-medium">{timeframeLabel(timeframe)}</span>
+                {!selectedSymbol ? (
+                  <span className="ml-2 text-muted-foreground">Select a pair</span>
+                ) : row ? (
+                  <>
+                    <span className="num mt-1 block text-muted-foreground">
+                      {candleClosedAt(row).toLocaleString(undefined, { dateStyle: "short", timeStyle: "medium" })}
+                    </span>
+                    <span className="num my-1 block">Candle close: {number(row.price)}</span>
+                    <HistorySignal row={row} />
+                    <HistoryScore row={row} />
+                  </>
+                ) : query.isError ? (
+                  <span className="ml-2 text-destructive">Could not load</span>
+                ) : query.isPending ? (
+                  <span className="ml-2 text-muted-foreground">
+                    {query.isFetching ? "Loading…" : "Press Refresh to load"}
+                  </span>
+                ) : (
+                  <span className="ml-2 text-muted-foreground">no data yet</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
       {history.isPending && !history.isFetching && !automatic.enabled ? (
         <p className="py-4 text-sm">Press Refresh to load the indicator history.</p>
       ) : history.isPending ? (
@@ -125,7 +174,7 @@ export function TechnicalAnalysis() {
       ) : (
         <>
           <div className="-mx-1 overflow-x-auto px-1" tabIndex={0} aria-label="Indicator history">
-            <table className="w-full min-w-[720px] text-left text-xs">
+            <table className="w-full min-w-[780px] text-left text-xs">
               <thead className="text-muted-foreground">
                 <tr className="border-b border-border">
                   {HEADERS.map(([h, help]) => (
@@ -176,9 +225,27 @@ export function TechnicalAnalysis() {
   );
 }
 
+async function loadHistory(frame: number, symbol: string, offset: number, limit: number) {
+  logActivity(import.meta.env["VITE_ACTIVITY_DIAGNOSTICS"], "ta-history", "request-started");
+  let query = supabase
+    .from("ta_signals")
+    .select(
+      "id, symbol, timeframe, candle_at, source, source_native_symbol, version, strategy_version, price, classification, score, atr_pct, factor_breakdown, reasons, indicators, patterns, outcome_status, return_pct",
+    )
+    .order("candle_at", { ascending: false })
+    .order("id", { ascending: false })
+    .range(offset, offset + limit - 1);
+  if (frame !== 0) query = query.eq("timeframe", frame);
+  if (symbol.trim()) query = query.eq("symbol", symbol.trim().toUpperCase());
+  const { data, error } = await query;
+  if (error) throw error;
+  return data;
+}
+
 const HEADERS: [string, string | null][] = [
   ["Pair", null],
   ["Candle closed", "Local time when the analysed candle finished. Only completed candles are used."],
+  ["Candle close", "Close of the analysed candle, not the live price."],
   [
     "Trend lean",
     "Direction suggested by the 20/50-candle averages and momentum. A description of the chart, not a forecast.",
@@ -223,9 +290,11 @@ const signed = (v: number | null) => (v === null ? "—" : v > 0 ? `+${v}` : Str
 const label = (value: unknown) =>
   typeof value === "string" ? humanizeToken(value) : "Unavailable";
 
-function HistoryRow({ row }: { row: HistoryRowData }) {
-  const [open, setOpen] = useState(false);
-  const values = (row.indicators ?? {}) as Record<string, unknown>;
+const timeframeLabel = (timeframe: number) => timeframe === 15 ? "15m" : `${timeframe / 60}h`;
+const candleClosedAt = (row: HistoryRowData) =>
+  new Date(Date.parse(row.candle_at) + row.timeframe * 60_000);
+
+function HistorySignal({ row }: { row: HistoryRowData }) {
   const factors = (row.factor_breakdown ?? {}) as Record<string, unknown>;
   const factor = (name: string) => {
     const value = factors[name];
@@ -233,8 +302,6 @@ function HistoryRow({ row }: { row: HistoryRowData }) {
       ? (value as Record<string, unknown>)
       : {};
   };
-  const timeframe = row.timeframe === 15 ? "15m" : `${row.timeframe / 60}h`;
-  const closed = new Date(Date.parse(row.candle_at) + row.timeframe * 60_000);
   const tone =
     row.classification === "bullish"
       ? "text-bull"
@@ -246,6 +313,29 @@ function HistoryRow({ row }: { row: HistoryRowData }) {
   const pattern = row.patterns[0] ? humanizeToken(row.patterns[0]) : null;
   return (
     <>
+      <span className={cn("inline-flex items-center gap-1 font-medium", tone)}>
+        <LeanIcon className="size-3.5" aria-hidden />
+        {label(factor("trend")["classification"])} trend
+      </span>
+      <span className="block text-muted-foreground">
+        {label(factor("momentum")["classification"])} momentum{pattern ? ` · ${pattern}` : ""}
+      </span>
+    </>
+  );
+}
+
+function HistoryScore({ row }: { row: HistoryRowData }) {
+  return <SignedBar value={row.score} label={`Indicator score ${signed(row.score)} of ±100`} />;
+}
+
+function HistoryRow({ row }: { row: HistoryRowData }) {
+  const [open, setOpen] = useState(false);
+  const values = (row.indicators ?? {}) as Record<string, unknown>;
+  const factors = (row.factor_breakdown ?? {}) as Record<string, unknown>;
+  const timeframe = timeframeLabel(row.timeframe);
+  const closed = candleClosedAt(row);
+  return (
+    <>
       <tr className="border-b border-border/50 align-top hover:bg-accent/30">
         <td className="p-2">
           <span className="font-medium">{row.symbol.replace(/USDT$/, "")}</span>
@@ -254,17 +344,12 @@ function HistoryRow({ row }: { row: HistoryRowData }) {
         <td className="num whitespace-nowrap p-2" title={`Opened ${new Date(row.candle_at).toLocaleString()}`}>
           {closed.toLocaleString(undefined, { dateStyle: "short", timeStyle: "medium" })}
         </td>
+        <td className="num whitespace-nowrap p-2">{number(row.price)}</td>
         <td className="p-2">
-          <span className={cn("inline-flex items-center gap-1 font-medium", tone)}>
-            <LeanIcon className="size-3.5" aria-hidden />
-            {label(factor("trend")["classification"])} trend
-          </span>
-          <div className="text-muted-foreground">
-            {label(factor("momentum")["classification"])} momentum{pattern ? ` · ${pattern}` : ""}
-          </div>
+          <HistorySignal row={row} />
         </td>
         <td className="p-2">
-          <SignedBar value={row.score} label={`Indicator score ${signed(row.score)} of ±100`} />
+          <HistoryScore row={row} />
         </td>
         <td className="num p-2">{row.atr_pct === null ? "—" : `${row.atr_pct.toFixed(2)}%`}</td>
         <td className="num p-2">{number(values["rsi14"])}</td>
@@ -295,7 +380,7 @@ function HistoryRow({ row }: { row: HistoryRowData }) {
       </tr>
       {open ? (
         <tr className="border-b border-border/50 bg-background/30">
-          <td colSpan={8} className="p-3">
+          <td colSpan={9} className="p-3">
             <div className="grid gap-4 md:grid-cols-[1fr_2fr]">
               <dl className="space-y-1">
                 <Detail name="EMA 20 / 50 / 200">
