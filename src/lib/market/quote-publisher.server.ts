@@ -133,9 +133,10 @@ function hostedPublish(): QuotePublisherDeps["publish"] {
 }
 
 /**
- * Starts the periodic publisher. Returns null (and says why) when it is disabled or the hosted
- * service credentials are not configured on this machine; it never throws, so the collector start-up
- * cannot be affected. Set MARKET_QUOTE_PUBLISHER_ENABLED=false to turn it off.
+ * Starts the periodic publisher, only from the standalone entrypoint. Its pending timer must keep
+ * the process alive until stop() is called. Returns null (and says why) when it is disabled or the
+ * hosted service credentials are not configured; it never throws.
+ * Set MARKET_QUOTE_PUBLISHER_ENABLED=false to turn it off.
  */
 export function startMarketQuotePublisher(
   options: StartPublisherOptions = {},
@@ -173,7 +174,6 @@ export function startMarketQuotePublisher(
     const schedule = (delay: number): void => {
       if (stopped) return;
       timer = setTimeout(() => void tick(), delay);
-      timer.unref?.();
     };
 
     const tick = async (): Promise<void> => {
