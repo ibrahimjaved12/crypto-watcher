@@ -112,6 +112,11 @@ export function preflight(input: { env: Env; envFileText: string | null }): stri
       problems.push(`${name} must be configured; placeholder values are not allowed.`);
   }
   const missing = missingEnvFileNames(envFileText);
+  if (env["RUNNER_JOBS_ENABLED"] === "true") {
+    // Same hosted main credentials as the scheduled forward jobs; no gateway key is needed.
+    for (const name of ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"])
+      if (!env[name]?.trim()) problems.push(`${name} is required for runner jobs.`);
+  }
   if (env["RUNNER_GATEWAY_ENABLED"] === "true") {
     problems.push(...validateGatewayEnv(env));
     const present = envFileNames(envFileText);

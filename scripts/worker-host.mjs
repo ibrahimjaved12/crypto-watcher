@@ -26,6 +26,7 @@ let forceSignalSeen = false;
 let statusWarned = false;
 let allDownSinceMs = null;
 const KILL_AFTER_MS = 10_000; // SIGTERM first, SIGKILL after this long
+const RUNNER_JOBS_DRAIN_MS = 60_000;
 
 const importLib = async (path) => {
   const loaded = (await runnerImport(path, { root, mode: MODE, configFile: false, envDir: false })).module;
@@ -249,7 +250,7 @@ async function shutdown(reason, requestedCode = 0) {
     return;
   }
   shuttingDown = true;
-  log(`${reason}; stopping children (SIGTERM, SIGKILL after ${KILL_AFTER_MS / 1000}s).`);
+  log(`${reason}; stopping children (runner jobs drain for up to 60s; other children then get ${KILL_AFTER_MS / 1000}s).`);
   for (const record of records.values()) {
     if (record.timer) clearTimeout(record.timer);
     record.timer = null;
@@ -261,6 +262,19 @@ async function shutdown(reason, requestedCode = 0) {
   const exits = [...records.values()]
     .filter((r) => r.state === "stopping")
     .map((r) => new Promise((done) => r.proc.once("exit", done)));
+  // Keep Python and the collector alive while the on-demand job drains, then stop the rest.
+  const runnerJobs = records.get("runner-jobs");
+  if (runnerJobs?.state === "stopping") {
+    let drainTimer;
+    const drained = new Promise((done) => runnerJobs.proc.once("exit", done));
+    const drainDeadline = new Promise((done) => {
+      drainTimer = setTimeout(done, RUNNER_JOBS_DRAIN_MS);
+    });
+    signalChild(runnerJobs, "SIGTERM");
+    await Promise.race([drained, drainDeadline]);
+    clearTimeout(drainTimer);
+    if (isAlive(runnerJobs.proc)) signalChild(runnerJobs, "SIGKILL");
+  }
   for (const record of records.values()) if (record.state === "stopping") signalChild(record, "SIGTERM");
   const killTimer = setTimeout(() => {
     for (const record of records.values()) if (record.state === "stopping") signalChild(record, "SIGKILL");
@@ -391,6 +405,8 @@ async function main() {
   ];
   if (env.RUNNER_GATEWAY_ENABLED === "true")
     specs.push(nodeJob("runner-gateway", "scripts/runner-gateway.mjs"));
+  if (env.RUNNER_JOBS_ENABLED === "true")
+    specs.push(nodeJob("runner-jobs", "scripts/runner-jobs.mjs"));
   for (const spec of specs) {
     records.set(spec.name, {
       ...spec,
@@ -415,6 +431,7 @@ async function main() {
   const urls = [endpoints.analysis.origin, endpoints.forward.origin];
   void startAfterPython(records.get("forward-hourly"), urls, pythonNames);
   void startAfterPython(records.get("forward-trend"), urls, pythonNames);
+  if (records.has("runner-jobs")) void startAfterPython(records.get("runner-jobs"), urls, pythonNames);
 }
 
 // SIGHUP is what a closed terminal sends; without it the children would outlive the host.

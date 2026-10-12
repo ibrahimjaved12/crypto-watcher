@@ -19,6 +19,7 @@
     "OPERATIONAL_DB_ENABLED": "false",
     "PYTHON_ANALYSIS_ENABLED": "false",
     "RUNNER_GATEWAY_ENABLED": "false",
+    "RUNNER_JOBS_ENABLED": "false",
     "SCHEDULED_MONITOR_ENABLED": "false",
     "SUPABASE_URL": "https://xshzjhocpcenuumdrhdh.supabase.co"
   },

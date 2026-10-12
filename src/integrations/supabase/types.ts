@@ -14,6 +14,51 @@ export type Database = {
   }
   public: {
     Tables: {
+      runner_jobs: {
+        Row: {
+          id: string
+          user_id: string
+          kind: string
+          status: string
+          idempotency_key: string
+          created_at: string
+          started_at: string | null
+          finished_at: string | null
+          lease_expires_at: string | null
+          worker_id: string | null
+          result: Json | null
+          error: string | null
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          kind: string
+          status?: string
+          idempotency_key: string
+          created_at?: string
+          started_at?: string | null
+          finished_at?: string | null
+          lease_expires_at?: string | null
+          worker_id?: string | null
+          result?: Json | null
+          error?: string | null
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          kind?: string
+          status?: string
+          idempotency_key?: string
+          created_at?: string
+          started_at?: string | null
+          finished_at?: string | null
+          lease_expires_at?: string | null
+          worker_id?: string | null
+          result?: Json | null
+          error?: string | null
+        }
+        Relationships: []
+      }
       alerts: {
         Row: {
           baseline_at: string | null
@@ -684,6 +729,31 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      claim_runner_job: {
+        Args: {
+          p_worker_id: string
+          p_lease_seconds: number
+        }
+        Returns: Database["public"]["Tables"]["runner_jobs"]["Row"][]
+      }
+      extend_runner_job_lease: {
+        Args: {
+          p_id: string
+          p_worker_id: string
+          p_lease_seconds: number
+        }
+        Returns: boolean
+      }
+      finish_runner_job: {
+        Args: {
+          p_id: string
+          p_worker_id: string
+          p_ok: boolean
+          p_result: Json | null
+          p_error: string | null
+        }
+        Returns: boolean
+      }
       apply_ta_outcomes: {
         Args: {
           p_outcomes: Json

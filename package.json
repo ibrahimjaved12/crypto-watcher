@@ -12,6 +12,7 @@
     "dev:local:all": "node scripts/dev-local.mjs --with-operational",
     "dev:local:stop": "node scripts/stop-local.mjs",
     "runner:gateway": "node scripts/runner-gateway.mjs",
+    "runner:jobs": "node scripts/runner-jobs.mjs",
     "collector:worker": "node scripts/collector-worker.mjs",
     "forward:run": "node scripts/forward-run.mjs",
     "forward:trend": "node scripts/forward-run.mjs --trend",

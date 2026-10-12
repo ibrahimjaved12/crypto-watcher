@@ -342,3 +342,14 @@ test("gateway is opt-in and requires its own file names when enabled", () => {
   refuses({ ...gateway, RUNNER_GATEWAY_PORT: "1000" }, /RUNNER_GATEWAY_PORT/);
   refuses({ ...gateway, RUNNER_GATEWAY_SECRET: "REPLACE_WITH_RANDOM_32_PLUS_CHARS" }, /RUNNER_GATEWAY_SECRET/);
 });
+
+test("runner jobs require only the existing main Supabase credentials when enabled", () => {
+  for (const flag of [undefined, "false", "TRUE", "1", "true"])
+    assert.deepEqual(run({ RUNNER_JOBS_ENABLED: flag, RUNNER_GATEWAY_ENABLED: "false" }), []);
+  for (const name of ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"])
+    refuses({ RUNNER_JOBS_ENABLED: "true", [name]: undefined }, new RegExp(`${name} is required for runner jobs`));
+  const { SUPABASE_SERVICE_ROLE_KEY: _omitted, ...withoutKey } = good();
+  refuses({ RUNNER_JOBS_ENABLED: "true" }, /must define these names itself.*SUPABASE_SERVICE_ROLE_KEY/, fileFor(withoutKey));
+  assert.equal(w.ESSENTIAL_CHILD, "collector");
+  assert.deepEqual(w.FORWARD_CHILDREN, ["forward-hourly", "forward-trend"]);
+});
