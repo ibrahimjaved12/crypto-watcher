@@ -19,11 +19,14 @@ async function read(path) {
   return readFile(new URL(path, import.meta.url), "utf8");
 }
 
+const loggingUrl = transpile(await read("../src/lib/market/collector-logging.ts"));
+
 // The collector runtime is transpiled with only its operational/market dependencies
 // stubbed. Application modules (the main-database admin client, the monitor engine, and
 // the TA engine) are deliberately not stubbed, so any restored import would fail to
 // resolve and fail this test.
 const collectorReplacements = {
+  "./collector-logging": loggingUrl,
   "../operational/repository.server": stub(
     `export function getOperationalStore() { throw new Error("the test injects a store"); }`,
   ),
@@ -42,6 +45,7 @@ const collectorReplacements = {
       async reconcile(symbols) { globalThis.__collectorBoundary.reconciled.push([...symbols]); }
       streamNames() { return []; }
       subscribedSymbols() { return []; }
+      storedOneMinuteCandleCount() { return 0; }
       async backfillMovementHistory() {
         globalThis.__collectorBoundary.historyBackfills += 1;
         if (globalThis.__collectorBoundary.historyBackfillError) {
@@ -166,6 +170,7 @@ class ValidatingFakeWebSocket {
 
 async function loadBehavioralCollectorRuntime() {
   const collector = transpile(await read("../src/lib/market/collector.ts"), {
+    "./collector-logging": loggingUrl,
     "./symbols": stub(
       `export const isSupportedSymbol = (value) => ["BTCUSDT", "ETHUSDT"].includes(value);`,
     ),

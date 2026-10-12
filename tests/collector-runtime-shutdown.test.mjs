@@ -18,7 +18,13 @@ const movementStub = `
   }
 `;
 
+const loggingSource = await readFile(new URL("../src/lib/market/collector-logging.ts", import.meta.url), "utf8");
+const loggingModule = ts.transpileModule(loggingSource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+
 const replacements = {
+  "./collector-logging": loggingModule,
   "../../integrations/supabase/client.server": `export const supabaseAdmin = {};`,
   "../operational/repository.server": `export function getOperationalStore() { return undefined; }`,
   "../monitor/run-context": `export function createMonitorRunContext() { return {}; }`,
@@ -49,7 +55,7 @@ const replacements = {
   "./collector-worker-env.server": `export function validateCollectorWorkerEnvironment() {} export function collectorCandleSettleSeconds() { return 15; }`,
 };
 
-// The collector runtime is transpiled with every dependency stubbed so the
+// The collector runtime uses the real logging helper and stubbed service dependencies so the
 // shutdown barrier can be observed without a database, socket, or timers.
 async function loadCollectorRuntime() {
   const source = await readFile(

@@ -280,7 +280,10 @@ export class MovementEngineRuntime {
             movementSessionId, boundary, this.historicalVersion!, universe,
             this.movementConfig.version, previousLifecycleState, interruptPreviousState,
           );
-          if (!stillCurrent()) throw new Error("stale movement session or universe response");
+          if (!stillCurrent()) {
+            console.warn(`[movement-engine] stale movement session or universe response universe_size=${universe.symbols.length} compared_session_id=${movementSessionId} current_session_id=${this.deps.collector.currentMovementSessionId()}`);
+            throw new Error("stale movement session or universe response");
+          }
           return assessment;
         },
       });
