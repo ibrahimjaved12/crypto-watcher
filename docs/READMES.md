@@ -219,6 +219,16 @@ For local migrations:
 supabase migration list --local
 supabase migration up --local
 ```
+Importantly, for machine hosting:
+```sh
+npm run up -- --update-worker-secret
+```
+1. Checks that Docker, cloudflared and your .env.production.local flags are fine.
+2. Starts the local operational Supabase if it isn’t running.
+3. Starts worker:host: the Python services, the collector, the forward jobs, the gateway and the jobs runner.
+4. Starts a Cloudflare quick tunnel to the gateway and waits until its /health answers.
+5. Writes the new tunnel URL into the Worker’s RUNNER_GATEWAY_URL secret, so the live site can reach your laptop.
+6. Restarts the tunnel if it dies (the URL changes, and it updates the secret again). Ctrl+C shuts everything down cleanly.
 
 The repository pins Node 22 in `.nvmrc` and the Supabase CLI in `package-lock.json`.
 
