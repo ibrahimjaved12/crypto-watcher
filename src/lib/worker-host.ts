@@ -107,12 +107,12 @@ export function preflight(input: { env: Env; envFileText: string | null }): stri
   }
   const problems: string[] = [];
   for (const [name, value] of Object.entries(env)) {
-    if (name === "RUNNER_GATEWAY_SECRET" && env.RUNNER_GATEWAY_ENABLED !== "true") continue;
+    if (name === "RUNNER_GATEWAY_SECRET" && env["RUNNER_GATEWAY_ENABLED"] !== "true") continue;
     if (value?.startsWith("REPLACE_"))
       problems.push(`${name} must be configured; placeholder values are not allowed.`);
   }
   const missing = missingEnvFileNames(envFileText);
-  if (env.RUNNER_GATEWAY_ENABLED === "true") {
+  if (env["RUNNER_GATEWAY_ENABLED"] === "true") {
     problems.push(...validateGatewayEnv(env));
     const present = envFileNames(envFileText);
     for (const name of ["RUNNER_GATEWAY_ENABLED", "RUNNER_GATEWAY_PORT", "RUNNER_GATEWAY_SECRET", "SUPABASE_PUBLISHABLE_KEY"])

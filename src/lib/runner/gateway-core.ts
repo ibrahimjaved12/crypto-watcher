@@ -34,9 +34,9 @@ export function secretMatches(provided: string, expected: string): boolean {
 /** Problems contain variable names and static descriptions, never configuration values. */
 export function validateGatewayEnv(env: Env): string[] {
   const problems: string[] = [];
-  if (!/^[A-Za-z0-9_-]{32,256}$/.test(env.RUNNER_GATEWAY_SECRET ?? ""))
+  if (!/^[A-Za-z0-9_-]{32,256}$/.test(env["RUNNER_GATEWAY_SECRET"] ?? ""))
     problems.push("RUNNER_GATEWAY_SECRET must be 32–256 URL-safe characters.");
-  const port = env.RUNNER_GATEWAY_PORT ?? "8787";
+  const port = env["RUNNER_GATEWAY_PORT"] ?? "8787";
   if (!/^\d+$/.test(port) || !Number.isInteger(Number(port)) || Number(port) < 1024 || Number(port) > 65535)
     problems.push("RUNNER_GATEWAY_PORT must be an integer from 1024 to 65535.");
   for (const name of ["SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_SERVICE_ROLE_KEY"])

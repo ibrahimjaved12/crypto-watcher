@@ -34,8 +34,8 @@ export class UnauthorizedError extends Error {
 export async function verifyUserToken(token: string, env: Record<string, string | undefined>) {
   try {
     if (!token || token.split(".").length !== 3) throw new UnauthorizedError();
-    const url = env.SUPABASE_URL;
-    const key = env.SUPABASE_PUBLISHABLE_KEY;
+    const url = env["SUPABASE_URL"];
+    const key = env["SUPABASE_PUBLISHABLE_KEY"];
     if (!url || !key) throw new UnauthorizedError();
     const supabase = createClient<Database>(url, key, {
       global: { fetch: createSupabaseFetch(key), headers: { Authorization: `Bearer ${token}` } },

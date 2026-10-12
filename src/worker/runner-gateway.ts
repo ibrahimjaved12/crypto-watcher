@@ -11,8 +11,8 @@ if (validateGatewayEnv(env).length) {
   console.error("internal startup");
   process.exit(1);
 }
-const secret = env.RUNNER_GATEWAY_SECRET!;
-const port = Number(env.RUNNER_GATEWAY_PORT ?? "8787");
+const secret = env["RUNNER_GATEWAY_SECRET"]!;
+const port = Number(env["RUNNER_GATEWAY_PORT"] ?? "8787");
 const analysisLimit = createRateLimiter({ windowMs: 60_000, max: 12 }, Date.now);
 const checkLimit = createRateLimiter({ windowMs: 60_000, max: 6 }, Date.now);
 const checking = new Set<string>();
