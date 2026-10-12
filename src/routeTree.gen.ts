@@ -18,6 +18,7 @@ import { Route as AuthenticatedForwardRouteImport } from './routes/_authenticate
 import { Route as AuthenticatedNotesRouteImport } from './routes/_authenticated/notes'
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
 import { Route as AuthCallbackRouteImport } from './routes/auth_.callback'
+import { Route as ApiDiagnosticsBinanceProbeRouteImport } from './routes/api/diagnostics/binance-probe'
 import { Route as ApiPublicHooksMonitorPricesRouteImport } from './routes/api/public/hooks/monitor-prices'
 import { Route as ApiPublicHooksSyncCollectorSubscriptionsRouteImport } from './routes/api/public/hooks/sync-collector-subscriptions'
 
@@ -65,6 +66,12 @@ const AuthCallbackRoute = AuthCallbackRouteImport.update({
   path: '/auth/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiDiagnosticsBinanceProbeRoute =
+  ApiDiagnosticsBinanceProbeRouteImport.update({
+    id: '/api/diagnostics/binance-probe',
+    path: '/api/diagnostics/binance-probe',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicHooksMonitorPricesRoute =
   ApiPublicHooksMonitorPricesRouteImport.update({
     id: '/api/public/hooks/monitor-prices',
@@ -87,6 +94,7 @@ export interface FileRoutesByFullPath {
   '/notes': typeof AuthenticatedNotesRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/auth/callback': typeof AuthCallbackRoute
+  '/api/diagnostics/binance-probe': typeof ApiDiagnosticsBinanceProbeRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
@@ -99,6 +107,7 @@ export interface FileRoutesByTo {
   '/notes': typeof AuthenticatedNotesRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/auth/callback': typeof AuthCallbackRoute
+  '/api/diagnostics/binance-probe': typeof ApiDiagnosticsBinanceProbeRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
@@ -113,6 +122,7 @@ export interface FileRoutesById {
   '/_authenticated/notes': typeof AuthenticatedNotesRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/auth_/callback': typeof AuthCallbackRoute
+  '/api/diagnostics/binance-probe': typeof ApiDiagnosticsBinanceProbeRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
@@ -127,6 +137,7 @@ export interface FileRouteTypes {
     | '/notes'
     | '/settings'
     | '/auth/callback'
+    | '/api/diagnostics/binance-probe'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
   fileRoutesByTo: FileRoutesByTo
@@ -139,6 +150,7 @@ export interface FileRouteTypes {
     | '/notes'
     | '/settings'
     | '/auth/callback'
+    | '/api/diagnostics/binance-probe'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
   id:
@@ -152,6 +164,7 @@ export interface FileRouteTypes {
     | '/_authenticated/notes'
     | '/_authenticated/settings'
     | '/auth_/callback'
+    | '/api/diagnostics/binance-probe'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
   fileRoutesById: FileRoutesById
@@ -161,6 +174,7 @@ export interface RootRouteChildren {
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   AuthRoute: typeof AuthRoute
   AuthCallbackRoute: typeof AuthCallbackRoute
+  ApiDiagnosticsBinanceProbeRoute: typeof ApiDiagnosticsBinanceProbeRoute
   ApiPublicHooksMonitorPricesRoute: typeof ApiPublicHooksMonitorPricesRoute
   ApiPublicHooksSyncCollectorSubscriptionsRoute: typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
 }
@@ -230,6 +244,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/diagnostics/binance-probe': {
+      id: '/api/diagnostics/binance-probe'
+      path: '/api/diagnostics/binance-probe'
+      fullPath: '/api/diagnostics/binance-probe'
+      preLoaderRoute: typeof ApiDiagnosticsBinanceProbeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/hooks/monitor-prices': {
       id: '/api/public/hooks/monitor-prices'
       path: '/api/public/hooks/monitor-prices'
@@ -271,6 +292,7 @@ const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AuthRoute: AuthRoute,
   AuthCallbackRoute: AuthCallbackRoute,
+  ApiDiagnosticsBinanceProbeRoute: ApiDiagnosticsBinanceProbeRoute,
   ApiPublicHooksMonitorPricesRoute: ApiPublicHooksMonitorPricesRoute,
   ApiPublicHooksSyncCollectorSubscriptionsRoute:
     ApiPublicHooksSyncCollectorSubscriptionsRoute,
