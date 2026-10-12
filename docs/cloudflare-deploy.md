@@ -82,6 +82,7 @@ The non-secret runtime variables are committed in the `vars` block of
 | `MACHINE_ONLY_ENABLED` | `false` |
 | `OPERATIONAL_DB_ENABLED` | `false` |
 | `PYTHON_ANALYSIS_ENABLED` | `false` |
+| `RUNNER_GATEWAY_ENABLED` | `false` |
 | `SCHEDULED_MONITOR_ENABLED` | `false` |
 | `SUPABASE_URL` | `https://xshzjhocpcenuumdrhdh.supabase.co` |
 
@@ -139,6 +140,35 @@ both without setting it. No scheduler is created by this deployment.
 Keep all actual secret values in Cloudflare, never in `wrangler.jsonc`, docs,
 commits, browser variables, or build logs. `.dev.vars` and local environment
 overrides are gitignored.
+
+## Runner gateway
+
+Refs #294. To run analysis and manual alert checks on the owner's machine:
+
+1. On the machine, set `RUNNER_GATEWAY_ENABLED=true` and a valid
+   `RUNNER_GATEWAY_SECRET` in `.env.production.local`, then start
+   `npm run worker:host` and expose the gateway through an HTTPS tunnel origin.
+   See [the host gateway setup](worker-host.md#reaching-the-gateway).
+2. In the Worker's **Settings > Variables and Secrets**, add
+   `RUNNER_GATEWAY_URL` and `RUNNER_GATEWAY_SECRET` using the encrypted **Secret**
+   type. The URL must be an HTTPS origin with no credentials, path, query, or
+   fragment. Do not put either value in `wrangler.jsonc` or a `VITE_*` variable.
+3. Set the Worker secret `RUNNER_GATEWAY_SECRET` to exactly the same value as
+   `RUNNER_GATEWAY_SECRET` in `.env.production.local` on the machine. It must be
+   32–256 characters using only letters, digits, underscores, and hyphens.
+4. Flip `RUNNER_GATEWAY_ENABLED` to `"true"` in the committed `wrangler.jsonc`
+   runtime vars and redeploy. Leave `PYTHON_ANALYSIS_ENABLED=false` on the Worker;
+   the machine's Python service configuration handles the actual analysis.
+
+The Worker passes the signed-in user's token to the gateway along with the
+shared secret. Analysis and manual alert checks wait directly for a result with
+a 25-second timeout. If the gateway cannot be reached, the UI shows a runner
+offline notice and the action returns a message asking you to start
+`npm run worker:host` and retry. An interrupted response from a reached gateway
+shows a timeout retry message. The status check uses `/health` with a two-second
+timeout, sends no gateway secret, and polls every 30 seconds while configured.
+Keep the HTTPS tunnel and the host supervisor running for the gateway to remain
+reachable. Forward-run and trend-run routing is handled separately in part 3.
 
 ## After the first deployment
 

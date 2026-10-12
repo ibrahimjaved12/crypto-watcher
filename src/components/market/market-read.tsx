@@ -4,6 +4,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { ArrowDownRight, ArrowUpRight, Compass, Minus, ScanSearch } from "lucide-react";
 
 import { Hint } from "@/components/hint";
+import { RunnerStatusNotice } from "@/components/runner-status-notice";
 import { EmptyState, SectionTitle, SignedBar, StatusChip } from "@/components/plain";
 import { Button } from "@/components/ui/button";
 import { runPythonAnalysis } from "@/lib/analysis.functions";
@@ -81,7 +82,8 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
       : undefined;
   const metrics = result ? analysis.data?.metrics : undefined;
   const technical = result ? Object.entries(result.technical) : [];
-  return (
+  const errorCategory = (analysis.error as (Error & { category?: string }) | null)?.category;
+  const marketRead = (
     <section className="panel mt-6 p-4 sm:p-5" aria-label="Market read" aria-busy={analysis.isPending}>
       <SectionTitle
         title="Market read"
@@ -122,15 +124,19 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
       )}
       {analysis.isError && (
         <div role="alert" className="space-y-1 py-2 text-sm">
-          <StatusChip level="problem">
-            {humanizeReason(
-              String((analysis.error as Error & { category?: string }).category ?? "unknown"),
-            ).short}
-          </StatusChip>
-          <details className="text-xs text-muted-foreground">
-            <summary>Technical details</summary>
-            <p className="mt-1 break-words">{analysis.error.message}</p>
-          </details>
+          {errorCategory === "runner_offline" || errorCategory === "timeout" ? (
+            <p>{analysis.error.message}</p>
+          ) : (
+            <>
+              <StatusChip level="problem">
+                {humanizeReason(String(errorCategory ?? "unknown")).short}
+              </StatusChip>
+              <details className="text-xs text-muted-foreground">
+                <summary>Technical details</summary>
+                <p className="mt-1 break-words">{analysis.error.message}</p>
+              </details>
+            </>
+          )}
         </div>
       )}
       {!result && !analysis.isPending && !analysis.isError && (
@@ -340,5 +346,11 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
         </div>
       )}
     </section>
+  );
+  return (
+    <>
+      <RunnerStatusNotice />
+      {marketRead}
+    </>
   );
 }

@@ -97,14 +97,18 @@ const server = createServer(async (request, response) => {
     checking.add(userId);
     try {
       const result = await runManualMonitorCheck(supabase, supabaseAdmin, userId);
-      // Monitor results may carry upstream exception text; keep the response contract, redact text.
-      json(response, 200, { ...result, error: result.error ? "Monitor check failed." : result.error });
+      json(response, 200, { ...result, error: result.error ? result.error.slice(0, 1000) : result.error });
     } finally { checking.delete(userId); }
   } catch (error) {
     const failure = error instanceof UnauthorizedError
       ? new RequestError(401, "unauthorized", "Unauthorized.")
       : error instanceof RequestError ? error : new RequestError(500, "internal", "Request failed.");
-    console.error(failure.category, route);
+    if (failure.category === "internal") {
+      console.error(failure.category, route,
+        error instanceof Error ? error.name + ": " + error.message : "non-error thrown");
+    } else {
+      console.error(failure.category, route);
+    }
     // Do not keep unread rejected bodies on a reusable connection.
     if (!request.complete) response.setHeader("Connection", "close");
     json(response, failure.status, { ok: false, category: failure.category, error: failure.message });

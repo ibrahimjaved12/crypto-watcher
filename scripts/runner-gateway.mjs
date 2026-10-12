@@ -24,25 +24,6 @@ async function main() {
     if (value !== undefined && process.env[name] === undefined) process.env[name] = value;
   }
 
-  // Shared monitoring code logs upstream errors for the app. This dedicated process
-  // must never emit those details. Keep only the gateway's fixed category/route pairs
-  // and its port-only startup announcement; do not stringify other arguments.
-  const writeLog = console.log.bind(console);
-  const writeError = console.error.bind(console);
-  const categories = new Set(["unauthorized", "bad_request", "rate_limited", "busy", "internal"]);
-  const routes = new Set(["/health", "/v1/analysis", "/v1/monitor/check", "unknown"]);
-  const safeLog = (...args) => {
-    if (args.length === 2 && categories.has(args[0]) && routes.has(args[1])) {
-      writeError(args[0], args[1]);
-    } else if (args.length === 1 && typeof args[0] === "string" &&
-      /^Runner gateway listening on port [0-9]{4,5}$/.test(args[0])) {
-      writeLog(args[0]);
-    } else {
-      writeError("internal", "unknown");
-    }
-  };
-  for (const method of ["log", "info", "warn", "error", "debug", "trace"]) console[method] = safeLog;
-
   await runnerImport("/src/worker/runner-gateway.ts", {
     root,
     mode,
