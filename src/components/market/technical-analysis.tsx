@@ -19,6 +19,7 @@ import { humanizeReason, humanizeToken, sourceLabel } from "@/lib/labels";
 import { explainTA } from "@/lib/ta/interpretation";
 import { TA_FRAMES } from "@/lib/ta/schedule";
 import { cn } from "@/lib/utils";
+import { fetchWatchlist } from "@/lib/db";
 
 export function TechnicalAnalysis() {
   const automatic = automaticQueryOptions(import.meta.env["VITE_TA_HISTORY_AUTO_REFRESH_ENABLED"]);
@@ -27,7 +28,13 @@ export function TechnicalAnalysis() {
       logActivity(import.meta.env["VITE_ACTIVITY_DIAGNOSTICS"], "ta-history", "automatic-paused");
   }, [automatic.enabled]);
   const [frame, setFrame] = useState(15);
-  const [symbol, setSymbol] = useState("");
+  const watchlist = useQuery({ queryKey: ["watchlist"], queryFn: fetchWatchlist });
+  const defaultSymbol = watchlist.data?.[0]?.symbol ?? "BTCUSDT";
+  const [symbol, setSymbol] = useState(defaultSymbol);
+  const [symbolTouched, setSymbolTouched] = useState(false);
+  useEffect(() => {
+    if (!symbolTouched) setSymbol(defaultSymbol);
+  }, [defaultSymbol, symbolTouched]);
   const [page, setPage] = useState(0);
   const history = useQuery({
     queryKey: ["ta", frame, symbol, page],
@@ -80,6 +87,7 @@ export function TechnicalAnalysis() {
               placeholder="Pair, e.g. BTCUSDT"
               value={symbol}
               onChange={(e) => {
+                setSymbolTouched(true);
                 setSymbol(e.target.value);
                 setPage(0);
               }}

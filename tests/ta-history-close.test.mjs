@@ -8,4 +8,5 @@ test("TA history exposes candle close and expands across all nine columns", asyn
   assert.ok(headers, "history headers exist");
   assert.match(headers, /"Candle close"/);
   assert.match(source, /colSpan=\{9\}/);
+  assert.match(source, /queryKey: \["watchlist"\], queryFn: fetchWatchlist[\s\S]*const defaultSymbol = watchlist\.data\?\.\[0\]\?\.symbol \?\? "BTCUSDT";[\s\S]*useState\(defaultSymbol\)[\s\S]*if \(!symbolTouched\) setSymbol\(defaultSymbol\);[\s\S]*setSymbolTouched\(true\);\s*setSymbol\(e\.target\.value\);/);
 });

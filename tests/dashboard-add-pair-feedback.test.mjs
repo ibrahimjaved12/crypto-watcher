@@ -9,4 +9,5 @@ test("adding a pair confirms success and keeps previous market quotes", async ()
   assert.ok(add, "add mutation exists");
   assert.match(add, /toast\.success\(/);
   assert.match(add, /baseAsset\(symbol\)/);
+  assert.match(source, /market\.isFetching \? \([\s\S]*market\.isError \? \([\s\S]*className="panel h-64 p-5"[\s\S]*\{symbol\}[\s\S]*Could not load\. Press Refresh\./);
 });

@@ -247,11 +247,16 @@ function Dashboard() {
                     if (item) remove.mutate(item.id);
                   }}
                 />
-              ) : (
+              ) : market.isFetching ? (
                 <div key={symbol} className="panel h-64 animate-pulse p-5">
                   <span className="num text-sm text-muted-foreground">{symbol}</span>
                 </div>
-              );
+              ) : market.isError ? (
+                <div key={symbol} className="panel h-64 p-5">
+                  <span className="num text-sm text-muted-foreground">{symbol}</span>
+                  <p className="mt-2 text-sm text-muted-foreground">Could not load. Press Refresh.</p>
+                </div>
+              ) : null;
             })}
       </div>
 
