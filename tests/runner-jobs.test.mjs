@@ -87,3 +87,28 @@ test("Strategy Lab polls to terminal status and explains queued, running and exp
   assert.match(source, /toast\.error\(result\.error \|\|/);
   assert.match(source, /runToast\(toastLabel, result\.result\)/);
 });
+
+test("users can expire only their own stale queued jobs", async () => {
+  const sql = await read("../supabase/migrations/20261012190000_runner_jobs_expire_own.sql");
+  assert.match(sql, /SECURITY DEFINER SET search_path = public/i);
+  assert.match(sql, /IF auth\.uid\(\) IS NULL THEN\s+RETURN 0;/i);
+  assert.match(sql, /WHERE user_id = auth\.uid\(\) AND status = 'queued'\s+AND created_at < now\(\) - interval '15 minutes'/i);
+  assert.match(sql, /REVOKE ALL ON FUNCTION public\.expire_my_stale_runner_jobs\(\) FROM PUBLIC, anon/i);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION public\.expire_my_stale_runner_jobs\(\) TO authenticated, service_role/i);
+});
+
+test("enqueue expires stale jobs first and polling shows old queued rows as expired", async () => {
+  const source = await read("../src/lib/forward.functions.ts");
+  const rpc = source.indexOf('supabase.rpc("expire_my_stale_runner_jobs")');
+  assert.ok(rpc > 0);
+  assert.ok(rpc < source.indexOf('.insert({ user_id: userId'));
+  assert.match(source, /job\.data\.status === "queued"\s+&& Date\.now\(\) - new Date\(job\.data\.created_at\)\.getTime\(\) > 15 \* 60_000/);
+  assert.match(source, /status: stale \? "expired" : job\.data\.status/);
+});
+
+test("safeError redacts only long values of secret-like variables", async () => {
+  const source = await read("../src/worker/runner-jobs.ts");
+  assert.match(source, /\/KEY\|SECRET\|TOKEN\|PASSWORD\|CREDENTIAL\/i\.test\(entry\[0\]\)/);
+  assert.match(source, /entry\[1\]\.length >= 12/);
+  assert.doesNotMatch(source, /Object\.values\(process\.env\)/);
+});

@@ -729,6 +729,10 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      expire_my_stale_runner_jobs: {
+        Args: Record<PropertyKey, never>
+        Returns: number
+      }
       claim_runner_job: {
         Args: {
           p_worker_id: string

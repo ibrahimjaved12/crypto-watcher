@@ -32,6 +32,8 @@ async function enqueueRunnerJob(
   kind: "forward_signals" | "forward_trend",
   idempotencyKey: string,
 ) {
+  // Stale queued rows would otherwise hold the active-job slot; a failure here is not fatal.
+  await supabase.rpc("expire_my_stale_runner_jobs");
   const { data, error } = await supabase.from("runner_jobs")
     .insert({ user_id: userId, kind, idempotency_key: idempotencyKey })
     .select("id, status").single();
@@ -59,10 +61,13 @@ export const getRunnerJob = createServerFn({ method: "GET" })
       .select("id, kind, status, created_at, started_at, finished_at, result, error")
       .eq("id", data.jobId).single();
     if (job.error || !job.data) throw new Error("Runner job could not be found.");
+    // The row is updated by the next enqueue or the host's next claim; show it as expired now.
+    const stale = job.data.status === "queued"
+      && Date.now() - new Date(job.data.created_at).getTime() > 15 * 60_000;
     return {
       id: job.data.id,
       kind: job.data.kind,
-      status: job.data.status,
+      status: stale ? "expired" : job.data.status,
       createdAt: job.data.created_at,
       startedAt: job.data.started_at,
       finishedAt: job.data.finished_at,

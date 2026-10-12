@@ -27,7 +27,10 @@ function safeError(error: unknown): string {
     : error && typeof error === "object" && "message" in error && typeof error.message === "string"
       ? error.message : "Runner job failed";
   let safe = `${name}: ${message}`;
-  const values = Object.values(process.env).filter((value): value is string => !!value)
+  const values = Object.entries(process.env)
+    .filter((entry): entry is [string, string] => /KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL/i.test(entry[0])
+      && typeof entry[1] === "string" && entry[1].length >= 12)
+    .map(([, value]) => value)
     .sort((a, b) => b.length - a.length);
   for (const value of values) {
     safe = safe.replaceAll(value, "[redacted]");
