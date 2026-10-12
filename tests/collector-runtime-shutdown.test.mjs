@@ -46,7 +46,7 @@ const replacements = {
   "./movement-metrics-contract": `
     export const DEFAULT_MARKET_MOVEMENT_CONFIG = { historicalLookbackMs: 604800000 };
   `,
-  "./collector-worker-env.server": `export function validateCollectorWorkerEnvironment() {}`,
+  "./collector-worker-env.server": `export function validateCollectorWorkerEnvironment() {} export function collectorCandleSettleSeconds() { return 15; }`,
 };
 
 // The collector runtime is transpiled with every dependency stubbed so the

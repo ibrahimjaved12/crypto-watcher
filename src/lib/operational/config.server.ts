@@ -10,17 +10,30 @@ export type OperationalDbConfig =
       outboxMaxAttempts: number;
     };
 
-function boundedInteger(value: string | undefined, fallback: number, min: number, max: number) {
+function boundedInteger(
+  value: string | undefined, fallback: number, min: number, max: number,
+  name = "Operational database retention/retry value",
+) {
   const parsed = value === undefined || value === "" ? fallback : Number(value);
   if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
-    throw new Error(`Operational database retention/retry value must be ${min}–${max}`);
+    throw new Error(`${name} must be ${min}–${max}`);
   }
   return parsed;
+}
+
+/** Server-only REST finality delay, validated with the operational integer bounds. */
+export function collectorCandleSettleSeconds(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return boundedInteger(
+    env["COLLECTOR_CANDLE_SETTLE_SECONDS"], 15, 5, 60, "COLLECTOR_CANDLE_SETTLE_SECONDS",
+  );
 }
 
 export function operationalDbConfig(
   env: Record<string, string | undefined> = process.env,
 ): OperationalDbConfig {
+  collectorCandleSettleSeconds(env);
   const rawEnabled = env["OPERATIONAL_DB_ENABLED"];
   if (rawEnabled !== undefined && rawEnabled !== "true" && rawEnabled !== "false") {
     throw new Error("OPERATIONAL_DB_ENABLED must be true or false");

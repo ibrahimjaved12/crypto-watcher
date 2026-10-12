@@ -1262,3 +1262,31 @@ test("forward minutes are read in non-overlapping windows and a transient failur
   client.rpc = async () => { throw new TypeError("fetch failed"); };
   await assert.rejects(store.readForwardMinuteCandles("btcusdt", 0, day), /fetch failed/, "a second failure surfaces");
 });
+
+test("settle reconciliation appends a later REST copy without changing provisional evidence", async () => {
+  await resetConflicts();
+  await db.exec("BEGIN");
+  try {
+    await db.exec(await readFile(new URL(
+      "../operational-db/supabase/migrations/20261012110000_collector_rest_settle_revisions.sql",
+      import.meta.url), "utf8"));
+    const opening = Math.floor(Date.now() / 60_000) * 60_000 - 5 * 60_000;
+    const original = collectorCandle(opening, 0);
+    await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([original])]);
+    const later = collectorCandle(opening, 0, { volume: 2.1, quote_volume: 212.1 });
+    await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([later])]);
+    const evidence = (await db.query("SELECT * FROM collector_candle_conflicts")).rows;
+    assert.equal(evidence[0].rest_side, "both");
+    assert.equal((await db.query("SELECT reconcile_conflicts(24) AS n")).rows[0].n, 0);
+    assert.equal((await db.query("SELECT reconcile_conflicts(0) AS n")).rows[0].n, 1);
+    assert.equal((await db.query("SELECT reconcile_conflicts(0) AS n")).rows[0].n, 0);
+    assert.deepEqual((await db.query("SELECT * FROM collector_candle_conflicts")).rows, evidence);
+    assert.equal((await db.query("SELECT volume FROM collector_recent_candles")).rows[0].volume, 2);
+    const revision = (await db.query("SELECT * FROM collector_candle_revisions")).rows[0];
+    assert.equal(revision.fields.volume, 2.1);
+    assert.equal(revision.conflict_id, evidence[0].conflict_id);
+    assert.equal(revision.tolerance.policy, "later-rest-evidence");
+  } finally {
+    await db.exec("ROLLBACK");
+  }
+});

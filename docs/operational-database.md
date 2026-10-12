@@ -133,6 +133,30 @@ aware) through `record_collector_candles`. The bound is enforced in two places: 
 `operationalDbConfig`. At 1440 rows per symbol per day that is about 200,000 rows per symbol;
 15m, 1h and 4h candles keep the general day window.
 
+## REST candle settling (#68)
+
+`COLLECTOR_CANDLE_SETTLE_SECONDS` is a server-only integer setting: default **15 seconds**,
+allowed **5–60**, validated at collector startup with the operational environment values.
+Binance can still add trades to a just-closed REST minute. Ten confirmed provisional candles
+were retrieved 0.7–4.7 seconds after close, with 0.5–5% volume differences and tiny price differences.
+
+The shared collector REST normalizer admits a 1m candle only when its retrieval timestamp is
+at least `close_time + settle seconds`. This covers bootstrap, reconnect/gap recovery, and
+movement-history backfill. Early responses are discarded, never held and written later;
+recovery/backfill retries fetch fresh values. Other intervals retain their closed-candle rule.
+WebSocket ingestion is unchanged: it requires Binance's explicit `k.x = true` final event,
+and the confirmed problem concerns REST's clock-based completion check.
+
+Deploy the new operational migration `20261012110000_collector_rest_settle_revisions.sql`
+without resetting the database, then restart the collector with the setting (or its default).
+The migration only replaces the reconciliation function; it does not rewrite historical rows.
+The ten existing conflicts remain known provisional candles. Stored candles and conflict rows
+stay unchanged, and forward signals are not recomputed. On the existing hourly reconciliation
+schedule, conflicts older than 24 hours with a later 1m REST offer append that copy to
+`collector_candle_revisions`, including REST-to-REST differences and differences beyond the
+old 2% volume tolerance. These revisions carry `tolerance.policy = later-rest-evidence`:
+they preserve evidence, not approval to replace the original. Revision insertion is idempotent.
+
 ## Candle conflicts and revisions (#239 P15)
 
 Owner policy (2026-10-10). A candle finalised from the WebSocket stream can differ from the REST
@@ -153,7 +177,7 @@ the whole recovery batch and every symbol went UNAVAILABLE.
   refreshed after every candle batch and every health write. The status stays as measured (for
   example LIVE); only structural problems (a gap, a missing candle) degrade it. The Control room
   shows "conflicts: n" next to the feed chip.
-- **Research parity.** REST is what the Binance archive matches. `reconcile_conflicts(older_than_hours
+- **Research parity for other intervals.** REST is what the Binance archive matches. `reconcile_conflicts(older_than_hours
   DEFAULT 24, p_price_tolerance DEFAULT 0.002, p_volume_tolerance DEFAULT 0.02)` appends, for every
   conflict older than the window whose offered side is REST (stored side is the stream) and whose
   only differing fields are high/low/close/volume/quote_volume within the stated tolerance (prices:
@@ -161,7 +185,8 @@ the whole recovery batch and every symbol went UNAVAILABLE.
   one row to the append-only `collector_candle_revisions` (`revision_id`, `conflict_id`, identity,
   `fields` = the REST values and their hash, `source = 'rest'`, `supersedes` = the stored candle's
   hash, `tolerance`). It never modifies `collector_recent_candles`; readers keep the original candle.
-  Conflicts outside the tolerance or without a REST side stay for manual review.
+  Outside the 1m REST evidence policy above, conflicts outside the tolerance or without a REST
+  offer stay for manual review.
 - **Candle versions.** `collector_candle_hash(...)` ("candle-v1": md5 over identity, open time and
   OHLCV text) identifies a candle's values. `get_collector_forward_minutes` returns it with every
   1m row; the forward job stores, with every `forward_signals` / `forward_setups` row (application
@@ -170,8 +195,8 @@ the whole recovery batch and every symbol went UNAVAILABLE.
   Hashes are never sent to Python and the forward engine's input is unchanged.
 
 `get_collector_candle_conflicts(p_hours, p_limit)` lists recent conflicts with their revision id.
-After pulling this change, reset the local operational database (the baseline is edited in place):
-`supabase db reset --local --workdir operational-db`.
+Apply pending operational migrations to an existing database; do not reset it to deploy the
+settle fix, because the existing conflict evidence must be preserved.
 
 Monitor runs default to 30 days (allowed range 1–90 days), and inactive checkpoints expire after
 30 days. Writes perform database-wide bounded cleanup. Age-based retention and the protected

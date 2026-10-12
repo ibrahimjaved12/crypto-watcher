@@ -41,3 +41,5 @@ export function validateCollectorWorkerEnvironment(env: Env = process.env): void
   }
   movementFinalizationConfig(env); // MOVEMENT_FINALIZATION_GRACE_MS
 }
+
+export { collectorCandleSettleSeconds } from "../operational/config.server";

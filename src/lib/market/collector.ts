@@ -174,11 +174,24 @@ export function candleIdentity(candle: CollectorCandle): string {
   ].join("|");
 }
 
+/** Evaluate at REST retrieval time: waiting to store an early response cannot settle its values. */
+export function isRestCandleSettled(
+  closeTime: number,
+  timeframeMinutes: CollectorInterval,
+  now: number,
+  settleSeconds = 15,
+): boolean {
+  return timeframeMinutes === 1
+    ? now >= closeTime + settleSeconds * 1_000
+    : now > closeTime;
+}
+
 export function normalizeRestCandles(input: {
   symbol: string;
   timeframeMinutes: CollectorInterval;
   candles: Candle[];
   retrievedAt: number;
+  settleSeconds?: number;
 }): CollectorCandle[] {
   const duration = input.timeframeMinutes * 60_000;
   return input.candles
@@ -205,7 +218,10 @@ export function normalizeRestCandles(input: {
         receivedAt: input.retrievedAt,
         transport: "rest" as const,
       };
-    });
+    })
+    .filter((candle) => isRestCandleSettled(
+      candle.closeTime, candle.timeframeMinutes, input.retrievedAt, input.settleSeconds,
+    ));
 }
 
 function aggregateTradeStreamSymbol(stream: unknown): string | null {
