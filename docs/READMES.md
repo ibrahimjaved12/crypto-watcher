@@ -25,8 +25,11 @@ The [implementation and deployment roadmap](docs/roadmap.md) links all 40 ordere
 GitHub issues and their dependencies, distinguishing current, proposed, and
 conditional decisions.
 
-The current implementation tries public futures REST data in order: **Binance USDⓈ-M,
-OKX USDT perpetual swaps, then Kraken perpetual futures**.
+The alert path tries public futures REST data in order: **Binance USDⓈ-M,
+OKX USDT perpetual swaps, then Kraken perpetual futures**. The dashboard's price cards do not:
+the Worker makes no exchange request and reads the Binance USDⓈ-M quotes the owner's machine
+publishes to hosted Supabase ([#323](https://github.com/ibrahimjaved12/crypto-watcher/issues/323),
+[publisher](docs/binance-futures-collector.md#market-quote-publisher-323)).
 Saved Python TA includes forward-return outcomes; conditional trade evaluation,
 backtesting, and paper trading remain planned work.
 Background execution also needs verification: [issue #13](https://github.com/ibrahimjaved12/crypto-watcher/issues/13)

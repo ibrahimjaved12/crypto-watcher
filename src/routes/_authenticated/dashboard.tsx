@@ -27,6 +27,7 @@ import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db
 import { getMarketSnapshot, type MarketSnapshot } from "@/lib/market.functions";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
 import { getOperationalState } from "@/lib/operational.functions";
+import { publishedFreshness } from "@/lib/market/published-quotes";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
@@ -147,6 +148,9 @@ function Dashboard() {
   const quotes = market.data?.quotes ?? [];
   const sourcesDown = quotes.length > 0 && quotes.every((q) => !q.ok);
   const source = quotes.find((q) => q.source)?.source ?? null;
+  const freshness = market.data
+    ? publishedFreshness({ quotes, publishedAt: market.data.publishedAt })
+    : null;
   const runStatus = lastRun ? humanizeReason(lastRun.status) : null;
   const stripLevel: Level = sourcesDown
     ? "problem"
@@ -156,7 +160,7 @@ function Dashboard() {
         ? "wait"
         : "ok";
   const stripDetails = [
-    `Data source: ${sourcesDown ? "no exchange reachable" : source ? sourceLabel(source) : "waiting for the first price load"}`,
+    `Data source: ${sourcesDown ? "no published prices" : source ? sourceLabel(source) : "waiting for the first price load"}`,
     ...fallbackDetailLines(quotes),
     `Last price update: ${market.data ? new Date(market.data.fetchedAt).toLocaleString() : "not loaded yet"}`,
     `Last monitoring check: ${lastRun ? `${new Date(lastRun.ran_at).toLocaleString()} (${runStatus!.short})` : "none yet"}`,
@@ -231,7 +235,7 @@ function Dashboard() {
         </StatusChip>
         <span className="text-muted-foreground">
           {sourcesDown ? (
-            "No exchange reachable"
+            "No published prices"
           ) : (
             <>
               Prices from <span className="text-foreground">{source ? sourceLabel(source) : "…"}</span>
@@ -256,11 +260,22 @@ function Dashboard() {
         </Hint>
       </div>
 
-      {sourcesDown ? (
-        <p className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm">
-          Public exchange data is not reachable from the server right now. No prices are shown and
-          no values are simulated. Details are recorded with each monitoring check.
-        </p>
+      {freshness && freshness !== "fresh" ? (
+        <div role="status" className="mt-4 rounded-lg border border-warn/40 bg-warn/10 p-3 text-sm">
+          {freshness === "stale" ? (
+            <>
+              <strong>Showing the last published prices.</strong> They are more than 10 minutes old
+              (newest published {new Date(market.data!.publishedAt!).toLocaleString()}). The machine
+              that publishes market data may be down or catching up.
+            </>
+          ) : (
+            <>
+              <strong>No usable published prices yet.</strong> The machine that publishes market data
+              may still be starting or catching up. No values are simulated and no other exchange is
+              used.
+            </>
+          )}
+        </div>
       ) : null}
 
       <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">

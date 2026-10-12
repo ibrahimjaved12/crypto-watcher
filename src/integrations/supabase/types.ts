@@ -14,6 +14,39 @@ export type Database = {
   }
   public: {
     Tables: {
+      market_quotes: {
+        Row: {
+          symbol: string
+          source: string
+          price_type: string
+          price: number
+          changes: Json
+          chart: Json
+          last_candle_at: string
+          published_at: string
+        }
+        Insert: {
+          symbol: string
+          source: string
+          price_type: string
+          price: number
+          changes: Json
+          chart: Json
+          last_candle_at: string
+          published_at?: string
+        }
+        Update: {
+          symbol?: string
+          source?: string
+          price_type?: string
+          price?: number
+          changes?: Json
+          chart?: Json
+          last_candle_at?: string
+          published_at?: string
+        }
+        Relationships: []
+      }
       runner_jobs: {
         Row: {
           id: string
@@ -729,6 +762,12 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      publish_market_quotes: {
+        Args: {
+          p_quotes: Json
+        }
+        Returns: number
+      }
       expire_my_stale_runner_jobs: {
         Args: Record<PropertyKey, never>
         Returns: number

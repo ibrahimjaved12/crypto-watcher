@@ -28,6 +28,7 @@ import {
   type LedgerSummary,
   type RunRow,
 } from "../lib/forward/mvp-check";
+import { publishFreshnessChecks } from "../lib/market/published-quotes";
 import { getOperationalStore } from "../lib/operational/repository.server";
 import { STATUS_FILE_NAME, classifyWorkerHost } from "../lib/worker-host";
 import { hostedDatabaseSizeCheck } from "./hosted-db-size";
@@ -170,11 +171,23 @@ function workerHostCheck(): Check {
   return { name: "worker host", ...classifyWorkerHost(raw, Date.now()) };
 }
 
+// #323: the Worker's price cards read the quotes the machine publishes. Production mode only, where the
+// hosted project is the one the deployed Worker reads; WARN when a symbol's newest published_at is older
+// than 10 minutes (the publisher is down, or the symbol is not collected).
+const productionMode = process.argv.includes("production") || process.env["NODE_ENV"] === "production";
+
+async function publishedQuoteChecks(): Promise<Check[]> {
+  const { data, error } = await db.from("market_quotes").select("symbol, published_at");
+  if (error) return [{ name: "published quotes", level: "FAIL", detail: `market_quotes read failed: ${error.message}` }];
+  return publishFreshnessChecks([...BENCHMARK_SYMBOLS], (data ?? []) as { symbol: string; published_at: string }[], Date.now());
+}
+
 async function main() {
   const checks: Check[] = [];
   checks.push(await hostedDatabaseSizeCheck());
   checks.push(await pythonCheck());
   checks.push(workerHostCheck());
+  if (productionMode) checks.push(...(await publishedQuoteChecks()));
   checks.push(...(await collectorChecks()));
   const users = await listForwardUsers(db, process.env["FORWARD_USER_ID"]);
   const [counts, ledgers, strategies, missingApp] = await Promise.all([
