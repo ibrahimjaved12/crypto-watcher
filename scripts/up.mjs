@@ -181,8 +181,13 @@ async function announceWhenHealthy(url, instance) {
       { signal: instance.abort.signal }).catch(() => {});
   }
   if (!shuttingDown && tunnel === instance && !instance.ended) {
-    log("Tunnel /health did not return 200 within 60 seconds. Check worker-host output and connectivity; stopping.");
-    await shutdown(1);
+    if (publishedUrl) {
+      log("Tunnel /health did not return 200 within 60 seconds; restarting the tunnel.");
+      signal(instance.child, "SIGKILL");
+    } else {
+      log("Tunnel /health did not return 200 within 60 seconds. Check worker-host output and connectivity; stopping.");
+      await shutdown(1);
+    }
   }
 }
 
@@ -195,8 +200,8 @@ function startTunnel() {
   // Do not echo tunnel output: print the public URL once it has passed health checks.
   for (const stream of [child.stdout, child.stderr]) {
     createInterface({ input: stream }).on("line", (line) => {
-      const match = line.match(/https:\/\/[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\.com\b/i);
-      if (!match || instance.url || instance.ended || shuttingDown) return;
+      const match = line.match(/https:\/\/([a-z0-9]+(?:-[a-z0-9]+)*)\.trycloudflare\.com\b/i);
+      if (!match || match[1].toLowerCase() === "api" || instance.url || instance.ended || shuttingDown) return;
       instance.url = match[0];
       clearTimeout(urlDeadline);
       void announceWhenHealthy(instance.url, instance).catch(() => shutdown(1));

@@ -127,7 +127,11 @@ to a tracked file. No gateway authentication secret is changed.
 A tunnel exit triggers retries from 2 seconds up to 60 seconds, resetting after
 5 minutes of stable uptime, without restarting the host. Each new URL is checked
 and printed again, and the optional secret update repeats. A host exit stops the
-launcher. Ctrl+C/SIGTERM stops both children and allows up to 75 seconds for the
+launcher. Before any URL has been published, a 60-second health timeout stops the
+launcher with exit code 1. After a URL has been published, a health timeout kills
+only that tunnel and retries with the same backoff; the host and collector keep
+running. Cloudflare API URLs in tunnel logs are ignored.
+Ctrl+C/SIGTERM stops both children and allows up to 75 seconds for the
 host's job drain before forcing remaining processes to stop; the operational
 Docker stack stays running.
 
