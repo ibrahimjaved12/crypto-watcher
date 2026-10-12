@@ -14,6 +14,7 @@ let restartTimer;
 let tunnel;
 let backoff = 2_000;
 let publishedUrl;
+let startupHealthFailures = 0;
 let secretUpdates = Promise.resolve();
 
 function start(command, args, prefix) {
@@ -140,13 +141,16 @@ async function preflight() {
 }
 
 async function announceWhenHealthy(url, instance) {
-  const deadline = Date.now() + 60_000;
+  const deadline = Date.now() + 90_000;
+  let lastFailure = "No health response received";
+  // Give the new hostname time to propagate before risking a cached DNS miss.
+  await sleep(5_000, undefined, { signal: instance.abort.signal }).catch(() => {});
   while (!shuttingDown && tunnel === instance && !instance.ended && Date.now() < deadline) {
     const attemptStarted = Date.now();
     try {
       const response = await fetch(`${url}/health`, {
         redirect: "manual",
-        signal: AbortSignal.any([instance.abort.signal, AbortSignal.timeout(Math.max(1, Math.min(2_000, deadline - Date.now())))]),
+        signal: AbortSignal.any([instance.abort.signal, AbortSignal.timeout(Math.max(1, Math.min(5_000, deadline - Date.now())))]),
       });
       await response.body?.cancel();
       if (response.status === 200) {
@@ -174,18 +178,26 @@ async function announceWhenHealthy(url, instance) {
         }
         return;
       }
-    } catch {
+      lastFailure = `HTTP ${response.status}`;
+    } catch (error) {
       // DNS, tunnel startup and gateway startup can all lag behind URL allocation.
+      lastFailure = error.name === "TimeoutError" ? "ETIMEDOUT"
+        : error.name === "AbortError" ? "abort"
+          : String(error.cause?.code ?? error.code ?? error.message ?? error);
     }
-    await sleep(Math.min(Math.max(0, 2_000 - (Date.now() - attemptStarted)), Math.max(0, deadline - Date.now())), undefined,
+    await sleep(Math.min(Math.max(0, 3_000 - (Date.now() - attemptStarted)), Math.max(0, deadline - Date.now())), undefined,
       { signal: instance.abort.signal }).catch(() => {});
   }
   if (!shuttingDown && tunnel === instance && !instance.ended) {
-    if (publishedUrl) {
-      log("Tunnel /health did not return 200 within 60 seconds; restarting the tunnel.");
+    if (!publishedUrl) startupHealthFailures += 1;
+    const failure = `Tunnel /health did not return 200 within 90 seconds (last failure: ${lastFailure})`;
+    for (const line of instance.output) log(`[cloudflared] ${line}`);
+    if (publishedUrl || startupHealthFailures < 3) {
+      const retry = publishedUrl ? "" : ` Startup health attempt ${startupHealthFailures}/3 failed.`;
+      log(`${failure}; restarting the tunnel.${retry}`);
       signal(instance.child, "SIGKILL");
     } else {
-      log("Tunnel /health did not return 200 within 60 seconds. Check worker-host output and connectivity; stopping.");
+      log(`${failure}. All 3 startup health attempts failed. Check worker-host output and connectivity; stopping.`);
       await shutdown(1);
     }
   }
@@ -195,11 +207,13 @@ function startTunnel() {
   if (shuttingDown) return;
   const child = start("cloudflared", ["tunnel", "--url", "http://127.0.0.1:8787"]);
   child.stdin.end();
-  const instance = { child, started: Date.now(), ended: false, abort: new AbortController(), url: null };
+  const instance = { child, started: Date.now(), ended: false, abort: new AbortController(), url: null, output: [] };
   tunnel = instance;
-  // Do not echo tunnel output: print the public URL once it has passed health checks.
+  // Keep a per-tunnel ring buffer in memory; only dump it on health failure.
   for (const stream of [child.stdout, child.stderr]) {
     createInterface({ input: stream }).on("line", (line) => {
+      instance.output.push(line);
+      if (instance.output.length > 30) instance.output.shift();
       const match = line.match(/https:\/\/([a-z0-9]+(?:-[a-z0-9]+)*)\.trycloudflare\.com\b/i);
       if (!match || match[1].toLowerCase() === "api" || instance.url || instance.ended || shuttingDown) return;
       instance.url = match[0];
