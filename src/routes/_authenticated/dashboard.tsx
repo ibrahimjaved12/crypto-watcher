@@ -8,6 +8,7 @@ import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
 import { ForwardFreshnessBanner } from "@/components/forward-freshness-banner";
+import { RunnerStatusNotice } from "@/components/runner-status-notice";
 import { QuoteCard } from "@/components/market/quote-card";
 import { MarketRead } from "@/components/market/market-read";
 import { TechnicalAnalysis } from "@/components/market/technical-analysis";
@@ -140,6 +141,7 @@ function Dashboard() {
 
   return (
     <AppShell>
+      <RunnerStatusNotice />
       <ForwardFreshnessBanner />
       <PageHeader
         eyebrow="Live market"
