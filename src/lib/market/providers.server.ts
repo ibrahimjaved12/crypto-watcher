@@ -193,10 +193,7 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: {
-        accept: "application/json",
-        "user-agent": "crypto-watcher/1.0 (+https://github.com/ibrahimjaved12/crypto-watcher)",
-      },
+      headers: { accept: "application/json" },
     });
     if (!res.ok) throw await httpFailure(res);
     return await res.json();
