@@ -1,7 +1,7 @@
 # Worker host (#270)
 
 `npm run worker:host` runs the forward-test workers on the owner's machine in **production mode**:
-hosted main Supabase, local operational Supabase, everything the machine does is outbound
+hosted main Supabase, local operational Supabase, the jobs use outbound connections
 (discussion #167, hosting plan v4). It exists because `npm run dev:local:all` starts the _local_ main
 stack and points the jobs at it.
 
@@ -9,7 +9,7 @@ The host explicitly sets `MACHINE_ONLY_ENABLED=true` for its child environment.
 Cloudflare keeps this server-only capability off. For stale hosted results and
 restart/catch-up steps, see the [forward outage runbook](forward-outage-runbook.md).
 
-It supervises five children, each with a log prefix and its own restart policy:
+It supervises five children, plus an optional sixth gateway, each with a log prefix and its own restart policy:
 
 | Child             | Command (same as the npm script / `dev-local.mjs`)                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -18,6 +18,8 @@ It supervises five children, each with a log prefix and its own restart policy:
 | `collector`        | `node scripts/collector-worker.mjs --mode production` (`npm run collector:worker`)                                  |
 | `forward-hourly`   | `node scripts/forward-run.mjs --mode production` (`npm run forward:run`)                                            |
 | `forward-trend`    | `node scripts/forward-run.mjs --trend --mode production` (`npm run forward:trend`)                                  |
+
+| `runner-gateway` | `node scripts/runner-gateway.mjs --mode production` (only when `RUNNER_GATEWAY_ENABLED=true`; non-essential) |
 
 The jobs are launched with `node` directly rather than through `npm`, so the supervisor owns the real
 process (no wrapper to signal through). `--workers 1` is explicit because uvicorn otherwise takes its
@@ -47,7 +49,8 @@ With the local operational Supabase stack running, use `npm run env:production` 
 generates the Python token and sets the worker flags and separate Python endpoints. It refuses to
 overwrite an existing file. Fill in `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` yourself: they start
 as `REPLACE_` placeholders, and hosted values are never fetched. The worker host refuses any variable
-whose value still starts with `REPLACE_`, reporting only its name.
+whose value still starts with `REPLACE_`, reporting only its name, except
+`RUNNER_GATEWAY_SECRET` while the gateway is disabled.
 
 Vite loads `.env`, `.env.local`, `.env.production`, then `.env.production.local` (last wins; shell
 variables beat all). The committed `.env.production` already selects the production profile and the
@@ -94,7 +97,7 @@ Prerequisites: Node 22.12+, `npm ci`, and the Python environment
 The host refuses to start (exit 1, one line per problem, no secret values) when:
 
 - `.env.production.local` is missing, or does not itself define every required name (marked \* above);
-- any environment value still starts with `REPLACE_`;
+- any environment value still starts with `REPLACE_` (except the disabled gateway secret);
 - `APP_PROFILE` is not `production`, `SUPABASE_URL` is not a hosted HTTPS origin, or
   `ALLOW_HOSTED_SUPABASE` is not exactly `true`;
 - the operational database is disabled, its URL is neither loopback nor HTTPS, or it is the same project
@@ -197,3 +200,44 @@ Scheduled-Task-side size check; the host does not rotate logs itself.
   `skipped_stale`; `mvp:check` has to be run.
 - Funding events, mark prices, maintenance-margin tiers and Python host sizing (see
   [production-todo](production-todo.md)).
+
+
+## Reaching the gateway
+
+The gateway is optional until PR 2 of #294. Worker calls and `dev:local` behavior are unchanged.
+Set these server-only variables in `.env.production.local` to enable the sixth child:
+
+- `RUNNER_GATEWAY_ENABLED=true` (default `false`).
+- `RUNNER_GATEWAY_PORT=8787` (integer 1024–65535).
+- `RUNNER_GATEWAY_SECRET`: a random secret of 32–256 URL-safe characters (`A-Z`, `a-z`, `0-9`, `_`, `-`).
+
+When enabled, all three names and `SUPABASE_PUBLISHABLE_KEY` must be defined in that file itself.
+The publishable key must belong to the hosted main project. The gateway also requires the existing
+`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Replace the generated secret placeholder before enabling.
+Never commit credentials or expose them via `VITE_*` variables.
+
+The listener binds only to `127.0.0.1`. `GET /health` is public; `POST /v1/analysis` with JSON
+`{"symbol":"BTCUSDT"}` and `POST /v1/monitor/check` require both `x-runner-secret` and
+`Authorization: Bearer <user JWT>`. Send `Content-Type: application/json` for bodies; check accepts
+an empty request. Bodies are capped at 4 KB. Analysis allows 12 requests/minute per user and checks
+allow 6, with one concurrent check per user. This is a server-to-server interface.
+
+To reach it through an optional Cloudflare Tunnel:
+
+1. Run `cloudflared tunnel login`.
+2. Run `cloudflared tunnel create crypto-watcher-runner`.
+3. Add a DNS route with `cloudflared tunnel route dns crypto-watcher-runner <YOUR_HOSTNAME>`.
+4. Create a cloudflared configuration using your tunnel ID, credentials path and hostname:
+
+   ```yaml
+   tunnel: <TUNNEL_ID>
+   credentials-file: <PATH_TO_TUNNEL_CREDENTIALS_JSON>
+   ingress:
+     - hostname: <YOUR_HOSTNAME>
+       service: http://127.0.0.1:8787
+     - service: http_status:404
+   ```
+
+5. Run `cloudflared tunnel run crypto-watcher-runner` with that configuration.
+
+A VM with nginx can later replace the tunnel with the same URL contract.
