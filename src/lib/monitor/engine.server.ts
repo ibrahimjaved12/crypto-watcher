@@ -108,6 +108,7 @@ export async function runMonitorForUser(
   if (symbols.length === 0) return finish({ ...base, status: "skipped" });
 
   const failures: string[] = [];
+  const checkedSymbols = new Set<string>();
   let alertsCreated = 0;
   let source: string | null = null;
   const sharedCollectorOwnsMarketData =
@@ -195,6 +196,9 @@ export async function runMonitorForUser(
         }
         if (status === "alerted") alertsCreated += 1;
       }
+      if (settings.movement_alerts_enabled || !settings.completed_candle_ta_enabled) {
+        checkedSymbols.add(symbol);
+      }
     } catch (error) {
       failures.push(`${symbol}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -208,16 +212,22 @@ export async function runMonitorForUser(
     // shared Python calculation path, validates responses, and is the privileged
     // main-database `ta_signals` writer. The collector worker never owns TA.
     for (const symbol of symbols) {
-      taErrors.push(
-        ...(await runTA(supabaseAdmin, userId, symbol, context, undefined, operationalStore)),
+      const symbolErrors = await runTA(
+        supabaseAdmin, userId, symbol, context, undefined, operationalStore,
       );
+      taErrors.push(...symbolErrors);
+      if (symbolErrors.length < 3) checkedSymbols.add(symbol);
     }
   }
 
   const collectionPathFailed = failures.length >= symbols.length;
   const taFailed = settings.completed_candle_ta_enabled && taErrors.length >= symbols.length * 3;
+  // Collection alone is not a successful alert check when only TA is enabled.
+  const otherEnabledWorkSucceeded =
+    (settings.movement_alerts_enabled || !settings.completed_candle_ta_enabled) &&
+    !collectionPathFailed;
   const allEnabledWorkFailed =
-    collectionPathFailed && (!settings.completed_candle_ta_enabled || taFailed);
+    !otherEnabledWorkSucceeded && (!settings.completed_candle_ta_enabled || taFailed);
   const status: UserRunResult["status"] = allEnabledWorkFailed
     ? "failed"
     : failures.length || taErrors.length
@@ -227,7 +237,7 @@ export async function runMonitorForUser(
   return finish({
     userId,
     status,
-    symbolsChecked: symbols.length,
+    symbolsChecked: checkedSymbols.size,
     alertsCreated,
     dataSource: source,
     error: [...failures, ...taErrors].join(" | ") || null,
