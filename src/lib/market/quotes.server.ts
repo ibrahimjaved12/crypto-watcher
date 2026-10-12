@@ -1,73 +1,48 @@
-import { loadCandles, type Candle, type ProviderAttempt } from "./providers.server";
+import { loadCandles } from "./providers.server";
+import { quoteFigures, quoteStale, type SymbolQuote } from "./quote-calc";
 
-export type SymbolQuote = {
-  symbol: string;
-  ok: boolean;
-  source: string | null;
-  price: number | null;
-  /** Minutes -> percent change. Missing key means the window could not be computed. */
-  changes: Record<number, number | null>;
-  /** 24h of 15m closes for the chart. */
-  chart: Array<{ time: number; close: number }>;
-  lastCandleAt: number | null;
-  /** True when the newest candle is older than 10 minutes. */
-  stale: boolean;
-  error: string | null;
-  /**
-   * Failed provider attempts in fallback order. On a successful quote these are the earlier sources
-   * that failed (empty when the first source answered); on a failed quote, every source.
-   */
-  fallbackReasons: ProviderAttempt[];
-  fetchedAt: string;
-};
+export type { SymbolQuote } from "./quote-calc";
 
-function pctFrom(series: Candle[], barsBack: number): number | null {
-  if (series.length <= barsBack) return null;
-  const last = series[series.length - 1];
-  const prev = series[series.length - 1 - barsBack];
-  if (!last || !prev || !prev.close) return null;
-  return ((last.close - prev.close) / prev.close) * 100;
-}
-
+/**
+ * Exchange-backed quote builder. The dashboard no longer uses it: `getMarketSnapshot` reads quotes
+ * the machine published (#323), so the Worker makes no exchange request. Kept (unreferenced) until
+ * the follow-up that removes the dead Worker-side fallback path; the maths lives in `quote-calc.ts`.
+ */
 export async function getQuote(symbol: string): Promise<SymbolQuote> {
   const fetchedAt = new Date().toISOString();
   const outcome = await loadCandles(symbol);
 
+  const failed = (error: string, fallbackReasons: SymbolQuote["fallbackReasons"]): SymbolQuote => ({
+    symbol,
+    ok: false,
+    source: null,
+    price: null,
+    changes: {},
+    chart: [],
+    lastCandleAt: null,
+    stale: true,
+    error,
+    fallbackReasons,
+    fetchedAt,
+  });
+
   if (!outcome.ok) {
-    return {
-      symbol,
-      ok: false,
-      source: null,
-      price: null,
-      changes: {},
-      chart: [],
-      lastCandleAt: null,
-      stale: true,
-      error: `Futures data unavailable — ${outcome.errors.join(" | ")}`,
-      fallbackReasons: outcome.attempts,
-      fetchedAt,
-    };
+    return failed(`Futures data unavailable — ${outcome.errors.join(" | ")}`, outcome.attempts);
   }
 
   const { minute, quarter, source, attempts } = outcome.result;
-  const last = minute[minute.length - 1]!;
-  const lastCandleAt = last.time;
+  const figures = quoteFigures(minute, quarter);
+  if (!figures) return failed("Futures data unavailable — no usable latest price", attempts);
 
   return {
     symbol,
     ok: true,
     source,
-    price: last.close,
-    changes: {
-      5: pctFrom(minute, 5),
-      15: pctFrom(minute, 15),
-      60: pctFrom(minute, 60),
-      240: pctFrom(quarter, 16),
-      1440: pctFrom(quarter, 96),
-    },
-    chart: quarter,
-    lastCandleAt,
-    stale: Date.now() - lastCandleAt > 10 * 60 * 1000,
+    price: figures.price,
+    changes: figures.changes,
+    chart: figures.chart,
+    lastCandleAt: figures.lastCandleAt,
+    stale: quoteStale(figures.lastCandleAt, Date.now()),
     error: null,
     fallbackReasons: attempts,
     fetchedAt,

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { sourceLabel } from "@/lib/labels";
 import { CHANGE_WINDOWS, WINDOW_LABELS, baseAsset } from "@/lib/market/symbols";
-import type { SymbolQuote } from "@/lib/market/quotes.server";
+import type { SymbolQuote } from "@/lib/market/quote-calc";
 
 function formatPrice(value: number): string {
   const digits = value >= 1000 ? 2 : value >= 1 ? 4 : 6;

@@ -124,6 +124,7 @@ values are runtime configuration (loaded into the dev process by Vite locally).
 | `SUPABASE_SERVICE_ROLE_KEY`                       | TanStack secret                     | Empty; required for admin monitoring operations; local value from status                                |
 | `SUPABASE_PROJECT_ID`, `VITE_SUPABASE_PROJECT_ID` | Server / browser metadata           | Optional; not used to choose targets                                                                    |
 | `OPERATIONAL_DB_ENABLED`                          | TanStack + collector worker         | `false` for rollback; exact `true` transfers checkpoint/run ownership and enables recent-candle storage |
+| `MARKET_QUOTE_PUBLISHER_ENABLED`                  | Collector worker                    | Optional; `false` stops the market quote publisher (#323). It also needs `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` on the machine |
 | `OPERATIONAL_SUPABASE_URL`                        | TanStack + collector worker         | Separate local/hosted operational Supabase origin; required when enabled                                |
 | `OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY`           | TanStack + collector worker secret  | Operational project service-role key; required when enabled; never `VITE_*`                             |
 | `OPERATIONAL_CANDLE_RETENTION_DAYS`               | TanStack + collector worker         | `8`; allowed range 1–30; collector needs at least 8 for #71 warm-up                                    |

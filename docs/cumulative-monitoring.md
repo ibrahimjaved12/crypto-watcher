@@ -58,9 +58,10 @@ cannot insert an alert or advance its baseline. See
 `src/lib/monitor/observation.ts` selects the newest completed 1m close, honors
 provider candle timestamps and rejects duplicate, malformed, future or more than
 10-minute-old observations. Bad or unavailable data fails visibly after the Binance,
-OKX, and Kraken futures chain. Dashboard quote
-calculations remain the prior rolling implementation, including their documented
-partial-candle limitations; monitoring no longer uses those rolling values.
+OKX, and Kraken futures chain. Dashboard quotes are published by the machine
+(#323) with the same change and chart functions (`src/lib/market/quote-calc.ts`), now from
+completed collector candles (the still-forming candle is no longer included, so a price can
+be up to two minutes old); monitoring does not use those values.
 
 Python's `market_analysis.cumulative.observe` implements the matching pure state
 transition for replay and future backtesting. It assumes one supplied state per

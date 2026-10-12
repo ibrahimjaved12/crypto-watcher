@@ -262,3 +262,41 @@ TA still consumes only 15m/1h/4h. #71 keeps its compact close/base/quote-volume
 projection from the same authoritative `collector_recent_candles` table. #70's
 five-second aggTrade buckets remain distinct. This adds no source, WebSocket,
 scheduler, strategy, or per-message Python call.
+
+## Market quote publisher (#323)
+
+The Cloudflare Worker cannot reach Binance (measured: HTTP 403 on every Binance endpoint,
+including the spot data host and the WebSocket upgrade; OKX answered 429), so the dashboard's price
+cards no longer fetch from any exchange. Ingestion and serving are separate:
+
+- **Machine.** `src/worker/collector-worker.ts` starts `startMarketQuotePublisher` next to the
+  collector, in the same process, so the process manager that runs the collector
+  (`npm run up` → `worker:host`) restarts both. A few seconds after each completed 1m candle it
+  reads the collected symbols' completed 1m and 15m candles from the operational store
+  (`readCollectorCompletedCandles`), builds each quote with `quote-calc.ts` and sends one batched
+  call, `publish_market_quotes`, to hosted `public.market_quotes` with the same service-role client
+  the forward jobs use. It makes no exchange call. A symbol whose newest candle did not advance is
+  not sent, and the database never moves a row backwards, so restarts and retries are idempotent.
+  A failed hosted write is logged and retried on the next candle; the collector is unaffected.
+  Heartbeat: `[market-quote-publisher] heartbeat symbols=… published=… behind=… unavailable=…
+  newest_published_at=…` once a minute. `MARKET_QUOTE_PUBLISHER_ENABLED=false` turns it off.
+- **Worker.** `getMarketSnapshot` reads `market_quotes` with the publishable key (one query, RLS
+  `SELECT` for `anon`/`authenticated`) and maps rows to `SymbolQuote`. A quote is stale after 10
+  minutes (from `last_candle_at` or `published_at`); all-stale or empty shows the "showing the last
+  published prices" banner. A symbol without a row is "not collected yet".
+- **Check.** `npm run mvp:check -- --mode production` lists the age of each benchmark symbol's
+  newest `published_at` and warns past 10 minutes.
+
+### How long until a newly watched symbol has a row
+
+The six benchmark symbols (`BENCHMARK_COLLECTOR_SYMBOLS`) are always collected and published. Any
+other symbol needs the collector universe to include it, and **adding a pair to a watchlist does not
+trigger that**: `addSymbol` only inserts the watchlist row. The universe is reconciled by
+`syncCollectorUniverse`, which runs (a) from the authenticated hook
+`/api/public/hooks/sync-collector-subscriptions`, which a scheduler must call (this repository
+configures no schedule for it), (b) before a manual "Check for alerts now", and (c) once per
+server process on the first request when that process can reach the operational store. After a
+sync the collector re-reads its subscriptions every 30 s, bootstraps the new symbol's history by
+REST, and the publisher writes the row on its next pass (within about a minute). So: up to about
+two minutes after the next sync, and until a sync runs it can stay "not collected yet". Scheduling
+the hook (or syncing from the machine) is a follow-up.
