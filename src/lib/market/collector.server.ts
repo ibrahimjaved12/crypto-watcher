@@ -1,3 +1,4 @@
+import { collectorLogMessage } from "./collector-logging";
 import { getOperationalStore } from "../operational/repository.server";
 import type { OperationalStore } from "../operational/types";
 import {
@@ -17,6 +18,7 @@ import { movementFinalizationConfig } from "./movement-finalization";
 import { DEFAULT_MARKET_MOVEMENT_CONFIG } from "./movement-metrics-contract";
 import { validateCollectorWorkerEnvironment, collectorCandleSettleSeconds } from "./collector-worker-env.server";
 
+const HEARTBEAT_MS = 60_000;
 const SUBSCRIPTION_REFRESH_MS = 30_000;
 const LEASE_SECONDS = 60;
 const LEASE_REFRESH_MS = 20_000;
@@ -51,6 +53,10 @@ export class CollectorRuntime {
   private reconnectAttempts = 0;
   private requestId = 1;
   private lastMessageAt = 0;
+  private lastObservedMessageAt: number | null = null;
+  private loggedSymbols: string | null = null;
+  private lastStoredCandleCount = 0;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private readonly pendingRequests = new Map<
     number,
     { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
@@ -134,6 +140,7 @@ export class CollectorRuntime {
       this.historyBackfillAttempts = 0;
       this.collector.resetMovementTransportState();
       await this.collector.reconcile(await this.store.readCollectorSubscriptions());
+      this.logSubscriptionSymbols();
       this.startTimers();
       this.connect();
       this.scheduleHistoryBackfill(0);
@@ -171,7 +178,28 @@ export class CollectorRuntime {
     }, LEASE_REFRESH_MS);
   }
 
+  private logSubscriptionSymbols(): void {
+    const symbols = this.collector.subscribedSymbols().slice().sort();
+    const key = symbols.join(",");
+    if (key === this.loggedSymbols) return;
+    this.loggedSymbols = key;
+    console.info(symbols.length === 0
+      ? "[binance-collector] subscription symbol set is empty"
+      : `[binance-collector] subscription symbol set changed: count=${symbols.length} symbols=${key}`);
+  }
+
   private startTimers(): void {
+    this.lastStoredCandleCount = this.collector.storedOneMinuteCandleCount();
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.active) return;
+      const stored = this.collector.storedOneMinuteCandleCount();
+      const age = this.lastObservedMessageAt === null
+        ? "never" : Math.floor((Date.now() - this.lastObservedMessageAt) / 1000);
+      console.info(
+        `[binance-collector] heartbeat connected=${this.socket?.readyState === WebSocket.OPEN ? "yes" : "no"} subscribed_symbols=${this.collector.subscribedSymbols().length} seconds_since_last_message=${age} stored_1m_candles=${stored - this.lastStoredCandleCount}`,
+      );
+      this.lastStoredCandleCount = stored;
+    }, HEARTBEAT_MS);
     this.leaseTimer = setInterval(() => void this.renewLease(), LEASE_REFRESH_MS);
     this.subscriptionTimer = setInterval(
       () => void this.reconcileSubscriptions(),
@@ -236,6 +264,7 @@ export class CollectorRuntime {
       const previousSymbols = this.collector.subscribedSymbols().join(",");
       const before = new Set(this.collector.streamNames());
       await this.collector.reconcile(await this.store.readCollectorSubscriptions());
+      this.logSubscriptionSymbols();
       const after = new Set(this.collector.streamNames());
       await Promise.all([
         this.sendSubscription(
@@ -268,6 +297,7 @@ export class CollectorRuntime {
     const recoveryGeneration = this.beginCandleRecoveryTenure();
     this.socket = socket;
     socket.addEventListener("open", () => {
+      console.info("[binance-collector] websocket open");
       this.lastMessageAt = Date.now();
       const subscription = this.sendSubscription("SUBSCRIBE", this.collector.streamNames());
       void subscription
@@ -292,6 +322,7 @@ export class CollectorRuntime {
     });
     socket.addEventListener("message", (event) => {
       this.lastMessageAt = Date.now();
+      this.lastObservedMessageAt = this.lastMessageAt;
       if (typeof event.data !== "string") {
         this.collector.markAllMovementUnavailable();
         socket.close(RECOVERY_CLOSE_CODE, "non-text Binance movement frame");
@@ -313,8 +344,12 @@ export class CollectorRuntime {
             clearTimeout(pending.timer);
             this.pendingRequests.delete(requestId);
             if (typeof payload["code"] === "number") {
+              console.error(`[binance-collector] subscription rejected id=${requestId} code=${payload["code"]} message=${collectorLogMessage(payload["msg"])}`);
               pending.reject(new Error(`Binance subscription rejected: ${String(payload["msg"])}`));
-            } else pending.resolve();
+            } else {
+              console.info(`[binance-collector] subscription acknowledged id=${requestId} response=${collectorLogMessage(JSON.stringify({ result: payload["result"], msg: payload["msg"] }))}`);
+              pending.resolve();
+            }
           }
         }
         this.collector.accept(payload, this.lastMessageAt);
@@ -323,7 +358,8 @@ export class CollectorRuntime {
         socket.close(RECOVERY_CLOSE_CODE, "invalid Binance movement frame");
       }
     });
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (event) => {
+      console.info(`[binance-collector] websocket close code=${event.code} reason=${collectorLogMessage(event.reason)}`);
       if (this.socket !== socket) return;
       this.socket = null;
       this.streamReady = false;
@@ -520,15 +556,18 @@ export class CollectorRuntime {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
+        console.error(`[binance-collector] ${method} acknowledgement timed out id=${id}`);
         reject(new Error("Binance subscription acknowledgement timed out"));
       }, 10_000);
       this.pendingRequests.set(id, { resolve, reject, timer });
       this.socket!.send(JSON.stringify({ method, params: streams, id }));
+      console.info(`[binance-collector] ${method} sent id=${id} stream_count=${streams.length} first_streams=${streams.slice(0, 3).join(",")}`);
     });
   }
 
   private rejectPendingRequests(message: string): void {
-    for (const pending of this.pendingRequests.values()) {
+    for (const [id, pending] of this.pendingRequests) {
+      console.warn(`[binance-collector] subscription interrupted id=${id} message=${collectorLogMessage(message)}`);
       clearTimeout(pending.timer);
       pending.reject(new Error(message));
     }
@@ -547,13 +586,14 @@ export class CollectorRuntime {
   }
 
   private clearTimers(): void {
-    for (const timer of [this.subscriptionTimer, this.leaseTimer, this.staleTimer, this.reconcileTimer]) {
+    for (const timer of [this.subscriptionTimer, this.leaseTimer, this.staleTimer, this.reconcileTimer, this.heartbeatTimer]) {
       if (timer) clearInterval(timer);
     }
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
     if (this.candleRecoveryRetryTimer) clearTimeout(this.candleRecoveryRetryTimer);
     if (this.historyBackfillTimer) clearTimeout(this.historyBackfillTimer);
+    this.heartbeatTimer = null;
     this.subscriptionTimer = null;
     this.leaseTimer = null;
     this.staleTimer = null;

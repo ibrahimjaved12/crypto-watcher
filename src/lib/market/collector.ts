@@ -1,3 +1,4 @@
+import { collectorLogMessage } from "./collector-logging";
 import { isSupportedSymbol } from "./symbols";
 import type { Candle } from "./providers.server";
 import type {
@@ -345,6 +346,27 @@ class TradeBuffer {
 }
 
 export class BinanceFuturesCollector {
+  private storedOneMinuteCandles = 0;
+
+  /** Confirmed new inserts, including recovery and historical backfill. */
+  storedOneMinuteCandleCount(): number {
+    return this.storedOneMinuteCandles;
+  }
+
+  private async recordCandles(candles: CollectorCandle[]): Promise<string[]> {
+    try {
+      const inserted = await this.dependencies.store.recordCollectorCandles(candles);
+      const identities = new Set(inserted);
+      this.storedOneMinuteCandles += new Set(candles
+        .filter((candle) => candle.timeframeMinutes === 1 && identities.has(candleIdentity(candle)))
+        .map(candleIdentity)).size;
+      return inserted;
+    } catch (error) {
+      console.error(`[binance-collector] candle storage failed symbols=${[...new Set(candles.map((candle) => candle.symbol))].join(",")} error=${collectorLogMessage(error)}`);
+      throw error;
+    }
+  }
+
   private readonly now: () => number;
   private readonly queueCapacity: number;
   private readonly tradeWindowMs: number;
@@ -533,7 +555,7 @@ export class BinanceFuturesCollector {
           break;
         }
         if (!shouldContinue()) return result;
-        await this.dependencies.store.recordCollectorCandles(candles);
+        await this.recordCandles(candles);
         result.historyChanged = true;
         pageLastOpen = pageStart - MINUTE_MS;
       }
@@ -1015,6 +1037,7 @@ export class BinanceFuturesCollector {
         try {
           await this.processFinal(candle, recoveryGeneration);
         } catch (error) {
+          console.error(`[binance-collector] completed-candle processing failed symbol=${candle.symbol} error=${collectorLogMessage(error)}`);
           await this.setHealth(
             candle,
             "UNAVAILABLE",
@@ -1147,7 +1170,7 @@ export class BinanceFuturesCollector {
     recoveryGeneration?: number,
   ): Promise<boolean> {
     if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
-    const inserted = new Set(await this.dependencies.store.recordCollectorCandles(candles));
+    const inserted = new Set(await this.recordCandles(candles));
     if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
     for (const candle of candles) {
       if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
@@ -1286,6 +1309,7 @@ export class BinanceFuturesCollector {
         this.persistedHealthWrites.set(key, { desired, input });
         this.failedHealthWrites.delete(key);
       } catch (error) {
+        console.error(`[binance-collector] candle health storage failed symbol=${desired.symbol} error=${collectorLogMessage(error)}`);
         // A failed RPC may still have committed remotely. If this intent was
         // superseded while it was in flight, continue and reassert the newest
         // intent. Only a failure of the still-current intent is surfaced.
