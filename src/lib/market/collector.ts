@@ -84,6 +84,10 @@ type HealthState = {
   errorMessage: string | null;
 };
 
+type CandleRecoveryResult =
+  | { recovered: true }
+  | { recovered: false; reason: string };
+
 type CollectorHealthInput = Parameters<OperationalStore["recordCollectorHealth"]>[0];
 
 type DesiredHealthWrite = {
@@ -960,25 +964,49 @@ export class BinanceFuturesCollector {
     if (generation !== this.candleRecoveryGeneration) return;
     if (this.recovery?.generation === generation) return this.recovery.promise;
     const recovery = (async () => {
+      const failures: string[] = [];
       for (const symbol of this.subscribedSymbols()) {
         for (const timeframe of COLLECTOR_INTERVALS) {
           if (!this.isCandleRecoveryCurrent(generation)) return;
-          const latest = this.latestCompleted.get(this.key(symbol, timeframe));
-          if (!latest) {
-            await this.bootstrap(symbol, timeframe, generation);
-            if (!this.isCandleRecoveryCurrent(generation)) return;
-            if (!this.latestCompleted.has(this.key(symbol, timeframe))) {
-              throw new Error(`REST continuity unavailable for ${symbol} ${timeframe}m`);
+          try {
+            const latest = this.latestCompleted.get(this.key(symbol, timeframe));
+            if (!latest) {
+              await this.bootstrap(symbol, timeframe, generation);
+              if (!this.isCandleRecoveryCurrent(generation)) return;
+              if (!this.latestCompleted.has(this.key(symbol, timeframe))) {
+                throw new Error(`REST continuity unavailable for ${symbol} ${timeframe}m`);
+              }
+            } else {
+              await this.recoverThrough(
+                symbol,
+                timeframe,
+                this.latestExpectedOpen(timeframe),
+                generation,
+              );
             }
-          } else {
-            await this.recoverThrough(
-              symbol,
-              timeframe,
-              this.latestExpectedOpen(timeframe),
-              generation,
-            );
+          } catch (error) {
+            if (!this.isCandleRecoveryCurrent(generation)) throw error;
+            const message = error instanceof Error ? error.message : String(error);
+            let failure = `${symbol} ${timeframe}m: ${message}`;
+            try {
+              await this.setHealth(
+                this.latestCompleted.get(this.key(symbol, timeframe)) ??
+                  this.placeholder(symbol, timeframe),
+                "UNAVAILABLE",
+                message,
+                generation,
+              );
+            } catch (healthError) {
+              // A failed health write must not prevent the remaining pairs from recovering.
+              failure += `; UNAVAILABLE health write failed: ${healthError instanceof Error ? healthError.message : String(healthError)}`;
+            }
+            failures.push(failure);
           }
         }
+      }
+      if (!this.isCandleRecoveryCurrent(generation)) return;
+      if (failures.length > 0) {
+        throw new Error(`REST reconnect recovery failed for pairs: ${failures.join("; ")}`);
       }
     })().finally(() => {
       if (this.recovery?.generation === generation) {
@@ -1084,9 +1112,9 @@ export class BinanceFuturesCollector {
         candle.openTime - duration,
         recoveryGeneration,
       );
-      if (!recovered) {
+      if (!recovered.recovered) {
         if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
-        throw new Error("REST recovery could not prove candle continuity");
+        throw new Error(`REST recovery could not prove candle continuity: ${recovered.reason}`);
       }
     }
     if (!(await this.persist([candle], "live", recoveryGeneration))) return;
@@ -1109,23 +1137,23 @@ export class BinanceFuturesCollector {
       recoveryGeneration,
     );
     if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
-    if (
-      !(await this.recoverRange(
-        symbol,
-        timeframeMinutes,
-        latest.openTime + timeframeMinutes * 60_000,
-        targetOpen,
-        recoveryGeneration,
-      ))
-    ) {
+    const recovered = await this.recoverRange(
+      symbol,
+      timeframeMinutes,
+      latest.openTime + timeframeMinutes * 60_000,
+      targetOpen,
+      recoveryGeneration,
+    );
+    if (!recovered.recovered) {
       if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return;
+      const message = `REST reconnect continuity unavailable for ${symbol} ${timeframeMinutes}m: ${recovered.reason}`;
       await this.setHealth(
         latest,
         "UNAVAILABLE",
-        "reconnect continuity unavailable",
+        message,
         recoveryGeneration,
       );
-      throw new Error(`REST reconnect continuity unavailable for ${symbol} ${timeframeMinutes}m`);
+      throw new Error(message);
     }
   }
 
@@ -1135,12 +1163,28 @@ export class BinanceFuturesCollector {
     firstOpen: number,
     lastOpen: number,
     recoveryGeneration?: number,
-  ): Promise<boolean> {
-    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
-    if (lastOpen < firstOpen) return true;
+  ): Promise<CandleRecoveryResult> {
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) {
+      return { recovered: false, reason: "candle recovery generation superseded" };
+    }
+    if (lastOpen < firstOpen) return { recovered: true };
     const duration = timeframeMinutes * 60_000;
     const count = Math.floor((lastOpen - firstOpen) / duration) + 1;
-    if (count > 1000) return false;
+    const failure = (
+      reason: string,
+      candles: CollectorCandle[] | null = null,
+      contiguous: boolean | null = null,
+    ): CandleRecoveryResult => ({
+      recovered: false,
+      reason: `${reason}: symbol=${symbol} interval=${timeframeMinutes}m ` +
+        `expectedCount=${count} returnedCount=${candles?.length ?? "not-requested"} ` +
+        `expectedFirstOpen=${firstOpen} returnedFirstOpen=${candles?.[0]?.openTime ?? "none"} ` +
+        `expectedLastOpen=${lastOpen} returnedLastOpen=${candles?.at(-1)?.openTime ?? "none"} ` +
+        `contiguous=${contiguous ?? "not-checked"}`,
+    });
+    if (count > 1000) {
+      return failure(`1000-candle guard exceeded (computedGapCount=${count}, limit=1000)`);
+    }
     const candles = (
       await this.dependencies.loadRest({
         symbol,
@@ -1152,16 +1196,22 @@ export class BinanceFuturesCollector {
     )
       .filter((candle) => candle.closeTime < this.now())
       .sort((left, right) => left.openTime - right.openTime);
-    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) return false;
+    if (!this.isCandleRecoveryCurrent(recoveryGeneration)) {
+      return { recovered: false, reason: "candle recovery generation superseded" };
+    }
+    const contiguous = this.contiguous(candles, timeframeMinutes);
     if (
       candles.length !== count ||
       candles[0]?.openTime !== firstOpen ||
       candles.at(-1)?.openTime !== lastOpen ||
-      !this.contiguous(candles, timeframeMinutes)
+      !contiguous
     ) {
-      return false;
+      return failure("REST candle continuity validation failed", candles, contiguous);
     }
-    return this.persist(candles, "recovery", recoveryGeneration);
+    const recovered = await this.persist(candles, "recovery", recoveryGeneration);
+    return recovered
+      ? { recovered: true }
+      : { recovered: false, reason: "candle recovery generation superseded" };
   }
 
   private async persist(

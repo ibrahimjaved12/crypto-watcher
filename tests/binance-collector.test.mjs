@@ -369,6 +369,50 @@ test("reconnect recovery and repeated final do not duplicate completion", async 
   assert.equal(events.filter((event) => event.origin === "live").length, 1);
 });
 
+test("reconnect recovery continues with later pairs when the first pair fails", async () => {
+  const requested = [];
+  const { collector, events, healthWrites } = harness({
+    loadRest: async (request) => {
+      const duration = request.timeframeMinutes * MINUTE_MS;
+      if (request.startTime === undefined) {
+        return [canonical(request.symbol, request.timeframeMinutes, BASE - 2 * duration)];
+      }
+      requested.push([request.symbol, request.timeframeMinutes]);
+      if (request.symbol === "BTCUSDT" && request.timeframeMinutes === 1) return [];
+      return [canonical(request.symbol, request.timeframeMinutes, request.startTime)];
+    },
+  });
+  await collector.reconcile(["BTCUSDT", "ETHUSDT"]);
+  events.length = 0;
+  healthWrites.length = 0;
+
+  await assert.rejects(collector.recoverAfterReconnect(), (error) => {
+    assert.match(error.message, /failed for pairs: BTCUSDT 1m:/);
+    assert.match(error.message, /expectedCount=1 returnedCount=0/);
+    assert.match(error.message, new RegExp(`expectedFirstOpen=${BASE - MINUTE_MS} returnedFirstOpen=none`));
+    assert.match(error.message, new RegExp(`expectedLastOpen=${BASE - MINUTE_MS} returnedLastOpen=none`));
+    assert.match(error.message, /contiguous=true/);
+    return true;
+  });
+
+  assert.deepEqual(
+    requested,
+    ["BTCUSDT", "ETHUSDT"].flatMap((symbol) =>
+      intervals.map((interval) => [symbol, interval])),
+  );
+  assert.deepEqual(
+    events.map(({ candle, origin }) =>
+      [candle.symbol, candle.timeframeMinutes, candle.openTime, origin]),
+    requested.slice(1).map(([symbol, interval]) =>
+      [symbol, interval, BASE - interval * MINUTE_MS, "recovery"]),
+  );
+  const failedHealth = healthWrites.filter((health) =>
+    health.symbol === "BTCUSDT" && health.timeframeMinutes === 1);
+  assert.equal(failedHealth.at(-1).status, "UNAVAILABLE");
+  assert.match(failedHealth.at(-1).errorMessage, /expectedCount=1 returnedCount=0/);
+  assert.equal(failedHealth.some((health) => health.status === "LIVE"), false);
+});
+
 test("a new candle recovery generation does not reuse an old failing single-flight", async () => {
   await exerciseCollectorRecoveryTenure("failure");
 });
