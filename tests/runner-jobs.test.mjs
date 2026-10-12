@@ -67,7 +67,7 @@ test("runner uses leased sequential execution and safe failure messages without 
   assert.match(source, /runForward\(await forwardDeps\(\), \{\s+userId: job\.user_id, trigger: "on_demand", strategyIds: FORWARD_STRATEGY_IDS/);
   assert.match(source, /runForwardTrend\(await forwardTrendDeps\(\), \{\s+userId: job\.user_id, trigger: "on_demand"/);
   assert.match(source, /await execute\(job\)/);
-  assert.match(source, /Object\.values\(process\.env\)/);
+  assert.match(source, /Object\.entries\(process\.env\)/);
   assert.match(source, /failure = safeError\(error\);\s+console\.error\(failure\)/);
   assert.match(source, /\.slice\(0, 500\)/);
   assert.doesNotMatch(source, /\.stack|callRunner|RUNNER_GATEWAY|createServer/);

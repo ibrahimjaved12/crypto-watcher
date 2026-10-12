@@ -111,7 +111,9 @@ test("hosted jobs use the user client, reuse the retry key and join an active jo
   let responses = [];
   globalThis.__machineAuthenticated = true;
   globalThis.__machineAuthCalls = 0;
+  const rpcCalls = [];
   globalThis.__machineSupabase = {
+    rpc(name) { rpcCalls.push(name); return Promise.resolve({ data: 0, error: null }); },
     from(table) {
       const call = { table, filters: [] };
       calls.push(call);
@@ -135,6 +137,7 @@ test("hosted jobs use the user client, reuse the retry key and join an active jo
       assert.deepEqual(await route(runInput), { jobId: "new-job", status: "queued", alreadyActive: false });
       assert.deepEqual(calls.at(-1).insert, { user_id: "user", kind, idempotency_key: runInput.data.idempotencyKey });
       assert.equal(calls.at(-1).table, "runner_jobs");
+      assert.equal(rpcCalls.at(-1), "expire_my_stale_runner_jobs");
 
       responses = [unique, { data: { id: "original-job", status: "succeeded" }, error: null }];
       assert.deepEqual(await route(runInput), { jobId: "original-job", status: "succeeded", alreadyActive: false });
