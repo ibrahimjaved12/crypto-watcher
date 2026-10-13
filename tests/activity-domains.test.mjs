@@ -17,6 +17,7 @@ const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toSt
 
 const { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser, runMonitorForUser } = await import(
   await moduleUrl("../src/lib/monitor/engine.server.ts", {
+    "../ta/schedule": await moduleUrl("../src/lib/ta/schedule.ts"),
     "@/lib/market/providers.server": stub(`
       export async function loadCandles(symbol) {
         globalThis.__domains.market.push(symbol);
@@ -97,6 +98,8 @@ async function run(patch, operationalStore) {
 test("movement alerts and completed-candle TA run independently", async () => {
   let outcome = await run({ completed_candle_ta_enabled: false });
   assert.equal(outcome.result.status, "success");
+  assert.equal(outcome.result.taChecks, 0);
+  assert.equal(outcome.result.taFailures, 0);
   assert.deepEqual(outcome.calls.market, ["BTCUSDT", "ETHUSDT"]);
   assert.equal(outcome.calls.checkpoints, 2);
   assert.equal(outcome.calls.rpc, 2);
@@ -104,6 +107,8 @@ test("movement alerts and completed-candle TA run independently", async () => {
 
   outcome = await run({ movement_alerts_enabled: false });
   assert.equal(outcome.result.status, "success");
+  assert.equal(outcome.result.taChecks, 6);
+  assert.equal(outcome.result.taFailures, 0);
   assert.deepEqual(outcome.calls.market, ["BTCUSDT", "ETHUSDT"]);
   assert.equal(outcome.calls.checkpoints, 2);
   assert.equal(outcome.calls.rpc, 0);
@@ -114,6 +119,8 @@ test("the master and collection controls stop work before provider or database I
   for (const patch of [{ monitoring_enabled: false }, { market_data_collection_enabled: false }]) {
     const { result, calls } = await run(patch);
     assert.equal(result.status, "skipped");
+    assert.equal(result.taChecks, 0);
+    assert.equal(result.taFailures, 0);
     assert.deepEqual(calls, {
       reads: 0,
       market: [],
@@ -158,6 +165,8 @@ test("the shared monitor lease skips work already owned by another run", async (
     { enabled: false },
   );
   assert.equal(result.status, "skipped");
+  assert.equal(result.taChecks, 0);
+  assert.equal(result.taFailures, 0);
   assert.match(result.error, /already in progress/);
   assert.equal(context.metrics.databaseNoOps, 1);
 });
@@ -200,6 +209,8 @@ test("monitor-run ownership switches as one domain without a main-database dual-
       status: "success",
       symbolsChecked: 1,
       alertsCreated: 0,
+      taChecks: 0,
+      taFailures: 0,
       dataSource: "binance-usdm",
       error: null,
       durationMs: 1,
@@ -238,6 +249,8 @@ test("enabling both current consumers runs both paths", async () => {
   const { result, calls } = await run({});
   assert.equal(result.status, "success");
   assert.equal(result.symbolsChecked, 2);
+  assert.equal(result.taChecks, 6);
+  assert.equal(result.taFailures, 0);
   assert.deepEqual(calls.market, ["BTCUSDT", "ETHUSDT"]);
   assert.equal(calls.checkpoints, 2);
   assert.equal(calls.rpc, 2);
