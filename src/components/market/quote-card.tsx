@@ -152,7 +152,10 @@ export function QuoteCard({
               </AreaChart>
             </ResponsiveContainer>
           </div>
-          <p className="num text-[11px] text-muted-foreground">Last 24 hours · 15-minute candles</p>
+          <p className="num text-[11px] text-muted-foreground">
+            Last 24 hours (15-minute candles) · updated{" "}
+            {new Date(quote.fetchedAt).toLocaleTimeString()}
+          </p>
         </>
       )}
     </article>
