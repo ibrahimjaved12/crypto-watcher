@@ -491,6 +491,20 @@ export function formatAgo(at: number | string | Date | null | undefined, now = D
   return `${Math.floor(elapsed / 86_400_000)}d ago`;
 }
 
+/** Exact clock time to show next to a relative one: "4:25:15 PM" on the same local day, else the full date. */
+export function formatClock(at: number | string | Date | null | undefined, now = Date.now()): string {
+  if (at === null || at === undefined) return "—";
+  const ms = at instanceof Date ? at.getTime() : typeof at === "number" ? at : Date.parse(at);
+  if (!Number.isFinite(ms)) return "—";
+  const time = new Date(ms);
+  const today = new Date(now);
+  const sameDay =
+    time.getFullYear() === today.getFullYear() &&
+    time.getMonth() === today.getMonth() &&
+    time.getDate() === today.getDate();
+  return sameDay ? time.toLocaleTimeString() : time.toLocaleString();
+}
+
 export const GLOSSARY: Record<string, { term: string; plain: string }> = {
   R: {
     term: "R (risk unit)",

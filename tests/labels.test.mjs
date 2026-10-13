@@ -64,6 +64,20 @@ test("formatAgo uses compact elapsed time at each display boundary", () => {
   }
 });
 
+test("formatClock shows the clock time on the same local day and the full date otherwise", () => {
+  const now = new Date(2026, 9, 13, 16, 30, 0).getTime();
+  const today = new Date(2026, 9, 13, 16, 25, 15);
+  const yesterday = new Date(2026, 9, 12, 23, 59, 59);
+  assert.equal(labels.formatClock(today, now), today.toLocaleTimeString());
+  assert.equal(labels.formatClock(today.getTime(), now), today.toLocaleTimeString());
+  assert.equal(labels.formatClock(today.toISOString(), now), today.toLocaleTimeString());
+  assert.equal(labels.formatClock(yesterday, now), yesterday.toLocaleString());
+  assert.equal(labels.formatClock(yesterday.toISOString(), now), yesterday.toLocaleString());
+  for (const input of [null, undefined, NaN, Infinity, "not a date", new Date(NaN)]) {
+    assert.equal(labels.formatClock(input, now), "—");
+  }
+});
+
 test("composite reasons are grouped per message with the affected coins", () => {
   const summary = labels.summarizeReasons("SOLUSDT: collector missing; SOLUSDT: no candles; BTCUSDT: no candles");
   assert.equal(summary.items.length, 2);
