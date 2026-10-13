@@ -73,9 +73,10 @@ test("runner uses leased sequential execution and safe failure messages without 
   assert.doesNotMatch(source, /\.stack|callRunner|RUNNER_GATEWAY|createServer/);
 });
 
-test("Strategy Lab preserves job polling while offline controls use the shared runner notice", async () => {
+test("Strategy Lab gates new work on service readiness and preserves polling for active jobs", async () => {
   const source = await read("../src/routes/_authenticated/forward.tsx");
-  assert.match(source, /machineOnlyEnabled \|\| runnerJobsEnabled/);
+  assert.match(source, /runnerReady = runner\.data\?\.services\.forward === true\s+&& \(!jobMode \|\| runner\.data\?\.services\.jobs === true\)/);
+  assert.match(source, /canRun = machineOnlyEnabled \|\| \(runnerJobsEnabled && runnerReady\)/);
   assert.match(source, /crypto\.randomUUID\(\)/);
   assert.match(source, /new Set\(\["succeeded", "failed", "expired"\]\)/);
   assert.match(source, /refetchInterval: [\s\S]*?\? false : 2_000/);
@@ -89,11 +90,22 @@ test("Strategy Lab preserves job polling while offline controls use the shared r
   const notice = await read("../src/components/runner-status-notice.tsx");
   assert.equal(shell.match(/<RunnerStatusNotice \/>/g)?.length, 1);
   assert.doesNotMatch(source, /<RunnerStatusNotice/);
-  assert.match(notice, /data\.online !== false\) return null/);
+  assert.match(notice, /!data\?\.configured \|\| data\.state === "online"\) return null/);
+  assert.match(notice, /data\.state === "degraded"/);
+  assert.match(notice, /background runs can continue/);
   assert.match(notice, /Runner temporarily offline: Alerts, analysis and forward runs are temporarily down\./);
   assert.match(source, /The runner did not pick this up in time\. Check that it is online and try again\./);
   assert.match(source, /toast\.error\(result\.error \|\|/);
   assert.match(source, /runToast\(toastLabel, result\.result\)/);
+});
+
+test("both Strategy Lab dashboards poll independently of the runner status", async () => {
+  const source = await read("../src/routes/_authenticated/forward.tsx");
+  for (const key of ["forward-dashboard", "forward-trend-dashboard"]) {
+    const query = source.slice(source.indexOf(`queryKey: ["${key}"]`)).split("});", 1)[0];
+    assert.match(query, /refetchInterval: 60_000/);
+    assert.doesNotMatch(query, /runner|offline|configured/);
+  }
 });
 
 test("users can expire only their own stale queued jobs", async () => {

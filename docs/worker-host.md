@@ -203,6 +203,23 @@ child's state (`waiting`, `running`, `backoff`, `crash-loop`, `stopping`, `stopp
 child process is alive), restart count, last restart time, last exit and `downSince`. On a clean stop the
 file is removed; after a non-zero exit it is kept.
 
+The shared web badge reads persisted `runner_health` records from hosted Supabase, independently
+of the gateway tunnel. Apply `20261013130000_runner_health.sql` to the hosted main database before
+restarting the updated host and deploying the web app. Every 15 seconds the host reports its child
+states and probes both Python `/health` endpoints. The jobs runner reports successful queue claims
+(at most every 15 seconds) and lease renewals; failures report degraded readiness. A heartbeat older
+than 60 seconds expires. Service failures show **Degraded**; expired machine heartbeats with an
+unreachable gateway show **Offline**. A reachable gateway without fresh worker heartbeats shows
+**Degraded** and cannot enable worker controls. Missing health records or failed reads show
+**Status unavailable**.
+
+Gateway reachability gates manual analysis separately. A tunnel outage leaves healthy queued forward
+run controls available. Strategy Lab refreshes both published dashboards every minute even while
+the runner is unavailable. `Last online` uses the persisted last machine heartbeat, including degraded
+operation, displayed as an absolute local timestamp so it survives page reloads and cannot freeze in
+relative time. Only the service role can publish health; signed-in users can read status booleans and
+timestamps, with no host names, process IDs or credentials.
+
 `npm run mvp:check` gets one new line, `worker host`: **PASS** fresh (updated within 2 minutes) and all
 children running; **WARN** file missing (host not used, e.g. the `dev:local:all` flow) or fresh but a
 child is waiting, backing off or stopping; **FAIL** stale, unreadable, any child in a crash loop, or any

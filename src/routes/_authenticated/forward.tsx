@@ -183,15 +183,25 @@ function ForwardPage() {
   });
   const machineOnlyEnabled = capabilities.data?.machineOnlyEnabled === true;
   const runnerJobsEnabled = capabilities.data?.runnerJobsEnabled === true;
-  const canRun = machineOnlyEnabled || runnerJobsEnabled;
   const jobMode = runnerJobsEnabled && !machineOnlyEnabled;
+  const runnerReady = runner.data?.services.forward === true
+    && (!jobMode || runner.data?.services.jobs === true);
+  const canRun = machineOnlyEnabled || (runnerJobsEnabled && runnerReady);
   const signalRun = useForwardRun("signals", jobMode);
   const trendRun = useForwardRun("trend", jobMode);
   const loadTrend = useServerFn(getTrendDashboard);
-  // Keep both dashboards available when switching tabs.
-  const trend = useQuery({ queryKey: ["forward-trend-dashboard"], queryFn: () => loadTrend() });
+  // Refresh published results independently of runner status and keep both tabs current.
+  const trend = useQuery({
+    queryKey: ["forward-trend-dashboard"],
+    queryFn: () => loadTrend(),
+    refetchInterval: 60_000,
+  });
   const load = useServerFn(getForwardDashboard);
-  const data = useQuery({ queryKey: ["forward-dashboard"], queryFn: () => load() });
+  const data = useQuery({
+    queryKey: ["forward-dashboard"],
+    queryFn: () => load(),
+    refetchInterval: 60_000,
+  });
   const latest = data.data?.latestRun as unknown as SignalRun | null | undefined;
   const tracks = trend.data?.tracks ?? [];
   const signalLine = explainSignalEngine(latest, Date.now());

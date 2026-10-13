@@ -4,6 +4,7 @@ import type { Json, Tables } from "../integrations/supabase/types";
 import { forwardDeps, forwardTrendDeps, FORWARD_STRATEGY_IDS } from "../lib/forward/forward-deps.server";
 import { runForward } from "../lib/forward/forward-run.server";
 import { runForwardTrend } from "../lib/forward/forward-trend-run.server";
+import { reportRunnerHealth } from "../lib/runner/health-publisher.server";
 
 if (process.env["RUNNER_JOBS_ENABLED"] !== "true") {
   console.log("Runner jobs are disabled.");
@@ -19,6 +20,23 @@ const SHUTDOWN_MS = 60_000;
 let stopping = false;
 let shutdownDeadline: ReturnType<typeof setTimeout> | undefined;
 let wake: (() => void) | undefined;
+let lastHealthAt = 0;
+let lastHealthStatus: string | undefined;
+let healthReporting = Promise.resolve();
+
+/** Successful queue/lease operations establish readiness; an alive PID alone does not. */
+async function publishJobHealth(requested: "online" | "degraded" | "offline") {
+  const status = stopping && requested !== "offline" ? "degraded" : requested;
+  const now = Date.now();
+  if (status === lastHealthStatus && now - lastHealthAt < 15_000) return;
+  lastHealthStatus = status;
+  lastHealthAt = now;
+  healthReporting = healthReporting.then(async () => {
+    try { await reportRunnerHealth("runner-jobs", status); }
+    catch { console.error("Runner jobs health could not be published; retrying next interval."); }
+  });
+  await healthReporting;
+}
 
 /** Never store a stack or configuration value in a user-visible error or machine log. */
 function safeError(error: unknown): string {
@@ -61,8 +79,10 @@ async function execute(job: Tables<"runner_jobs">) {
           clearInterval(renewal);
           console.error("Runner job lease is no longer owned by this worker.");
         }
+        await publishJobHealth(data ? "online" : "degraded");
       } catch (error) {
         console.error(safeError(error));
+        await publishJobHealth("degraded");
       }
     })().finally(() => { renewing = undefined; });
   }, RENEW_MS);
@@ -106,6 +126,7 @@ async function execute(job: Tables<"runner_jobs">) {
 function shutdown() {
   if (stopping) return;
   stopping = true;
+  void publishJobHealth("degraded");
   console.log("Runner jobs stopping; allowing active work up to 60 seconds to finish.");
   wake?.();
   shutdownDeadline = setTimeout(() => {
@@ -124,13 +145,16 @@ while (!stopping) {
       p_worker_id: workerId, p_lease_seconds: LEASE_SECONDS,
     });
     if (error) throw error;
+    await publishJobHealth("online");
     const job = data?.[0];
     if (job && !stopping) await execute(job); // exactly one job at a time
     await sleep(POLL_MS);
   } catch (error) {
     console.error(safeError(error));
+    await publishJobHealth("degraded");
     await sleep(CLAIM_BACKOFF_MS);
   }
 }
 clearTimeout(shutdownDeadline);
+await publishJobHealth("offline");
 process.exit(0);

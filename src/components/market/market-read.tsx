@@ -84,7 +84,7 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
   const metrics = result ? analysis.data?.metrics : undefined;
   const technical = result ? Object.entries(result.technical) : [];
   const errorCategory = (analysis.error as (Error & { category?: string }) | null)?.category;
-  if (runner.data?.online === false) return null;
+  if (!runner.data || (runner.data.configured && runner.data.services.analysis !== true)) return null;
 
   return (
     <section className="panel mt-6 p-4 sm:p-5" aria-label="Market read" aria-busy={analysis.isPending}>

@@ -3,6 +3,7 @@ import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "nod
 import { uptime } from "node:os";
 import { resolve } from "node:path";
 import { loadEnv, runnerImport } from "vite";
+import { createRunnerHealthReporter } from "./runner-health.mjs";
 
 // Worker-host supervisor (#270). Runs the forward-test workers on the owner's machine in production
 // mode against the hosted main Supabase and the local operational Supabase: two FastAPI services,
@@ -25,6 +26,11 @@ let crashLoopSeen = false;
 let forceSignalSeen = false;
 let statusWarned = false;
 let allDownSinceMs = null;
+let reportHealth;
+let healthEndpoints;
+let healthTimer;
+let healthPublishing;
+let healthWarned = false;
 const KILL_AFTER_MS = 10_000; // SIGTERM first, SIGKILL after this long
 const RUNNER_JOBS_DRAIN_MS = 60_000;
 
@@ -83,7 +89,8 @@ function pipeLines(stream, name, sink) {
 
 async function healthy(origin) {
   try {
-    const response = await fetch(new URL("/health", origin), { signal: AbortSignal.timeout(2_000) });
+    const response = await fetch(new URL("/health", origin), { redirect: "error", signal: AbortSignal.timeout(2_000) });
+    await response.body?.cancel();
     return response.ok;
   } catch {
     return false;
@@ -91,6 +98,27 @@ async function healthy(origin) {
 }
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+/** Probe services repeatedly, not just at startup; publish independently of the public tunnel. */
+function publishHealth() {
+  if (!reportHealth || healthPublishing) return;
+  healthPublishing = (async () => {
+    const [analysis, forward] = await Promise.all([
+      healthy(healthEndpoints.analysis.origin), healthy(healthEndpoints.forward.origin),
+    ]);
+    const services = Object.fromEntries([...records.values()].map((record) => [
+      record.name, record.state === "running" && isAlive(record.proc),
+    ]));
+    services["fastapi-analysis"] = services["fastapi-analysis"] && analysis;
+    services["fastapi-forward"] = services["fastapi-forward"] && forward;
+    const status = !shuttingDown && Object.values(services).every(Boolean) ? "online" : "degraded";
+    await reportHealth("worker-host", status, services);
+    healthWarned = false;
+  })().catch(() => {
+    if (!healthWarned) logError("could not publish runner health; retrying next interval.");
+    healthWarned = true;
+  }).finally(() => { healthPublishing = undefined; });
+}
 
 // ── Status file ────────────────────────────────────────────────────────────────────────────────
 
@@ -294,6 +322,12 @@ async function shutdown(reason, requestedCode = 0) {
     );
   }
   const code = crashLoopSeen || survivors.length ? 1 : requestedCode;
+  clearInterval(healthTimer);
+  await healthPublishing;
+  if (reportHealth) {
+    try { await reportHealth("worker-host", "offline"); }
+    catch { logError("could not publish stopped runner health; the last heartbeat will expire."); }
+  }
   if (code === 0) {
     rmSync(statusPath, { force: true }); // deliberate stop: the host is simply no longer in use
   } else {
@@ -429,6 +463,12 @@ async function main() {
       restartState: lib.initialRestartState(),
     });
   }
+
+  reportHealth = createRunnerHealthReporter(env);
+  healthEndpoints = endpoints;
+  // This timer stays active through the jobs drain, then a final offline report retains last seen.
+  healthTimer = setInterval(publishHealth, lib.STATUS_WRITE_INTERVAL_MS);
+  publishHealth();
 
   setInterval(writeStatus, lib.STATUS_WRITE_INTERVAL_MS);
   setInterval(evaluateExit, 5_000);
