@@ -50,8 +50,8 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
 });
 
 /**
- * Details lines for the status strip: why earlier exchange sources failed for quotes that a later
- * source answered. Each reason is listed once, with the pairs it applied to.
+ * Failed exchange attempts for usable quotes, including retained published prices. Each reason
+ * is listed once, with the pairs it applied to.
  */
 function fallbackDetailLines(quotes: MarketSnapshot["quotes"]): string[] {
   const pairsByReason = new Map<string, string[]>();
@@ -149,9 +149,12 @@ function Dashboard() {
   const available = SUPPORTED_SYMBOLS.filter((s) => !symbols.includes(s));
   const quotes = market.data?.quotes ?? [];
   const sourcesDown = quotes.length > 0 && quotes.every((q) => !q.ok);
-  const source = quotes.find((q) => q.source)?.source ?? null;
+  const sourceNames = [...new Set(quotes.filter((q) => q.ok && q.source).map((q) => q.source))]
+    .map(sourceLabel)
+    .join(", ");
   // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
   const degraded = market.data?.degraded;
+  const hasRetainedPublished = degraded && quotes.some((q) => q.ok && q.source === "binance-usdm");
   const freshness = market.data && !degraded
     ? publishedFreshness({ quotes, publishedAt: market.data.publishedAt })
     : null;
@@ -165,7 +168,7 @@ function Dashboard() {
         ? "wait"
         : "ok";
   const stripDetails = [
-    `Data source: ${sourcesDown ? "no published prices" : source ? sourceLabel(source) : "waiting for the first price load"}`,
+    `Data source: ${sourcesDown ? "no published prices" : sourceNames || "waiting for the first price load"}`,
     ...fallbackDetailLines(quotes),
     `Last price update: ${market.data ? new Date(market.data.fetchedAt).toLocaleString() : "not loaded yet"}`,
     `Last monitoring check: ${lastRun ? `${new Date(lastRun.ran_at).toLocaleString()} (${runStatus!.short})` : "none yet"}`,
@@ -244,7 +247,7 @@ function Dashboard() {
             "No published prices"
           ) : (
             <>
-              Prices from <span className="text-foreground">{source ? sourceLabel(source) : "…"}</span>
+              Prices from <span className="text-foreground">{sourceNames || "…"}</span>
             </>
           )}
           {" · "}updated{" "}
@@ -270,7 +273,14 @@ function Dashboard() {
       {degraded ? (
         <div role="status" className="mt-4 rounded-lg border border-warn/40 bg-warn/10 p-3 text-sm">
           <strong>Showing {degradedSourceLabel(degraded.source)} prices because the machine is not publishing.</strong>{" "}
-          These are perpetual futures trade prices from a different venue, not Binance USDⓈ-M prices.
+          These fallback quotes are perpetual futures trade prices from a different venue, not
+          Binance USDⓈ-M prices.
+          {hasRetainedPublished ? (
+            <>
+              {" "}Pairs unavailable from that venue keep their stale machine-published Binance
+              USDⓈ-M prices, marked on each card.
+            </>
+          ) : null}
           {degraded.lastPublishedAt ? <> Last machine publication: {relativeTime(degraded.lastPublishedAt)}.</> : " No machine publication is available yet."}
         </div>
       ) : null}

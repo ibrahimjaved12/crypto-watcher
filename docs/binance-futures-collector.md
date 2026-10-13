@@ -290,9 +290,11 @@ and serving are separate during normal operation:
   row is "not collected yet" when the snapshot has any fresh published quote.
   <!-- TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days -->
   Empty/all-stale snapshots temporarily try Kraken futures, then OKX if Kraken returns no usable
-  quotes. One venue serves the whole fallback snapshot; unavailable pairs are never patched with
-  Binance or another venue. The banner, strip and cards name the source; cards identify the native
-  perpetual contract and trade price. No Worker request goes to Binance. See the
+  quotes. Successful pairs use the selected fallback venue; failed pairs retain usable stale
+  published prices with their original Binance identity and stale warning, or remain unavailable
+  if no published value exists. No failed pair triggers another venue request. Unexpected fallback
+  errors retain the published snapshot. The banner, strip and cards name the sources; cards identify
+  the native perpetual contract and trade price. No Worker request goes to Binance. See the
   [switch and removal condition](environments.md#temporary-degraded-market-fallback-323).
 - **Check.** `npm run mvp:check -- --mode production` lists the age of each benchmark symbol's
   newest `published_at` and warns past 10 minutes.

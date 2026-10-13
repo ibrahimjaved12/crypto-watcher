@@ -42,6 +42,7 @@ export async function withDegradedFallback<T extends PublishedSnapshot>(
     },
     candleRows() {},
   };
+  const publishedBySymbol = new Map(snapshot.quotes.map((quote) => [quote.symbol, quote]));
   const attempts = new Map<string, SymbolQuote["fallbackReasons"]>();
   for (const source of DEGRADED_SOURCES) {
     const loaded = await loadQuotes([...new Set(symbols)], { sources: [source], observer });
@@ -53,7 +54,16 @@ export async function withDegradedFallback<T extends PublishedSnapshot>(
     if (quotes.some((quote) => quote.ok && quote.price !== null)) {
       return {
         ...snapshot,
-        quotes,
+        quotes: quotes.map((quote) => {
+          if (quote.ok && quote.price !== null) return quote;
+          const published = publishedBySymbol.get(quote.symbol);
+          if (!published?.ok || published.price === null) return quote;
+          // Preserve the published venue, timestamps and stale flag for failed pairs.
+          return {
+            ...published,
+            fallbackReasons: [...published.fallbackReasons, ...quote.fallbackReasons],
+          };
+        }),
         degraded: { source, reason, lastPublishedAt: snapshot.publishedAt },
       };
     }

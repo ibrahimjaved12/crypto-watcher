@@ -21,7 +21,9 @@ export type SymbolQuote = {
   /**
    * Failed provider attempts in fallback order. On a successful quote these are the earlier sources
    * that failed (empty when the first source answered); on a failed quote, every source. Published
-   * quotes never involve a fallback, so they carry an empty list.
+   * quotes normally carry an empty list.
+   * TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
+   * Retained stale published quotes carry the failed exchange attempts for that pair.
    */
   fallbackReasons: ProviderAttempt[];
   fetchedAt: string;

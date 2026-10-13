@@ -191,22 +191,29 @@ documented in [Operational PostgreSQL](operational-database.md).
 
 `MARKET_DEGRADED_FALLBACK_ENABLED` is a Worker runtime variable, default `"true"`, committed
 in the `wrangler.jsonc` vars block. Set it to `"false"` there and deploy to restore published-only
-behavior, including the existing stale/empty banners. It contains no credential.
+behavior, including the existing stale/empty banners. Dashboard changes are overwritten on deploy:
+`keep_vars` does not protect config-defined variables. It contains no credential.
 
 For each `getMarketSnapshot` call, `publishedFreshness` decides once: any fresh readable quote
 keeps the published snapshot unchanged, including individual "Not collected yet" pairs, with no
 exchange request. Only empty/all-stale snapshots try Kraken futures for the requested symbols,
 then OKX if Kraken has no usable quotes. Never Binance: its Worker egress is blocked. A partial
-Kraken result stays entirely Kraken, with failed pairs visibly unavailable. If both venues fail
-for every symbol, keep stale published values or the existing empty banner. The degraded banner
-names the venue and last publication age; cards identify native contracts and trade prices,
-which are not Binance USDⓈ-M instruments. Existing provider failure diagnostics remain available.
+Kraken result uses Kraken for successful pairs and retains stale published values for failed pairs,
+including their original source and timestamps; pairs without a usable published value remain
+unavailable. No failed pair triggers a request to another venue. If both venues fail for every
+symbol, or the fallback throws unexpectedly, keep the published snapshot unchanged. The degraded
+banner names the venue and last publication age; cards identify native contracts and trade prices,
+which are not Binance USDⓈ-M instruments. Retained published prices keep their Binance label and
+stale warning, and the banner and strip identify the mixed sources. Existing provider failure
+diagnostics remain available.
 
 Fresh page loads use one hosted query. Kraken normally needs two candle requests per distinct
 pair (at most 20 for the 10-pair watchlist). The degraded path caps exchange requests at 40 total
-across both venues, leaving room for the hosted read; pairs beyond that budget fail visibly.
+across both venues, leaving room for the hosted read; pairs beyond that budget retain stale
+published values or fail visibly.
 OKX may return HTTP 429 from Worker egress. Exchange latency/availability affects page loads
-only in degraded mode. Existing automatic-refresh controls still apply.
+only in degraded mode. Degraded quotes are not cached, so each page load or automatic refresh
+repeats the exchange requests. Existing automatic-refresh controls still apply.
 
 Remove all blocks marked `TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days`
 after 30 days of continuous machine operation with no publication gap over 10 minutes,

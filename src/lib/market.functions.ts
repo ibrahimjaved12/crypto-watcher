@@ -31,15 +31,21 @@ export const getMarketSnapshot = createServerFn({ method: "POST" })
   .handler(async ({ data }): Promise<MarketSnapshot> => {
     const { readPublishedSnapshot } = await import("./market/published-quotes.server");
     const { quotes, publishedAt } = await readPublishedSnapshot(data.symbols);
+    const snapshot = { quotes, fetchedAt: new Date().toISOString(), publishedAt };
     // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
-    const { withDegradedFallback } = await import("./market/degraded-fallback");
-    return withDegradedFallback(
-      { quotes, fetchedAt: new Date().toISOString(), publishedAt },
-      data.symbols,
-      async (symbols, options) => {
-        const { getQuotes } = await import("./market/quotes.server");
-        return getQuotes(symbols, options);
-      },
-      process.env["MARKET_DEGRADED_FALLBACK_ENABLED"],
-    );
+    try {
+      const { withDegradedFallback } = await import("./market/degraded-fallback");
+      return await withDegradedFallback(
+        snapshot,
+        data.symbols,
+        async (symbols, options) => {
+          const { getQuotes } = await import("./market/quotes.server");
+          return getQuotes(symbols, options);
+        },
+        process.env["MARKET_DEGRADED_FALLBACK_ENABLED"],
+      );
+    } catch {
+      // Unexpected fallback failures must not hide the last published prices.
+      return snapshot;
+    }
   });

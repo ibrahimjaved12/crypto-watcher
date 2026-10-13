@@ -30,7 +30,7 @@ test("fresh, mixed stale/fresh and fresh with missing symbols never call an exch
   }
 });
 
-test("stale and empty snapshots select Kraken for the entire page and label it", async () => {
+test("stale and empty snapshots select Kraken and label it, leaving unpublished pairs unavailable", async () => {
   for (const original of [snapshot([quote("BTCUSDT", "binance-usdm", true)]), snapshot([], null)]) {
     const calls = [];
     const result = await withDegradedFallback(original, ["BTCUSDT", "ETHUSDT"], async (symbols, options) => {
@@ -47,6 +47,39 @@ test("stale and empty snapshots select Kraken for the entire page and label it",
     assert.match(degradedContractLabel("kraken-futures", "BTCUSDT"), /PF_XBTUSD.*USD perpetual.*trade price.*not Binance/);
     assert.match(degradedContractLabel("okx-usdt-swap", "ETHUSDT"), /ETH-USDT-SWAP.*trade price.*not Binance/);
     assert.equal(degradedContractLabel("binance-usdm", "BTCUSDT"), null);
+  }
+});
+
+test("partial fallback retains stale published prices and diagnostics without trying another venue", async () => {
+  for (const source of DEGRADED_SOURCES) {
+    const published = {
+      ...quote("ETHUSDT", "binance-usdm", true),
+      price: 90, changes: { 5: -2 }, chart: [{ time: 1, close: 90 }], lastCandleAt: 1,
+    };
+    const unreadable = quote("XRPUSDT", null, true, false);
+    const original = snapshot([quote("BTCUSDT", "binance-usdm", true), published, unreadable]);
+    const before = structuredClone(original);
+    const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"];
+    const calls = [];
+    const failure = { source, status: 429, message: "rate limited" };
+    const result = await withDegradedFallback(original, symbols, async (_, options) => {
+      const current = options.sources[0];
+      calls.push(current);
+      return symbols.map((symbol) => {
+        if (current === source && symbol === "BTCUSDT") return quote(symbol, current);
+        return { ...quote(symbol, null, true, false), fallbackReasons: [{ ...failure, source: current }] };
+      });
+    });
+    assert.deepEqual(calls, source === "kraken-futures" ? [source] : [...DEGRADED_SOURCES]);
+    assert.equal(result.degraded.source, source);
+    assert.equal(result.quotes[0].source, source);
+    const expectedReasons = calls.map((current) => ({ ...failure, source: current }));
+    assert.deepEqual(result.quotes[1], { ...published, fallbackReasons: expectedReasons });
+    assert.equal(result.quotes[2].ok, false, "no published value means the pair remains unavailable");
+    assert.equal(result.quotes[3].ok, false, "unreadable published values must not be reused");
+    assert.equal(result.publishedAt, original.publishedAt);
+    assert.equal(result.fetchedAt, original.fetchedAt);
+    assert.deepEqual(original, before, "fallback must not mutate the published snapshot");
   }
 });
 
@@ -104,4 +137,55 @@ test("exchange request budget is shared across both fallback venues", async () =
     }
     return [quote("BTCUSDT", null, true, false)];
   });
+});
+
+const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+const dependenciesUrl = stub(`
+  export const dependencies = {};
+  export const readPublishedSnapshot = (symbols) => dependencies.read(symbols);
+  export const getQuotes = (symbols, options) => dependencies.load(symbols, options);
+`);
+const { dependencies } = await import(dependenciesUrl);
+const { getMarketSnapshot } = await import(await moduleUrl("../src/lib/market.functions.ts", {
+  "@tanstack/react-start": stub(`
+    export const createServerFn = () => ({ validator() { return this; }, handler(fn) { return fn; } });
+  `),
+  "./market/published-quotes.server": dependenciesUrl,
+  "./market/quotes.server": dependenciesUrl,
+}));
+
+test("market handler preserves published snapshots on unexpected fallback errors", async (t) => {
+  const oldFlag = process.env.MARKET_DEGRADED_FALLBACK_ENABLED;
+  process.env.MARKET_DEGRADED_FALLBACK_ENABLED = "true";
+  t.after(() => {
+    if (oldFlag === undefined) delete process.env.MARKET_DEGRADED_FALLBACK_ENABLED;
+    else process.env.MARKET_DEGRADED_FALLBACK_ENABLED = oldFlag;
+  });
+  for (const original of [snapshot([], null), snapshot([quote("BTCUSDT", "binance-usdm", true)])]) {
+    for (const source of DEGRADED_SOURCES) {
+      for (const reject of [false, true]) {
+        const calls = [];
+        dependencies.read = async () => original;
+        dependencies.load = (_, options) => {
+          const current = options.sources[0];
+          calls.push(current);
+          if (current === source) {
+            const error = new Error("unexpected quote failure");
+            if (reject) return Promise.reject(error);
+            throw error;
+          }
+          return Promise.resolve([quote("BTCUSDT", null, true, false)]);
+        };
+        const result = await getMarketSnapshot({ data: { symbols: ["BTCUSDT"] } });
+        assert.equal(result.quotes, original.quotes);
+        assert.equal(result.publishedAt, original.publishedAt);
+        assert.equal(result.degraded, undefined);
+        assert.ok(Number.isFinite(Date.parse(result.fetchedAt)));
+        assert.deepEqual(calls, source === "kraken-futures" ? [source] : [...DEGRADED_SOURCES]);
+      }
+    }
+  }
+  dependencies.read = async () => { throw new Error("published read failed"); };
+  dependencies.load = () => assert.fail("failed published reads must not load exchanges");
+  await assert.rejects(getMarketSnapshot({ data: { symbols: ["BTCUSDT"] } }), /published read failed/);
 });
