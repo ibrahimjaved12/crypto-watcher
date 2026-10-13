@@ -79,6 +79,8 @@ async function handle(request: Request) {
         status: "failed" as const,
         symbolsChecked: 0,
         alertsCreated: 0,
+        taChecks: 0,
+        taFailures: 0,
         dataSource: null,
         error: err instanceof Error ? err.message : String(err),
         durationMs: 0,

@@ -6,6 +6,7 @@
  */
 import { completedObservation } from "./observation";
 import { runTA } from "../ta/engine.server";
+import { TA_FRAMES } from "../ta/schedule";
 import {
   createMonitorRunContext,
   metricsSince,
@@ -49,6 +50,8 @@ export type UserRunResult = {
   status: "success" | "partial" | "failed" | "skipped";
   symbolsChecked: number;
   alertsCreated: number;
+  taChecks: number;
+  taFailures: number;
   dataSource: string | null;
   error: string | null;
   durationMs: number;
@@ -74,6 +77,8 @@ export async function runMonitorForUser(
     status: "success",
     symbolsChecked: 0,
     alertsCreated: 0,
+    taChecks: 0,
+    taFailures: 0,
     dataSource: null,
     error: null,
     durationMs: 0,
@@ -234,11 +239,16 @@ export async function runMonitorForUser(
       ? "partial"
       : "success";
 
+  const taChecks = settings.completed_candle_ta_enabled ? symbols.length * TA_FRAMES.length : 0;
+  const taFailures = taErrors.length;
+
   return finish({
     userId,
     status,
     symbolsChecked: checkedSymbols.size,
     alertsCreated,
+    taChecks,
+    taFailures,
     dataSource: source,
     error: [...failures, ...taErrors].join(" | ") || null,
   });
@@ -260,6 +270,8 @@ export async function runLeasedMonitorForUser(
     status,
     symbolsChecked: 0,
     alertsCreated: 0,
+    taChecks: 0,
+    taFailures: 0,
     dataSource: null,
     error,
     durationMs: Math.max(0, Math.round(performance.now() - startedAt)),

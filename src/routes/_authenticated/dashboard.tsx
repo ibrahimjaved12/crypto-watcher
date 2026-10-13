@@ -3,7 +3,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useState } from "react";
 import { automaticQueryOptions, logActivity } from "@/lib/activity-controls";
-import { Plus, RefreshCw, PlayCircle } from "lucide-react";
+import { Plus, RefreshCw, PlayCircle, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
@@ -20,12 +20,13 @@ import {
 } from "@/components/ui/select";
 import { Hint } from "@/components/hint";
 import { EmptyState, PageHeader, TimeAgo } from "@/components/plain";
-import { humanizeReason, relativeTime, sourceLabel, summarizeReasons } from "@/lib/labels";
+import { humanizeReason, relativeTime, sourceLabel } from "@/lib/labels";
 import { useRunnerStatus } from "@/lib/runner/use-runner-status";
 import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db";
 import { getMarketSnapshot, type MarketSnapshot } from "@/lib/market.functions";
 import { marketQueryKey, useMarketSelfHeal } from "@/lib/market/use-market-self-heal";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
+import { describeAlertCheck } from "@/lib/monitor/check-message";
 import { getOperationalState } from "@/lib/operational.functions";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
 
@@ -134,18 +135,13 @@ function Dashboard() {
   const check = useMutation({
     mutationFn: () => runCheck({ data: undefined }),
     onSuccess: (result) => {
-      const detail = result.error ? summarizeReasons(result.error).items.join("; ") : undefined;
-      if (result.status === "partial") {
-        toast.warning(`Alert check partly completed: ${result.alertsCreated} new alert(s).`, {
-          description: detail,
-        });
-      } else if (result.status === "failed") {
-        toast.error("Alert check failed. No analysis completed.", { description: detail });
+      const { kind, title, description } = describeAlertCheck(result);
+      if (kind === "success") {
+        toast.success(title, { description });
+      } else if (kind === "warning") {
+        toast.warning(title, { description });
       } else {
-        toast.success(
-          `Alert check ${humanizeReason(result.status).short.toLowerCase()}: ${result.symbolsChecked} pairs checked, ${result.alertsCreated} new alert(s).`,
-        );
-        if (detail) toast.warning(detail);
+        toast.error(title, { description });
       }
       queryClient.invalidateQueries({ queryKey: ["operational-state"] });
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
@@ -239,8 +235,16 @@ function Dashboard() {
                     : "Check every watched pair against your alert rule right now"
               }
             >
-              <PlayCircle className="size-4" aria-hidden />
-              {monitoringPaused ? "Monitoring paused" : "Check for alerts now"}
+              {check.isPending ? (
+                <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden />
+              ) : (
+                <PlayCircle className="size-4" aria-hidden />
+              )}
+              {check.isPending
+                ? "Checking…"
+                : monitoringPaused
+                  ? "Monitoring paused"
+                  : "Check for alerts now"}
             </Button>
           </>
         }
