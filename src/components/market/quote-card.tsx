@@ -3,8 +3,6 @@ import { AlertTriangle, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-// TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
-import { degradedContractLabel } from "@/lib/market/degraded-fallback";
 import { sourceLabel } from "@/lib/labels";
 import { CHANGE_WINDOWS, WINDOW_LABELS, baseAsset } from "@/lib/market/symbols";
 import type { SymbolQuote } from "@/lib/market/quote-calc";
@@ -50,12 +48,15 @@ export function QuoteCard({
             )}
           </p>
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           {quote.source ? (
             <Badge variant="secondary" className="text-[10px]" title={quote.source}>
               {sourceLabel(quote.source)}
             </Badge>
           ) : null}
+          {quote.stale && !unavailable && (
+            <Badge variant="outline" className="text-[10px] text-warn">Stale</Badge>
+          )}
           {onRemove ? (
             <Button
               variant="ghost"
@@ -68,11 +69,6 @@ export function QuoteCard({
           ) : null}
         </div>
       </header>
-      {/* TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days */}
-      {degradedContractLabel(quote.source, quote.symbol) ? (
-        <p className="text-xs text-warn">{degradedContractLabel(quote.source, quote.symbol)}</p>
-      ) : null}
-
       {unavailable ? (
         <p className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive-foreground">
           <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
@@ -80,14 +76,6 @@ export function QuoteCard({
         </p>
       ) : (
         <>
-          {quote.stale ? (
-            <p className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn/10 p-2 text-xs text-warn">
-              <AlertTriangle className="size-4" aria-hidden />
-              Prices may be out of date: last candle{" "}
-              {new Date(quote.lastCandleAt!).toLocaleTimeString()}
-            </p>
-          ) : null}
-
           <div className="grid grid-cols-5 gap-1 text-center">
             {CHANGE_WINDOWS.map((w) => {
               const value = quote.changes[w];

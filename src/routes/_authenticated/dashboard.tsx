@@ -7,8 +7,6 @@ import { Plus, RefreshCw, PlayCircle } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
-import { ForwardFreshnessBanner } from "@/components/forward-freshness-banner";
-import { RunnerStatusNotice } from "@/components/runner-status-notice";
 import { QuoteCard } from "@/components/market/quote-card";
 import { MarketRead } from "@/components/market/market-read";
 import { TechnicalAnalysis } from "@/components/market/technical-analysis";
@@ -27,9 +25,6 @@ import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db
 import { getMarketSnapshot, type MarketSnapshot } from "@/lib/market.functions";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
 import { getOperationalState } from "@/lib/operational.functions";
-// TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
-import { degradedSourceLabel } from "@/lib/market/degraded-fallback";
-import { publishedFreshness } from "@/lib/market/published-quotes";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
@@ -118,8 +113,11 @@ function Dashboard() {
   });
 
   const remove = useMutation({
-    mutationFn: removeSymbol,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["watchlist"] }),
+    mutationFn: ({ id }: { id: string; symbol: string }) => removeSymbol(id),
+    onSuccess: (_data, { symbol }) => {
+      queryClient.invalidateQueries({ queryKey: ["watchlist"] });
+      toast.success(`${baseAsset(symbol)} removed from your watchlist`);
+    },
     onError: (e: Error) => toast.error(e.message),
   });
 
@@ -154,10 +152,6 @@ function Dashboard() {
     .join(", ");
   // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
   const degraded = market.data?.degraded;
-  const hasRetainedPublished = degraded && quotes.some((q) => q.ok && q.source === "binance-usdm");
-  const freshness = market.data && !degraded
-    ? publishedFreshness({ quotes, publishedAt: market.data.publishedAt })
-    : null;
   const runStatus = lastRun ? humanizeReason(lastRun.status) : null;
   // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
   const stripLevel: Level = sourcesDown
@@ -176,8 +170,6 @@ function Dashboard() {
 
   return (
     <AppShell>
-      <RunnerStatusNotice />
-      <ForwardFreshnessBanner />
       <PageHeader
         eyebrow="Live market"
         title="Market"
@@ -269,40 +261,6 @@ function Dashboard() {
         </Hint>
       </div>
 
-      {/* TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days */}
-      {degraded ? (
-        <div role="status" className="mt-4 rounded-lg border border-warn/40 bg-warn/10 p-3 text-sm">
-          <strong>Showing {degradedSourceLabel(degraded.source)} prices because the machine is not publishing.</strong>{" "}
-          These fallback quotes are perpetual futures trade prices from a different venue, not
-          Binance USDⓈ-M prices.
-          {hasRetainedPublished ? (
-            <>
-              {" "}Pairs unavailable from that venue keep their stale machine-published Binance
-              USDⓈ-M prices, marked on each card.
-            </>
-          ) : null}
-          {degraded.lastPublishedAt ? <> Last machine publication: {relativeTime(degraded.lastPublishedAt)}.</> : " No machine publication is available yet."}
-        </div>
-      ) : null}
-
-      {freshness && freshness !== "fresh" ? (
-        <div role="status" className="mt-4 rounded-lg border border-warn/40 bg-warn/10 p-3 text-sm">
-          {freshness === "stale" ? (
-            <>
-              <strong>Showing the last published prices.</strong> They are more than 10 minutes old
-              (newest published {new Date(market.data!.publishedAt!).toLocaleString()}). The machine
-              that publishes market data may be down or catching up.
-            </>
-          ) : (
-            <>
-              <strong>No usable published prices yet.</strong> The machine that publishes market data
-              may still be starting or catching up. No values are simulated and no other exchange is
-              used.
-            </>
-          )}
-        </div>
-      ) : null}
-
       <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {watchlist.isLoading
           ? symbols.map((s) => (
@@ -318,7 +276,7 @@ function Dashboard() {
                   quote={quote}
                   onRemove={() => {
                     const item = watchlist.data?.find((w) => w.symbol === quote.symbol);
-                    if (item) remove.mutate(item.id);
+                    if (item) remove.mutate({ id: item.id, symbol: item.symbol });
                   }}
                 />
               ) : market.isFetching ? (

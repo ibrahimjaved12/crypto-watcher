@@ -70,9 +70,8 @@ export function explainSignalEngine(run: SignalRun, now: number): StatusLine {
       return {
         level: "problem",
         title,
-        detail: `Last successful run was ${Math.round(age / 60)} h ago; the job may have stopped.`,
+        detail: `Last successful run was ${Math.round(age / 60)} h ago.`,
         action: "Check that the hourly job is running, or press “Check for new signals now”.",
-        raw: rawOf(run),
       };
     }
     return funding
