@@ -1,6 +1,6 @@
 import { useRunnerStatus } from "@/lib/runner/use-runner-status";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { formatAgo } from "@/lib/labels";
+import { formatAgo, formatClock } from "@/lib/labels";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
 
@@ -18,6 +18,13 @@ export function RunnerStatusBadge() {
   if (isPending) return <span className="text-xs text-muted-foreground">Connecting…</span>;
   const online = available && data?.reason !== "never-reported";
   const label = checkFailed ? "Status unknown" : online ? "Online" : "Offline";
+  const heartbeat = checkFailed
+    ? "Couldn't check the runner"
+    : data?.reason === "never-reported"
+      ? "No heartbeat received yet"
+      : data?.lastOnlineAt != null
+        ? `Last heartbeat ${formatClock(data.lastOnlineAt, now)}`
+        : null;
 
   return (
     <div role="status" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
@@ -45,7 +52,10 @@ export function RunnerStatusBadge() {
           collisionPadding={16}
           className="w-80 max-w-[calc(100vw-2rem)] p-3"
         >
-          <p className="mb-3 text-sm font-medium">Runner services</p>
+          <div className="mb-3 space-y-1">
+            <p className="text-sm font-medium">Runner services</p>
+            {heartbeat ? <p className="text-xs text-muted-foreground">{heartbeat}</p> : null}
+          </div>
           <ul className="space-y-3 text-xs">
             {RUNNER_SERVICES.filter(({ key }) => key !== "jobs" || data?.jobsEnabled).map(
               ({ key, name }) => {
@@ -70,7 +80,7 @@ export function RunnerStatusBadge() {
                       {working
                         ? "Working now"
                         : lastWorking != null
-                          ? `Last working ${formatAgo(lastWorking, now)}`
+                          ? `Last working ${formatAgo(lastWorking, now)} · ${formatClock(lastWorking, now)}`
                           : "—"}
                     </span>
                   </li>
@@ -104,7 +114,7 @@ export function RunnerStatusNotice() {
     return null;
   const lastOnline =
     data?.lastOnlineAt != null
-      ? ` (last online ${formatAgo(data.lastOnlineAt, now)})`
+      ? ` (last online ${formatAgo(data.lastOnlineAt, now)} · ${formatClock(data.lastOnlineAt, now)})`
       : data?.reason === "never-reported"
         ? " (no heartbeat received yet)"
         : "";

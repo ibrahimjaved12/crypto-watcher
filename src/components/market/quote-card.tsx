@@ -3,7 +3,7 @@ import { AlertTriangle, Loader2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { formatAgo, sourceLabel } from "@/lib/labels";
+import { formatAgo, formatClock, sourceLabel } from "@/lib/labels";
 import { useNow } from "@/lib/use-now";
 import { isUnavailable } from "@/lib/market/self-heal";
 import { CHANGE_WINDOWS, WINDOW_LABELS, baseAsset } from "@/lib/market/symbols";
@@ -35,6 +35,7 @@ export function QuoteCard({
 }) {
   const now = useNow();
   const unavailable = isUnavailable(quote);
+  const checkedAt = Date.parse(quote.fetchedAt);
 
   return (
     <article className="panel flex flex-col gap-4 p-5 transition-colors hover:border-primary/40">
@@ -93,8 +94,11 @@ export function QuoteCard({
                 : "No market data available.")}
             {quote.lastCandleAt !== null && Number.isFinite(quote.lastCandleAt) && (
               <span className="mt-1 block">
-                Last price seen {formatAgo(quote.lastCandleAt, now)}
+                Last price seen {formatAgo(quote.lastCandleAt, now)} ({formatClock(quote.lastCandleAt, now)})
               </span>
+            )}
+            {Number.isFinite(checkedAt) && (
+              <span className="mt-1 block">Last checked {formatClock(checkedAt, now)}</span>
             )}
           </span>
         </p>
