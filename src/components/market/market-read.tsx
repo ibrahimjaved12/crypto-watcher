@@ -14,7 +14,8 @@ import { WINDOW_LABELS, baseAsset } from "@/lib/market/symbols";
 import { cn } from "@/lib/utils";
 
 const explanations: Record<PythonAnalysis["baseline"]["status"], string> = {
-  eligible: "Your alert condition is met at this moment. Only the scheduled monitor can save the alert.",
+  eligible:
+    "Your alert condition is met at this moment. Only the scheduled monitor can save the alert.",
   cooldown: "The move is big enough, but this direction is on cooldown after a recent alert.",
   below_threshold: "The move since the saved starting price is smaller than your alert threshold.",
   already_processed: "The monitor has already checked this candle (or a newer one).",
@@ -23,7 +24,8 @@ const explanations: Record<PythonAnalysis["baseline"]["status"], string> = {
   baseline_reset_required:
     "The data source or threshold changed, so the monitor must save a new starting price before comparing.",
   unavailable: "Fresh completed market data is unavailable, so the alert rule was not checked.",
-  invalid_state: "The saved starting price has inconsistent timestamps, so the alert rule was not checked.",
+  invalid_state:
+    "The saved starting price has inconsistent timestamps, so the alert rule was not checked.",
 };
 const percent = (value: string | null, digits = 2) => {
   if (value === null) return "—";
@@ -58,7 +60,10 @@ function lean(row: Technical): { word: string; tone: string; Icon: typeof Minus 
 function verdict(timeframe: string, row: Technical): string {
   const { word } = lean(row);
   const parts = [`${frame(timeframe)}: ${word.toLowerCase()}`];
-  if (row.score !== null) parts.push(`score ${row.score > 0 ? "+" : row.score < 0 ? "−" : ""}${Math.abs(row.score)} of ±100`);
+  if (row.score !== null)
+    parts.push(
+      `score ${row.score > 0 ? "+" : row.score < 0 ? "−" : ""}${Math.abs(row.score)} of ±100`,
+    );
   if (row.atr_pct !== null) parts.push(`volatility ${row.atr_pct.toFixed(2)}%`);
   return parts.join(", ");
 }
@@ -84,10 +89,14 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
   const metrics = result ? analysis.data?.metrics : undefined;
   const technical = result ? Object.entries(result.technical) : [];
   const errorCategory = (analysis.error as (Error & { category?: string }) | null)?.category;
-  if (!runner.data || (runner.data.configured && runner.data.services.analysis !== true)) return null;
+  if (!runner.canAnalyse) return null;
 
   return (
-    <section className="panel mt-6 p-4 sm:p-5" aria-label="Market read" aria-busy={analysis.isPending}>
+    <section
+      className="panel mt-6 p-4 sm:p-5"
+      aria-label="Market read"
+      aria-busy={analysis.isPending}
+    >
       <SectionTitle
         title="Market read"
         hint="A read-only snapshot from completed candles. It never saves alerts or changes your saved starting prices."
@@ -113,7 +122,10 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
                 </option>
               ))}
             </select>
-            <Button disabled={!symbol || analysis.isPending} onClick={() => analysis.mutate(symbol)}>
+            <Button
+              disabled={!symbol || analysis.isPending}
+              onClick={() => analysis.mutate(symbol)}
+            >
               <ScanSearch className="size-4" aria-hidden />
               {analysis.isPending ? "Analysing…" : `Analyse ${symbol ? baseAsset(symbol) : "pair"}`}
             </Button>
@@ -145,7 +157,11 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
       {!result && !analysis.isPending && !analysis.isError && (
         <EmptyState
           icon={Compass}
-          title={symbol ? `Press “Analyse ${baseAsset(symbol)}” for a read` : "Add a pair to get a market read"}
+          title={
+            symbol
+              ? `Press “Analyse ${baseAsset(symbol)}” for a read`
+              : "Add a pair to get a market read"
+          }
           body="You get a one-line verdict per timeframe (15m, 1h, 4h), the recent moves against your alert threshold and whether an alert would fire."
           className="py-6"
         />
@@ -153,9 +169,13 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
       {result && (
         <div className="space-y-5" aria-live="polite">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="font-display text-lg font-semibold">{baseAsset(result.symbol)}/USDT</span>
+            <span className="font-display text-lg font-semibold">
+              {baseAsset(result.symbol)}/USDT
+            </span>
             <span className="num text-lg">
-              {result.price === null ? "Price unavailable" : `${Number(result.price).toLocaleString()} USDT`}
+              {result.price === null
+                ? "Price unavailable"
+                : `${Number(result.price).toLocaleString()} USDT`}
             </span>
             <span className="text-xs text-muted-foreground">
               as of {at(result.as_of_ms)}
@@ -174,14 +194,18 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
             <h3 className="text-sm font-medium">
               Indicator verdict{" "}
               <span className="font-normal text-muted-foreground">
-                (<Hint term="score">score −100 bearish … +100 bullish</Hint>; a ranking, not a win probability)
+                (<Hint term="score">score −100 bearish … +100 bullish</Hint>; a ranking, not a win
+                probability)
               </span>
             </h3>
             <div className="mt-2 grid gap-3 sm:grid-cols-3">
               {technical.map(([timeframe, row]) => {
                 const { word, tone, Icon } = lean(row);
                 return (
-                  <div key={timeframe} className="rounded-lg border border-border/70 bg-background/30 p-3">
+                  <div
+                    key={timeframe}
+                    className="rounded-lg border border-border/70 bg-background/30 p-3"
+                  >
                     <div className="flex items-center justify-between gap-2">
                       <span className="num text-xs text-muted-foreground">{frame(timeframe)}</span>
                       <SignedBar value={row.score} label={`Score ${row.score ?? "unavailable"}`} />
@@ -195,7 +219,9 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
                 );
               })}
               {!technical.length && (
-                <p className="text-sm text-muted-foreground">No indicator verdict available for this snapshot.</p>
+                <p className="text-sm text-muted-foreground">
+                  No indicator verdict available for this snapshot.
+                </p>
               )}
             </div>
           </div>
@@ -203,7 +229,9 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
           <div>
             <h3 className="text-sm font-medium">
               Recent moves{" "}
-              <span className="font-normal text-muted-foreground">vs your {result.threshold_pct}% alert threshold</span>
+              <span className="font-normal text-muted-foreground">
+                vs your {result.threshold_pct}% alert threshold
+              </span>
             </h3>
             <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-5">
               {Object.entries(result.rolling).map(([window, row]) => {
@@ -214,7 +242,13 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
                     <p
                       className={cn(
                         "num text-sm font-semibold",
-                        value === null ? "" : value > 0 ? "text-bull" : value < 0 ? "text-bear" : "",
+                        value === null
+                          ? ""
+                          : value > 0
+                            ? "text-bull"
+                            : value < 0
+                              ? "text-bear"
+                              : "",
                       )}
                     >
                       {percent(row.change_pct)}
@@ -230,7 +264,9 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
                 );
               })}
               {!Object.keys(result.rolling).length && (
-                <p className="col-span-full text-sm text-muted-foreground">Recent moves are unavailable.</p>
+                <p className="col-span-full text-sm text-muted-foreground">
+                  Recent moves are unavailable.
+                </p>
               )}
             </div>
           </div>
@@ -240,8 +276,8 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
             <p className="mt-1 text-muted-foreground">{explanations[result.baseline.status]}</p>
             {result.baseline.baseline_price !== null && (
               <p className="num mt-1 text-xs">
-                From {Number(result.baseline.baseline_price).toLocaleString()} USDT ({at(result.baseline.baseline_at_ms)}):{" "}
-                {percent(result.baseline.change_pct)}
+                From {Number(result.baseline.baseline_price).toLocaleString()} USDT (
+                {at(result.baseline.baseline_at_ms)}): {percent(result.baseline.change_pct)}
               </p>
             )}
           </div>
@@ -250,8 +286,8 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
             <summary className="font-medium text-foreground">Technical details</summary>
             <div className="mt-3 space-y-3 break-words">
               <p>
-                Calculated by the Python analysis service · request {metrics ? duration(metrics.duration_ms) : "—"} ·
-                data age{" "}
+                Calculated by the Python analysis service · request{" "}
+                {metrics ? duration(metrics.duration_ms) : "—"} · data age{" "}
                 {result.observed_at_ms === null
                   ? "unavailable"
                   : duration(Math.max(0, result.as_of_ms - result.observed_at_ms))}
@@ -279,8 +315,9 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
                     </dl>
                   )}
                   <p className="mt-1">
-                    Source event {at(row.source_event_time_ms)} · {row.ta_version} · {row.strategy_version} ·
-                    reasons: {row.reason ?? (row.reasons.length ? row.reasons.join(", ") : "none")}
+                    Source event {at(row.source_event_time_ms)} · {row.ta_version} ·{" "}
+                    {row.strategy_version} · reasons:{" "}
+                    {row.reason ?? (row.reasons.length ? row.reasons.join(", ") : "none")}
                     {row.factor_breakdown
                       ? ` · factor reasons: ${Object.entries(row.factor_breakdown)
                           .map(([name, factor]) => `${name}=${factor.reason}`)
@@ -288,15 +325,16 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
                       : ""}
                   </p>
                   <p>
-                    {row.provenance.candle_count} candles · {row.provenance.warmup_candle_count} warm-up ·{" "}
-                    {row.provenance.missing_open_times_ms.length} missing open times
+                    {row.provenance.candle_count} candles · {row.provenance.warmup_candle_count}{" "}
+                    warm-up · {row.provenance.missing_open_times_ms.length} missing open times
                   </p>
                 </div>
               ))}
               {Object.entries(result.rolling).map(([window, row]) =>
                 row.status === "ok" ? (
                   <p key={window}>
-                    {WINDOW_LABELS[Number(window)]}: {at(row.start_close_ms)} → {at(row.end_close_ms)}
+                    {WINDOW_LABELS[Number(window)]}: {at(row.start_close_ms)} →{" "}
+                    {at(row.end_close_ms)}
                   </p>
                 ) : null,
               )}
@@ -330,19 +368,24 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
               </p>
               {metrics && (
                 <p>
-                  Payload {bytes(metrics.request_bytes)} sent / {bytes(metrics.response_bytes)} received
+                  Payload {bytes(metrics.request_bytes)} sent / {bytes(metrics.response_bytes)}{" "}
+                  received
                 </p>
               )}
               {!!result.attempts.length && (
                 <p>
                   Provider attempts:{" "}
                   {result.attempts
-                    .map((attempt) => `${sourceLabel(attempt.source)}: ${humanizeReason(attempt.reason).short}`)
+                    .map(
+                      (attempt) =>
+                        `${sourceLabel(attempt.source)}: ${humanizeReason(attempt.reason).short}`,
+                    )
                     .join("; ")}
                 </p>
               )}
               <p>
-                The monitor may update settings or state after this snapshot; it does not reserve an alert.
+                The monitor may update settings or state after this snapshot; it does not reserve an
+                alert.
               </p>
             </div>
           </details>

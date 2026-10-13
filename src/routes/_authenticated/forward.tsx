@@ -134,7 +134,8 @@ function useForwardRun(kind: "signals" | "trend", jobMode: boolean) {
         void queryClient.invalidateQueries({ queryKey: [queryKey] });
       }
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : `${toastLabel} failed`),
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : `${toastLabel} failed`),
   });
   const status = job.data?.status ?? initialStatus;
   const activeLabel = status === "running" ? "Running…" : "Queued…";
@@ -170,7 +171,7 @@ function Side({ side }: { side: unknown }) {
 
 function ForwardPage() {
   const runner = useRunnerStatus();
-  const offline = runner.data?.online === false;
+  const offline = !runner.available;
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
   const filters = useMemo(() => withDefaultRange(search), [search]);
@@ -184,9 +185,8 @@ function ForwardPage() {
   const machineOnlyEnabled = capabilities.data?.machineOnlyEnabled === true;
   const runnerJobsEnabled = capabilities.data?.runnerJobsEnabled === true;
   const jobMode = runnerJobsEnabled && !machineOnlyEnabled;
-  const runnerReady = runner.data?.services.forward === true
-    && (!jobMode || runner.data?.services.jobs === true);
-  const canRun = machineOnlyEnabled || (runnerJobsEnabled && runnerReady);
+  const runnerReady = runner.canRunForward && (!jobMode || runner.canQueueJobs);
+  const canRun = runnerReady && (machineOnlyEnabled || runnerJobsEnabled);
   const signalRun = useForwardRun("signals", jobMode);
   const trendRun = useForwardRun("trend", jobMode);
   const loadTrend = useServerFn(getTrendDashboard);
@@ -237,16 +237,8 @@ function ForwardPage() {
 
         <Tabs defaultValue="signals">
           <TabsList className="h-auto w-full flex-wrap justify-start gap-1 bg-muted/60 p-1 sm:w-auto">
-            <LabTab
-              value="signals"
-              icon={Radar}
-              label="Signals & paper trading"
-            />
-            <LabTab
-              value="trend"
-              icon={Satellite}
-              label="Daily trend portfolios"
-            />
+            <LabTab value="signals" icon={Radar} label="Signals & paper trading" />
+            <LabTab value="trend" icon={Satellite} label="Daily trend portfolios" />
           </TabsList>
           <TabsContent value="signals" className="mt-4">
             <SignalsSection
@@ -260,7 +252,13 @@ function ForwardPage() {
             />
           </TabsContent>
           <TabsContent value="trend" className="mt-4">
-            <TrendSection data={trend} line={trendLine} offline={offline} canRun={canRun && !offline} runNow={trendRun} />
+            <TrendSection
+              data={trend}
+              line={trendLine}
+              offline={offline}
+              canRun={canRun && !offline}
+              runNow={trendRun}
+            />
           </TabsContent>
         </Tabs>
       </div>
@@ -315,9 +313,10 @@ function SignalsSection({
 
   return (
     <div className="space-y-6">
-      {!offline && (
+      {offline ? (
+        <div className="panel p-4 text-sm font-medium sm:p-5">Signals &amp; paper trading</div>
+      ) : (
         <StatusCard
-          level={line.level}
           title={line.title}
           detail={line.detail}
           action={line.action}
@@ -327,7 +326,10 @@ function SignalsSection({
           <div className="flex flex-wrap items-center gap-3 pt-2">
             {canRun && (
               <Button onClick={runNow.run} disabled={runNow.isPending}>
-                <RefreshCw className={cn("size-4", runNow.isPending && "animate-spin")} aria-hidden />
+                <RefreshCw
+                  className={cn("size-4", runNow.isPending && "animate-spin")}
+                  aria-hidden
+                />
                 {runNow.label ?? "Check for new signals now"}
               </Button>
             )}
@@ -543,9 +545,10 @@ function TrendSection({
   const latest = data.data?.latestRun ?? null;
   return (
     <div className="space-y-6">
-      {!offline && (
+      {offline ? (
+        <div className="panel p-4 text-sm font-medium sm:p-5">Daily trend portfolios</div>
+      ) : (
         <StatusCard
-          level={line.level}
           title={line.title}
           detail={line.detail}
           action={line.action}
@@ -555,7 +558,10 @@ function TrendSection({
           <div className="flex flex-wrap items-center gap-3 pt-2">
             {canRun && (
               <Button onClick={runNow.run} disabled={runNow.isPending}>
-                <RefreshCw className={cn("size-4", runNow.isPending && "animate-spin")} aria-hidden />
+                <RefreshCw
+                  className={cn("size-4", runNow.isPending && "animate-spin")}
+                  aria-hidden
+                />
                 {runNow.label ?? "Update trend portfolios now"}
               </Button>
             )}

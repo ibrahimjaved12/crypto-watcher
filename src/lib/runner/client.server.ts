@@ -58,14 +58,14 @@ export function classifyRunnerFailure(status: number | null, aborted: boolean): 
     return {
       ok: false,
       category: "timeout",
-      error: "The runner did not respond in time. If your computer is on, wait a moment and try again; if it is off, start npm run worker:host.",
+      error: "The runner did not respond in time. Please try again shortly.",
     };
   }
   if (status === null || [502, 503, 504, 522, 523, 524, 530].includes(status)) {
     return {
       ok: false,
       category: "runner_offline",
-      error: "The runner (your computer) is offline. Start npm run worker:host and try again.",
+      error: "Runner temporarily offline. Please try again when it is back online.",
     };
   }
   if (aborted) {
@@ -133,11 +133,7 @@ export async function callRunner<T = unknown>(
       ...(method === "POST" ? { body: JSON.stringify(body) } : {}),
     });
     status = response.status;
-    const contentType = response.headers
-      .get("Content-Type")
-      ?.split(";")[0]
-      ?.trim()
-      .toLowerCase();
+    const contentType = response.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase();
     if (!response.ok || contentType !== "application/json") {
       // Never expose proxy HTML, redirect bodies, or upstream exception text.
       try {

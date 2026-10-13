@@ -19,12 +19,12 @@ const env = {
 const offline = {
   ok: false,
   category: "runner_offline",
-  error: "The runner (your computer) is offline. Start npm run worker:host and try again.",
+  error: "Runner temporarily offline. Please try again when it is back online.",
 };
 const preResponseTimeout = {
   ok: false,
   category: "timeout",
-  error: "The runner did not respond in time. If your computer is on, wait a moment and try again; if it is off, start npm run worker:host.",
+  error: "The runner did not respond in time. Please try again shortly.",
 };
 
 async function withRunnerFetch(send, action) {
