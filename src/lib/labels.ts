@@ -474,6 +474,23 @@ export function relativeTime(at: number | string | Date | null | undefined, now 
   return future ? `in ${text}` : `${text} ago`;
 }
 
+/** Compact elapsed time for machine and service history. Future clock skew reads as just now. */
+export function formatAgo(at: number | string | Date | null | undefined, now = Date.now()): string {
+  if (at === null || at === undefined) return "—";
+  const ms = at instanceof Date ? at.getTime() : typeof at === "number" ? at : Date.parse(at);
+  if (!Number.isFinite(ms) || !Number.isFinite(now)) return "—";
+  const elapsed = Math.max(0, now - ms);
+  if (elapsed < 45_000) return "just now";
+  const minutes = Math.max(1, Math.floor(elapsed / 60_000));
+  if (elapsed < 3_600_000) return `${minutes}m ago`;
+  if (elapsed < 86_400_000) {
+    const hours = Math.floor(minutes / 60);
+    const remainder = minutes % 60;
+    return remainder >= 10 ? `${hours}h ${remainder}m ago` : `${hours}h ago`;
+  }
+  return `${Math.floor(elapsed / 86_400_000)}d ago`;
+}
+
 export const GLOSSARY: Record<string, { term: string; plain: string }> = {
   R: {
     term: "R (risk unit)",

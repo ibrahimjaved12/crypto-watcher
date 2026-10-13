@@ -19,6 +19,7 @@ export type Database = {
           service: string
           status: string
           services: Json
+          services_seen: Json
           updated_at: string
           last_seen_at: string | null
         }
@@ -26,6 +27,7 @@ export type Database = {
           service: string
           status: string
           services?: Json
+          services_seen?: Json
           updated_at: string
           last_seen_at?: string | null
         }
@@ -33,6 +35,7 @@ export type Database = {
           service?: string
           status?: string
           services?: Json
+          services_seen?: Json
           updated_at?: string
           last_seen_at?: string | null
         }

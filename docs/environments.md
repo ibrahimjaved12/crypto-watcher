@@ -204,8 +204,10 @@ charts only when fresh; otherwise the price is unavailable. Unexpected fallback 
 return the published snapshot. Existing provider failure diagnostics remain available in Details.
 
 Runner availability is shown once beside the logo: green Online or red Offline, with relative
-last-online time from the persisted heartbeat and the exact time in a tooltip. Missing health
-keeps runner controls unavailable and uses the same offline banner. Alert checks are disabled,
+last-online time from the persisted heartbeat and the exact time in a tooltip. Elapsed labels tick
+every 30 seconds, including between health polls. The badge opens a service list with current
+readiness and persisted last-working times. No history shows "No heartbeat received yet";
+failed health reads show neutral "Status unknown" and keep controls unavailable. Alert checks are disabled,
 Market read is omitted, and Strategy Lab service cards show only their titles while offline.
 Online service cards keep run details and actions without repeating coloured service badges.
 
@@ -215,6 +217,15 @@ across both venues, leaving room for the hosted read; pairs without fresh data s
 OKX may return HTTP 429 from Worker egress. Exchange latency/availability affects page loads
 only in degraded mode. Degraded quotes are not cached, so each page load or automatic refresh
 repeats the exchange requests. Existing automatic-refresh controls still apply.
+
+Unavailable cards retry together in one request for just their down symbols when automatic
+market refresh is enabled. Retries use 2/4/8/15/30/60-second base delays with 20% jitter, counting
+failed requests too. They stop when all pairs recover and do not poll in hidden tabs; visibility
+and reconnect events join an immediate retry without duplicating an active batch. Disabling
+`VITE_MARKET_AUTO_REFRESH_ENABLED` disables these retries too. Only fresh matching pairs merge
+into the watchlist cache; failed retry results never erase existing quotes or change the last
+full-refresh time. Cards keep quote errors and last-price-seen time, with a retry indicator while
+automatic recovery is enabled.
 
 Remove all blocks marked `TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days`
 after 30 days of continuous machine operation with no publication gap over 10 minutes,

@@ -107,9 +107,12 @@ test("missing health and lookup failures remain unknown even when the gateway is
   assert.equal(missing.online, null);
   assert.equal(missing.gatewayReachable, true);
   assert.equal(missing.lastOnlineAt, null);
+  assert.equal(missing.reason, "never-reported");
   assert.deepEqual(unavailableRunnerStatus(true), {
     configured: true, jobsEnabled: false, state: "unknown", online: null,
     lastOnlineAt: null, gatewayReachable: null,
+    servicesLastOnlineAt: { analysis: null, alerts: null, forward: null, jobs: null },
+    reason: "check-failed",
     services: { analysis: false, alerts: false, forward: false, jobs: false },
   });
 });
@@ -267,10 +270,60 @@ test("health reporting uses the database clock and preserves last seen after an 
   assert.match(sql, /last_seen_at = CASE WHEN EXCLUDED\.status <> 'offline'\s+THEN EXCLUDED\.last_seen_at ELSE runner_health\.last_seen_at END/i);
 });
 
-test("the badge uses persisted last-seen data for relative time and its absolute tooltip", async () => {
+test("the badge uses persisted last-seen data for ticking elapsed time and its absolute tooltip", async () => {
   const hook = await read("../src/lib/runner/use-runner-status.ts");
   const badge = await read("../src/components/runner-status-notice.tsx");
   assert.doesNotMatch(hook, /Date\.now\(|getQueryData|lastOnlineAt:/);
   assert.match(badge, /new Date\(data\.lastOnlineAt\)\.toLocaleString\(\)/);
-  assert.match(badge, /relativeTime\(data\.lastOnlineAt\)/);
+  assert.match(badge, /formatAgo\(data\.lastOnlineAt, now\)/);
+});
+
+test("runner history distinguishes never reported, failed checks and known machine history", () => {
+  assert.equal(resolve([]).reason, "never-reported");
+  assert.equal(resolve([host({ last_seen_at: null })]).reason, "never-reported");
+  assert.equal(resolve([host({ updated_at: "invalid" })]).reason, "never-reported");
+  assert.equal(unavailableRunnerStatus(true, true).reason, "check-failed");
+  assert.equal(unavailableRunnerStatus(false).reason, "ok");
+  assert.equal(resolve([host(), jobs()]).reason, "ok");
+  assert.equal(resolve([host({ status: "offline" })], { ...enabled, gatewayReachable: false }).reason, "ok");
+});
+
+test("service history uses both dependencies and the jobs row without fabricating timestamps", () => {
+  const result = resolve([
+    host({ services_seen: {
+      "fastapi-analysis": timestamp(10 * 60_000), collector: timestamp(20 * 60_000),
+      "fastapi-forward": timestamp(30 * 60_000), "runner-jobs": timestamp(),
+    } }),
+    jobs({ services_seen: { "runner-jobs": timestamp(5 * 60_000) } }),
+  ]);
+  assert.deepEqual(result.servicesLastOnlineAt, {
+    analysis: now - 20 * 60_000, alerts: now - 20 * 60_000,
+    forward: now - 30 * 60_000, jobs: now - 5 * 60_000,
+  });
+  const missing = resolve([host({ services_seen: { "fastapi-analysis": timestamp(), "runner-jobs": timestamp() } })]);
+  assert.deepEqual(missing.servicesLastOnlineAt, { analysis: null, alerts: null, forward: null, jobs: null });
+  const missingPython = resolve([host({ services_seen: { collector: timestamp() } })]);
+  assert.deepEqual(missingPython.servicesLastOnlineAt, missing.servicesLastOnlineAt);
+});
+
+test("service history ignores invalid and implausibly future values and survives expired heartbeats", () => {
+  for (const value of ["not a date", timestamp(-30_001), null, true, 0]) {
+    const result = resolve([
+      host({ services_seen: { "fastapi-analysis": value, "fastapi-forward": value, collector: timestamp() } }),
+      jobs({ services_seen: { "runner-jobs": value } }),
+    ]);
+    assert.deepEqual(result.servicesLastOnlineAt, { analysis: null, alerts: null, forward: null, jobs: null });
+  }
+  assert.equal(resolve([jobs({ services_seen: { "runner-jobs": timestamp(-30_000) } })]).servicesLastOnlineAt.jobs, now + 30_000);
+  for (const services_seen of [undefined, null, [], "invalid"]) {
+    assert.equal(resolve([host({ services_seen })]).servicesLastOnlineAt.analysis, null);
+  }
+  const old = timestamp(2 * 86_400_000);
+  const offline = resolve([host({
+    updated_at: old, last_seen_at: old,
+    services_seen: { "fastapi-analysis": old, collector: old, "fastapi-forward": old },
+  })], { ...enabled, gatewayReachable: false });
+  assert.equal(offline.online, false);
+  assert.equal(offline.reason, "ok");
+  assert.equal(offline.servicesLastOnlineAt.analysis, Date.parse(old));
 });

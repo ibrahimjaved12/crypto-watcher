@@ -204,20 +204,28 @@ child process is alive), restart count, last restart time, last exit and `downSi
 file is removed; after a non-zero exit it is kept.
 
 The shared web badge reads persisted `runner_health` records from hosted Supabase, independently
-of the gateway tunnel. Apply `20261013130000_runner_health.sql` to the hosted main database before
+of the gateway tunnel. Apply `20261013130000_runner_health.sql` and
+`20261013140000_runner_services_seen.sql` to the hosted main database before
 restarting the updated host and deploying the web app. Every 15 seconds the host reports its child
 states and probes both Python `/health` endpoints. The jobs runner reports successful queue claims
 (at most every 15 seconds) and lease renewals; failures report degraded readiness. A heartbeat older
-than 60 seconds expires. Service failures show **Degraded**; expired machine heartbeats with an
-unreachable gateway show **Offline**. A reachable gateway without fresh worker heartbeats shows
-**Degraded** and cannot enable worker controls. Missing health records or failed reads show
-**Status unavailable**.
+than 60 seconds expires. The header shows **Online** while the machine is alive, with unavailable
+services named in the banner. Expired machine heartbeats with an unreachable gateway show
+**Offline**. A reachable gateway without fresh worker heartbeats cannot enable worker controls.
+Missing machine history shows **Offline · No heartbeat received yet**; failed health reads show
+a neutral **Status unknown** badge and leave controls disabled.
 
 Gateway reachability gates manual analysis separately. A tunnel outage leaves healthy queued forward
 run controls available. Strategy Lab refreshes both published dashboards every minute even while
 the runner is unavailable. `Last online` uses the persisted last machine heartbeat, including degraded
-operation, displayed as an absolute local timestamp so it survives page reloads and cannot freeze in
-relative time. Only the service role can publish health; signed-in users can read status booleans and
+operation, displayed as ticking elapsed time with the exact local timestamp in a tooltip.
+Clicking the keyboard-accessible badge lists service readiness and persisted last-working times.
+`services_seen` records the database clock only for services reported as JSON `true`; false and
+missing keys preserve history. Analysis and Alerts require history for both analysis and collector;
+Forward runs require forward and collector. Their earlier dependency timestamp is displayed.
+On-demand jobs use the jobs runner's own service timestamp. Old records without service history
+remain unknown until a successful report. Machine health and service history are global for all users.
+Only the service role can publish health; signed-in users can read status booleans and
 timestamps, with no host names, process IDs or credentials.
 
 `npm run mvp:check` gets one new line, `worker host`: **PASS** fresh (updated within 2 minutes) and all

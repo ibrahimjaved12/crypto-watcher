@@ -1,9 +1,11 @@
 import { Area, AreaChart, ResponsiveContainer, Tooltip, YAxis } from "recharts";
-import { AlertTriangle, Trash2 } from "lucide-react";
+import { AlertTriangle, Loader2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { sourceLabel } from "@/lib/labels";
+import { formatAgo, sourceLabel } from "@/lib/labels";
+import { useNow } from "@/lib/use-now";
+import { isUnavailable } from "@/lib/market/self-heal";
 import { CHANGE_WINDOWS, WINDOW_LABELS, baseAsset } from "@/lib/market/symbols";
 import type { SymbolQuote } from "@/lib/market/quote-calc";
 
@@ -22,8 +24,17 @@ function changeClass(value: number | null | undefined): string {
   return "text-muted-foreground";
 }
 
-export function QuoteCard({ quote, onRemove }: { quote: SymbolQuote; onRemove?: () => void }) {
-  const unavailable = !quote.ok || quote.price == null || quote.stale;
+export function QuoteCard({
+  quote,
+  onRemove,
+  retrying = false,
+}: {
+  quote: SymbolQuote;
+  onRemove?: () => void;
+  retrying?: boolean;
+}) {
+  const now = useNow();
+  const unavailable = isUnavailable(quote);
 
   return (
     <article className="panel flex flex-col gap-4 p-5 transition-colors hover:border-primary/40">
@@ -63,13 +74,28 @@ export function QuoteCard({ quote, onRemove }: { quote: SymbolQuote; onRemove?: 
         </div>
       </header>
       {unavailable ? (
-        <p className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive-foreground">
-          <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+        <p
+          aria-live="polite"
+          className="flex items-start gap-2 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground"
+        >
+          {retrying ? (
+            <Loader2
+              className="mt-0.5 size-4 shrink-0 animate-spin motion-reduce:animate-none"
+              aria-hidden
+            />
+          ) : (
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+          )}
           <span>
             {quote.error ??
-              (quote.stale
-                ? "Fresh prices could not be loaded. Try Refresh."
+              (retrying
+                ? "Price feed is catching up — retrying automatically"
                 : "No market data available.")}
+            {quote.lastCandleAt !== null && Number.isFinite(quote.lastCandleAt) && (
+              <span className="mt-1 block">
+                Last price seen {formatAgo(quote.lastCandleAt, now)}
+              </span>
+            )}
           </span>
         </p>
       ) : (
@@ -109,7 +135,10 @@ export function QuoteCard({ quote, onRemove }: { quote: SymbolQuote; onRemove?: 
                     borderRadius: 8,
                     fontSize: 12,
                   }}
-                  labelFormatter={(t) => new Date(Number(t)).toLocaleString()}
+                  labelFormatter={(_label, payload) => {
+                    const t = payload?.[0]?.payload?.time;
+                    return Number.isFinite(t) ? new Date(t).toLocaleString() : "";
+                  }}
                   formatter={(v: number) => [`$${formatPrice(v)}`, "Close"]}
                 />
                 <Area

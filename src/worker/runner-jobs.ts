@@ -32,7 +32,7 @@ async function publishJobHealth(requested: "online" | "degraded" | "offline") {
   lastHealthStatus = status;
   lastHealthAt = now;
   healthReporting = healthReporting.then(async () => {
-    try { await reportRunnerHealth("runner-jobs", status); }
+    try { await reportRunnerHealth("runner-jobs", status, { "runner-jobs": status === "online" }); }
     catch { console.error("Runner jobs health could not be published; retrying next interval."); }
   });
   await healthReporting;

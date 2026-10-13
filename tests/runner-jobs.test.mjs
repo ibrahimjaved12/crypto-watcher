@@ -93,7 +93,7 @@ test("Strategy Lab gates new work on service readiness and preserves polling for
   assert.match(notice, /available && data\?\.state === "online"/);
   assert.match(notice, /available && data\?\.state === "degraded"/);
   assert.match(notice, /background runs can continue/);
-  assert.match(notice, /Runner temporarily offline: Alerts, analysis and forward runs are temporarily down\./);
+  assert.match(notice, /Runner temporarily offline\$\{lastOnline\}: Alerts, analysis and forward runs are temporarily down\./);
   assert.match(source, /The runner did not pick this up in time\. Check that it is online and try again\./);
   assert.match(source, /toast\.error\(result\.error \|\|/);
   assert.match(source, /runToast\(toastLabel, result\.result\)/);
