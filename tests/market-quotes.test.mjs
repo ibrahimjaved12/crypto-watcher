@@ -7,12 +7,10 @@ import { createModuleLoader } from "./module-loader.mjs";
 const moduleUrl = createModuleLoader(import.meta.url);
 const calc = await import(await moduleUrl("../src/lib/market/quote-calc.ts"));
 const published = await import(await moduleUrl("../src/lib/market/published-quotes.ts"));
-const stubClient = "data:text/javascript,export const supabaseAdmin = {};";
-const publisher = await import(
-  await moduleUrl("../src/lib/market/quote-publisher.server.ts", {
-    "../../integrations/supabase/client.server": stubClient,
-  })
-);
+const publisher = await import(await moduleUrl("../src/lib/market/quote-publisher.server.ts"));
+// Inert placeholders only; all hosted writes in these tests use in-memory fakes.
+const hostedEnv = { SUPABASE_URL: "https://example.invalid", SUPABASE_SERVICE_ROLE_KEY: "test-placeholder" };
+
 
 const MIN = 60_000;
 const NOW = Date.UTC(2026, 9, 13, 12, 0, 30);
@@ -34,6 +32,23 @@ function candles(count, stepMs, endOpen, price) {
   }));
 }
 const wave = (i) => 100 + Math.sin(i / 7) * 3 + i * 0.05;
+
+test("hosted publish forwards the batch, returns the row count and propagates RPC errors", async () => {
+  const batch = [published.quoteInputFromFigures("BTCUSDT", calc.quoteFigures(
+    candles(61, MIN, LAST_OPEN, wave),
+    candles(97, 15 * MIN, LAST_OPEN, wave),
+  ))];
+  const calls = [];
+  let result = { data: 1, error: null };
+  const publish = publisher.createHostedPublish({
+    rpc: async (...args) => { calls.push(args); return result; },
+  });
+  assert.equal(await publish(batch), 1);
+  assert.deepEqual(calls, [["publish_market_quotes", { p_quotes: batch }]]);
+  assert.equal(calls[0][1].p_quotes, batch);
+  result = { data: null, error: { message: "hosted write rejected" } };
+  await assert.rejects(publish(batch), { message: "hosted write rejected" });
+});
 
 test("shared quote maths gives the same numbers as the previous pctFrom", () => {
   for (const [minuteCount, quarterCount] of [[61, 97], [61, 40], [30, 97], [3, 2], [1, 1]]) {
@@ -263,7 +278,7 @@ test("the standalone publisher keeps its timer referenced until stop clears it",
   });
   const clear = t.mock.method(globalThis, "clearTimeout", (handle) => pending.delete(handle));
   const running = publisher.startMarketQuotePublisher({
-    env: {},
+    env: hostedEnv,
     deps: { store: fakeStore({ symbols: [], lastOpen: {} }), publish: async () => 0 },
     log: () => {},
   });
@@ -287,15 +302,22 @@ test("the standalone publisher keeps its timer referenced until stop clears it",
 
 test("the publisher declines to start without hosted credentials and never throws", () => {
   const lines = [];
-  const options = (env) => ({ env, store: fakeStore({ symbols: [], lastOpen: {} }), log: (l) => lines.push(l), error: (l) => lines.push(l) });
+  const options = (env) => ({ env, log: (l) => lines.push(l), error: (l) => lines.push(l) });
   assert.equal(publisher.startMarketQuotePublisher(options({})), null);
   assert.match(lines.at(-1), /SUPABASE_SERVICE_ROLE_KEY are required/);
   assert.equal(publisher.startMarketQuotePublisher(options({ MARKET_QUOTE_PUBLISHER_ENABLED: "false" })), null);
   assert.match(lines.at(-1), /disabled/);
   const running = publisher.startMarketQuotePublisher({
-    ...options({}),
+    ...options(hostedEnv),
     deps: { store: fakeStore({ symbols: [], lastOpen: {} }), publish: async () => 0 },
   });
+  assert.equal(publisher.startMarketQuotePublisher({
+    ...options({}),
+    deps: { store: fakeStore({ symbols: [], lastOpen: {} }), publish: async () => 0 },
+  }), null);
+  assert.match(lines.at(-1), /SUPABASE_SERVICE_ROLE_KEY are required/);
+  assert.equal(publisher.startMarketQuotePublisher(options(hostedEnv)), null);
+  assert.match(lines.at(-1), /no operational store was provided/);
   assert.ok(running);
   running.stop();
 });
