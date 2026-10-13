@@ -73,7 +73,7 @@ dependencies already exist.
 | 10 | [#19 — Run a bounded Python analysis trial and evaluate persistent-worker hosting](https://github.com/ibrahimjaved12/crypto-watcher/issues/19)                          | Backlog        | #18; bounded API trial and separate persistent-worker hosting assessment.                    |
 | 11 | [#24 — Persist immutable analysis conclusions, trade setups, and provenance](https://github.com/ibrahimjaved12/crypto-watcher/issues/24)                                | Backlog        | #23 and #17; immutable provenance before scheduled cutover.                                  |
 | 12 | [#20 — Switch scheduled TA to Python and retire the TypeScript TA calculator](https://github.com/ibrahimjaved12/crypto-watcher/issues/20)                               | Implemented    | Shared Python calculation; TanStack remains the sole writer.                                 |
-| 13 | [#25 — Introduce external PostgreSQL for frequent operational updates and selective result synchronization](https://github.com/ibrahimjaved12/crypto-watcher/issues/25) | Backlog        | #13 baseline, #16 ownership/recovery, #24 records, and #20 boundary.                         |
+| 13 | [#25 — Introduce external PostgreSQL for frequent operational updates and selective result synchronization](https://github.com/ibrahimjaved12/crypto-watcher/issues/25) (superseded by architecture v5, #273) | Backlog        | #13 baseline, #16 ownership/recovery, #24 records, and #20 boundary.                         |
 | 14 | [#26 — Implement a shared futures WebSocket collector with REST bootstrap and gap recovery](https://github.com/ibrahimjaved12/crypto-watcher/issues/26)                 | Backlog        | #19 hosting evidence, #23 futures feeds, #25 allocation; complete #16 gap tests.             |
 | 15 | [#27 — Define retention, historical-data storage, and verified archival policies](https://github.com/ibrahimjaved12/crypto-watcher/issues/27)                           | Backlog        | #24–#26 data inventory; verify archives and restores before cleanup.                         |
 | 16 | [#28 — Add market-wide futures movement and acceleration detection](https://github.com/ibrahimjaved12/crypto-watcher/issues/28)                                         | Backlog        | #23 and #26 fresh shared market events.                                                      |
@@ -122,7 +122,7 @@ dependencies already exist.
    Python calculation path are present. TanStack remains the one scheduled writer;
    the movement monitor remains independently owned until explicitly migrated.
 5. **Operational data and collection (13–15):** finalize table ownership, add
-   external PostgreSQL with transactional outbox and selective main-database sync, prove
+   external PostgreSQL (superseded by architecture v5, #273) with transactional outbox and selective main-database sync, prove
    authenticated fresh-state reads, then deploy the persistent shared collector.
    Test disconnect/restart, bounded REST recovery, overlap deduplication, and visible
    freshness. Measure storage/WAL growth and verify archival restore before cleanup.
@@ -165,7 +165,7 @@ These notes do not replace the live issue bodies or close an issue automatically
 The immediate baseline retains main Supabase Postgres as the main application database and
 TanStack orchestration, with the optional FastAPI service. The proposed increment
 adds independently hosted persistent collection and external operational data; it
-does not require moving authentication or all application data. External PostgreSQL
+does not require moving authentication or all application data. External PostgreSQL (superseded by architecture v5, #273)
 does not host the collector process, and browser tabs are not its runtime.
 
 Before choosing hosting in #19/#25, compare uptime/sleep behavior, region access to

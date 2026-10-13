@@ -1,7 +1,9 @@
 # Operational PostgreSQL
 
-main Supabase Postgres remains the permanent application database. A second Supabase/PostgreSQL
-instance owns bounded, frequently updated working state when `OPERATIONAL_DB_ENABLED=true`.
+The owner's hosted main Supabase remains the permanent application database for accounts and
+published results. Under architecture v5 (#273), the operational database is the local Supabase
+stack on the owner's machine, alongside the collector, FastAPI and forward jobs. It owns bounded,
+frequently updated working state when `OPERATIONAL_DB_ENABLED=true`.
 TanStack remains the only privileged writer to the main database. The collector worker is a headless
 ingestion process that is privileged only on the operational database and holds no main-database
 credentials; Python remains calculation-only.
@@ -50,7 +52,7 @@ Server-only variables:
 
 ```text
 OPERATIONAL_DB_ENABLED=true
-OPERATIONAL_SUPABASE_URL=https://<operational-project>.supabase.co
+OPERATIONAL_SUPABASE_URL=http://127.0.0.1:55321
 OPERATIONAL_SUPABASE_SERVICE_ROLE_KEY=<server secret>
 OPERATIONAL_CANDLE_RETENTION_DAYS=8
 OPERATIONAL_MONITOR_RUN_RETENTION_DAYS=30
@@ -72,16 +74,15 @@ this single current baseline; historical operational migration evolution is inte
 not preserved yet, and no production-data migration path is required. Once production data
 must survive upgrades, freeze the baseline and use forward migrations for future changes.
 
-For a hosted operational project, use its direct PostgreSQL connection string (not a main-database
-connection) and run:
+With the machine's local operational stack running, apply its migrations:
 
 ```sh
-npx supabase db push --workdir operational-db \
-  --db-url 'postgresql://postgres:<password>@db.<operational-project>.supabase.co:5432/postgres'
+npx supabase migration up --local --workdir operational-db
 ```
 
-Alternatively, apply the SQL file through that operational project's SQL editor. Neither method
-requires or authorizes a main-database login or schema change.
+The operational stack is local in production as well as development. This command does not
+require or authorize a hosted main-database login or schema change. See [worker host](worker-host.md)
+for the production setup.
 
 Local development uses two isolated Supabase stacks and runs the application and the collector
 worker as separate processes:
