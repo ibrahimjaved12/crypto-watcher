@@ -6,12 +6,13 @@ an open dashboard, and is enabled only when both `BINANCE_COLLECTOR_ENABLED=true
 operational database are enabled. The application owns user watchlists; it derives the union of
 watched contracts required by accounts with monitoring and market-data collection enabled
 and assigns that set to the operational database as collector input. The worker reads it
-there rather than querying main-database user tables. That reconciliation is
-application-owned and independent of scheduled monitoring: the dedicated authenticated
-`/api/public/hooks/sync-collector-subscriptions` hook is the initial and ongoing mechanism the
-deployment schedules, and the server's best-effort first-request pass is only a safety net for a
-missed run, so pausing scheduled monitoring never leaves the collector empty or stale. A renewable
-operational-database
+there rather than querying main-database user tables. The six benchmark symbols are always
+included. Reconciliation is application-owned and independent of scheduled monitoring:
+the machine-side `collector-universe-sync` child calls the existing `syncCollectorUniverse`
+periodically. The authenticated `/api/public/hooks/sync-collector-subscriptions` hook remains
+available for explicit reconciliation, and the server's best-effort first-request pass is a
+safety net where collector mode and the operational store are available. The hosted Worker
+has collector mode disabled and cannot reach that store. A renewable operational-database
 lease prevents two worker instances from acting as authoritative collectors. The TanStack
 application server does not start the collector: importing or starting the app never opens a market
 stream. Production hosting for the worker remains an open decision in
@@ -21,11 +22,12 @@ stream. Production hosting for the worker remains an open decision in
 
 The current-state lifecycle is:
 
-- Collection enabled and a symbol required by an eligible watcher: TanStack assigns
+- Collection enabled and a symbol required by an eligible watcher: the sync child assigns
   the symbol, the worker reconciles and performs REST bootstrap/recovery, and health
   becomes `LIVE` when current evidence is established.
-- The final relevant watcher is removed or disables collection: TanStack removes
-  the symbol from the shared universe. The assignment RPC immediately sets every
+- The final relevant watcher of a non-benchmark pair is removed or disables collection: the sync
+  child removes the symbol from the shared universe on the next successful sync pass. The
+  assignment RPC immediately sets every
   persisted health row outside that universe to `UNAVAILABLE`, with reason
   `collection disabled/unsubscribed`, null lag, and zero queue depth. The worker
   unsubscribes during reconciliation. An empty assignment invalidates all health rows.
@@ -299,16 +301,103 @@ and serving are separate during normal operation:
 - **Check.** `npm run mvp:check -- --mode production` lists the age of each benchmark symbol's
   newest `published_at` and warns past 10 minutes.
 
+## Machine-side collector universe sync (#329)
+
+`src/worker/collector-universe-sync.ts`, launched by `scripts/collector-universe-sync.mjs`, is a
+separate, non-essential worker-host child beside the collector and quote publisher. It calls
+`syncCollectorUniverse(supabaseAdmin, getOperationalStore())`; the shared reconciliation reads
+hosted `watchlist_items` and `monitor_settings`, includes pairs watched by at least one eligible
+account plus the six frozen benchmarks, and calls `assignCollectorSubscriptions` only when the
+sorted universe changes. No hook scheduler or dashboard action is needed. It uses the existing
+hosted service-role client and local operational credentials, all supplied at runtime.
+
+The host starts it only with `BINANCE_COLLECTOR_ENABLED=true`, `OPERATIONAL_DB_ENABLED=true`, and
+all four hosted/operational URL and service-role variable names configured. Set
+`COLLECTOR_UNIVERSE_SYNC_ENABLED=false` to disable just this child. The default
+`COLLECTOR_UNIVERSE_SYNC_INTERVAL_MS` is **60000** (60 seconds); positive integers below **10000**
+are clamped to 10 seconds. Missing, empty, invalid, zero, negative, fractional, or values beyond
+Node's 2,147,483,647ms timer range use 60 seconds. These are server-only variables, never `VITE_*`.
+For a standalone machine run: `npm run collector-universe-sync -- --mode production`.
+
+The first pass is scheduled immediately; each subsequent pass starts one interval after the prior
+pass completes, so slow reads extend the cadence and passes do not overlap. Every completed pass
+logs one short line:
+`[collector-universe-sync] heartbeat status=unchanged|assigned|skipped symbols=… newest_assignment_at=…`.
+The assignment time is the most recent successful assignment **by this process** (`never` until it
+assigns); the count is the last successfully observed universe (`unknown` until then). A failed pass
+logs `status=skipped`, a bounded, redacted error and `retry=next_interval`, retaining those last-known
+fields. Failed hosted reads cannot empty the universe, and operational DB startup failures are
+retried without ending the child or stopping its siblings.
+
+The pending timer remains referenced, keeping the standalone child alive (#326). All dependencies
+used by later ticks are imported statically before Vite's `runnerImport` closes its module runner
+(#327); there are no delayed module imports. `stop()` clears the timer and prevents rescheduling,
+including after an in-flight pass. Startup/process crashes use the host's existing restart backoff
+and non-essential crash-loop breaker: only this child stops after repeated crashes while the
+collector, publisher and other children continue. One more child must be monitored, with two small
+hosted reads per successful interval and operational assignment writes only on changes.
+
+In production, `npm run mvp:check -- --mode production` adds a read-only **collector universe** line.
+It uses the same hosted derivation as `syncCollectorUniverse`; missing or extra local subscriptions
+produce `WARN` (stale universe), equality produces `PASS`, and read failures produce `WARN`. The
+check never repairs or writes subscriptions.
+
+### Running collector response: no restart required
+
+Code paths: `CollectorRuntime.startTimers` / `reconcileSubscriptions` in
+`src/lib/market/collector.server.ts`, and `BinanceFuturesCollector.reconcile` / `bootstrap` in
+`src/lib/market/collector.ts`. The running collector re-reads the operational assignment every
+**30 seconds**. Reconciliation removes dropped symbols from live memory, adds new ones and
+bootstraps each new symbol's completed **1m, 15m, 1h and 4h** series sequentially from REST
+(limit 300 per frame; the developing candle is excluded). After reconciliation it sends the
+WebSocket stream differences as `UNSUBSCRIBE` / `SUBSCRIBE` and schedules movement history backfill.
+It needs **no process restart or manual subscription command**. Removal preserves stored candles;
+assignment immediately invalidates the removed symbols' health. Benchmarks never leave the universe,
+and a pair with another eligible watcher remains assigned.
+
 ### How long until a newly watched symbol has a row
 
-The six benchmark symbols (`BENCHMARK_COLLECTOR_SYMBOLS`) are always collected and published. Any
-other symbol needs the collector universe to include it, and **adding a pair to a watchlist does not
-trigger that**: `addSymbol` only inserts the watchlist row. The universe is reconciled by
-`syncCollectorUniverse`, which runs (a) from the authenticated hook
-`/api/public/hooks/sync-collector-subscriptions`, which a scheduler must call (this repository
-configures no schedule for it), (b) before a manual "Check for alerts now", and (c) once per
-server process on the first request when that process can reach the operational store. After a
-sync the collector re-reads its subscriptions every 30 s, bootstraps the new symbol's history by
-REST, and the publisher writes the row on its next pass (within about a minute). So: up to about
-two minutes after the next sync, and until a sync runs it can stay "not collected yet". Scheduling
-the hook (or syncing from the machine) is a follow-up.
+`addSymbol` in `src/lib/db.ts` inserts the hosted watchlist row; it does not call the hook. With the
+machine running, collection enabled for the account, healthy hosted/local stores and Binance, and
+the default sync interval:
+
+1. **Hosted watchlist to assignment:** up to roughly **60 seconds**, plus the previous/current
+   sync's hosted and operational read/write time (the interval starts after completion).
+2. **Assignment to collector discovery:** up to **30 seconds**, plus any active collector work.
+3. **Bootstrap:** REST and local persistence time for the new symbol's four native frames. The
+   existing provider has an 8-second timeout per HTTP fetch; metadata resolution can add a fetch.
+   Bootstrap stores completed 1m candles immediately and does not wait for 24 hours of live data.
+   Quote calculation needs only a usable newest 1m close to publish a price; longer change windows
+   remain unavailable until their history is present. Several new symbols bootstrap sequentially
+   and can take longer; outages/recovery have no fixed completion bound.
+4. **First publication:** the quote publisher reads subscriptions on every pass and publishes on
+   its next pass, at the next minute boundary plus **3 seconds** (allow roughly **63 seconds**).
+   Startup has a **5-second** delay. Behind candles get up to four additional **5-second** retries.
+   Add local read and hosted upsert time; failed hosted writes retry on the next candle.
+
+The scheduled waits total roughly **153 seconds**, plus read/write/bootstrap time, so a single
+newly added supported pair usually has a hosted quote **within a few minutes** under healthy
+conditions. This is a code-derived expectation, not a measured deadline or an outage guarantee.
+Increasing the sync interval increases that latency. Dashboard cards see it on their next market
+fetch: automatic market refresh polls every **60 seconds** when enabled; with automatic activity
+paused, use the dashboard's market refresh control. Refreshing the page does not reconcile the
+universe and is not required for machine collection/publication.
+
+### Verify on the machine
+
+- Start the operational stack and the production worker host through the existing `npm run up`
+  flow. With account monitoring and collection enabled, add a supported non-benchmark pair (for
+  example ADAUSDT) on the site. Without calling the hook, running a sync command or restarting
+  the collector, watch for the sync child's `status=assigned`, the collector's changed symbol
+  set/subscription acknowledgement and the publisher's next heartbeat. The pair should have a
+  price within a few minutes under the conditions above; refresh market cards if auto-refresh is
+  paused. Run `npm run mvp:check -- --mode production` to confirm the universe matches.
+- Remove that pair's **last eligible watcher**. On the next successful sync it leaves the local
+  assignment; within the collector's next 30-second poll it is removed from streams. Other
+  eligible watchers and the six benchmarks deliberately retain their pairs. Historical candles
+  and existing hosted quote rows are not deleted.
+- Temporarily make hosted reads unavailable to the sync child, without altering credentials or
+  the operational DB. Observe `status=skipped … retry=next_interval` repeatedly with the same
+  child pid; the collector and quote publisher stay running. Restore access and confirm a later
+  pass succeeds. If hosted access is blocked for the whole machine, the publisher also reports
+  its existing hosted-write failures but remains independent.

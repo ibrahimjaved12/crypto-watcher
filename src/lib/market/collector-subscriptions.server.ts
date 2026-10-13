@@ -61,24 +61,12 @@ export function collectorUniverse(
 }
 
 /**
- * Application-owned reconciliation of the collector's subscription universe. It is
- * independent of scheduled monitoring: the dedicated authenticated hook
- * (`/api/public/hooks/sync-collector-subscriptions`) is the initial and ongoing
- * mechanism the deployment schedules, so the collector cannot be left empty or stale
- * by a disabled monitor cron. The worker never reads the main database itself.
+ * Read-only derivation shared by reconciliation and the machine's stale-universe
+ * check. Includes the frozen benchmarks even when there are no eligible watchers.
  */
-export async function syncCollectorUniverse(
+export async function readCollectorUniverse(
   supabaseAdmin: Client,
-  store: OperationalStore,
-  env: Record<string, string | undefined> = process.env,
-): Promise<CollectorUniverseSync> {
-  if (env["BINANCE_COLLECTOR_ENABLED"] !== "true") {
-    return { status: "skipped", reason: "Collector mode disabled" };
-  }
-  if (!store.enabled) {
-    return { status: "skipped", reason: "Operational store disabled" };
-  }
-
+): Promise<string[]> {
   const { data: watchers, error: watcherError } = await supabaseAdmin
     .from("watchlist_items")
     .select("user_id, symbol");
@@ -99,9 +87,29 @@ export async function syncCollectorUniverse(
     (settingsRows ?? []).map((row) => [row.user_id, row as CollectionSettings]),
   );
 
-  const symbols = [
+  return [
     ...new Set([...collectorUniverse(rows, byUser), ...BENCHMARK_COLLECTOR_SYMBOLS]),
   ].sort();
+}
+
+/**
+ * Application-owned reconciliation, independent of scheduled monitoring. The
+ * machine-side worker-host child schedules it; the authenticated hook remains
+ * available for explicit syncs. The collector never reads the main database.
+ */
+export async function syncCollectorUniverse(
+  supabaseAdmin: Client,
+  store: OperationalStore,
+  env: Record<string, string | undefined> = process.env,
+): Promise<CollectorUniverseSync> {
+  if (env["BINANCE_COLLECTOR_ENABLED"] !== "true") {
+    return { status: "skipped", reason: "Collector mode disabled" };
+  }
+  if (!store.enabled) {
+    return { status: "skipped", reason: "Operational store disabled" };
+  }
+
+  const symbols = await readCollectorUniverse(supabaseAdmin);
   const current = await store.readCollectorSubscriptions();
   if (
     current.length === symbols.length &&
@@ -117,8 +125,8 @@ let bootstrap: Promise<boolean> | null = null;
 
 /**
  * Best-effort first-request reconciliation. This is only a safety net for a missed
- * scheduled run: the initial and ongoing reconciliation is the dedicated
- * authenticated hook the deployment schedules. A successful reconciliation runs at
+ * machine-side run. The worker-host child owns periodic reconciliation, and the
+ * authenticated hook can still request it explicitly. A successful reconciliation runs at
  * most once per process; a failed one (for example while the operational database
  * is still starting) is retryable. Resolves false on failure so the caller can retry.
  * It never starts or hosts the collector itself (#82).

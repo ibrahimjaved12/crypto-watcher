@@ -136,6 +136,38 @@ test("a symbol leaves the universe only when its last relevant subscriber does",
 // The frozen benchmark universe is always collected, whatever the watchlists hold.
 const BENCH = ["BNBUSDT", "BTCUSDT", "DOGEUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"];
 
+test("read-only universe derivation matches sync, including eligibility and benchmarks", async () => {
+  const { readCollectorUniverse, syncCollectorUniverse } = await load();
+  const client = admin({
+    watchers: [
+      { user_id: "a", symbol: "adausdt" },
+      { user_id: "b", symbol: "ADAUSDT" },
+      { user_id: "c", symbol: "LINKUSDT" },
+    ],
+    settings: [
+      { user_id: "b", monitoring_enabled: false },
+      { user_id: "c", market_data_collection_enabled: false },
+    ],
+  });
+  const expected = await readCollectorUniverse(client);
+  assert.deepEqual(expected, ["ADAUSDT", ...BENCH]);
+  const store = fakeStore([]);
+  const assigned = await syncCollectorUniverse(client, store, { BINANCE_COLLECTOR_ENABLED: "true" });
+  assert.deepEqual(assigned, { status: "assigned", symbols: expected });
+  await readCollectorUniverse(client);
+  assert.equal(store.assigned.length, 1, "read-only derivation does not assign");
+});
+
+test("a failed settings read cannot assign a partial universe", async () => {
+  const { syncCollectorUniverse } = await load();
+  const store = fakeStore(BENCH);
+  await assert.rejects(syncCollectorUniverse(
+    admin({ settingsError: { message: "offline" } }), store,
+    { BINANCE_COLLECTOR_ENABLED: "true" },
+  ), /settings read failed: offline/);
+  assert.deepEqual(store.assigned, []);
+});
+
 test("the universe sync assigns changes and no-ops while unchanged", async () => {
   const { syncCollectorUniverse } = await load();
   const env = { BINANCE_COLLECTOR_ENABLED: "true" };

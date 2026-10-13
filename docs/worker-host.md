@@ -11,8 +11,8 @@ Cloudflare keeps this server-only capability off. The committed Worker config ha
 `npm run worker:host` with both flags set to `true` in `.env.production.local`.
 For stale hosted results and restart/catch-up steps, see the [forward outage runbook](forward-outage-runbook.md).
 
-It supervises five children, plus an optional gateway and jobs runner, each with a log prefix and its
-own restart policy:
+It supervises five core children, plus the quote publisher, collector universe sync, optional
+gateway and jobs runner, each with a log prefix and its own restart policy:
 
 | Child             | Command (same as the npm script / `dev-local.mjs`)                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -21,6 +21,8 @@ own restart policy:
 | `collector`        | `node scripts/collector-worker.mjs --mode production` (`npm run collector:worker`)                                  |
 | `forward-hourly`   | `node scripts/forward-run.mjs --mode production` (`npm run forward:run`)                                            |
 | `forward-trend`    | `node scripts/forward-run.mjs --trend --mode production` (`npm run forward:trend`)                                  |
+| `quote-publisher` | `node scripts/market-quote-publisher.mjs --mode production` (`npm run market-quote-publisher`; hosted credentials required; non-essential) |
+| `collector-universe-sync` | `node scripts/collector-universe-sync.mjs --mode production` (`npm run collector-universe-sync`; collector/operational DB enabled and hosted/operational credentials required; non-essential) |
 | `runner-gateway` | `node scripts/runner-gateway.mjs --mode production` (only when `RUNNER_GATEWAY_ENABLED=true`; non-essential) |
 | `runner-jobs` | `node scripts/runner-jobs.mjs --mode production` (`npm run runner:jobs`; only when `RUNNER_JOBS_ENABLED=true`; non-essential) |
 
@@ -75,6 +77,9 @@ environment; an empty value counts as defined and is then caught by the value ch
   loopback HTTP origins with explicit ports, for example ports 8000 and 8001), `PYTHON_ANALYSIS_TOKEN`\*
   (32–256 URL-safe characters)
 - Optional: `FORWARD_USER_ID` (narrow the jobs to one account), `MOVEMENT_FINALIZATION_GRACE_MS`
+- Universe sync: `COLLECTOR_UNIVERSE_SYNC_ENABLED=false` disables only that child;
+  `COLLECTOR_UNIVERSE_SYNC_INTERVAL_MS` defaults to 60000, minimum 10000. See
+  [collector response and latency](binance-futures-collector.md#machine-side-collector-universe-sync-329).
 - Durable jobs: `RUNNER_JOBS_ENABLED=true` enables `runner-jobs`; it uses the existing
   `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. No new secrets or publishable key are required on the
   host. `FORWARD_USER_ID` narrows the scheduled jobs only; durable jobs use the user on each queued row.

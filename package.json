@@ -15,6 +15,7 @@
     "runner:jobs": "node scripts/runner-jobs.mjs",
     "collector:worker": "node scripts/collector-worker.mjs",
     "market-quote-publisher": "node scripts/market-quote-publisher.mjs",
+    "collector-universe-sync": "node scripts/collector-universe-sync.mjs",
     "forward:run": "node scripts/forward-run.mjs",
     "forward:trend": "node scripts/forward-run.mjs --trend",
     "forward:backfill": "node scripts/forward-run.mjs --backfill-only",
