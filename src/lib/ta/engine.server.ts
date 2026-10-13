@@ -67,6 +67,12 @@ function sourceNativeSymbol(source: string, symbol: string) {
   return symbol;
 }
 
+export type TARunResult = {
+  /** Frames with due work or a frame failure; disabled and already-current work is excluded. */
+  checks: number;
+  errors: string[];
+};
+
 /** Each frame fails independently; movement alerts do not depend on TA. */
 export async function runTA(
   db: Client,
@@ -75,12 +81,12 @@ export async function runTA(
   context: MonitorRunContext = createMonitorRunContext(),
   calculate: typeof calculateTechnicalBatch = calculateTechnicalBatch,
   operationalStore: OperationalStore | null | undefined = undefined,
-) {
+): Promise<TARunResult> {
   const generation = activityEnabled(process.env["TA_GENERATION_ENABLED"]);
   const outcomes = activityEnabled(process.env["TA_OUTCOME_EVALUATION_ENABLED"]);
   if (!generation) logActivity(process.env["ACTIVITY_DIAGNOSTICS"], "ta-generation", "skipped");
   if (!outcomes) logActivity(process.env["ACTIVITY_DIAGNOSTICS"], "ta-outcomes", "skipped");
-  if (!generation && !outcomes) return [];
+  if (!generation && !outcomes) return { checks: 0, errors: [] };
 
   const now = Date.now();
   context.metrics.databaseReads += 1;
@@ -93,10 +99,14 @@ export async function runTA(
     p_include_outcomes: outcomes,
   });
   if (workError) {
-    return TA_FRAMES.map((timeframe) => `TA ${symbol} ${timeframe}m: ${workError.message}`);
+    return {
+      checks: TA_FRAMES.length,
+      errors: TA_FRAMES.map((timeframe) => `TA ${symbol} ${timeframe}m: ${workError.message}`),
+    };
   }
   const work = (data ?? []) as DueWork[];
   const errors: string[] = [];
+  const checkedFrames = new Set<number>();
 
   // While the leased collector owns market data, canonical completed candles come
   // from the operational store it writes. The application reads that history
@@ -127,6 +137,7 @@ export async function runTA(
           context.metrics.databaseNoOps += 1;
           return;
         }
+        checkedFrames.add(timeframe);
 
         const validate = (candles: Candle[]) => {
           completedCandles(candles, timeframe, now);
@@ -399,11 +410,12 @@ export async function runTA(
           context.metrics.databaseNoOps += Math.max(0, patches.length - (changed ?? 0));
         }
       } catch (error) {
+        checkedFrames.add(timeframe);
         errors.push(
           `TA ${symbol} ${timeframe}m: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }),
   );
-  return errors;
+  return { checks: checkedFrames.size, errors };
 }

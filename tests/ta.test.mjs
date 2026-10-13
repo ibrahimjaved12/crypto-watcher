@@ -553,6 +553,7 @@ test("TA due gating skips completed work and bounds catch-up batches", async () 
     let providerCalls = 0;
     const upserts = [];
     let latestOffset = 0;
+    let dueFrames = [15, 60, 240];
     const db = {
       async rpc(name) {
         assert.equal(name, "get_ta_due_work");
@@ -562,7 +563,8 @@ test("TA due gating skips completed work and bounds catch-up batches", async () 
             work_kind: "latest",
             timeframe,
             candle_at: new Date(
-              latestCompletedCandleAt(timeframe, now) - latestOffset * timeframe * 60_000,
+              latestCompletedCandleAt(timeframe, now) -
+                (dueFrames.includes(timeframe) ? latestOffset : 0) * timeframe * 60_000,
             ).toISOString(),
           })),
         };
@@ -600,18 +602,32 @@ test("TA due gating skips completed work and bounds catch-up batches", async () 
       },
     };
 
-    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, pythonResults), []);
+    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, pythonResults), {
+      checks: 0,
+      errors: [],
+    });
     assert.equal(providerCalls, 0);
     assert.equal(upserts.length, 0);
     assert.equal(context.metrics.databaseNoOps, 3);
 
     latestOffset = 10;
-    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, pythonResults), []);
+    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, pythonResults), {
+      checks: 3,
+      errors: [],
+    });
     assert.equal(providerCalls, 3);
     assert.equal(upserts.length, 3);
     assert.ok(upserts.every((rows) => rows.length === TA_CATCH_UP_LIMIT));
     assert.equal(context.metrics.taCalculations, TA_CATCH_UP_LIMIT * 3);
     assert.equal(context.metrics.taSignalsSaved, TA_CATCH_UP_LIMIT * 3);
+
+    dueFrames = [15];
+    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, pythonResults), {
+      checks: 1,
+      errors: [],
+    });
+    assert.equal(providerCalls, 4);
+    assert.equal(upserts.length, 4);
   } finally {
     Date.now = oldNow;
     if (oldOutcomes === undefined) delete process.env.TA_OUTCOME_EVALUATION_ENABLED;
@@ -703,7 +719,8 @@ test("TA runner isolates frame failures and settles on the recorded futures sour
     },
   };
   try {
-    const errors = await runTA(db, "owner", "BTCUSDT", undefined, pythonResults);
+    const { checks, errors } = await runTA(db, "owner", "BTCUSDT", undefined, pythonResults);
+    assert.equal(checks, 3);
     assert.equal(errors.length, 1);
     assert.match(errors[0], /60m.*feed down/);
     assert.equal(writes.length, 2);
@@ -848,7 +865,10 @@ test("collector mode reads canonical completed candles and never a second live s
       return pythonResults(requests);
     };
 
-    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, calculate, store), []);
+    assert.deepEqual(await runTA(db, "owner", "BTCUSDT", context, calculate, store), {
+      checks: 3,
+      errors: [],
+    });
     assert.equal(restCalls, 0);
     assert.deepEqual(collectorReads, [
       ["BTCUSDT", 15],
@@ -950,8 +970,9 @@ test("collector mode reads canonical completed candles and never a second live s
       },
     };
     const missing = await runTA(db, "owner", "BTCUSDT", context, pythonResults, emptyStore);
-    assert.equal(missing.length, 3);
-    assert.ok(missing.every((error) => /Collector history is still warming up \(\d+\/200 completed candles\)/.test(error)));
+    assert.equal(missing.checks, 3);
+    assert.equal(missing.errors.length, 3);
+    assert.ok(missing.errors.every((error) => /Collector history is still warming up \(\d+\/200 completed candles\)/.test(error)));
     assert.equal(restCalls, 0);
 
     // Stale canonical history also fails visibly.
@@ -963,8 +984,9 @@ test("collector mode reads canonical completed candles and never a second live s
       },
     };
     const stale = await runTA(db, "owner", "BTCUSDT", context, pythonResults, staleStore);
-    assert.equal(stale.length, 3);
-    assert.ok(stale.every((error) => /Stale TA candles/.test(error)));
+    assert.equal(stale.checks, 3);
+    assert.equal(stale.errors.length, 3);
+    assert.ok(stale.errors.every((error) => /Stale TA candles/.test(error)));
     assert.equal(restCalls, 0);
   } finally {
     Date.now = oldNow;

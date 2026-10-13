@@ -49,6 +49,8 @@ export type UserRunResult = {
   status: "success" | "partial" | "failed" | "skipped";
   symbolsChecked: number;
   alertsCreated: number;
+  taChecks: number;
+  taFailures: number;
   dataSource: string | null;
   error: string | null;
   durationMs: number;
@@ -74,6 +76,8 @@ export async function runMonitorForUser(
     status: "success",
     symbolsChecked: 0,
     alertsCreated: 0,
+    taChecks: 0,
+    taFailures: 0,
     dataSource: null,
     error: null,
     durationMs: 0,
@@ -205,6 +209,7 @@ export async function runMonitorForUser(
   }
 
   const taErrors: string[] = [];
+  let taChecks = 0;
   if (settings.completed_candle_ta_enabled) {
     // Completed-candle TA stays application-owned (#20): TanStack determines due
     // work, reads canonical completed candles (the operational collector store when
@@ -212,9 +217,10 @@ export async function runMonitorForUser(
     // shared Python calculation path, validates responses, and is the privileged
     // main-database `ta_signals` writer. The collector worker never owns TA.
     for (const symbol of symbols) {
-      const symbolErrors = await runTA(
+      const { checks, errors: symbolErrors } = await runTA(
         supabaseAdmin, userId, symbol, context, undefined, operationalStore,
       );
+      taChecks += checks;
       taErrors.push(...symbolErrors);
       if (symbolErrors.length < 3) checkedSymbols.add(symbol);
     }
@@ -234,11 +240,15 @@ export async function runMonitorForUser(
       ? "partial"
       : "success";
 
+  const taFailures = taErrors.length;
+
   return finish({
     userId,
     status,
     symbolsChecked: checkedSymbols.size,
     alertsCreated,
+    taChecks,
+    taFailures,
     dataSource: source,
     error: [...failures, ...taErrors].join(" | ") || null,
   });
@@ -260,6 +270,8 @@ export async function runLeasedMonitorForUser(
     status,
     symbolsChecked: 0,
     alertsCreated: 0,
+    taChecks: 0,
+    taFailures: 0,
     dataSource: null,
     error,
     durationMs: Math.max(0, Math.round(performance.now() - startedAt)),

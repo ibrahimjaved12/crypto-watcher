@@ -55,6 +55,8 @@ export async function runManualMonitorCheck(
     status: result.status,
     symbolsChecked: result.symbolsChecked,
     alertsCreated: result.alertsCreated,
+    taChecks: result.taChecks,
+    taFailures: result.taFailures,
     dataSource: result.dataSource,
     error: result.error,
     durationMs: result.durationMs,
