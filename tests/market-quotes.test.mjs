@@ -8,7 +8,7 @@ const moduleUrl = createModuleLoader(import.meta.url);
 const calc = await import(await moduleUrl("../src/lib/market/quote-calc.ts"));
 const published = await import(await moduleUrl("../src/lib/market/published-quotes.ts"));
 const publisher = await import(await moduleUrl("../src/lib/market/quote-publisher.server.ts"));
-const { isUnavailable, healDelayMs, mergeHealed } = await import(await moduleUrl("../src/lib/market/self-heal.ts"));
+const { isUnavailable, healDelayMs, nextHealDelay, mergeHealed } = await import(await moduleUrl("../src/lib/market/self-heal.ts"));
 // Inert placeholders only; all hosted writes in these tests use in-memory fakes.
 const hostedEnv = { SUPABASE_URL: "https://example.invalid", SUPABASE_SERVICE_ROLE_KEY: "test-placeholder" };
 
@@ -51,6 +51,15 @@ test("heal delay backs off to a minute with bounded integer jitter", () => {
     assert.ok(Number.isInteger(healDelayMs(attempt, () => 0.12345)));
   });
   assert.equal(healDelayMs(10_000, () => 0.5), 60_000);
+});
+
+test("next heal delay starts at two seconds and counts successful and failed requests", () => {
+  const rand = () => 0.5;
+  assert.equal(nextHealDelay({ dataUpdateCount: 0, errorUpdateCount: 0 }, rand), 2_000);
+  assert.equal(nextHealDelay({ dataUpdateCount: 1, errorUpdateCount: 0 }, rand), 4_000);
+  assert.equal(nextHealDelay({ dataUpdateCount: 0, errorUpdateCount: 1 }, rand), 4_000);
+  assert.equal(nextHealDelay({ dataUpdateCount: 2, errorUpdateCount: 1 }, rand), 15_000);
+  assert.equal(nextHealDelay({ dataUpdateCount: 0, errorUpdateCount: 8 }, rand), 60_000);
 });
 
 test("mergeHealed repairs fresh matching pairs without erasing others or advancing fetchedAt", () => {

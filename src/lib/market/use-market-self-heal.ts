@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { automaticQueryOptions } from "../activity-controls";
 import { getMarketSnapshot, type MarketSnapshot } from "../market.functions";
-import { healDelayMs, isUnavailable, mergeHealed } from "./self-heal";
+import { isUnavailable, mergeHealed, nextHealDelay } from "./self-heal";
 
 export const marketQueryKey = (symbols: readonly string[]) => ["market", symbols] as const;
 
@@ -23,18 +23,23 @@ export function useMarketSelfHeal(
         .map((quote) => quote.symbol),
     ),
   ].sort();
+  const downKey = down.join(",");
   const enabled = down.length > 0 && automatic.enabled && !!market.data;
   const heal = useQuery({
-    queryKey: ["market-heal", down.join(",")],
-    enabled,
+    queryKey: ["market-heal", downKey],
+    // Schedule the first request below; interval polling takes over after it finishes.
+    enabled: (query) =>
+      enabled && query.state.dataUpdateCount + query.state.errorUpdateCount > 0,
     retry: false,
     queryFn: async () => {
       const healed = await load({ data: { symbols: down } });
       queryClient.setQueryData<MarketSnapshot>(marketKey, (old) => mergeHealed(old, healed));
       return healed;
     },
-    refetchInterval: (query) => healDelayMs(query.state.dataUpdateCount),
+    refetchInterval: (query) => nextHealDelay(query.state),
     refetchIntervalInBackground: false,
+    refetchOnMount: false,
+    retryOnMount: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     staleTime: 0,
@@ -43,18 +48,26 @@ export function useMarketSelfHeal(
   const { refetch } = heal;
   useEffect(() => {
     if (!enabled) return;
+    let firstRetry: ReturnType<typeof setTimeout> | undefined;
     const resume = () => {
       if (document.visibilityState === "visible") {
+        clearTimeout(firstRetry);
+        firstRetry = undefined;
         // Joining an active request prevents focus and reconnect events from duplicating a batch.
         void refetch({ cancelRefetch: false });
       }
     };
+    const state = queryClient.getQueryState<MarketSnapshot>(["market-heal", downKey]);
+    if (state && state.dataUpdateCount + state.errorUpdateCount === 0) {
+      firstRetry = setTimeout(resume, nextHealDelay(state));
+    }
     document.addEventListener("visibilitychange", resume);
     window.addEventListener("online", resume);
     return () => {
+      clearTimeout(firstRetry);
       document.removeEventListener("visibilitychange", resume);
       window.removeEventListener("online", resume);
     };
-  }, [enabled, refetch]);
+  }, [enabled, downKey, queryClient, refetch]);
   return { retrying: down.length > 0, down };
 }

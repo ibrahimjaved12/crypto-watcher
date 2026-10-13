@@ -13,6 +13,13 @@ export function healDelayMs(attempt: number, rand = Math.random): number {
   return Math.round(base * (0.8 + rand() * 0.4));
 }
 
+export function nextHealDelay(
+  state: { dataUpdateCount: number; errorUpdateCount: number },
+  rand = Math.random,
+): number {
+  return healDelayMs(state.dataUpdateCount + state.errorUpdateCount, rand);
+}
+
 /** A partial retry can repair existing pairs, but cannot erase other quotes or advance refresh time. */
 export function mergeHealed(
   current: MarketSnapshot | undefined,
