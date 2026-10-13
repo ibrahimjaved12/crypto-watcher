@@ -13,18 +13,19 @@ export const getRunnerStatus = createServerFn({ method: "GET" })
       const [health, gatewayReachable] = await Promise.all([
         context.supabase
           .from("runner_health")
-          .select("service, status, services, updated_at, last_seen_at")
+          .select("service, status, services, services_seen, updated_at, last_seen_at")
           .abortSignal(AbortSignal.timeout(4_000)),
         gatewayEnabled ? gatewayAvailable() : Promise.resolve(null),
       ]);
-      if (health.error) return unavailableRunnerStatus(true, jobsEnabled);
+      if (health.error)
+        return { ...unavailableRunnerStatus(true, jobsEnabled), reason: "check-failed" };
       return resolveRunnerStatus(health.data, Date.now(), {
         gatewayEnabled,
         jobsEnabled,
         gatewayReachable,
       });
     } catch {
-      return unavailableRunnerStatus(true, jobsEnabled);
+      return { ...unavailableRunnerStatus(true, jobsEnabled), reason: "check-failed" };
     }
   });
 

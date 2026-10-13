@@ -45,6 +45,25 @@ test("unknown and empty values fall back without throwing", () => {
   assert.equal(labels.relativeTime("not a date"), "—");
 });
 
+test("formatAgo uses compact elapsed time at each display boundary", () => {
+  const now = Date.parse("2026-10-13T12:00:00.000Z");
+  for (const [age, expected] of [
+    [0, "just now"], [44_999, "just now"], [45_000, "1m ago"],
+    [12 * 60_000, "12m ago"], [3_599_999, "59m ago"],
+    [3_600_000, "1h ago"], [6 * 3_600_000, "6h ago"],
+    [6 * 3_600_000 + 9 * 60_000, "6h ago"],
+    [6 * 3_600_000 + 10 * 60_000, "6h 10m ago"],
+    [6 * 3_600_000 + 20 * 60_000, "6h 20m ago"],
+    [86_399_999, "23h 59m ago"], [86_400_000, "1d ago"],
+    [3 * 86_400_000, "3d ago"], [-30_000, "just now"],
+  ]) assert.equal(labels.formatAgo(now - age, now), expected);
+  assert.equal(labels.formatAgo(new Date(now - 12 * 60_000), now), "12m ago");
+  assert.equal(labels.formatAgo(new Date(now - 12 * 60_000).toISOString(), now), "12m ago");
+  for (const input of [null, undefined, NaN, Infinity, "not a date", new Date(NaN)]) {
+    assert.equal(labels.formatAgo(input, now), "—");
+  }
+});
+
 test("composite reasons are grouped per message with the affected coins", () => {
   const summary = labels.summarizeReasons("SOLUSDT: collector missing; SOLUSDT: no candles; BTCUSDT: no candles");
   assert.equal(summary.items.length, 2);

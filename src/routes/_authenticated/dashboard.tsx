@@ -24,6 +24,7 @@ import { humanizeReason, relativeTime, sourceLabel, summarizeReasons } from "@/l
 import { useRunnerStatus } from "@/lib/runner/use-runner-status";
 import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db";
 import { getMarketSnapshot, type MarketSnapshot } from "@/lib/market.functions";
+import { marketQueryKey, useMarketSelfHeal } from "@/lib/market/use-market-self-heal";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
 import { getOperationalState } from "@/lib/operational.functions";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
@@ -92,8 +93,9 @@ function Dashboard() {
     settings.data !== undefined &&
     (!settings.data.monitoring_enabled || !settings.data.market_data_collection_enabled);
 
+  const marketKey = marketQueryKey(symbols);
   const market = useQuery({
-    queryKey: ["market", symbols],
+    queryKey: marketKey,
     placeholderData: keepPreviousData,
     queryFn: () => {
       logActivity(import.meta.env["VITE_ACTIVITY_DIAGNOSTICS"], "market", "request-started");
@@ -102,6 +104,7 @@ function Dashboard() {
     ...automatic,
     enabled: automatic.enabled && symbols.length > 0,
   });
+  const { retrying, down } = useMarketSelfHeal(symbols, marketKey);
 
   const operational = useQuery({
     queryKey: ["operational-state"],
@@ -284,6 +287,7 @@ function Dashboard() {
                 <QuoteCard
                   key={symbol}
                   quote={quote}
+                  retrying={automatic.enabled && retrying && down.includes(symbol)}
                   onRemove={() => {
                     const item = watchlist.data?.find((w) => w.symbol === quote.symbol);
                     if (item) remove.mutate({ id: item.id, symbol: item.symbol });

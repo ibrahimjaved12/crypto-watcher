@@ -4,6 +4,7 @@ export type RunnerHealthRecord = {
   service: string;
   status: string;
   services: unknown;
+  services_seen?: unknown;
   updated_at: string;
   last_seen_at: string | null;
 };
@@ -14,6 +15,13 @@ export type RunnerStatus = {
   state: "online" | "degraded" | "offline" | "unknown" | "disabled";
   online: boolean | null;
   lastOnlineAt: number | null;
+  servicesLastOnlineAt: {
+    analysis: number | null;
+    alerts: number | null;
+    forward: number | null;
+    jobs: number | null;
+  };
+  reason: "ok" | "never-reported" | "check-failed";
   gatewayReachable: boolean | null;
   services: { analysis: boolean; alerts: boolean; forward: boolean; jobs: boolean };
 };
@@ -25,6 +33,8 @@ export function unavailableRunnerStatus(configured: boolean, jobsEnabled = false
     state: configured ? "unknown" : "disabled",
     online: null,
     lastOnlineAt: null,
+    servicesLastOnlineAt: { analysis: null, alerts: null, forward: null, jobs: null },
+    reason: configured ? "check-failed" : "ok",
     gatewayReachable: null,
     services: { analysis: false, alerts: false, forward: false, jobs: false },
   };
@@ -63,6 +73,24 @@ export function resolveRunnerStatus(
     .map((row) => (row?.last_seen_at ? Date.parse(row.last_seen_at) : NaN))
     .filter((time) => Number.isFinite(time) && time <= now + 30_000);
   result.lastOnlineAt = seen.length ? Math.max(...seen) : null;
+  result.reason = (!host && !jobs) || result.lastOnlineAt === null ? "never-reported" : "ok";
+  const serviceSeen = (row: RunnerHealthRecord | undefined, name: string): number | null => {
+    const seen = row?.services_seen;
+    if (!seen || typeof seen !== "object" || Array.isArray(seen)) return null;
+    const value = (seen as Record<string, unknown>)[name];
+    const time = typeof value === "string" ? Date.parse(value) : NaN;
+    return Number.isFinite(time) && time <= now + 30_000 ? time : null;
+  };
+  const together = (first: number | null, second: number | null) =>
+    first !== null && second !== null ? Math.min(first, second) : null;
+  const collectorSeen = serviceSeen(host, "collector");
+  const analysisSeen = together(serviceSeen(host, "fastapi-analysis"), collectorSeen);
+  result.servicesLastOnlineAt = {
+    analysis: analysisSeen,
+    alerts: analysisSeen,
+    forward: together(serviceSeen(host, "fastapi-forward"), collectorSeen),
+    jobs: serviceSeen(jobs, "runner-jobs"),
+  };
   // A jobs heartbeat can still establish liveness if the supervisor has failed.
   const hostAlive = fresh(host) && host?.status !== "offline";
   // A final supervisor report follows its children exiting. Ignore older, unexpired jobs reports.

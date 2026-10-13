@@ -8,6 +8,7 @@ const moduleUrl = createModuleLoader(import.meta.url);
 const calc = await import(await moduleUrl("../src/lib/market/quote-calc.ts"));
 const published = await import(await moduleUrl("../src/lib/market/published-quotes.ts"));
 const publisher = await import(await moduleUrl("../src/lib/market/quote-publisher.server.ts"));
+const { isUnavailable, healDelayMs, nextHealDelay, mergeHealed } = await import(await moduleUrl("../src/lib/market/self-heal.ts"));
 // Inert placeholders only; all hosted writes in these tests use in-memory fakes.
 const hostedEnv = { SUPABASE_URL: "https://example.invalid", SUPABASE_SERVICE_ROLE_KEY: "test-placeholder" };
 
@@ -32,6 +33,70 @@ function candles(count, stepMs, endOpen, price) {
   }));
 }
 const wave = (i) => 100 + Math.sin(i / 7) * 3 + i * 0.05;
+
+function healQuote(symbol, patch = {}) {
+  return {
+    symbol, ok: true, source: "binance-usdm", price: 100, changes: {}, chart: [],
+    lastCandleAt: LAST_OPEN, stale: false, error: null, fallbackReasons: [],
+    fetchedAt: new Date(NOW).toISOString(), ...patch,
+  };
+}
+
+test("heal delay backs off to a minute with bounded integer jitter", () => {
+  const delays = [2_000, 4_000, 8_000, 15_000, 30_000, 60_000, 60_000, 60_000];
+  delays.forEach((base, attempt) => {
+    assert.equal(healDelayMs(attempt, () => 0.5), base);
+    assert.equal(healDelayMs(attempt, () => 0), base * 0.8);
+    assert.equal(healDelayMs(attempt, () => 1), base * 1.2);
+    assert.ok(Number.isInteger(healDelayMs(attempt, () => 0.12345)));
+  });
+  assert.equal(healDelayMs(10_000, () => 0.5), 60_000);
+});
+
+test("next heal delay starts at two seconds and counts successful and failed requests", () => {
+  const rand = () => 0.5;
+  assert.equal(nextHealDelay({ dataUpdateCount: 0, errorUpdateCount: 0 }, rand), 2_000);
+  assert.equal(nextHealDelay({ dataUpdateCount: 1, errorUpdateCount: 0 }, rand), 4_000);
+  assert.equal(nextHealDelay({ dataUpdateCount: 0, errorUpdateCount: 1 }, rand), 4_000);
+  assert.equal(nextHealDelay({ dataUpdateCount: 2, errorUpdateCount: 1 }, rand), 15_000);
+  assert.equal(nextHealDelay({ dataUpdateCount: 0, errorUpdateCount: 8 }, rand), 60_000);
+});
+
+test("mergeHealed repairs fresh matching pairs without erasing others or advancing fetchedAt", () => {
+  const current = {
+    quotes: [healQuote("BTCUSDT", { stale: true }), healQuote("ETHUSDT"), healQuote("SOLUSDT", { ok: false })],
+    fetchedAt: new Date(NOW - MIN).toISOString(), publishedAt: new Date(NOW - MIN).toISOString(),
+  };
+  const before = structuredClone(current);
+  const refreshed = healQuote("BTCUSDT", { source: "kraken-futures", price: 110 });
+  const healed = {
+    quotes: [refreshed, healQuote("SOLUSDT", { stale: true }), healQuote("XRPUSDT")],
+    fetchedAt: new Date(NOW + MIN).toISOString(), publishedAt: new Date(NOW).toISOString(),
+  };
+  const result = mergeHealed(current, healed);
+  assert.equal(result.quotes[0], refreshed);
+  assert.equal(result.quotes[1], current.quotes[1]);
+  assert.equal(result.quotes[2], current.quotes[2]);
+  assert.equal(result.quotes.length, 3);
+  assert.equal(result.fetchedAt, current.fetchedAt);
+  assert.equal(result.publishedAt, healed.publishedAt);
+  assert.deepEqual(current, before);
+  assert.equal(mergeHealed(current, { ...healed, publishedAt: new Date(NOW - 2 * MIN).toISOString() }).publishedAt, current.publishedAt);
+  assert.equal(mergeHealed({ ...current, publishedAt: null }, healed).publishedAt, healed.publishedAt);
+  assert.equal(mergeHealed(current, { ...healed, publishedAt: null }).publishedAt, current.publishedAt);
+});
+
+test("unavailable heal results and unrelated symbols leave the original snapshot untouched", () => {
+  const current = { quotes: [healQuote("BTCUSDT", { stale: true })], fetchedAt: "original", publishedAt: null };
+  for (const patch of [{ ok: false }, { price: null }, { stale: true }]) {
+    const failed = healQuote("BTCUSDT", patch);
+    assert.equal(isUnavailable(failed), true);
+    assert.equal(mergeHealed(current, { ...current, quotes: [failed] }), current);
+  }
+  assert.equal(isUnavailable(healQuote("BTCUSDT")), false);
+  assert.equal(mergeHealed(current, { ...current, quotes: [healQuote("ETHUSDT")] }), current);
+  assert.equal(mergeHealed(undefined, current), undefined);
+});
 
 test("hosted publish forwards the batch, returns the row count and propagates RPC errors", async () => {
   const batch = [published.quoteInputFromFigures("BTCUSDT", calc.quoteFigures(

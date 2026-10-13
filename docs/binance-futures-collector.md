@@ -377,8 +377,9 @@ The scheduled waits total roughly **153 seconds**, plus read/write/bootstrap tim
 newly added supported pair usually has a hosted quote **within a few minutes** under healthy
 conditions. This is a code-derived expectation, not a measured deadline or an outage guarantee.
 Increasing the sync interval increases that latency. Dashboard cards see it on their next market
-fetch: automatic market refresh polls every **60 seconds** when enabled; with automatic activity
-paused, use the dashboard's market refresh control. Refreshing the page does not reconcile the
+fetch: automatic market refresh polls every **60 seconds** when enabled, with unavailable pairs
+also retried as one batch using jittered backoff. With automatic activity paused, use the dashboard's
+market refresh control. Refreshing the page does not reconcile the
 universe and is not required for machine collection/publication.
 
 ### Verify on the machine
