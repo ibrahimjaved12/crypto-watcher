@@ -112,19 +112,23 @@ export type MarketQuotePublisher = { stop(): void };
 
 export type StartPublisherOptions = {
   env?: Record<string, string | undefined>;
-  /** The collector's operational store (the caller already has it). */
-  store?: QuotePublisherDeps["store"];
-  /** Full override of the store and hosted write. Used by tests. */
+  /** Store and hosted write resolved by the entrypoint before its module runner closes. */
   deps?: QuotePublisherDeps;
   log?: (line: string) => void;
   error?: (line: string) => void;
 };
 
-/** Default hosted write: the same service-role client the machine's forward jobs use. */
-function hostedPublish(): QuotePublisherDeps["publish"] {
+type HostedPublishClient = {
+  rpc(name: "publish_market_quotes", args: { p_quotes: Json }): PromiseLike<{
+    data: unknown;
+    error: { message: string } | null;
+  }>;
+};
+
+/** Capture the startup-loaded client; publishing must not import through a closed Vite runner. */
+export function createHostedPublish(client: HostedPublishClient): QuotePublisherDeps["publish"] {
   return async (quotes) => {
-    const { supabaseAdmin } = await import("../../integrations/supabase/client.server");
-    const { data, error } = await supabaseAdmin.rpc("publish_market_quotes", {
+    const { data, error } = await client.rpc("publish_market_quotes", {
       p_quotes: quotes as unknown as Json,
     });
     if (error) throw new Error(error.message);
@@ -149,19 +153,16 @@ export function startMarketQuotePublisher(
       log("[market-quote-publisher] disabled by MARKET_QUOTE_PUBLISHER_ENABLED=false");
       return null;
     }
-    let deps = options.deps;
-    if (!deps) {
-      if (!env["SUPABASE_URL"] || !env["SUPABASE_SERVICE_ROLE_KEY"]) {
-        log(
-          "[market-quote-publisher] not started: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required to publish to hosted Supabase",
-        );
-        return null;
-      }
-      if (!options.store) {
-        log("[market-quote-publisher] not started: no operational store was provided");
-        return null;
-      }
-      deps = { store: options.store, publish: hostedPublish() };
+    if (!env["SUPABASE_URL"] || !env["SUPABASE_SERVICE_ROLE_KEY"]) {
+      log(
+        "[market-quote-publisher] not started: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required to publish to hosted Supabase",
+      );
+      return null;
+    }
+    const deps = options.deps;
+    if (!deps?.store) {
+      log("[market-quote-publisher] not started: no operational store was provided");
+      return null;
     }
 
     const state = newPublishState();
@@ -179,7 +180,7 @@ export function startMarketQuotePublisher(
     const tick = async (): Promise<void> => {
       let retrySoon = false;
       try {
-        const run = await publishQuotesOnce(deps!, state);
+        const run = await publishQuotesOnce(deps, state);
         if (run.writeError) {
           writeFailuresInRow += 1;
           error(
