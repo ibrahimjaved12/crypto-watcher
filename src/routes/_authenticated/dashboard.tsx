@@ -27,6 +27,8 @@ import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db
 import { getMarketSnapshot, type MarketSnapshot } from "@/lib/market.functions";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
 import { getOperationalState } from "@/lib/operational.functions";
+// TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
+import { degradedSourceLabel } from "@/lib/market/degraded-fallback";
 import { publishedFreshness } from "@/lib/market/published-quotes";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
 
@@ -148,15 +150,18 @@ function Dashboard() {
   const quotes = market.data?.quotes ?? [];
   const sourcesDown = quotes.length > 0 && quotes.every((q) => !q.ok);
   const source = quotes.find((q) => q.source)?.source ?? null;
-  const freshness = market.data
+  // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
+  const degraded = market.data?.degraded;
+  const freshness = market.data && !degraded
     ? publishedFreshness({ quotes, publishedAt: market.data.publishedAt })
     : null;
   const runStatus = lastRun ? humanizeReason(lastRun.status) : null;
+  // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
   const stripLevel: Level = sourcesDown
     ? "problem"
     : runStatus?.level === "problem"
       ? "problem"
-      : !market.data || runStatus?.level === "wait"
+      : degraded || !market.data || runStatus?.level === "wait"
         ? "wait"
         : "ok";
   const stripDetails = [
@@ -231,7 +236,8 @@ function Dashboard() {
         title={stripDetails}
       >
         <StatusChip level={stripLevel}>
-          {stripLevel === "ok" ? "Data flowing" : stripLevel === "wait" ? "Waiting" : "Data problem"}
+          {/* TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days */}
+          {degraded ? "Degraded prices" : stripLevel === "ok" ? "Data flowing" : stripLevel === "wait" ? "Waiting" : "Data problem"}
         </StatusChip>
         <span className="text-muted-foreground">
           {sourcesDown ? (
@@ -259,6 +265,15 @@ function Dashboard() {
           <span className="text-xs">Details</span>
         </Hint>
       </div>
+
+      {/* TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days */}
+      {degraded ? (
+        <div role="status" className="mt-4 rounded-lg border border-warn/40 bg-warn/10 p-3 text-sm">
+          <strong>Showing {degradedSourceLabel(degraded.source)} prices because the machine is not publishing.</strong>{" "}
+          These are perpetual futures trade prices from a different venue, not Binance USDⓈ-M prices.
+          {degraded.lastPublishedAt ? <> Last machine publication: {relativeTime(degraded.lastPublishedAt)}.</> : " No machine publication is available yet."}
+        </div>
+      ) : null}
 
       {freshness && freshness !== "fresh" ? (
         <div role="status" className="mt-4 rounded-lg border border-warn/40 bg-warn/10 p-3 text-sm">

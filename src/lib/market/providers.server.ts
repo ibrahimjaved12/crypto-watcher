@@ -571,12 +571,16 @@ export async function loadCandles(
   symbol: string,
   validate?: (result: ProviderResult) => void,
   observer?: ProviderObserver,
+  // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
+  sources: readonly MarketSource[] = MARKET_SOURCES,
+  loadSource: typeof load = load,
 ): Promise<ProviderOutcome> {
   const errors: string[] = [];
   const attempts: ProviderAttempt[] = [];
-  for (const source of MARKET_SOURCES) {
+  // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
+  for (const source of sources) {
     try {
-      const loaded = await load(source, symbol, [1, 15], [MINUTE_LIMIT, QUARTER_LIMIT], observer);
+      const loaded = await loadSource(source, symbol, [1, 15], [MINUTE_LIMIT, QUARTER_LIMIT], observer);
       if (loaded.minute.length < 2 || loaded.quarter.length < 2)
         throw new Error("insufficient data");
       const result = { ...loaded, attempts: [...attempts] };

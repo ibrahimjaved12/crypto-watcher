@@ -265,9 +265,11 @@ scheduler, strategy, or per-message Python call.
 
 ## Market quote publisher (#323)
 
+<!-- TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days -->
 The Cloudflare Worker cannot reach Binance (measured: HTTP 403 on every Binance endpoint,
 including the spot data host and the WebSocket upgrade; OKX answered 429), so the dashboard's price
-cards no longer fetch from any exchange. Ingestion and serving are separate:
+cards no longer fetch from any exchange except the temporary degraded-mode fallback. Ingestion
+and serving are separate during normal operation:
 
 - **Machine.** `src/worker/market-quote-publisher.ts` runs as its own child of the worker host (`npm run up`
   → `worker:host`), beside the collector and not inside it, because the collector artifact must hold no
@@ -284,7 +286,14 @@ cards no longer fetch from any exchange. Ingestion and serving are separate:
 - **Worker.** `getMarketSnapshot` reads `market_quotes` with the publishable key (one query, RLS
   `SELECT` for `anon`/`authenticated`) and maps rows to `SymbolQuote`. A quote is stale after 10
   minutes (from `last_candle_at` or `published_at`); all-stale or empty shows the "showing the last
-  published prices" banner. A symbol without a row is "not collected yet".
+  published prices" banner if fallback is disabled or fails for every symbol. A symbol without a
+  row is "not collected yet" when the snapshot has any fresh published quote.
+  <!-- TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days -->
+  Empty/all-stale snapshots temporarily try Kraken futures, then OKX if Kraken returns no usable
+  quotes. One venue serves the whole fallback snapshot; unavailable pairs are never patched with
+  Binance or another venue. The banner, strip and cards name the source; cards identify the native
+  perpetual contract and trade price. No Worker request goes to Binance. See the
+  [switch and removal condition](environments.md#temporary-degraded-market-fallback-323).
 - **Check.** `npm run mvp:check -- --mode production` lists the age of each benchmark symbol's
   newest `published_at` and warns past 10 minutes.
 

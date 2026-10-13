@@ -1,16 +1,20 @@
-import { loadCandles } from "./providers.server";
+import { loadCandles, type ProviderObserver } from "./providers.server";
 import { quoteFigures, quoteStale, type SymbolQuote } from "./quote-calc";
 
 export type { SymbolQuote } from "./quote-calc";
 
-/**
- * Exchange-backed quote builder. The dashboard no longer uses it: `getMarketSnapshot` reads quotes
- * the machine published (#323), so the Worker makes no exchange request. Kept (unreferenced) until
- * the follow-up that removes the dead Worker-side fallback path; the maths lives in `quote-calc.ts`.
- */
-export async function getQuote(symbol: string): Promise<SymbolQuote> {
+// TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
+import type { MarketSource } from "./symbols";
+export type QuoteLoadOptions = {
+  sources?: readonly MarketSource[];
+  observer?: ProviderObserver;
+  load?: typeof loadCandles;
+};
+
+/** Exchange quote builder used only when the published snapshot needs temporary fallback. */
+export async function getQuote(symbol: string, options: QuoteLoadOptions = {}): Promise<SymbolQuote> {
   const fetchedAt = new Date().toISOString();
-  const outcome = await loadCandles(symbol);
+  const outcome = await (options.load ?? loadCandles)(symbol, undefined, options.observer, options.sources);
 
   const failed = (error: string, fallbackReasons: SymbolQuote["fallbackReasons"]): SymbolQuote => ({
     symbol,
@@ -49,6 +53,7 @@ export async function getQuote(symbol: string): Promise<SymbolQuote> {
   };
 }
 
-export async function getQuotes(symbols: string[]): Promise<SymbolQuote[]> {
-  return Promise.all(symbols.map((s) => getQuote(s)));
+// TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
+export async function getQuotes(symbols: string[], options: QuoteLoadOptions = {}): Promise<SymbolQuote[]> {
+  return Promise.all([...new Set(symbols)].map((s) => getQuote(s, options)));
 }

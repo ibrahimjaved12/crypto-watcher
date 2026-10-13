@@ -169,7 +169,7 @@ monitoring never leaves the collector empty or stale.
 | Action                                                                   | Services used                                                                                                      |
 | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
 | Sign in, initial reads, watchlist/settings changes, default row creation | Selected Supabase auth/database: local by default; shared staging or the hosted project only with explicit hosted profile     |
-| Refresh market prices                                                    | Public exchange APIs; independent of the hosted Supabase project                                                                 |
+| Refresh market prices <!-- TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days --> | Hosted `market_quotes`, except the temporary degraded-mode fallback to Kraken/OKX                                                                 |
 | Run check now / enabled scheduled checks                                 | Main-database permanent-state operations, operational working-state operations when enabled, and public exchange candles |
 | Refresh TA history                                                       | Selected Supabase                                                                                                  |
 | Manual Python analysis                                                   | Selected Supabase reads → configured FastAPI → public exchange APIs; local FastAPI by default                      |
@@ -185,3 +185,35 @@ created by this change.
 
 Operational ownership, isolated migrations, retention, synchronization, and rollback are
 documented in [Operational PostgreSQL](operational-database.md).
+
+<!-- TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days -->
+## Temporary degraded market fallback (#323)
+
+`MARKET_DEGRADED_FALLBACK_ENABLED` is a Worker runtime variable, default `"true"`, committed
+in the `wrangler.jsonc` vars block. Set it to `"false"` there and deploy to restore published-only
+behavior, including the existing stale/empty banners. It contains no credential.
+
+For each `getMarketSnapshot` call, `publishedFreshness` decides once: any fresh readable quote
+keeps the published snapshot unchanged, including individual "Not collected yet" pairs, with no
+exchange request. Only empty/all-stale snapshots try Kraken futures for the requested symbols,
+then OKX if Kraken has no usable quotes. Never Binance: its Worker egress is blocked. A partial
+Kraken result stays entirely Kraken, with failed pairs visibly unavailable. If both venues fail
+for every symbol, keep stale published values or the existing empty banner. The degraded banner
+names the venue and last publication age; cards identify native contracts and trade prices,
+which are not Binance USDⓈ-M instruments. Existing provider failure diagnostics remain available.
+
+Fresh page loads use one hosted query. Kraken normally needs two candle requests per distinct
+pair (at most 20 for the 10-pair watchlist). The degraded path caps exchange requests at 40 total
+across both venues, leaving room for the hosted read; pairs beyond that budget fail visibly.
+OKX may return HTTP 429 from Worker egress. Exchange latency/availability affects page loads
+only in degraded mode. Existing automatic-refresh controls still apply.
+
+Remove all blocks marked `TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days`
+after 30 days of continuous machine operation with no publication gap over 10 minutes,
+checked with `mvp:check`. Record the qualifying date in ticket #323, then delete this fallback
+and its runtime variable.
+
+Deployed verification: stop the machine's publisher for more than 10 minutes and refresh the
+market page. Expect Kraken prices and the degraded banner (OKX only if Kraken is unavailable).
+Restart the publisher and refresh after a new publication: Binance quotes return and the
+banner disappears. With the switch off, the stale/empty published presentation remains.
