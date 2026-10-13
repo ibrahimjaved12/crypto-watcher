@@ -6,7 +6,6 @@
  */
 import { completedObservation } from "./observation";
 import { runTA } from "../ta/engine.server";
-import { TA_FRAMES } from "../ta/schedule";
 import {
   createMonitorRunContext,
   metricsSince,
@@ -210,6 +209,7 @@ export async function runMonitorForUser(
   }
 
   const taErrors: string[] = [];
+  let taChecks = 0;
   if (settings.completed_candle_ta_enabled) {
     // Completed-candle TA stays application-owned (#20): TanStack determines due
     // work, reads canonical completed candles (the operational collector store when
@@ -217,9 +217,10 @@ export async function runMonitorForUser(
     // shared Python calculation path, validates responses, and is the privileged
     // main-database `ta_signals` writer. The collector worker never owns TA.
     for (const symbol of symbols) {
-      const symbolErrors = await runTA(
+      const { checks, errors: symbolErrors } = await runTA(
         supabaseAdmin, userId, symbol, context, undefined, operationalStore,
       );
+      taChecks += checks;
       taErrors.push(...symbolErrors);
       if (symbolErrors.length < 3) checkedSymbols.add(symbol);
     }
@@ -239,7 +240,6 @@ export async function runMonitorForUser(
       ? "partial"
       : "success";
 
-  const taChecks = settings.completed_candle_ta_enabled ? symbols.length * TA_FRAMES.length : 0;
   const taFailures = taErrors.length;
 
   return finish({

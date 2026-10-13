@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import ts from "../node_modules/typescript/lib/typescript.js";
+import { createModuleLoader } from "./module-loader.mjs";
+
+const loadModule = createModuleLoader(import.meta.url);
+const { describeAlertCheck } = await import(await loadModule("../src/lib/monitor/check-message.ts"));
 
 async function moduleUrl(path, imports = {}) {
   const source = await readFile(new URL(path, import.meta.url), "utf8");
@@ -17,7 +21,6 @@ const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toSt
 
 const { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser, runMonitorForUser } = await import(
   await moduleUrl("../src/lib/monitor/engine.server.ts", {
-    "../ta/schedule": await moduleUrl("../src/lib/ta/schedule.ts"),
     "@/lib/market/providers.server": stub(`
       export async function loadCandles(symbol) {
         globalThis.__domains.market.push(symbol);
@@ -42,7 +45,7 @@ const { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser, runMonitorForUser 
     "../ta/engine.server": stub(`
       export async function runTA(db,userId,symbol) {
         globalThis.__domains.ta.push(symbol);
-        return [];
+        return globalThis.__domains.taResults?.[symbol] ?? { checks: 3, errors: [] };
       }
     `),
     "../operational/repository.server": stub(`
@@ -83,8 +86,9 @@ function database() {
   };
 }
 
-async function run(patch, operationalStore) {
+async function run(patch, operationalStore, taResults) {
   globalThis.__domains = { reads: 0, market: [], checkpoints: 0, operational: 0, rpc: 0, ta: [] };
+  if (taResults) globalThis.__domains.taResults = taResults;
   const result = await runMonitorForUser(
     database(),
     "user",
@@ -113,6 +117,27 @@ test("movement alerts and completed-candle TA run independently", async () => {
   assert.equal(outcome.calls.checkpoints, 2);
   assert.equal(outcome.calls.rpc, 0);
   assert.deepEqual(outcome.calls.ta, ["BTCUSDT", "ETHUSDT"]);
+});
+
+test("skipped TA work adds no checks or all-checks-ran reassurance", async () => {
+  const { result } = await run({}, undefined, {
+    BTCUSDT: { checks: 0, errors: [] },
+    ETHUSDT: { checks: 0, errors: [] },
+  });
+  assert.equal(result.taChecks, 0);
+  assert.equal(result.taFailures, 0);
+  assert.doesNotMatch(describeAlertCheck(result).title, /technical-analysis checks ran/);
+});
+
+test("the monitor sums attempted TA frames and their failures", async () => {
+  const { result } = await run({}, undefined, {
+    BTCUSDT: { checks: 1, errors: ["TA BTCUSDT 15m: provider timeout"] },
+    ETHUSDT: { checks: 2, errors: [] },
+  });
+  assert.equal(result.status, "partial");
+  assert.equal(result.taChecks, 3);
+  assert.equal(result.taFailures, 1);
+  assert.match(describeAlertCheck(result).title, /^1 of 3 technical-analysis checks failed\./);
 });
 
 test("the master and collection controls stop work before provider or database I/O", async () => {

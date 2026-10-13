@@ -29,7 +29,7 @@ const replacements = {
   "../operational/repository.server": `export function getOperationalStore() { return undefined; }`,
   "../monitor/run-context": `export function createMonitorRunContext() { return {}; }`,
   "../monitor/engine.server": `export const DEFAULT_SETTINGS = {};`,
-  "../ta/engine.server": `export async function runTA() { return []; }`,
+  "../ta/engine.server": `export async function runTA() { return { checks: 0, errors: [] }; }`,
   "./providers.server": `
     export async function loadBinanceFuturesKlines() {
       return { candles: [], retrievedAt: new Date().toISOString() };

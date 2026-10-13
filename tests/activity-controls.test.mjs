@@ -181,7 +181,10 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
       fetches = inserts = reads = outcomeWrites = 0;
       process.env.TA_GENERATION_ENABLED = String(generation);
       process.env.TA_OUTCOME_EVALUATION_ENABLED = String(outcomes);
-      assert.deepEqual(await runTA(db, "user", "BTCUSDT"), []);
+      assert.deepEqual(await runTA(db, "user", "BTCUSDT"), {
+        checks: generation || outcomes ? 3 : 0,
+        errors: [],
+      });
       assert.equal(fetches, generation || outcomes ? 3 : 0);
       assert.equal(inserts, generation ? 3 : 0);
       assert.equal(reads, generation || outcomes ? 1 : 0);
