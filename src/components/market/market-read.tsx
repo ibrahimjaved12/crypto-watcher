@@ -4,7 +4,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { ArrowDownRight, ArrowUpRight, Compass, Minus, ScanSearch } from "lucide-react";
 
 import { Hint } from "@/components/hint";
-import { RunnerStatusNotice } from "@/components/runner-status-notice";
+import { useRunnerStatus } from "@/lib/runner/use-runner-status";
 import { EmptyState, SectionTitle, SignedBar, StatusChip } from "@/components/plain";
 import { Button } from "@/components/ui/button";
 import { runPythonAnalysis } from "@/lib/analysis.functions";
@@ -64,6 +64,7 @@ function verdict(timeframe: string, row: Technical): string {
 }
 
 export function MarketRead({ symbols }: { symbols: string[] }) {
+  const runner = useRunnerStatus();
   const [selected, setSelected] = useState("");
   const symbol = symbols.includes(selected) ? selected : (symbols[0] ?? "");
   const call = useServerFn(runPythonAnalysis);
@@ -83,7 +84,9 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
   const metrics = result ? analysis.data?.metrics : undefined;
   const technical = result ? Object.entries(result.technical) : [];
   const errorCategory = (analysis.error as (Error & { category?: string }) | null)?.category;
-  const marketRead = (
+  if (!runner.data || (runner.data.configured && runner.data.services.analysis !== true)) return null;
+
+  return (
     <section className="panel mt-6 p-4 sm:p-5" aria-label="Market read" aria-busy={analysis.isPending}>
       <SectionTitle
         title="Market read"
@@ -125,7 +128,7 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
       {analysis.isError && (
         <div role="alert" className="space-y-1 py-2 text-sm">
           {errorCategory === "runner_offline" || errorCategory === "timeout" ? (
-            <p>{analysis.error.message}</p>
+            <p>Analysis is temporarily unavailable. Try again shortly.</p>
           ) : (
             <>
               <StatusChip level="problem">
@@ -346,11 +349,5 @@ export function MarketRead({ symbols }: { symbols: string[] }) {
         </div>
       )}
     </section>
-  );
-  return (
-    <>
-      <RunnerStatusNotice />
-      {marketRead}
-    </>
   );
 }

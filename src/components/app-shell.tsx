@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Activity, Bell, FlaskConical, LineChart, LogOut, NotebookPen, SlidersHorizontal } from "lucide-react";
 import type { ReactNode } from "react";
 
+import { RunnerStatusBadge, RunnerStatusNotice } from "@/components/runner-status-notice";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { supabase } from "@/integrations/supabase/client";
@@ -30,7 +31,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     <TooltipProvider delayDuration={150}>
       <div className="min-h-screen">
         <header className="sticky top-0 z-30 border-b border-border/60 bg-background/75 backdrop-blur-md">
-          <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-2.5">
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2 px-4 py-2.5">
             <Link
               to="/dashboard"
               className="flex shrink-0 items-center gap-2 font-display text-lg font-semibold"
@@ -38,7 +39,8 @@ export function AppShell({ children }: { children: ReactNode }) {
               <Activity className="size-5 text-primary" aria-hidden />
               Crypto Watch
             </Link>
-            <nav className="ml-auto flex min-w-0 items-center gap-0.5 overflow-x-auto" aria-label="Main">
+            <RunnerStatusBadge />
+            <nav className="ml-auto flex w-full min-w-0 sm:w-auto items-center gap-0.5 overflow-x-auto" aria-label="Main">
               {NAV.map(({ to, label, icon: Icon }) => (
                 <Link
                   key={to}
@@ -57,7 +59,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             </nav>
           </div>
         </header>
-        <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
+        <main className="mx-auto max-w-6xl px-4 py-6">
+          <RunnerStatusNotice />
+          {children}
+        </main>
       </div>
     </TooltipProvider>
   );

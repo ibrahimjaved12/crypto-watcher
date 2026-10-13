@@ -14,6 +14,30 @@ export type Database = {
   }
   public: {
     Tables: {
+      runner_health: {
+        Row: {
+          service: string
+          status: string
+          services: Json
+          updated_at: string
+          last_seen_at: string | null
+        }
+        Insert: {
+          service: string
+          status: string
+          services?: Json
+          updated_at: string
+          last_seen_at?: string | null
+        }
+        Update: {
+          service?: string
+          status?: string
+          services?: Json
+          updated_at?: string
+          last_seen_at?: string | null
+        }
+        Relationships: []
+      }
       market_quotes: {
         Row: {
           symbol: string
@@ -762,6 +786,14 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      report_runner_health: {
+        Args: {
+          p_service: string
+          p_status: string
+          p_services?: Json
+        }
+        Returns: undefined
+      }
       publish_market_quotes: {
         Args: {
           p_quotes: Json
