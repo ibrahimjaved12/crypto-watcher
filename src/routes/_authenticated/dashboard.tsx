@@ -19,8 +19,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Hint } from "@/components/hint";
-import { EmptyState, PageHeader, StatusChip, TimeAgo } from "@/components/plain";
-import { humanizeReason, relativeTime, sourceLabel, summarizeReasons, type Level } from "@/lib/labels";
+import { EmptyState, PageHeader, TimeAgo } from "@/components/plain";
+import { humanizeReason, relativeTime, sourceLabel, summarizeReasons } from "@/lib/labels";
+import { useRunnerStatus } from "@/lib/runner/use-runner-status";
 import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db";
 import { getMarketSnapshot, type MarketSnapshot } from "@/lib/market.functions";
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
@@ -45,28 +46,34 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
 });
 
 /**
- * Failed exchange attempts for usable quotes, including retained published prices. Each reason
- * is listed once, with the pairs it applied to.
+ * Quote errors and failed exchange attempts for every pair, including unavailable quotes.
+ * Each reason is listed once, with the pairs it applied to.
  */
-function fallbackDetailLines(quotes: MarketSnapshot["quotes"]): string[] {
-  const pairsByReason = new Map<string, string[]>();
+function quoteDetailLines(quotes: MarketSnapshot["quotes"]): string[] {
+  const pairsByReason = new Map<string, Set<string>>();
+  const addReason = (reason: string, symbol: string) => {
+    const pairs = pairsByReason.get(reason) ?? new Set<string>();
+    pairs.add(symbol);
+    pairsByReason.set(reason, pairs);
+  };
   for (const quote of quotes) {
-    if (!quote.ok) continue;
+    if (quote.error) addReason(quote.error, quote.symbol);
     for (const attempt of quote.fallbackReasons) {
       const status = attempt.status === null ? "" : `HTTP ${attempt.status} `;
       const detail = `${status}${attempt.message}`.trim() || "no details";
       const reason = `${sourceLabel(attempt.source)}: ${detail}`;
-      pairsByReason.set(reason, [...(pairsByReason.get(reason) ?? []), quote.symbol]);
+      addReason(reason, quote.symbol);
     }
   }
   if (pairsByReason.size === 0) return [];
   return [
-    "Fallback used because:",
-    ...Array.from(pairsByReason, ([reason, pairs]) => `${reason} (${pairs.join(", ")})`),
+    "Price diagnostics:",
+    ...Array.from(pairsByReason, ([reason, pairs]) => `${reason} (${[...pairs].join(", ")})`),
   ];
 }
 
 function Dashboard() {
+  const runner = useRunnerStatus();
   const automatic = automaticQueryOptions(import.meta.env["VITE_MARKET_AUTO_REFRESH_ENABLED"]);
   useEffect(() => {
     if (!automatic.enabled)
@@ -146,26 +153,22 @@ function Dashboard() {
 
   const available = SUPPORTED_SYMBOLS.filter((s) => !symbols.includes(s));
   const quotes = market.data?.quotes ?? [];
-  const sourcesDown = quotes.length > 0 && quotes.every((q) => !q.ok);
-  const sourceNames = [...new Set(quotes.filter((q) => q.ok && q.source).map((q) => q.source))]
+  const sourcesDown = quotes.length > 0 && quotes.every((q) => !q.ok || q.stale);
+  const sourceNames = [
+    ...new Set(quotes.filter((q) => q.ok && !q.stale && q.source).map((q) => q.source)),
+  ]
     .map(sourceLabel)
     .join(", ");
-  // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
-  const degraded = market.data?.degraded;
   const runStatus = lastRun ? humanizeReason(lastRun.status) : null;
-  // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
-  const stripLevel: Level = sourcesDown
-    ? "problem"
-    : runStatus?.level === "problem"
-      ? "problem"
-      : degraded || !market.data || runStatus?.level === "wait"
-        ? "wait"
-        : "ok";
   const stripDetails = [
-    `Data source: ${sourcesDown ? "no published prices" : sourceNames || "waiting for the first price load"}`,
-    ...fallbackDetailLines(quotes),
-    `Last price update: ${market.data ? new Date(market.data.fetchedAt).toLocaleString() : "not loaded yet"}`,
-    `Last monitoring check: ${lastRun ? `${new Date(lastRun.ran_at).toLocaleString()} (${runStatus!.short})` : "none yet"}`,
+    `Data source: ${sourcesDown ? "prices unavailable" : sourceNames || "waiting for the first price load"}`,
+    ...quoteDetailLines(quotes),
+    `Last refresh: ${market.data ? new Date(market.data.fetchedAt).toLocaleString() : "not loaded yet"}`,
+    ...(runner.canCheckAlerts
+      ? [
+          `Last monitoring check: ${lastRun ? `${new Date(lastRun.ran_at).toLocaleString()} (${runStatus!.short})` : "none yet"}`,
+        ]
+      : []),
   ].join("\n");
 
   return (
@@ -175,7 +178,7 @@ function Dashboard() {
         title="Market"
         subtitle={
           <>
-            Your watched futures pairs, their recent moves and a plain-language market read.{" "}
+            Your watched futures pairs and their recent moves.{" "}
             <span className="num">
               {symbols.length}/{MAX_WATCHLIST_SIZE}
             </span>{" "}
@@ -188,7 +191,11 @@ function Dashboard() {
         actions={
           <>
             <Select value={pending} onValueChange={(v) => add.mutate(v)}>
-              <SelectTrigger className="h-9 w-[160px]" disabled={add.isPending || available.length === 0} aria-label="Add a pair">
+              <SelectTrigger
+                className="h-9 w-[160px]"
+                disabled={add.isPending || available.length === 0}
+                aria-label="Add a pair"
+              >
                 <SelectValue placeholder="Add a pair" />
               </SelectTrigger>
               <SelectContent>
@@ -211,12 +218,22 @@ function Dashboard() {
               Refresh
             </Button>
             <Button
-              onClick={() => check.mutate()}
-              disabled={check.isPending || settings.isPending || settings.isError || monitoringPaused}
-              title={
+              onClick={() => {
+                if (runner.canCheckAlerts) check.mutate();
+              }}
+              disabled={
+                !runner.canCheckAlerts ||
+                check.isPending ||
+                settings.isPending ||
+                settings.isError ||
                 monitoringPaused
-                  ? "Turn on monitoring and market-data collection in the Control room"
-                  : "Check every watched pair against your alert rule right now"
+              }
+              title={
+                !runner.canCheckAlerts
+                  ? undefined
+                  : monitoringPaused
+                    ? "Turn on monitoring and market-data collection in the Control room"
+                    : "Check every watched pair against your alert rule right now"
               }
             >
               <PlayCircle className="size-4" aria-hidden />
@@ -230,31 +247,24 @@ function Dashboard() {
         className="panel mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-sm"
         title={stripDetails}
       >
-        <StatusChip level={stripLevel}>
-          {/* TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days */}
-          {degraded ? "Degraded prices" : stripLevel === "ok" ? "Data flowing" : stripLevel === "wait" ? "Waiting" : "Data problem"}
-        </StatusChip>
         <span className="text-muted-foreground">
           {sourcesDown ? (
-            "No published prices"
+            "Prices unavailable"
           ) : (
             <>
               Prices from <span className="text-foreground">{sourceNames || "…"}</span>
             </>
           )}
-          {" · "}updated{" "}
+          {" · "}refreshed{" "}
           <span className="num text-foreground">
             {market.data ? new Date(market.data.fetchedAt).toLocaleTimeString() : "—"}
           </span>
-          {" · "}last check{" "}
-          {lastRun ? (
+          {runner.canCheckAlerts && lastRun ? (
             <>
-              <TimeAgo at={lastRun.ran_at} text={relativeTime(lastRun.ran_at)} />{" "}
+              {" · "}last check <TimeAgo at={lastRun.ran_at} text={relativeTime(lastRun.ran_at)} />{" "}
               <span className="text-foreground">({runStatus!.short.toLowerCase()})</span>
             </>
-          ) : (
-            "none yet"
-          )}
+          ) : null}
         </span>
         <Hint text={stripDetails}>
           <span className="text-xs">Details</span>
@@ -286,12 +296,16 @@ function Dashboard() {
               ) : market.isError ? (
                 <div key={symbol} className="panel h-64 p-5">
                   <span className="num text-sm text-muted-foreground">{symbol}</span>
-                  <p className="mt-2 text-sm text-muted-foreground">Could not load. Press Refresh.</p>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Could not load. Press Refresh.
+                  </p>
                 </div>
               ) : (
                 <div key={symbol} className="panel h-64 p-5">
                   <span className="num text-sm text-muted-foreground">{symbol}</span>
-                  <p className="mt-2 text-sm text-muted-foreground">No data for this pair right now.</p>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    No data for this pair right now.
+                  </p>
                 </div>
               );
             })}
@@ -306,7 +320,7 @@ function Dashboard() {
         />
       ) : null}
 
-      <MarketRead symbols={symbols} />
+      {runner.canAnalyse && <MarketRead symbols={symbols} />}
       <TechnicalAnalysis />
     </AppShell>
   );

@@ -29,7 +29,15 @@ export function PageHeader({
   );
 }
 
-export function SectionTitle({ title, hint, right }: { title: string; hint?: ReactNode; right?: ReactNode }) {
+export function SectionTitle({
+  title,
+  hint,
+  right,
+}: {
+  title: string;
+  hint?: ReactNode;
+  right?: ReactNode;
+}) {
   return (
     <div className="mb-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -42,7 +50,10 @@ export function SectionTitle({ title, hint, right }: { title: string; hint?: Rea
   );
 }
 
-const LEVEL_STYLE: Record<Level, { icon: LucideIcon; text: string; chip: string; dot: string; word: string }> = {
+const LEVEL_STYLE: Record<
+  Level,
+  { icon: LucideIcon; text: string; chip: string; dot: string; word: string }
+> = {
   ok: {
     icon: CheckCircle2,
     text: "text-bull",
@@ -71,7 +82,15 @@ export function levelStyle(level: Level) {
 }
 
 /** Coloured chip with an icon and a word, so colour is never the only signal. */
-export function StatusChip({ level, children, className }: { level: Level; children: ReactNode; className?: string }) {
+export function StatusChip({
+  level,
+  children,
+  className,
+}: {
+  level: Level;
+  children: ReactNode;
+  className?: string;
+}) {
   const style = LEVEL_STYLE[level];
   const Icon = style.icon;
   return (
@@ -89,11 +108,10 @@ export function StatusChip({ level, children, className }: { level: Level; child
 }
 
 /**
- * One status per subsystem: level, a plain one-liner, what to do, and the raw machine string only
- * inside a collapsed "Technical details".
+ * Subsystem details and actions. Runner availability lives in the app header;
+ * raw machine strings stay inside collapsed "Technical details".
  */
 export function StatusCard({
-  level,
   title,
   detail,
   action,
@@ -101,7 +119,6 @@ export function StatusCard({
   raw,
   children,
 }: {
-  level: Level;
   title: string;
   detail: ReactNode;
   action?: ReactNode;
@@ -109,15 +126,11 @@ export function StatusCard({
   raw?: ReactNode;
   children?: ReactNode;
 }) {
-  const style = LEVEL_STYLE[level];
-  const Icon = style.icon;
   return (
-    <div className="panel flex gap-3 p-4">
-      <Icon className={cn("mt-0.5 size-5 shrink-0", style.text)} aria-hidden />
+    <div className="panel p-4 sm:p-5">
       <div className="min-w-0 flex-1 space-y-1 text-sm">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium">{title}</span>
-          <StatusChip level={level}>{style.word}</StatusChip>
         </div>
         <p className="text-muted-foreground">{detail}</p>
         {action ? <p className="text-xs">{action}</p> : null}
@@ -127,7 +140,9 @@ export function StatusCard({
             <summary className="text-foreground/80">Technical details</summary>
             <div className="mt-2 space-y-2 break-words">
               {help ? <div>{help}</div> : null}
-              {raw ? <code className="block rounded bg-muted/60 p-2 font-mono text-[11px]">{raw}</code> : null}
+              {raw ? (
+                <code className="block rounded bg-muted/60 p-2 font-mono text-[11px]">{raw}</code>
+              ) : null}
             </div>
           </details>
         ) : null}
@@ -185,10 +200,17 @@ export function SignedBar({
         <span className="absolute inset-y-0 left-1/2 w-px bg-muted-foreground/50" />
         <span
           className={cn("absolute inset-y-0 rounded-full", positive ? "bg-bull" : "bg-bear")}
-          style={positive ? { left: "50%", width: `${share}%` } : { right: "50%", width: `${share}%` }}
+          style={
+            positive ? { left: "50%", width: `${share}%` } : { right: "50%", width: `${share}%` }
+          }
         />
       </span>
-      <span className={cn("num", positive ? "text-bull" : value < 0 ? "text-bear" : "text-muted-foreground")}>
+      <span
+        className={cn(
+          "num",
+          positive ? "text-bull" : value < 0 ? "text-bear" : "text-muted-foreground",
+        )}
+      >
         {format(value)}
       </span>
     </span>

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createModuleLoader } from "./module-loader.mjs";
 const moduleUrl = createModuleLoader(import.meta.url);
-const { withDegradedFallback, DEGRADED_SOURCES, degradedSourceLabel, degradedContractLabel } =
+const { withDegradedFallback, DEGRADED_SOURCES } =
   await import(await moduleUrl("../src/lib/market/degraded-fallback.ts"));
 const { getQuotes } = await import(await moduleUrl("../src/lib/market/quotes.server.ts"));
 const { loadCandles } = await import(await moduleUrl("../src/lib/market/providers.server.ts"));
@@ -15,42 +15,48 @@ const quote = (symbol, source = "binance-usdm", stale = false, ok = true) => ({
 });
 const snapshot = (quotes, publishedAt = stamp) => ({ quotes, publishedAt, fetchedAt: stamp });
 
-test("fresh, mixed stale/fresh and fresh with missing symbols never call an exchange", async () => {
-  for (const quotes of [
-    [quote("BTCUSDT")],
-    [quote("BTCUSDT"), quote("ETHUSDT", "binance-usdm", true)],
-    [quote("BTCUSDT"), quote("ETHUSDT", null, true, false)],
-  ]) {
-    const original = snapshot(quotes);
-    const result = await withDegradedFallback(original, quotes.map(q => q.symbol), async () => {
-      assert.fail("fresh snapshot must not load exchange quotes");
+test("fresh published quotes never call an exchange", async () => {
+  const original = snapshot([quote("BTCUSDT")]);
+  assert.equal(await withDegradedFallback(original, ["BTCUSDT"], async () => {
+    assert.fail("fresh pairs must not load exchange quotes");
+  }), original);
+});
+
+test("mixed snapshots refresh only their old or missing pairs", async () => {
+  for (const old of [quote("ETHUSDT", "binance-usdm", true), quote("ETHUSDT", null, true, false)]) {
+    const original = snapshot([quote("BTCUSDT"), old]);
+    const calls = [];
+    const result = await withDegradedFallback(original, ["BTCUSDT", "ETHUSDT", "ETHUSDT"], async (symbols, options) => {
+      calls.push([symbols, options.sources]);
+      return symbols.map((symbol) => quote(symbol, options.sources[0]));
     });
-    assert.equal(result, original);
-    assert.equal(result.degraded, undefined);
+    assert.deepEqual(calls, [[["ETHUSDT"], ["kraken-futures"]]]);
+    assert.equal(result.quotes[0], original.quotes[0]);
+    assert.equal(result.quotes[1].source, "kraken-futures");
+    assert.equal(result.quotes[1].stale, false);
   }
 });
 
-test("stale and empty snapshots select Kraken and label it, leaving unpublished pairs unavailable", async () => {
+test("stale and empty snapshots retry failed Kraken pairs on OKX", async () => {
   for (const original of [snapshot([quote("BTCUSDT", "binance-usdm", true)]), snapshot([], null)]) {
     const calls = [];
     const result = await withDegradedFallback(original, ["BTCUSDT", "ETHUSDT"], async (symbols, options) => {
       calls.push([symbols, options.sources]);
       return [quote("BTCUSDT", options.sources[0]), quote("ETHUSDT", null, true, false)];
     });
-    assert.deepEqual(calls, [[["BTCUSDT", "ETHUSDT"], ["kraken-futures"]]]);
+    assert.deepEqual(calls, [
+      [["BTCUSDT", "ETHUSDT"], ["kraken-futures"]],
+      [["ETHUSDT"], ["okx-usdt-swap"]],
+    ]);
     assert.deepEqual(result.degraded, {
       source: "kraken-futures", reason: original.publishedAt ? "stale" : "empty",
       lastPublishedAt: original.publishedAt,
     });
-    assert.equal(result.quotes[1].ok, false, "do not fill a failed Kraken pair from another venue");
-    assert.equal(degradedSourceLabel(result.degraded.source), "Kraken futures");
-    assert.match(degradedContractLabel("kraken-futures", "BTCUSDT"), /PF_XBTUSD.*USD perpetual.*trade price.*not Binance/);
-    assert.match(degradedContractLabel("okx-usdt-swap", "ETHUSDT"), /ETH-USDT-SWAP.*trade price.*not Binance/);
-    assert.equal(degradedContractLabel("binance-usdm", "BTCUSDT"), null);
+    assert.equal(result.quotes[1].ok, false, "both failed venues leave an unpublished pair unavailable");
   }
 });
 
-test("partial fallback retains stale published prices and diagnostics without trying another venue", async () => {
+test("partial fallback preserves published metadata and accumulates both venues' failures", async () => {
   for (const source of DEGRADED_SOURCES) {
     const published = {
       ...quote("ETHUSDT", "binance-usdm", true),
@@ -70,7 +76,7 @@ test("partial fallback retains stale published prices and diagnostics without tr
         return { ...quote(symbol, null, true, false), fallbackReasons: [{ ...failure, source: current }] };
       });
     });
-    assert.deepEqual(calls, source === "kraken-futures" ? [source] : [...DEGRADED_SOURCES]);
+    assert.deepEqual(calls, [...DEGRADED_SOURCES]);
     assert.equal(result.degraded.source, source);
     assert.equal(result.quotes[0].source, source);
     const expectedReasons = calls.map((current) => ({ ...failure, source: current }));
@@ -94,8 +100,24 @@ test("Kraken then OKX, never Binance; retain #319 failure diagnostics", async ()
   });
   assert.deepEqual(sources, ["kraken-futures", "okx-usdt-swap"]);
   assert.equal(result.degraded.source, "okx-usdt-swap");
-  assert.equal(degradedSourceLabel(result.degraded.source), "OKX USDT perpetual swaps");
   assert.deepEqual(result.quotes[0].fallbackReasons, [failure]);
+});
+
+test("old Kraken candles trigger a fresh OKX fetch for that pair", async () => {
+  const calls = [];
+  const result = await withDegradedFallback(snapshot([], null), ["BTCUSDT", "ETHUSDT"], async (symbols, options) => {
+    const source = options.sources[0];
+    calls.push([symbols, source]);
+    return symbols.map((symbol) => quote(symbol, source, source === "kraken-futures" && symbol === "ETHUSDT"));
+  });
+  assert.deepEqual(calls, [
+    [["BTCUSDT", "ETHUSDT"], "kraken-futures"],
+    [["ETHUSDT"], "okx-usdt-swap"],
+  ]);
+  assert.equal(result.quotes[0].source, "kraken-futures");
+  assert.equal(result.quotes[1].source, "okx-usdt-swap");
+  assert.ok(result.quotes.every((q) => !q.stale));
+  assert.match(result.quotes[1].fallbackReasons[0].message, /too old/);
 });
 
 test("kill switch off and total failure preserve the published snapshot", async () => {
@@ -123,6 +145,23 @@ test("source list passes through quote builder and provider uses its explicit or
   assert.equal(quotes.length, 1);
   assert.equal(quotes[0].source, "okx-usdt-swap");
   assert.equal(quotes[0].fallbackReasons[0].source, "kraken-futures");
+});
+
+test("quote builder rejects old candles and continues to the next requested venue", async () => {
+  const sources = [];
+  const quotes = await getQuotes(["BTCUSDT"], {
+    sources: DEGRADED_SOURCES,
+    load: (symbol, validate, observer, requested) => loadCandles(symbol, validate, observer, requested,
+      async (source) => {
+        sources.push(source);
+        const candle = { time: source === "kraken-futures" ? 1 : Date.now(), close: 100 };
+        return { source, minute: [candle, candle], quarter: [candle, candle], attempts: [] };
+      }),
+  });
+  assert.deepEqual(sources, [...DEGRADED_SOURCES]);
+  assert.equal(quotes[0].source, "okx-usdt-swap");
+  assert.equal(quotes[0].stale, false);
+  assert.match(quotes[0].fallbackReasons[0].message, /Fresh market candles unavailable/);
 });
 
 test("exchange request budget is shared across both fallback venues", async () => {

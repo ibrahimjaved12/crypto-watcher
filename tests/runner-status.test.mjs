@@ -267,10 +267,10 @@ test("health reporting uses the database clock and preserves last seen after an 
   assert.match(sql, /last_seen_at = CASE WHEN EXCLUDED\.status <> 'offline'\s+THEN EXCLUDED\.last_seen_at ELSE runner_health\.last_seen_at END/i);
 });
 
-test("the shared hook keeps persisted status and the badge displays an absolute last-seen time", async () => {
+test("the badge uses persisted last-seen data for relative time and its absolute tooltip", async () => {
   const hook = await read("../src/lib/runner/use-runner-status.ts");
   const badge = await read("../src/components/runner-status-notice.tsx");
   assert.doesNotMatch(hook, /Date\.now\(|getQueryData|lastOnlineAt:/);
   assert.match(badge, /new Date\(data\.lastOnlineAt\)\.toLocaleString\(\)/);
-  assert.doesNotMatch(badge, /relativeTime\(/);
+  assert.match(badge, /relativeTime\(data\.lastOnlineAt\)/);
 });

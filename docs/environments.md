@@ -191,26 +191,27 @@ documented in [Operational PostgreSQL](operational-database.md).
 
 `MARKET_DEGRADED_FALLBACK_ENABLED` is a Worker runtime variable, default `"true"`, committed
 in the `wrangler.jsonc` vars block. Set it to `"false"` there and deploy to restore published-only
-behavior, including the existing stale/empty banners. Dashboard changes are overwritten on deploy:
+behavior. Old prices remain unavailable in the UI. Dashboard changes are overwritten on deploy:
 `keep_vars` does not protect config-defined variables. It contains no credential.
 
-For each `getMarketSnapshot` call, `publishedFreshness` decides once: any fresh readable quote
-keeps the published snapshot unchanged, including individual "Not collected yet" pairs, with no
-exchange request. Only empty/all-stale snapshots try Kraken futures for the requested symbols,
-then OKX if Kraken has no usable quotes. Never Binance: its Worker egress is blocked. A partial
-Kraken result uses Kraken for successful pairs and retains stale published values for failed pairs,
-including their original source and timestamps; pairs without a usable published value remain
-unavailable. No failed pair triggers a request to another venue. If both venues fail for every
-symbol, or the fallback throws unexpectedly, keep the published snapshot unchanged. The degraded
-banner names the venue and last publication age; cards identify native contracts and trade prices,
-which are not Binance USDⓈ-M instruments. Retained published prices keep their Binance label and
-stale warning, and the banner and strip identify the mixed sources. Existing provider failure
-diagnostics remain available.
+For each `getMarketSnapshot` call, keep fresh published pairs unchanged and fetch new Kraken
+futures candles for old or missing pairs. Retry only pairs without fresh Kraken data on OKX,
+including pairs whose Kraken request succeeded but returned old candles. Never Binance: its
+Worker egress is blocked. Each card keeps the source beside its pair name, with USD for Kraken
+and USDT for Binance/OKX. Remove the repeated contract explanation, stale badges and degraded
+price banner. Failed pairs retain published metadata in the API, but the UI displays prices and
+charts only when fresh; otherwise the price is unavailable. Unexpected fallback errors still
+return the published snapshot. Existing provider failure diagnostics remain available in Details.
+
+Runner availability is shown once beside the logo: green Online or red Offline, with relative
+last-online time from the persisted heartbeat and the exact time in a tooltip. Missing health
+keeps runner controls unavailable and uses the same offline banner. Alert checks are disabled,
+Market read is omitted, and Strategy Lab service cards show only their titles while offline.
+Online service cards keep run details and actions without repeating coloured service badges.
 
 Fresh page loads use one hosted query. Kraken normally needs two candle requests per distinct
 pair (at most 20 for the 10-pair watchlist). The degraded path caps exchange requests at 40 total
-across both venues, leaving room for the hosted read; pairs beyond that budget retain stale
-published values or fail visibly.
+across both venues, leaving room for the hosted read; pairs without fresh data show unavailable.
 OKX may return HTTP 429 from Worker egress. Exchange latency/availability affects page loads
 only in degraded mode. Degraded quotes are not cached, so each page load or automatic refresh
 repeats the exchange requests. Existing automatic-refresh controls still apply.
@@ -221,6 +222,7 @@ checked with `mvp:check`. Record the qualifying date in ticket #323, then delete
 and its runtime variable.
 
 Deployed verification: stop the machine's publisher for more than 10 minutes and refresh the
-market page. Expect Kraken prices and the degraded banner (OKX only if Kraken is unavailable).
-Restart the publisher and refresh after a new publication: Binance quotes return and the
-banner disappears. With the switch off, the stale/empty published presentation remains.
+market page. Expect fresh Kraken prices, with OKX for pairs Kraken cannot refresh. Stop the runner:
+expect the red Offline header and title-only service cards; alert checks cannot be clicked.
+Restart the publisher and refresh after a new publication: fresh Binance quotes return.
+With the switch off, old published prices show unavailable.

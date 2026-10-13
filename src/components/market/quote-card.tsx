@@ -22,14 +22,8 @@ function changeClass(value: number | null | undefined): string {
   return "text-muted-foreground";
 }
 
-export function QuoteCard({
-  quote,
-  onRemove,
-}: {
-  quote: SymbolQuote;
-  onRemove?: () => void;
-}) {
-  const unavailable = !quote.ok || quote.price == null;
+export function QuoteCard({ quote, onRemove }: { quote: SymbolQuote; onRemove?: () => void }) {
+  const unavailable = !quote.ok || quote.price == null || quote.stale;
 
   return (
     <article className="panel flex flex-col gap-4 p-5 transition-colors hover:border-primary/40">
@@ -38,7 +32,9 @@ export function QuoteCard({
           <h3 className="font-display text-lg font-semibold">
             {baseAsset(quote.symbol)}
             {/* TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days */}
-            <span className="text-muted-foreground">/{quote.source === "kraken-futures" ? "USD" : "USDT"}</span>
+            <span className="text-muted-foreground">
+              /{quote.source === "kraken-futures" ? "USD" : "USDT"}
+            </span>
           </h3>
           <p className="num mt-1 text-2xl font-semibold">
             {unavailable ? (
@@ -54,9 +50,6 @@ export function QuoteCard({
               {sourceLabel(quote.source)}
             </Badge>
           ) : null}
-          {quote.stale && !unavailable && (
-            <Badge variant="outline" className="text-[10px] text-warn">Stale</Badge>
-          )}
           {onRemove ? (
             <Button
               variant="ghost"
@@ -72,7 +65,12 @@ export function QuoteCard({
       {unavailable ? (
         <p className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive-foreground">
           <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
-          <span>{quote.error ?? "No market data available."}</span>
+          <span>
+            {quote.error ??
+              (quote.stale
+                ? "Fresh prices could not be loaded. Try Refresh."
+                : "No market data available.")}
+          </span>
         </p>
       ) : (
         <>
@@ -125,10 +123,7 @@ export function QuoteCard({
               </AreaChart>
             </ResponsiveContainer>
           </div>
-          <p className="num text-[11px] text-muted-foreground">
-            Last 24 hours (15-minute candles) · updated{" "}
-            {new Date(quote.fetchedAt).toLocaleTimeString()}
-          </p>
+          <p className="num text-[11px] text-muted-foreground">Last 24 hours · 15-minute candles</p>
         </>
       )}
     </article>

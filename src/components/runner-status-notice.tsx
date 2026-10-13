@@ -1,51 +1,44 @@
 import { useRunnerStatus } from "@/lib/runner/use-runner-status";
+import { relativeTime } from "@/lib/labels";
 import { cn } from "@/lib/utils";
 
 export function RunnerStatusBadge() {
-  const { data } = useRunnerStatus();
-  if (!data?.configured) return null;
-  const label = {
-    online: "Online",
-    degraded: "Degraded",
-    offline: "Offline",
-    unknown: "Status unavailable",
-    disabled: "",
-  }[data.state];
+  const { data, available, isPending } = useRunnerStatus();
+  if (data?.configured === false) return null;
+  if (isPending) return <span className="text-xs text-muted-foreground">Connecting…</span>;
 
   return (
-    <div role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+    <div role="status" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
       <span
         className={cn(
-          "rounded-full border px-2 py-0.5 font-medium",
-          data.state === "online"
-            ? "border-bull/40 bg-bull/10 text-bull"
-            : data.state === "offline"
-              ? "border-bear/40 bg-bear/10 text-bear"
-              : "border-warn/40 bg-warn/10 text-warn",
+          "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-medium",
+          available ? "border-bull/40 bg-bull/10 text-bull" : "border-bear/40 bg-bear/10 text-bear",
         )}
       >
+        <span className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden />
         <span className="sr-only">Runner </span>
-        {label}
+        {available ? "Online" : "Offline"}
       </span>
-      {data.state === "offline" && data.lastOnlineAt !== null && (
-        <span
+      {!available && data?.lastOnlineAt != null && (
+        <time
           className="whitespace-nowrap text-muted-foreground"
+          dateTime={new Date(data.lastOnlineAt).toISOString()}
           title={new Date(data.lastOnlineAt).toLocaleString()}
         >
-          Last online {new Date(data.lastOnlineAt).toLocaleString()}
-        </span>
+          Last online {relativeTime(data.lastOnlineAt).replace(/ (min|h|d)\b/g, "$1")}
+        </time>
       )}
     </div>
   );
 }
 
 export function RunnerStatusNotice() {
-  const { data } = useRunnerStatus();
-  if (!data?.configured || data.state === "online") return null;
-  let message = "Runner health is unavailable. Service readiness could not be confirmed.";
-  if (data.state === "offline") {
-    message = "Runner temporarily offline: Alerts, analysis and forward runs are temporarily down.";
-  } else if (data.state === "degraded") {
+  const { data, available, isPending } = useRunnerStatus();
+  if (isPending || data?.configured === false || (available && data?.state === "online"))
+    return null;
+  let message =
+    "Runner temporarily offline: Alerts, analysis and forward runs are temporarily down.";
+  if (available && data?.state === "degraded") {
     const unavailable = [
       !data.services.analysis ? "Analysis" : null,
       !data.services.alerts ? "Alerts" : null,
@@ -53,15 +46,18 @@ export function RunnerStatusNotice() {
       data.jobsEnabled && !data.services.jobs ? "On-demand forward runs" : null,
     ].filter(Boolean);
     message = unavailable.length
-      ? `Runner services degraded: ${unavailable.join(", ")} temporarily unavailable.`
-      : "Runner services degraded: One or more background services are unavailable.";
+      ? `Runner online: ${unavailable.join(", ")} temporarily unavailable.`
+      : "Runner online: One or more background services are temporarily unavailable.";
     if (data.gatewayReachable === false && data.services.forward) {
       message += " The runner connection is unavailable; background runs can continue.";
     }
   }
 
   return (
-    <div role="status" className="mb-6 rounded-lg border border-warn/40 bg-warn/10 p-3 text-sm">
+    <div
+      role="status"
+      className="mb-6 rounded-lg border border-bear/30 bg-bear/5 px-4 py-3 text-sm leading-relaxed"
+    >
       {message}
     </div>
   );

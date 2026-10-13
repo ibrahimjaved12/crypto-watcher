@@ -1,5 +1,5 @@
 // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
-import { publishedFreshness, type PublishedSnapshot } from "./published-quotes";
+import type { PublishedSnapshot } from "./published-quotes";
 import type { SymbolQuote } from "./quote-calc";
 import type { ProviderObserver } from "./providers.server";
 import type { MarketSource } from "./symbols";
@@ -11,28 +11,24 @@ export type DegradedMarket = {
   lastPublishedAt: string | null;
 };
 
-export function degradedSourceLabel(source: string): string {
-  return source === "kraken-futures" ? "Kraken futures" : "OKX USDT perpetual swaps";
-}
-
-export function degradedContractLabel(source: string | null, symbol: string): string | null {
-  const base = symbol.replace(/USDT$/, "");
-  if (source === "kraken-futures")
-    return `Kraken ${base === "BTC" ? "PF_XBTUSD" : `PF_${base}USD`} · USD perpetual · trade price (not Binance USDⓈ-M)`;
-  if (source === "okx-usdt-swap")
-    return `OKX ${base}-USDT-SWAP · USDT perpetual · trade price (not Binance USDⓈ-M)`;
-  return null;
-}
-
-/** One decision per snapshot. Never fill gaps in a fresh Binance snapshot with another venue. */
+/** Keep fresh published pairs; fetch new candles for every old or missing pair. */
 export async function withDegradedFallback<T extends PublishedSnapshot>(
   snapshot: T,
   symbols: string[],
-  loadQuotes: (symbols: string[], options: { sources: readonly MarketSource[]; observer: ProviderObserver }) => Promise<SymbolQuote[]>,
+  loadQuotes: (
+    symbols: string[],
+    options: { sources: readonly MarketSource[]; observer: ProviderObserver },
+  ) => Promise<SymbolQuote[]>,
   enabled: string | undefined = undefined,
 ): Promise<T & { degraded?: DegradedMarket }> {
-  const reason = publishedFreshness(snapshot);
-  if (enabled === "false" || reason === "fresh" || symbols.length === 0) return snapshot;
+  if (enabled === "false" || symbols.length === 0) return snapshot;
+  const requested = [...new Set(symbols)];
+  const publishedBySymbol = new Map(snapshot.quotes.map((quote) => [quote.symbol, quote]));
+  const fresh = (quote: SymbolQuote | undefined) =>
+    !!quote?.ok && quote.price !== null && !quote.stale;
+  let pending = requested.filter((symbol) => !fresh(publishedBySymbol.get(symbol)));
+  if (pending.length === 0) return snapshot;
+  const reason = pending.some((symbol) => publishedBySymbol.get(symbol)?.ok) ? "stale" : "empty";
   // Leave headroom under the Worker's subrequest limit, including the hosted read.
   let requests = 0;
   const observer: ProviderObserver = {
@@ -42,32 +38,64 @@ export async function withDegradedFallback<T extends PublishedSnapshot>(
     },
     candleRows() {},
   };
-  const publishedBySymbol = new Map(snapshot.quotes.map((quote) => [quote.symbol, quote]));
   const attempts = new Map<string, SymbolQuote["fallbackReasons"]>();
+  const refreshed = new Map<string, SymbolQuote>();
+  const failed = new Map<string, SymbolQuote>();
+  let firstSource: DegradedMarket["source"] | undefined;
   for (const source of DEGRADED_SOURCES) {
-    const loaded = await loadQuotes([...new Set(symbols)], { sources: [source], observer });
-    const quotes = loaded.map((quote) => {
-      const fallbackReasons = [...(attempts.get(quote.symbol) ?? []), ...quote.fallbackReasons];
+    const loaded = await loadQuotes(pending, { sources: [source], observer });
+    for (const quote of loaded) {
+      if (!pending.includes(quote.symbol)) continue;
+      const fallbackReasons = [
+        ...(attempts.get(quote.symbol) ?? []),
+        ...quote.fallbackReasons,
+        ...(quote.ok && quote.stale
+          ? [{ source, status: null, message: "Latest candles are too old" }]
+          : []),
+      ];
       attempts.set(quote.symbol, fallbackReasons);
-      return { ...quote, source: quote.source ?? source, fallbackReasons };
-    });
-    if (quotes.some((quote) => quote.ok && quote.price !== null)) {
-      return {
-        ...snapshot,
-        quotes: quotes.map((quote) => {
-          if (quote.ok && quote.price !== null) return quote;
-          const published = publishedBySymbol.get(quote.symbol);
-          if (!published?.ok || published.price === null) return quote;
-          // Preserve the published venue, timestamps and stale flag for failed pairs.
-          return {
-            ...published,
-            fallbackReasons: [...published.fallbackReasons, ...quote.fallbackReasons],
-          };
-        }),
-        degraded: { source, reason, lastPublishedAt: snapshot.publishedAt },
-      };
+      const result = { ...quote, source: quote.source ?? source, fallbackReasons };
+      if (fresh(quote)) {
+        refreshed.set(quote.symbol, result);
+        firstSource ??= source;
+      } else {
+        failed.set(quote.symbol, result);
+      }
     }
+    pending = pending.filter((symbol) => !refreshed.has(symbol));
+    if (pending.length === 0) break;
   }
-  // Both venues failed: retain the exact published snapshot and its stale/empty presentation.
-  return snapshot;
+  // Keep the API's published snapshot on total failure; cards hide prices marked old.
+  if (!firstSource) return snapshot;
+  return {
+    ...snapshot,
+    quotes: requested.map((symbol) => {
+      const replacement = refreshed.get(symbol);
+      if (replacement) return replacement;
+      const published = publishedBySymbol.get(symbol);
+      if (published && fresh(published)) return published;
+      const failure = failed.get(symbol);
+      if (published)
+        return {
+          ...published,
+          fallbackReasons: [...published.fallbackReasons, ...(attempts.get(symbol) ?? [])],
+        };
+      return (
+        failure ?? {
+          symbol,
+          ok: false,
+          source: null,
+          price: null,
+          changes: {},
+          chart: [],
+          lastCandleAt: null,
+          stale: true,
+          error: "Fresh prices could not be loaded.",
+          fallbackReasons: attempts.get(symbol) ?? [],
+          fetchedAt: new Date().toISOString(),
+        }
+      );
+    }),
+    degraded: { source: firstSource, reason, lastPublishedAt: snapshot.publishedAt },
+  };
 }

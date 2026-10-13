@@ -12,9 +12,22 @@ export type QuoteLoadOptions = {
 };
 
 /** Exchange quote builder used only when the published snapshot needs temporary fallback. */
-export async function getQuote(symbol: string, options: QuoteLoadOptions = {}): Promise<SymbolQuote> {
+export async function getQuote(
+  symbol: string,
+  options: QuoteLoadOptions = {},
+): Promise<SymbolQuote> {
   const fetchedAt = new Date().toISOString();
-  const outcome = await (options.load ?? loadCandles)(symbol, undefined, options.observer, options.sources);
+  const outcome = await (options.load ?? loadCandles)(
+    symbol,
+    ({ minute, quarter }) => {
+      const figures = quoteFigures(minute, quarter);
+      if (!figures || quoteStale(figures.lastCandleAt, Date.now())) {
+        throw new Error("Fresh market candles unavailable");
+      }
+    },
+    options.observer,
+    options.sources,
+  );
 
   const failed = (error: string, fallbackReasons: SymbolQuote["fallbackReasons"]): SymbolQuote => ({
     symbol,
@@ -54,6 +67,9 @@ export async function getQuote(symbol: string, options: QuoteLoadOptions = {}): 
 }
 
 // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
-export async function getQuotes(symbols: string[], options: QuoteLoadOptions = {}): Promise<SymbolQuote[]> {
+export async function getQuotes(
+  symbols: string[],
+  options: QuoteLoadOptions = {},
+): Promise<SymbolQuote[]> {
   return Promise.all([...new Set(symbols)].map((s) => getQuote(s, options)));
 }
