@@ -66,9 +66,10 @@ export function QuoteCard({ quote, onRemove }: { quote: SymbolQuote; onRemove?: 
         <p className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive-foreground">
           <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
           <span>
-            {quote.stale
-              ? "Fresh prices could not be loaded. Try Refresh."
-              : (quote.error ?? "No market data available.")}
+            {quote.error ??
+              (quote.stale
+                ? "Fresh prices could not be loaded. Try Refresh."
+                : "No market data available.")}
           </span>
         </p>
       ) : (

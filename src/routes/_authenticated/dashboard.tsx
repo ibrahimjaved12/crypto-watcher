@@ -46,24 +46,29 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
 });
 
 /**
- * Failed exchange attempts for usable quotes, including retained published prices. Each reason
- * is listed once, with the pairs it applied to.
+ * Quote errors and failed exchange attempts for every pair, including unavailable quotes.
+ * Each reason is listed once, with the pairs it applied to.
  */
-function fallbackDetailLines(quotes: MarketSnapshot["quotes"]): string[] {
-  const pairsByReason = new Map<string, string[]>();
+function quoteDetailLines(quotes: MarketSnapshot["quotes"]): string[] {
+  const pairsByReason = new Map<string, Set<string>>();
+  const addReason = (reason: string, symbol: string) => {
+    const pairs = pairsByReason.get(reason) ?? new Set<string>();
+    pairs.add(symbol);
+    pairsByReason.set(reason, pairs);
+  };
   for (const quote of quotes) {
-    if (!quote.ok) continue;
+    if (quote.error) addReason(quote.error, quote.symbol);
     for (const attempt of quote.fallbackReasons) {
       const status = attempt.status === null ? "" : `HTTP ${attempt.status} `;
       const detail = `${status}${attempt.message}`.trim() || "no details";
       const reason = `${sourceLabel(attempt.source)}: ${detail}`;
-      pairsByReason.set(reason, [...(pairsByReason.get(reason) ?? []), quote.symbol]);
+      addReason(reason, quote.symbol);
     }
   }
   if (pairsByReason.size === 0) return [];
   return [
-    "Fallback used because:",
-    ...Array.from(pairsByReason, ([reason, pairs]) => `${reason} (${pairs.join(", ")})`),
+    "Price diagnostics:",
+    ...Array.from(pairsByReason, ([reason, pairs]) => `${reason} (${[...pairs].join(", ")})`),
   ];
 }
 
@@ -157,7 +162,7 @@ function Dashboard() {
   const runStatus = lastRun ? humanizeReason(lastRun.status) : null;
   const stripDetails = [
     `Data source: ${sourcesDown ? "prices unavailable" : sourceNames || "waiting for the first price load"}`,
-    ...fallbackDetailLines(quotes),
+    ...quoteDetailLines(quotes),
     `Last refresh: ${market.data ? new Date(market.data.fetchedAt).toLocaleString() : "not loaded yet"}`,
     ...(runner.canCheckAlerts
       ? [
