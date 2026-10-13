@@ -250,6 +250,41 @@ test("publisher reports unavailable symbols and never throws", async () => {
   assert.match(failed.unavailable[0], /store down/);
 });
 
+test("the standalone publisher keeps its timer referenced until stop clears it", (t) => {
+  let referenced = true;
+  const timer = {
+    hasRef: () => referenced,
+    unref: t.mock.fn(() => { referenced = false; }),
+  };
+  const pending = new Set();
+  const schedule = t.mock.method(globalThis, "setTimeout", () => {
+    pending.add(timer);
+    return timer;
+  });
+  const clear = t.mock.method(globalThis, "clearTimeout", (handle) => pending.delete(handle));
+  const running = publisher.startMarketQuotePublisher({
+    env: {},
+    deps: { store: fakeStore({ symbols: [], lastOpen: {} }), publish: async () => 0 },
+    log: () => {},
+  });
+  try {
+    assert.ok(running);
+    assert.equal(schedule.mock.callCount(), 1);
+    assert.equal(typeof schedule.mock.calls[0].arguments[0], "function");
+    assert.equal(schedule.mock.calls[0].arguments[1], 5_000);
+    assert.equal(pending.has(timer), true);
+    assert.equal(timer.hasRef(), true, "the standalone process must stay alive");
+    assert.equal(timer.unref.mock.callCount(), 0);
+
+    running.stop();
+    assert.equal(clear.mock.callCount(), 1);
+    assert.equal(clear.mock.calls[0].arguments[0], timer);
+    assert.equal(pending.size, 0, "stop removes the pending timer so the process can exit");
+  } finally {
+    running?.stop();
+  }
+});
+
 test("the publisher declines to start without hosted credentials and never throws", () => {
   const lines = [];
   const options = (env) => ({ env, store: fakeStore({ symbols: [], lastOpen: {} }), log: (l) => lines.push(l), error: (l) => lines.push(l) });
