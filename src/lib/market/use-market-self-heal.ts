@@ -33,9 +33,7 @@ export function useMarketSelfHeal(
       queryClient.setQueryData<MarketSnapshot>(marketKey, (old) => mergeHealed(old, healed));
       return healed;
     },
-    // Failed requests must back off too; the success counter alone never advances on network errors.
-    refetchInterval: (query) =>
-      healDelayMs(query.state.dataUpdateCount + query.state.errorUpdateCount),
+    refetchInterval: (query) => healDelayMs(query.state.dataUpdateCount),
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,

@@ -219,9 +219,9 @@ only in degraded mode. Degraded quotes are not cached, so each page load or auto
 repeats the exchange requests. Existing automatic-refresh controls still apply.
 
 Unavailable cards retry together in one request for just their down symbols when automatic
-market refresh is enabled. Retries use 2/4/8/15/30/60-second base delays with 20% jitter, counting
-failed requests too. They stop when all pairs recover and do not poll in hidden tabs; visibility
-and reconnect events join an immediate retry without duplicating an active batch. Disabling
+market refresh is enabled. Retries use 2/4/8/15/30/60-second base delays with 20% jitter, advancing
+after each returned snapshot. They stop when all pairs recover and do not poll in hidden tabs.
+Visibility and reconnect events join an immediate retry without duplicating an active batch. Disabling
 `VITE_MARKET_AUTO_REFRESH_ENABLED` disables these retries too. Only fresh matching pairs merge
 into the watchlist cache; failed retry results never erase existing quotes or change the last
 full-refresh time. Cards keep quote errors and last-price-seen time, with a retry indicator while
