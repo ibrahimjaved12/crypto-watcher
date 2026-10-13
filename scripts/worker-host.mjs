@@ -407,6 +407,10 @@ async function main() {
   // artifact keeps no main-database credential. It needs the hosted service credentials to publish.
   if (env.MARKET_QUOTE_PUBLISHER_ENABLED !== "false" && env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY)
     specs.push(nodeJob("quote-publisher", "scripts/market-quote-publisher.mjs"));
+  // Non-essential sibling: uses the host's existing restart/backoff/crash-loop policy.
+  const universeSync = await importLib("/src/lib/market/collector-universe-sync.ts");
+  if (universeSync.collectorUniverseSyncConfigured(env))
+    specs.push(nodeJob("collector-universe-sync", "scripts/collector-universe-sync.mjs"));
   if (env.RUNNER_GATEWAY_ENABLED === "true")
     specs.push(nodeJob("runner-gateway", "scripts/runner-gateway.mjs"));
   if (env.RUNNER_JOBS_ENABLED === "true")
@@ -431,6 +435,7 @@ async function main() {
   log(`Preflight passed (${MODE}, hosted main Supabase). Starting ${specs.length} children.`);
   for (const name of ["fastapi-analysis", "fastapi-forward", "collector"]) launch(records.get(name));
   if (records.has("quote-publisher")) launch(records.get("quote-publisher"));
+  if (records.has("collector-universe-sync")) launch(records.get("collector-universe-sync"));
   if (records.has("runner-gateway")) launch(records.get("runner-gateway"));
   const pythonNames = ["fastapi-analysis", "fastapi-forward"];
   const urls = [endpoints.analysis.origin, endpoints.forward.origin];

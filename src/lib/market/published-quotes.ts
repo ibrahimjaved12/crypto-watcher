@@ -106,7 +106,7 @@ function failedQuote(symbol: string, error: string, fetchedAt: string): SymbolQu
 export function missingQuote(symbol: string, now: number): SymbolQuote {
   return failedQuote(
     symbol,
-    "Not collected yet — no price has been published for this pair.",
+    "Not collected yet — a newly added pair usually appears within a few minutes while the collector is running.",
     new Date(now).toISOString(),
   );
 }

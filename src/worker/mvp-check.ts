@@ -29,6 +29,8 @@ import {
   type RunRow,
 } from "../lib/forward/mvp-check";
 import { publishFreshnessChecks } from "../lib/market/published-quotes";
+import { readCollectorUniverse } from "../lib/market/collector-subscriptions.server";
+import { collectorLogMessage } from "../lib/market/collector-logging";
 import { getOperationalStore } from "../lib/operational/repository.server";
 import { STATUS_FILE_NAME, classifyWorkerHost } from "../lib/worker-host";
 import { hostedDatabaseSizeCheck } from "./hosted-db-size";
@@ -176,6 +178,30 @@ function workerHostCheck(): Check {
 // than 10 minutes (the publisher is down, or the symbol is not collected).
 const productionMode = process.argv.includes("production") || process.env["NODE_ENV"] === "production";
 
+// Read-only: use the reconciliation's derivation, never assign from a health check.
+async function collectorUniverseCheck(): Promise<Check> {
+  const name = "collector universe";
+  try {
+    const store = getOperationalStore();
+    if (!store.enabled) return { name, level: "WARN", detail: "operational store disabled; cannot compare subscriptions" };
+    const [expected, current] = await Promise.all([
+      readCollectorUniverse(supabaseAdmin),
+      store.readCollectorSubscriptions(),
+    ]);
+    const missing = expected.filter((symbol) => !current.includes(symbol));
+    const extra = current.filter((symbol) => !expected.includes(symbol));
+    return {
+      name,
+      level: missing.length || extra.length ? "WARN" : "PASS",
+      detail: missing.length || extra.length
+        ? `stale universe: missing=${missing.join(",") || "none"}; extra=${extra.join(",") || "none"}; check collector-universe-sync child`
+        : `${current.length} subscriptions match hosted watchlists/settings plus benchmarks`,
+    };
+  } catch (error) {
+    return { name, level: "WARN", detail: `cannot compare universe: ${collectorLogMessage(error).slice(0, 200)}` };
+  }
+}
+
 async function publishedQuoteChecks(): Promise<Check[]> {
   const { data, error } = await db.from("market_quotes").select("symbol, published_at");
   if (error) return [{ name: "published quotes", level: "FAIL", detail: `market_quotes read failed: ${error.message}` }];
@@ -187,7 +213,10 @@ async function main() {
   checks.push(await hostedDatabaseSizeCheck());
   checks.push(await pythonCheck());
   checks.push(workerHostCheck());
-  if (productionMode) checks.push(...(await publishedQuoteChecks()));
+  if (productionMode) {
+    checks.push(...(await publishedQuoteChecks()));
+    checks.push(await collectorUniverseCheck());
+  }
   checks.push(...(await collectorChecks()));
   const users = await listForwardUsers(db, process.env["FORWARD_USER_ID"]);
   const [counts, ledgers, strategies, missingApp] = await Promise.all([
