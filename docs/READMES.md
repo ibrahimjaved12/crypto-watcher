@@ -25,11 +25,15 @@ The [implementation and deployment roadmap](docs/roadmap.md) links all 40 ordere
 GitHub issues and their dependencies, distinguishing current, proposed, and
 conditional decisions.
 
+<!-- TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days -->
 The alert path tries public futures REST data in order: **Binance USDⓈ-M,
 OKX USDT perpetual swaps, then Kraken perpetual futures**. The dashboard's price cards do not:
-the Worker makes no exchange request and reads the Binance USDⓈ-M quotes the owner's machine
+the Worker makes no exchange request except the temporary degraded-mode fallback, and reads the Binance USDⓈ-M quotes the owner's machine
 publishes to hosted Supabase ([#323](https://github.com/ibrahimjaved12/crypto-watcher/issues/323),
 [publisher](docs/binance-futures-collector.md#market-quote-publisher-323)).
+When all readable published quotes are stale or absent, the temporary fallback tries Kraken
+futures, then OKX, with a banner and explicit venue/contract labels; see
+[the runtime switch and removal condition](environments.md#temporary-degraded-market-fallback-323).
 Saved Python TA includes forward-return outcomes; conditional trade evaluation,
 backtesting, and paper trading remain planned work.
 Background execution also needs verification: [issue #13](https://github.com/ibrahimjaved12/crypto-watcher/issues/13)
@@ -74,7 +78,7 @@ fail-closed and are clearly labeled as unavailable.
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | Supabase scheduled job (not an environment variable) | Sends the scheduled monitor request every 5 minutes when the Job is enabled. A disabled Job sends nothing.                                |
 | `SCHEDULED_MONITOR_ENABLED=true`                | Allows an authenticated scheduled request to run. It does not create a timer; with the scheduled job disabled, it causes no periodic calls. |
-| `VITE_MARKET_AUTO_REFRESH_ENABLED=true`         | Loads market prices when the dashboard opens and every 60 seconds while active. Uses the TanStack server and public exchange APIs.        |
+| `VITE_MARKET_AUTO_REFRESH_ENABLED=true` <!-- TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days --> | Loads market prices when the dashboard opens and every 60 seconds while active. Uses the TanStack server and hosted quotes, except the temporary degraded-mode fallback.        |
 | `VITE_TA_HISTORY_AUTO_REFRESH_ENABLED=true`     | Reads saved TA history when the dashboard opens and every 60 seconds while active.                                                        |
 | `TA_GENERATION_ENABLED=false`                   | Skips new TA calculations during manual and scheduled monitoring runs. Unset defaults to enabled.                                         |
 | `TA_OUTCOME_EVALUATION_ENABLED=false`           | Skips pending TA-outcome evaluation during manual and scheduled monitoring runs. Unset defaults to enabled.                               |

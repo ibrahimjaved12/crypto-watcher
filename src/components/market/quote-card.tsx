@@ -3,6 +3,8 @@ import { AlertTriangle, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+// TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
+import { degradedContractLabel } from "@/lib/market/degraded-fallback";
 import { sourceLabel } from "@/lib/labels";
 import { CHANGE_WINDOWS, WINDOW_LABELS, baseAsset } from "@/lib/market/symbols";
 import type { SymbolQuote } from "@/lib/market/quote-calc";
@@ -37,7 +39,8 @@ export function QuoteCard({
         <div>
           <h3 className="font-display text-lg font-semibold">
             {baseAsset(quote.symbol)}
-            <span className="text-muted-foreground">/USDT</span>
+            {/* TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days */}
+            <span className="text-muted-foreground">/{quote.source === "kraken-futures" ? "USD" : "USDT"}</span>
           </h3>
           <p className="num mt-1 text-2xl font-semibold">
             {unavailable ? (
@@ -65,6 +68,10 @@ export function QuoteCard({
           ) : null}
         </div>
       </header>
+      {/* TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days */}
+      {degradedContractLabel(quote.source, quote.symbol) ? (
+        <p className="text-xs text-warn">{degradedContractLabel(quote.source, quote.symbol)}</p>
+      ) : null}
 
       {unavailable ? (
         <p className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive-foreground">
