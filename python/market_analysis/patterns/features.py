@@ -54,6 +54,9 @@ class _FeatureRun:
     ema_fast: tuple[float | None, ...]
     ema_slow: tuple[float | None, ...]
     adx: tuple[float | None, ...]
+    # Additive (candle-table-v1): the +DI/-DI of the same _adx_series pass.
+    plus_di: tuple[float | None, ...] = ()
+    minus_di: tuple[float | None, ...] = ()
 
 
 class CandleFeatureHistory:
@@ -90,11 +93,14 @@ class CandleFeatureHistory:
                 volume=candles.volume[j] / scale if candles.volume[j] != MISSING else float("nan"),
             ) for j in range(first, end))
             closes = [candle.close for candle in run_candles]
+            adx_rows = _adx_series(run_candles, adx_period)
             run = _FeatureRun(first, run_candles,
                               tuple(_wema(_true_ranges(run_candles), atr_period)),
                               tuple(_ema(closes, ema_fast_period)),
                               tuple(_ema(closes, ema_slow_period)),
-                              tuple(value[0] for value in _adx_series(run_candles, adx_period)))
+                              tuple(value[0] for value in adx_rows),
+                              tuple(value[1] for value in adx_rows),
+                              tuple(value[2] for value in adx_rows))
             for j in range(first, end):
                 self._runs[j] = run
             first = end
@@ -142,6 +148,40 @@ class CandleFeatureHistory:
             prior20_low=min(candle.low for candle in prior) if prior else None,
             missing_inputs=missing,
         )
+
+
+    def indicators(self, index: int) -> dict:
+        """ATR/EMA/ADX/+DI/-DI computed through candle ``index`` INCLUSIVE (None if invalid or unready).
+
+        ``at(i)`` reads these values at i - 1; candle-table ``_prev`` columns call ``indicators(i - 1)``.
+        """
+        if not 0 <= index < len(self._runs):
+            raise IndexError("completed candle index outside series")
+        run = self._runs[index]
+        names = ("atr", "ema_fast", "ema_slow", "adx", "plus_di", "minus_di")
+        if run is None:
+            return dict.fromkeys(names)
+        local = index - run.first
+
+        def value(series, position):
+            return series[position] if 0 <= position < len(series) and _finite(series[position]) else None
+
+        return {"atr": value(run.atr, local - 1), "ema_fast": value(run.ema_fast, local),
+                "ema_slow": value(run.ema_slow, local),
+                "adx": value(run.adx, local) if local + 1 >= 2 * self._adx_period else None,
+                "plus_di": value(run.plus_di, local), "minus_di": value(run.minus_di, local)}
+
+    def wilder_atr(self, period: int) -> list:
+        """Wilder ATR(period) through each candle (None if invalid or unready), reset at every gap."""
+        out = [None] * len(self._runs)
+        seen = set()
+        for run in self._runs:
+            if run is None or run.first in seen:
+                continue
+            seen.add(run.first)
+            for local, atr in enumerate(_wema(_true_ranges(run.candles), period), start=1):
+                out[run.first + local] = atr if _finite(atr) else None
+        return out
 
 
 def candle_features(candles: CandleSeries, index: int, *, atr_period: int,

@@ -53,6 +53,12 @@ remains the only set the label engine and strategy registry accept (`make_specs`
 
 ## Frozen doji-v1
 
+> **Status: frozen exploratory baseline.** doji-v1 fuses trend (EMA20/EMA50 sign),
+> ADX and relative volume into its gate and score, takes its direction from the EMA
+> sign, and enters at the candle close with 1-sigma stops. It must not be extended or
+> tuned. It is superseded by the event study over candle-table-v1 in
+> [pattern-study.md](pattern-study.md), where those conditions are separate columns.
+
 All constants live in frozen `DojiParams` in `patterns/doji.py`. The inclusive
 gate requires positive range and ATR, body/range <= 0.10, and range/ATR >= 0.5.
 Zero range is `insufficient`; other ready gate failures are `not_pattern`.

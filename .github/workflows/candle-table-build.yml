@@ -1,0 +1,90 @@
+name: Candle table build
+run-name: "Candle table build"
+
+# candle-table-v1: one row per symbol x timeframe x completed candle with geometry, trend/volatility,
+# volume, calendar, regime-v1 and forward-outcome groups (scripts/research/candle_table_build.py,
+# docs/pattern-study.md). DESCRIPTIVE ONLY: nothing is a PASS and nothing enters the experiment
+# ledger. Reads the dk1 daily releases (requested symbols plus BTCUSDT) and the rd 1-minute bars
+# 2024-01..through_month; through_month is at most 2025-12 and the hidden stretch is never read.
+# The csv.gz files and manifest.json go to reports/candle-table/ct1__<hash16>/ in the private
+# research-data repository (an existing directory with the same hash is skipped); this public log
+# and the job summary carry only counts and the report hash, plus allowlisted progress lines.
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "comma-separated symbols (subset of the six)"
+        type: string
+        default: "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT"
+      timeframes:
+        description: "comma-separated candle minutes"
+        type: string
+        default: "15,60,240,1440,10080"
+      through_month:
+        description: "last month built (YYYY-MM, at most 2025-12)"
+        type: string
+        default: "2025-12"
+      data_revision:
+        description: "rd data release revision (1-minute bars)"
+        type: string
+        default: "1"
+      daily_revision:
+        description: "dk1 daily history release revision"
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candle-table-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Candle table build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            python/requirements.txt
+            python/requirements-research.txt
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+          .venv/bin/python -m pip install -r requirements-research.txt
+      - name: Build candle table
+        env:
+          SYMBOLS: ${{ inputs.symbols }}
+          TIMEFRAMES: ${{ inputs.timeframes }}
+          THROUGH_MONTH: ${{ inputs.through_month }}
+          DATA_REVISION: ${{ inputs.data_revision }}
+          DAILY_REVISION: ${{ inputs.daily_revision }}
+          BUILD_SUMMARY: ${{ runner.temp }}/candle-table-build-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: |
+          python/.venv/bin/python scripts/research/candle_table_build.py --workdir candle-table-work \
+            --summary "$BUILD_SUMMARY" --symbols "$SYMBOLS" --timeframes "$TIMEFRAMES" \
+            --through-month "$THROUGH_MONTH" --data-revision "$DATA_REVISION" --daily-revision "$DAILY_REVISION"
+      - name: Delete working files
+        if: always()
+        run: rm -rf candle-table-work
+      - name: Summary
+        if: always()
+        env:
+          BUILD_SUMMARY: ${{ runner.temp }}/candle-table-build-summary.md
+        run: |
+          if [ -f "$BUILD_SUMMARY" ]; then
+            cat "$BUILD_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
