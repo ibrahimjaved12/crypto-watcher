@@ -32,8 +32,15 @@ The first dry run reports the real header, the rows per day and the timestamp fo
 ## Building and release layout
 
 The **Metrics build** workflow (`.github/workflows/metrics-build.yml`, script
-`scripts/research/metrics_build.py`) runs one job per symbol x finished month, at most
-three at a time. It accepts months from 2020-01; the default window is 2024-01..2026-09.
+`scripts/research/metrics_build.py`) runs one job per symbol x calendar year, at most
+three at a time. Each job builds only the requested finished months sequentially
+(at most twelve), with separate monthly releases and summaries and cleanup after
+each month. Six symbols across 2020-01..2023-12 therefore use 24 jobs for 288
+symbol-months, below the 256-job matrix limit. Overlapping runs share a symbol-year
+concurrency group. A failed month is reported and the remaining months are attempted;
+the job still fails if any month failed. Jobs have a six-hour timeout; reruns skip
+already published releases. It accepts months from 2020-01; the default window is
+2024-01..2026-09.
 
 - **Missing days:** a day whose file returns HTTP 404 is recorded as a gap, not an error.
 - **Errors:** a checksum mismatch or an unexpected header stops the build.
