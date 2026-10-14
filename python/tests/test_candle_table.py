@@ -348,15 +348,15 @@ class WriterAndGuardTests(unittest.TestCase):
     def test_duplicate_columns_rejected(self):
         registry = ct.default_registry()
         with self.assertRaises(ct.CandleTableError):
-            registry.register(ct.Group("location", "loc-v1", (("close", "a duplicate"),), lambda ctx, i: {}))
+            registry.register(ct.Group("derivatives", "drv-v1", (("close", "a duplicate"),), lambda ctx, i: {}))
         with self.assertRaises(ct.CandleTableError):
-            registry.register(ct.Group("location", "loc-v1", (("a", "x"), ("a", "y")), lambda ctx, i: {}))
+            registry.register(ct.Group("derivatives", "drv-v1", (("a", "x"), ("a", "y")), lambda ctx, i: {}))
         with self.assertRaises(ct.CandleTableError):
             registry.register(ct.Group("other", "o-v1", (("geometry_ok", "clash with a flag"),), lambda ctx, i: {}))
         with self.assertRaises(ct.CandleTableError):
             registry.register(ct.Group("geometry", "geo-v2", (("new_col", "doc"),), lambda ctx, i: {}))
-        registry.register(ct.Group("location", "loc-v1", (("dist_prev_high", "doc"),), lambda ctx, i: {}))
-        self.assertIn("location_ok", registry.columns())
+        registry.register(ct.Group("derivatives", "drv-v1", (("dist_prev_high", "doc"),), lambda ctx, i: {}))
+        self.assertIn("derivatives_ok", registry.columns())
         self.assertEqual(len(set(COLUMNS)), len(COLUMNS))
 
 

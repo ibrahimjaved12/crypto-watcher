@@ -65,6 +65,9 @@ This study supersedes it.
 | volume | vol-v1 | volume, rel_volume_prior20, rel_volume_slot (intraday), taker_buy_ratio, taker_ratio_prior20, taker_imb |
 | calendar | cal-v1 | utc_dow; intraday: utc_hour, is_weekend, session_bin, funding_in_candle, mins_to_funding |
 | regime | regime-v1 | `rg_` + every market and symbol column of `regime.build_table` (built from dk1 inside the run) |
+| location | loc-v1 | per level set: dist_up/dist_dn (ATR units), touch, approach_side; any_touch, nearest level/set, level_count_near, touch_approach_side, ATH/ATL distances, new_ath_in_candle |
+| sweep | sweep-v1 | per reference (prior20, swing_tf, prev_day, prev_week, prev_month): sweep_up/sweep_dn; any, both, direction, depth |
+| htf | htf-v1 | per higher timeframe (1h, 4h, 1d, 1w): trend_dir, adx, extension_atr, ema_gap_atr of the last closed higher candle |
 | outcomes | fwd-v1 | for m in 1, 2, 4: ret_m_bp, ret_m_sigma, mfe/mae_long_m_sigma, fwd_ok_m; range1_sigma, absret1_sigma, ln_range1_sigma, fwd_status |
 
 **Sigma:**
@@ -87,6 +90,95 @@ complete.
 Every feature group has `<group>_ok` and `<group>_missing`. A column that does not apply to
 a row is left empty and does not count as missing. Examples are `doji_subtype` outside
 `doji_b10` and the intraday-only calendar and volume columns on daily/weekly rows.
+
+### Location (loc-v1)
+
+**Level sets.** The sets are `benchmark/levels.py` `PATTERN_LEVEL_SETS`, in this fixed
+order, which is also the tie-break order: round, prev_day, prev_week, prev_month,
+swing_tf, swing4h, swing1d, swing1w. `LEVEL_SETS` and the level study are unchanged.
+
+| Set | Source |
+|---|---|
+| round | per-symbol grid (`ROUND_SPACING`) |
+| prev_day, prev_week, prev_month | high/low of the previous complete, fully valid period, valid during the next one. Intraday rows use the 1m bars; daily/weekly rows use the dk1 daily candles. Weeks start Monday. |
+| swing_tf | fractal on the row's own timeframe, n = 5, valid 7/30/90/180/365 days for 15m/1h/4h/1d/1w |
+| swing4h | the level study's 4h swings (intraday rows only) |
+| swing1d | daily candles, n = 5, valid 180 d |
+| swing1w | weekly candles, n = 3, valid 365 d |
+
+swing1d and swing1w come from dk1, so they exist for every row, intraday included.
+
+**Not-applicable sets.** These are left empty and do not count as missing:
+
+- prev_day on daily and weekly rows, and prev_week on weekly rows. At the decision time
+  these would be (or contain) the row's own candle.
+- swing4h on daily and weekly rows.
+
+**Usability.** A level is usable iff `valid_from_ms <= decision_ms < valid_to_ms`. A swing is
+known `n` candles after its candle, so a candle is never its own swing.
+
+**Per-set columns.** With `atr = atr_prev`:
+
+- `dist_up_S_atr` / `dist_dn_S_atr`: distance to the nearest level >= / <= close. The value
+  is empty when the set has no level on that side.
+- `touch_S`: a level lies in `[low - 0.25 atr, high + 0.25 atr]`.
+- `approach_side_S`: for the nearest touched level (ties go to the lower price), +1 if
+  `close_{i-1}` is below it (approaching resistance), -1 if above (approaching support),
+  0 if equal. Empty when nothing was touched.
+
+**Overall columns:**
+
+- `any_touch`.
+- `nearest_level_dist_atr` and `nearest_set`, with ties broken by set order.
+- `level_count_near`: distinct prices within 0.5 atr of close.
+- `touch_approach_side`: the approach side of the nearest touched level of any set.
+
+**ATH/ATL.** `dist_ath_atr`, `dist_atl_atr` and `new_ath_in_candle` use running extremes since
+the series start. Daily/weekly rows see dk1 history from 2020. **Limitation:** intraday
+series start in 2024-01, so intraday "all-time" extremes mean extremes since 2024-01.
+
+### Sweep (sweep-v1)
+
+**References.** prior20 (max high / min low of candles i-20..i-1, all valid), plus the usable
+swing_tf, prev_day, prev_week and prev_month levels. Applicability follows the location rules.
+
+**Rules:**
+
+- `sweep_up_X`: `high_i > H + 0.1 atr_prev` and `close_i < H` for a reference high H.
+- `sweep_dn_X`: the mirror rule, using lows.
+
+**Summary columns:**
+
+- `sweep_any_up`, `sweep_any_dn`.
+- `sweep_both` (outside bar).
+- `sweep_dir`: -1 swept up only, +1 swept down only, 0 both or none.
+- `sweep_depth_atr`: the largest piercing depth. Empty, and not missing, when nothing was swept.
+
+### Higher timeframes (htf-v1)
+
+| Row | Higher timeframes |
+|---|---|
+| 15m | 1h, 4h |
+| 1h | 4h, 1d |
+| 4h | 1d, 1w |
+| 1d | 1w |
+| 1w | none |
+
+1h and 4h come from the 1m bars; 1d and 1w come from dk1.
+
+Each row uses the **last higher candle that closed at or before `decision_ms`**, never one
+still forming. Its state is taken through its own close, using
+`CandleFeatureHistory.indicators` (inclusive):
+
+- `trend_dir_H`: sign(EMA20 - EMA50).
+- `adx_H`.
+- `extension_H_atr`: (close - EMA20) / ATR14.
+- `ema_gap_H_atr`: (EMA20 - EMA50) / ATR14.
+
+Columns of timeframes that are not higher than the row's are not applicable.
+
+location, sweep and htf never change `status`. Their availability is reported by
+`<group>_ok` and `<group>_missing` only.
 
 ## Adding a group (location, derivatives, advanced levels, ...)
 

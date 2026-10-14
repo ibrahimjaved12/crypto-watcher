@@ -26,6 +26,18 @@ away from the real grid), and for the other sets 20 offset levels
 ``L + d * sigma_240(valid_from) * L`` per real level, ``d`` in +/-0.5..+/-1.4, fixed at
 the real level's creation and valid over the same interval.
 
+Pattern-study sets (candle-table loc-v1/sweep-v1; ``PATTERN_LEVEL_SETS``). ``LEVEL_SETS``
+and the level study are unchanged: ``swing_levels`` on 4h candles with its defaults still
+yields ``swing4h`` exactly as before.
+
+- ``prev_month``: high/low of the previous UTC calendar month, valid during the next month,
+  only if the whole month is valid (1m bars: ``prev_month_levels``; dk1 daily candles:
+  ``prev_period_levels_daily(days, "month")``, which also gives ``prev_week``).
+- ``swing_tf``: the same fractal on the row's own timeframe, n = 5, valid
+  ``SWING_TF_VALID_DAYS[minutes]`` days.
+- ``swing1d``: daily candles, n = 5, valid 180 days; ``swing1w``: weekly candles, n = 3,
+  valid 365 days.
+
 ``rng.u64_words`` forbids ``|`` in a stream name, so the round placebo stream is
 ``level-placebo:<SYMBOL>:round`` (the spec's ``level-placebo|<SYMBOL>|round`` with
 ``:`` separators).
@@ -33,6 +45,7 @@ the real level's creation and valid over the same interval.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from fractions import Fraction
 
 from .. import data_lake
@@ -42,6 +55,9 @@ from .rng import u64_words
 
 SCALE = 10 ** 8
 LEVEL_SETS = ("round", "prev_day", "prev_week", "swing4h")
+PATTERN_LEVEL_SETS = ("round", "prev_day", "prev_week", "prev_month", "swing_tf", "swing4h", "swing1d", "swing1w")
+SWING_TF_VALID_DAYS = {15: 7, 60: 30, 240: 90, 1440: 180, 10080: 365}
+PATTERN_SWINGS = {"swing1d": (1440, 5, 180), "swing1w": (10080, 3, 365)}  # set -> (minutes, n, valid days)
 # Grid spacing in scaled price units: BTC 1000, ETH 100, BNB 50, SOL 10, XRP 0.10, DOGE 0.01 USDT.
 ROUND_SPACING = {"BTCUSDT": 1000 * SCALE, "ETHUSDT": 100 * SCALE, "BNBUSDT": 50 * SCALE, "SOLUSDT": 10 * SCALE,
                  "XRPUSDT": SCALE // 10, "DOGEUSDT": SCALE // 100}
@@ -139,10 +155,18 @@ def prev_period_levels(bars: BarSeries, period: str = "day") -> list[Level]:
     return levels
 
 
-def swing_levels(candles_4h: CandleSeries, n: int = SWING_N, valid_days: int = SWING_VALID_DAYS) -> list[Level]:
-    """Fractal swing highs/lows, known at the end of candle i+n, valid for ``valid_days`` from then."""
-    if candles_4h.minutes != 240:
-        raise ValueError("swing levels use 4h candles")
+def swing_levels(candles_4h: CandleSeries, n: int = SWING_N, valid_days: int = SWING_VALID_DAYS,
+                 set_name: str | None = None) -> list[Level]:
+    """Fractal swing highs/lows, known at the end of candle i+n, valid for ``valid_days`` from then.
+
+    Any timeframe; ``set_name`` defaults to ``swing4h`` for 240-minute candles and must be given otherwise.
+    """
+    if set_name is None:
+        if candles_4h.minutes != 240:
+            raise ValueError("swing levels of a timeframe other than 4h need an explicit set_name")
+        set_name = "swing4h"
+    if type(n) is not int or n < 1:
+        raise ValueError("n must be a positive int")
     levels = []
     count = len(candles_4h)
     high, low, valid = candles_4h.high, candles_4h.low, candles_4h.valid
@@ -153,10 +177,97 @@ def swing_levels(candles_4h: CandleSeries, n: int = SWING_N, valid_days: int = S
         known = candles_4h.end_ms[i + n]
         others = [j for j in window if j != i]
         if all(high[i] > high[j] for j in others):
-            levels.append(Level("swing4h", "high", high[i], known, known + valid_days * _DAY, 1))
+            levels.append(Level(set_name, "high", high[i], known, known + valid_days * _DAY, 1))
         if all(low[i] < low[j] for j in others):
-            levels.append(Level("swing4h", "low", low[i], known, known + valid_days * _DAY, 1))
+            levels.append(Level(set_name, "low", low[i], known, known + valid_days * _DAY, 1))
     return levels
+
+
+def pattern_swing_levels(candles: CandleSeries, set_name: str) -> list[Level]:
+    """``swing_tf`` (the candles' own timeframe), ``swing1d`` or ``swing1w`` with their fixed n and validity."""
+    if set_name == "swing_tf":
+        if candles.minutes not in SWING_TF_VALID_DAYS:
+            raise ValueError(f"swing_tf needs minutes in {sorted(SWING_TF_VALID_DAYS)}")
+        return swing_levels(candles, SWING_N, SWING_TF_VALID_DAYS[candles.minutes], "swing_tf")
+    if set_name not in PATTERN_SWINGS:
+        raise ValueError(f"unknown swing set {set_name!r}")
+    minutes, n, days = PATTERN_SWINGS[set_name]
+    if candles.minutes != minutes:
+        raise ValueError(f"{set_name} needs {minutes}-minute candles")
+    return swing_levels(candles, n, days, set_name)
+
+
+def _month_start(ms: int) -> int:
+    """Start of the UTC calendar month containing ``ms``."""
+    day = datetime.fromtimestamp(ms // 1000, tz=timezone.utc)
+    return data_lake.month_bounds_ms(f"{day.year:04d}-{day.month:02d}")[0]
+
+
+def _next_month(ms: int) -> int:
+    """Start of the month after the one containing ``ms``."""
+    day = datetime.fromtimestamp(ms // 1000, tz=timezone.utc)
+    return data_lake.month_bounds_ms(f"{day.year:04d}-{day.month:02d}")[1]
+
+
+def _periods(start_ms: int, end_ms: int, period: str):
+    """(first, end) of every complete ``week`` (Monday) or ``month`` inside [start_ms, end_ms)."""
+    if period == "week":
+        first = _week_start(start_ms)
+        if first < start_ms:
+            first += _WEEK
+        while first + _WEEK <= end_ms:
+            yield first, first + _WEEK
+            first += _WEEK
+    elif period == "month":
+        first = _month_start(start_ms)
+        if first < start_ms:
+            first = _next_month(start_ms)
+        while _next_month(first) <= end_ms:
+            yield first, _next_month(first)
+            first = _next_month(first)
+    else:
+        raise ValueError("period must be 'week' or 'month'")
+
+
+def _period_levels(set_name: str, periods, extremes) -> list[Level]:
+    levels = []
+    for first, end in periods:
+        found = extremes(first, end)
+        if found is not None:  # known at the period's end, valid during the next period
+            valid_to = _next_month(end) if set_name == "prev_month" else end + (end - first)
+            levels.append(Level(set_name, "high", found[0], end, valid_to, 1))
+            levels.append(Level(set_name, "low", found[1], end, valid_to, 1))
+    return levels
+
+
+def prev_month_levels(bars: BarSeries) -> list[Level]:
+    """High/low of every complete, fully valid UTC calendar month of the 1m bars, valid during the next month."""
+    high, low, flags = bars.high, bars.low, bars.flags
+
+    def extremes(first, end):
+        a, b = (first - bars.start_ms) // _MINUTE, (end - bars.start_ms) // _MINUTE
+        highs, lows = high[a:b], low[a:b]
+        if MISSING in highs or MISSING in lows or any(f & COMPROMISED_FLAGS for f in flags[a:b]):
+            return None
+        return max(highs), min(lows)
+
+    return _period_levels("prev_month", _periods(bars.start_ms, bars.end_ms, "month"), extremes)
+
+
+def prev_period_levels_daily(days: CandleSeries, period: str) -> list[Level]:
+    """``prev_week`` / ``prev_month`` from daily candles: every complete period whose days are all valid."""
+    if days.minutes != 1440:
+        raise ValueError("prev_period_levels_daily needs daily (1440-minute) candles")
+    end_ms = days.start_ms + len(days) * _DAY
+
+    def extremes(first, end):
+        a, b = (first - days.start_ms) // _DAY, (end - days.start_ms) // _DAY
+        if not all(days.valid[a:b]):
+            return None
+        return max(days.high[a:b]), min(days.low[a:b])
+
+    set_name = "prev_week" if period == "week" else "prev_month"
+    return _period_levels(set_name, _periods(days.start_ms, end_ms, period), extremes)
 
 
 def placebo_offset_levels(levels, sigma240_at_valid_from, offsets=PLACEBO_OFFSETS) -> list[list[Level]]:
