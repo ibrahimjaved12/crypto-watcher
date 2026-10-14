@@ -77,17 +77,20 @@ class LocationTests(unittest.TestCase):
 
     def test_level_validity_window(self):
         candles = flat(18)
-        ends = candles.end_ms
-        levels = {"prev_day": [level("prev_day", "high", 107, ends[16], ends[17])]}
-        table = rows(context(candles, levels))
-        self.assertIsNone(table[15]["dist_up_prev_day_atr"])  # before valid_from
-        self.assertAlmostEqual(table[16]["dist_up_prev_day_atr"], 0.2)  # valid_from == decision
-        self.assertIsNone(table[17]["dist_up_prev_day_atr"])  # decision == valid_to (exclusive)
-        index = loc.LevelIndex(levels["prev_day"])
-        self.assertEqual(len(index.usable(ends[16])), 1)
-        self.assertEqual(index.usable(ends[17]), [])
-        self.assertEqual(len(index.usable(ends[16])), 1)  # an earlier time restarts the sweep
-        self.assertEqual(index.usable(ends[16] - 1), [])
+        opened = candles.open_ms(16)
+
+        def dist(valid_from, valid_to):
+            levels = {"prev_day": [level("prev_day", "high", 107, valid_from, valid_to)]}
+            return rows(context(candles, levels))[16]["dist_up_prev_day_atr"]
+
+        self.assertAlmostEqual(dist(opened, opened + H4), 0.2)  # valid_from == open: usable
+        self.assertIsNone(dist(opened + 1, opened + H4))  # valid only 1 ms after the open
+        self.assertIsNone(dist(opened - H4, opened))  # valid_to == open (exclusive)
+        index = loc.LevelIndex([level("prev_day", "high", 107, opened, opened + MIN15)])
+        self.assertEqual(len(index.usable(opened)), 1)
+        self.assertEqual(index.usable(opened + MIN15), [])
+        self.assertEqual(len(index.usable(opened)), 1)  # an earlier time restarts the sweep
+        self.assertEqual(index.usable(opened - 1), [])
 
     def test_new_ath(self):
         candles = flat(16, [(105, 112, 104, 111)])
@@ -136,6 +139,123 @@ class PeriodLevelTests(unittest.TestCase):
         bar_levels = lv.prev_month_levels(bars)
         self.assertEqual([(lvl.price, lvl.valid_from_ms, lvl.valid_to_ms) for lvl in bar_levels],
                          [(100 * S + 31 * 1440 - 1, feb, mar), (100 * S, feb, mar)])
+
+
+def day_candles(start, highs, invalid=(), closes=None):
+    count = len(highs)
+    closes = closes or [105] * count
+    col = lambda values: array("q", (MISSING if j in invalid else int(v * S)  # noqa: E731
+                                     for j, v in enumerate(values)))
+    return candles_from_daily(DailySeries("ETHUSDT", start, count, open=col(closes), high=col(highs),
+                                          low=col([100] * count), close=col(closes),
+                                          volume=array("q", [S] * count), taker_buy_volume=array("q", [S] * count)),
+                              1440)
+
+
+class OpenTimeRuleTests(unittest.TestCase):
+    """Regression: a period level is never tested against the candle that formed it."""
+
+    def test_last_4h_candle_of_a_day_sees_the_previous_day(self):
+        def row(spike):
+            count = 24  # four days of 4h candles; the last one is 20:00-24:00 of day 3
+            o, h, l, c = [105 * S] * count, [110 * S] * count, [100 * S] * count, [105 * S] * count
+            h[23], c[23] = int(spike * S), 106 * S
+            candles = series(240, START, o, h, l, c)
+            levels = []
+            for day in range(4):  # what prev_period_levels yields: known at the day's end, valid the next day
+                hi = max(h[6 * day:6 * day + 6]) / S
+                start = START + (day + 1) * DAY_MS
+                levels += [level("prev_day", "high", hi, start, start + DAY_MS),
+                           level("prev_day", "low", 100, start, start + DAY_MS)]
+            return rows(context(candles, {"prev_day": levels}))[23]
+
+        first = row(125)
+        self.assertAlmostEqual(first["dist_up_prev_day_atr"], 0.4)  # day 2's high 110, not day 3's 125
+        self.assertAlmostEqual(first["dist_dn_prev_day_atr"], 0.6)
+        self.assertEqual(row(140)["dist_up_prev_day_atr"], first["dist_up_prev_day_atr"])
+
+    def daily_row(self, start, count, index):
+        def at(spike):
+            highs = [110] * count
+            highs[index] = spike
+            days = day_candles(start, highs)
+            levels = {"prev_week": lv.prev_period_levels_daily(days, "week"),
+                      "prev_month": lv.prev_period_levels_daily(days, "month")}
+            return rows(context(days, levels))[index]
+        return at(130), at(160)
+
+    def test_sunday_daily_row_sees_the_previous_week(self):
+        first, second = self.daily_row(START, 28, 20)  # day 20 = Sunday of the third week
+        self.assertAlmostEqual(first["dist_up_prev_week_atr"], 0.5)  # week 2's high 110
+        self.assertEqual(first["dist_up_prev_week_atr"], second["dist_up_prev_week_atr"])
+
+    def test_month_end_daily_row_sees_the_previous_month(self):
+        december = data_lake.month_bounds_ms("2023-12")[0]
+        first, second = self.daily_row(december, 31 + 31 + 1, 61)  # 2024-01-31
+        self.assertAlmostEqual(first["dist_up_prev_month_atr"], 0.5)  # December's high 110
+        self.assertEqual(first["dist_up_prev_month_atr"], second["dist_up_prev_month_atr"])
+
+
+class DailySourcedLevelTests(unittest.TestCase):
+    december = data_lake.month_bounds_ms("2023-12")[0]
+
+    def test_first_table_month_has_prev_month_from_dk1(self):
+        days = day_candles(self.december, [120] * 31 + [110] * 5)
+        candles = flat(16)
+        shared = loc.shared_levels(days=days)
+        self.assertNotIn("prev_week@daily", shared)
+        levels = loc.context_levels(15, candles, shared)
+        row = rows(context(candles, levels))[15]
+        self.assertAlmostEqual(row["dist_up_prev_month_atr"], 1.5)  # December's high 120
+        self.assertIsNotNone(row["dist_up_prev_week_atr"])  # week of 2023-12-25 (complete in dk1)
+
+    def test_incomplete_or_invalid_periods_make_no_level(self):
+        invalid = day_candles(self.december, [120] * 31 + [110] * 32, invalid={10})
+        self.assertEqual([x.valid_from_ms for x in lv.prev_period_levels_daily(invalid, "month")],
+                         [data_lake.month_bounds_ms("2024-02")[0]] * 2)  # December dropped, January kept
+        late = day_candles(self.december + 4 * DAY_MS, [120] * 27 + [110] * 5)  # starts 2023-12-05
+        self.assertEqual(lv.prev_period_levels_daily(late, "month"), [])
+        weeks = [x.valid_from_ms for x in lv.prev_period_levels_daily(invalid, "week")]
+        self.assertIn(self.december + 10 * DAY_MS, weeks)  # Dec 4-10 is complete and valid
+        self.assertNotIn(self.december + 17 * DAY_MS, weeks)  # Dec 11-17 holds the invalid day 10
+
+
+class AthTests(unittest.TestCase):
+    def test_intraday_rows_are_seeded_by_dk1(self):
+        history = day_candles(START - 10 * DAY_MS, [110] * 3 + [200] + [110] * 6)
+        candles = flat(16)
+        ctx = ct.TableContext(candles.symbol, 15, candles, [0.01] * 16, "test", ct.table_segments(15), None,
+                              history_days=history)
+        row = rows(ctx)[15]
+        self.assertAlmostEqual(row["dist_ath_atr"], 9.5)  # (200 - 105) / 10
+        self.assertIs(row["new_ath_in_candle"], False)
+
+    def test_spike_inside_the_current_day_counts_from_its_own_candle(self):
+        history = day_candles(START - 2 * DAY_MS, [150, 150, 999])  # day 3 = the current day: not used
+        candles = flat(16, [(105, 160, 104, 106), (105, 110, 100, 105)])
+        ath, _, before, _ = loc.running_extremes(candles, history)
+        self.assertEqual((ath[15], ath[16], ath[17]), (150 * S, 160 * S, 160 * S))
+        self.assertEqual((before[16], before[17]), (150 * S, 160 * S))
+        table = rows(ct.TableContext(
+            candles.symbol, 15, candles, [0.01] * 18, "test", ct.table_segments(15), None, history_days=history))
+        self.assertEqual((table[16]["new_ath_in_candle"], table[17]["new_ath_in_candle"]), (True, False))
+        self.assertAlmostEqual(table[15]["dist_ath_atr"], 4.5)
+
+    def test_weekly_row_uses_days_of_its_own_week(self):
+        highs = [110] * 14
+        highs[9] = 300
+        days = day_candles(START, highs)
+        weeks = candles_from_daily(DailySeries("ETHUSDT", START, 14, *(array("q", [105 * S] * 14),) * 4,
+                                               array("q", [S] * 14), array("q", [S] * 14)), 10080)
+        ath, _, before, _ = loc.running_extremes(weeks, days)
+        self.assertEqual((ath[0], ath[1], before[1]), (110 * S, 300 * S, 110 * S))
+
+    def test_no_seed_keeps_series_only_extremes(self):
+        candles = flat(3, [(105, 120, 90, 105)])
+        ath, atl, before, low_before = loc.running_extremes(candles)
+        self.assertEqual(ath, [110 * S] * 3 + [120 * S])
+        self.assertEqual(before, [None, 110 * S, 110 * S, 110 * S])
+        self.assertEqual((atl[3], low_before[3]), (90 * S, 100 * S))
 
 
 class SweepTests(unittest.TestCase):
@@ -190,12 +310,14 @@ class HtfTests(unittest.TestCase):
         before = rows(context(flat15, htf={240: self.four_hour()}))
         after = rows(context(flat15, htf={240: self.four_hour(jump=k)}))
         forming = 16 * (k + 1) - 2  # decides 15 minutes before 4h candle k closes
-        closed = 16 * (k + 1) - 1   # decides exactly at its close
+        closed = 16 * (k + 1) - 1   # decides exactly at its close, but opened while k was forming
+        following = closed + 1      # opens at k's close
         self.assertEqual(flat15.end_ms[closed], self.four_hour().end_ms[k])
         names = [n for n in COLUMNS if n.endswith("_4h") or "_4h_" in n]
         self.assertEqual(len(names), 4)
-        self.assertEqual({n: before[forming][n] for n in names}, {n: after[forming][n] for n in names})
-        self.assertNotEqual(before[closed]["extension_4h_atr"], after[closed]["extension_4h_atr"])
+        for row in (forming, closed):
+            self.assertEqual({n: before[row][n] for n in names}, {n: after[row][n] for n in names})
+        self.assertNotEqual(before[following]["extension_4h_atr"], after[following]["extension_4h_atr"])
         state = loc.htf_state(self.four_hour())
         ind = state.ind[k - 1]
         self.assertEqual(before[forming]["trend_dir_4h"], 1)

@@ -116,7 +116,7 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
                 contexts[minutes] = ct.intraday_context(
                     symbol, minutes, bars, candles[minutes], variance, regime, through,
                     levels=loc.context_levels(minutes, candles[minutes], shared),
-                    htf=loc.htf_sources(minutes, candles, days, weeks))
+                    htf=loc.htf_sources(minutes, candles, days, weeks), history_days=days)
             del candles, shared
         daily_tfs = [m for m in timeframes if m in ct.DAILY_TIMEFRAMES]
         if daily_tfs:

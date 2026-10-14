@@ -50,6 +50,8 @@ This study supersedes it.
 - **Outcomes:** they read candles `i + 1 .. i + m` only. The window must be price-valid and
   end inside the segment that contains the decision time. The exit is the close of `i + m`,
   never the next open, which for the last segment would read the hidden stretch.
+  m-candle quantities (`ret_m_sigma`, `mfe/mae_long_m_sigma`) are in one-candle sigma units;
+  divide by `sqrt(m)` to compare across m. Likewise `ret3_prev_sigma` is not divided by `sqrt(3)`.
 - **Regime:** the join takes the regime-v1 row of the UTC day containing the decision time.
   A decision at midnight takes the new day, whose labels use closes through the previous day.
 - **Empty means unavailable.** Nothing is forward-filled. Geometry ratios and doji/size flags
@@ -100,7 +102,8 @@ swing_tf, swing4h, swing1d, swing1w. `LEVEL_SETS` and the level study are unchan
 | Set | Source |
 |---|---|
 | round | per-symbol grid (`ROUND_SPACING`) |
-| prev_day, prev_week, prev_month | high/low of the previous complete, fully valid period, valid during the next one. Intraday rows use the 1m bars; daily/weekly rows use the dk1 daily candles. Weeks start Monday. |
+| prev_day | high/low of the previous complete, fully valid UTC day (1m bars), valid during the next day |
+| prev_week, prev_month | high/low of the previous complete, fully valid Monday week / calendar month from the dk1 daily candles, valid during the next period; the same lists serve intraday, daily and weekly rows (so the first table month already has a prev_month) |
 | swing_tf | fractal on the row's own timeframe, n = 5, valid 7/30/90/180/365 days for 15m/1h/4h/1d/1w |
 | swing4h | the level study's 4h swings (intraday rows only) |
 | swing1d | daily candles, n = 5, valid 180 d |
@@ -114,8 +117,11 @@ swing1d and swing1w come from dk1, so they exist for every row, intraday include
   these would be (or contain) the row's own candle.
 - swing4h on daily and weekly rows.
 
-**Usability.** A level is usable iff `valid_from_ms <= decision_ms < valid_to_ms`. A swing is
-known `n` candles after its candle, so a candle is never its own swing.
+**Usability.** A level is usable for candle i iff it was valid when the candle opened:
+`valid_from_ms <= open_ms(i) < valid_to_ms`. A period level therefore never contains the
+candle's own high/low (the last 4h candle of day D sees day D-1's prev_day, not D's). A swing
+is known `n` candles after its candle, so a candle is never its own swing. The candle's own
+high, low, close and `atr_prev` are still used to measure distances and touches.
 
 **Per-set columns.** With `atr = atr_prev`:
 
@@ -133,14 +139,19 @@ known `n` candles after its candle, so a candle is never its own swing.
 - `level_count_near`: distinct prices within 0.5 atr of close.
 - `touch_approach_side`: the approach side of the nearest touched level of any set.
 
-**ATH/ATL.** `dist_ath_atr`, `dist_atl_atr` and `new_ath_in_candle` use running extremes since
-the series start. Daily/weekly rows see dk1 history from 2020. **Limitation:** intraday
-series start in 2024-01, so intraday "all-time" extremes mean extremes since 2024-01.
+**ATH/ATL.** `dist_ath_atr`, `dist_atl_atr` and `new_ath_in_candle` use the highest high /
+lowest low since 2020-01-01 (the start of the dk1 history), which is not necessarily the
+all-time extreme. Intraday rows combine the valid dk1 days that end at or before the UTC day
+start of the candle's open with the valid intraday candles of that day through candle i.
+Daily and weekly rows use the valid dk1 days that start before the candle's end (so a weekly
+row includes the days of its own week). `new_ath_in_candle` compares `high_i` with the
+extreme strictly before candle i. Invalid days and candles are skipped.
 
 ### Sweep (sweep-v1)
 
-**References.** prior20 (max high / min low of candles i-20..i-1, all valid), plus the usable
-swing_tf, prev_day, prev_week and prev_month levels. Applicability follows the location rules.
+**References.** prior20 (max high / min low of candles i-20..i-1, all valid), plus the
+swing_tf, prev_day, prev_week and prev_month levels that were valid when the candle opened.
+Applicability follows the location rules.
 
 **Rules:**
 
@@ -166,8 +177,9 @@ swing_tf, prev_day, prev_week and prev_month levels. Applicability follows the l
 
 1h and 4h come from the 1m bars; 1d and 1w come from dk1.
 
-Each row uses the **last higher candle that closed at or before `decision_ms`**, never one
-still forming. Its state is taken through its own close, using
+Each row uses the **last higher candle that closed at or before the row candle's open**,
+so the higher state never includes the row's own candle (a 15m candle deciding exactly at a
+4h close does not see that 4h candle; the next 15m row does). Its state is taken through its own close, using
 `CandleFeatureHistory.indicators` (inclusive):
 
 - `trend_dir_H`: sign(EMA20 - EMA50).

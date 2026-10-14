@@ -1,7 +1,9 @@
 """candle-table-v1 groups location (loc-v1), sweep (sweep-v1) and htf (htf-v1); see docs/pattern-study.md.
 
-Levels come from ``benchmark/levels.py`` (``PATTERN_LEVEL_SETS``). A level is usable for a row iff
-``valid_from_ms <= decision_ms < valid_to_ms``; a swing is known only ``n`` candles after its
+Levels come from ``benchmark/levels.py`` (``PATTERN_LEVEL_SETS``). A level is usable for candle i iff
+it was valid when the candle opened: ``valid_from_ms <= open_ms(i) < valid_to_ms``, so a period
+level never contains the candle's own high/low. Higher-timeframe state likewise comes from the
+last higher candle closed at or before the row candle's open. A swing is known only ``n`` candles after its
 candle, so a candle is never its own swing. All distances are in ``atr_prev`` units (Wilder
 ATR14 through candle i-1). This module reads a ``TableContext`` (duck-typed; no import of
 candle_table) and is wired in by ``candle_table``.
@@ -15,6 +17,7 @@ from .. import data_lake
 from ..benchmark import levels as lv
 from ..benchmark.bars import BarSeries
 from ..benchmark.candles import CandleSeries
+from ..daily_lake import DAY_MS
 from .features import CandleFeatureHistory
 
 SCALE = 10 ** data_lake.SCALE_DIGITS
@@ -42,7 +45,8 @@ _HTF_PARAMS = dict(atr_period=14, adx_period=14, ema_fast_period=20, ema_slow_pe
 
 
 class LevelIndex:
-    """Levels of one set, answered for non-decreasing decision times with a sweep cursor
+    """Levels of one set usable at ``known_ms`` (the row candle's open: a level is usable for candle i
+    iff it was valid when the candle opened), answered for non-decreasing times with a sweep cursor
     (an earlier time restarts the sweep, so answers depend only on the time asked)."""
 
     def __init__(self, levels):
@@ -50,14 +54,14 @@ class LevelIndex:
         self._starts = [level.valid_from_ms for level in self.levels]
         self._time, self._next, self._active = None, 0, []
 
-    def usable(self, decision_ms: int) -> list:
-        if self._time is None or decision_ms < self._time:
+    def usable(self, known_ms: int) -> list:
+        if self._time is None or known_ms < self._time:
             self._next, self._active = 0, []
-        stop = bisect_right(self._starts, decision_ms)
+        stop = bisect_right(self._starts, known_ms)
         self._active.extend(self.levels[self._next:stop])
         self._next = max(self._next, stop)
-        self._active = [level for level in self._active if level.valid_to_ms > decision_ms]
-        self._time = decision_ms
+        self._active = [level for level in self._active if level.valid_to_ms > known_ms]
+        self._time = known_ms
         return self._active
 
 
@@ -72,10 +76,10 @@ def htf_state(candles: CandleSeries) -> HtfState:
     return HtfState(candles, [history.indicators(k) for k in range(len(candles))])
 
 
-def last_closed_index(candles: CandleSeries, decision_ms: int) -> int | None:
-    """Index of the last candle with ``end_ms <= decision_ms`` (never one still forming), else None."""
+def last_closed_index(candles: CandleSeries, at_ms: int) -> int | None:
+    """Index of the last candle with ``end_ms <= at_ms`` (never one still forming), else None."""
     step = candles.minutes * MINUTE
-    k = (decision_ms - candles.start_ms) // step - 1
+    k = (at_ms - candles.start_ms) // step - 1
     return k if 0 <= k < len(candles) else None
 
 
@@ -83,19 +87,21 @@ def shared_levels(*, bars: BarSeries | None = None, days: CandleSeries | None = 
                   weeks: CandleSeries | None = None, candles_240: CandleSeries | None = None) -> dict:
     """Level sets of one symbol that do not depend on the row's timeframe.
 
-    ``bars`` gives intraday prev_day / prev_week / prev_month (keys without suffix);
-    ``days`` gives prev_week / prev_month for daily and weekly rows (keys ``*@daily``)."""
+    prev_day comes from the 1m ``bars``. prev_week / prev_month come from the dk1 ``days`` when given
+    (complete, fully valid Monday weeks / calendar months; the same lists serve intraday, daily and
+    weekly rows), else from ``bars``."""
     out = {}
     if bars is not None:
         out["prev_day"] = lv.prev_period_levels(bars, "day")
-        out["prev_week"] = lv.prev_period_levels(bars, "week")
-        out["prev_month"] = lv.prev_month_levels(bars)
+        if days is None:
+            out["prev_week"] = lv.prev_period_levels(bars, "week")
+            out["prev_month"] = lv.prev_month_levels(bars)
     if candles_240 is not None:
         out["swing4h"] = lv.swing_levels(candles_240)
     if days is not None:
         out["swing1d"] = lv.pattern_swing_levels(days, "swing1d")
-        out["prev_week@daily"] = lv.prev_period_levels_daily(days, "week")
-        out["prev_month@daily"] = lv.prev_period_levels_daily(days, "month")
+        out["prev_week"] = lv.prev_period_levels_daily(days, "week")
+        out["prev_month"] = lv.prev_period_levels_daily(days, "month")
     if weeks is not None:
         out["swing1w"] = lv.pattern_swing_levels(weeks, "swing1w")
     return out
@@ -103,14 +109,10 @@ def shared_levels(*, bars: BarSeries | None = None, days: CandleSeries | None = 
 
 def context_levels(minutes: int, candles: CandleSeries, shared: dict) -> dict:
     """The applicable non-round sets of a row timeframe (round levels are computed per row)."""
-    daily = minutes not in (15, 60, 240)
     out = {"swing_tf": lv.pattern_swing_levels(candles, "swing_tf")}
     for name in LOCATION_SETS[minutes]:
-        if name in ("round", "swing_tf"):
-            continue
-        key = f"{name}@daily" if daily and name in ("prev_week", "prev_month") else name
-        if key in shared:
-            out[name] = shared[key]
+        if name not in ("round", "swing_tf") and name in shared:
+            out[name] = shared[name]
     return out
 
 
@@ -125,23 +127,74 @@ def htf_sources(minutes: int, intraday_candles: dict, days: CandleSeries | None,
     return out
 
 
-def running_extremes(candles: CandleSeries) -> tuple[list, list]:
-    """(highest high, lowest low) of the valid candles 0..j inclusive; None before the first valid one."""
-    ath, atl, hi, lo = [], [], None, None
-    for j in range(len(candles)):
+def _max(a, b):
+    return b if a is None else a if b is None else max(a, b)
+
+
+def _min(a, b):
+    return b if a is None else a if b is None else min(a, b)
+
+
+def _day_prefix(days: CandleSeries) -> tuple[list, list]:
+    """hi[n], lo[n]: extremes of the valid dk1 days 0..n-1 (None while there is none)."""
+    hi, lo = [None], [None]
+    for d in range(len(days)):
+        ok = days.valid[d]
+        hi.append(_max(hi[-1], days.high[d] if ok else None))
+        lo.append(_min(lo[-1], days.low[d] if ok else None))
+    return hi, lo
+
+
+def _days_before(days: CandleSeries, t: int, *, ending: bool) -> int:
+    """Number of leading dk1 days that end at or before t (ending) or start before t (not ending)."""
+    offset = t - days.start_ms
+    n = offset // DAY_MS if ending else -(-offset // DAY_MS)
+    return min(max(n, 0), len(days))
+
+
+def running_extremes(candles: CandleSeries, history_days: CandleSeries | None = None) -> tuple:
+    """(ath, atl, ath_before, atl_before): extremes through candle i and strictly before it.
+
+    Without ``history_days`` the series alone is used. With the dk1 daily candles (since 2020-01-01):
+    intraday rows combine the days ending at or before the UTC day start of the candle's open with
+    the series' valid candles of that day through i; daily/weekly rows use the days that start
+    before end_ms(i) (``*_before``: before open_ms(i)). Invalid days/candles are skipped."""
+    n = len(candles)
+    ath, atl, ath_b, atl_b = [None] * n, [None] * n, [None] * n, [None] * n
+    if history_days is None:
+        hi = lo = None
+        for j in range(n):
+            ath_b[j], atl_b[j] = hi, lo
+            if candles.valid[j]:
+                hi, lo = _max(hi, candles.high[j]), _min(lo, candles.low[j])
+            ath[j], atl[j] = hi, lo
+        return ath, atl, ath_b, atl_b
+    pre_hi, pre_lo = _day_prefix(history_days)
+    if candles.minutes in (1440, 10080):
+        for j in range(n):
+            k = _days_before(history_days, candles.end_ms[j], ending=False)
+            kb = _days_before(history_days, candles.open_ms(j), ending=False)
+            ath[j], atl[j], ath_b[j], atl_b[j] = pre_hi[k], pre_lo[k], pre_hi[kb], pre_lo[kb]
+        return ath, atl, ath_b, atl_b
+    day, day_hi, day_lo = None, None, None
+    for j in range(n):
+        start = candles.open_ms(j) // DAY_MS * DAY_MS
+        if start != day:
+            day, day_hi, day_lo = start, None, None
+        k = _days_before(history_days, start, ending=True)
+        ath_b[j], atl_b[j] = _max(pre_hi[k], day_hi), _min(pre_lo[k], day_lo)
         if candles.valid[j]:
-            hi = candles.high[j] if hi is None else max(hi, candles.high[j])
-            lo = candles.low[j] if lo is None else min(lo, candles.low[j])
-        ath.append(hi)
-        atl.append(lo)
-    return ath, atl
+            day_hi, day_lo = _max(day_hi, candles.high[j]), _min(day_lo, candles.low[j])
+        ath[j], atl[j] = _max(pre_hi[k], day_hi), _min(pre_lo[k], day_lo)
+    return ath, atl, ath_b, atl_b
 
 
 def prepare(ctx) -> None:
     """Attach the indexes the three groups read (called by TableContext.__post_init__)."""
     ctx.level_index = {name: LevelIndex(levels) for name, levels in ctx.levels.items()}
     ctx.htf_state = {higher: htf_state(candles) for higher, candles in ctx.htf.items()}
-    ctx.ath, ctx.atl = running_extremes(ctx.candles)
+    ctx.ath, ctx.atl, ctx.ath_before, ctx.atl_before = running_extremes(
+        ctx.candles, getattr(ctx, "history_days", None))
 
 
 # ---------------------------------------------------------------- per-row helpers
@@ -155,14 +208,14 @@ def _round_prices(symbol: str, close: int, lo: float, hi: float) -> list:
     return [m * spacing for m in range(first, last + 1) if m * spacing > 0]
 
 
-def _set_prices(ctx, name: str, decision: int, close: int, lo: float, hi: float):
+def _set_prices(ctx, name: str, known_ms: int, close: int, lo: float, hi: float):
     """Usable (price, side) pairs of a set, or None when the set's source is unavailable."""
     if name == "round":
         return [(price, "grid") for price in _round_prices(ctx.symbol, close, lo, hi)]
     index = ctx.level_index.get(name)
     if index is None:
         return None
-    return [(level.price, level.side_hint) for level in index.usable(decision)]
+    return [(level.price, level.side_hint) for level in index.usable(known_ms)]
 
 
 def _side(previous_close, price: int):
@@ -182,7 +235,7 @@ def location(ctx, i: int) -> dict:
     atr = ctx.ind[i - 1]["atr"] if i else None
     out = {}
     close, high, low = c.close[i], c.high[i], c.low[i]
-    ath, previous_ath, atl = ctx.ath[i], ctx.ath[i - 1] if i else None, ctx.atl[i]
+    ath, previous_ath, atl = ctx.ath[i], ctx.ath_before[i], ctx.atl[i]
     out["new_ath_in_candle"] = None if previous_ath is None else high > previous_ath
     if not atr or atr <= 0:
         out.update(dict.fromkeys(names))
@@ -195,13 +248,13 @@ def location(ctx, i: int) -> dict:
     previous_close = c.close[i - 1] if i and c.valid[i - 1] else None
     lo, hi = low - TOUCH_BAND_ATR * unit, high + TOUCH_BAND_ATR * unit
     near_lo, near_hi = close - NEAR_BAND_ATR * unit, close + NEAR_BAND_ATR * unit
-    decision = c.end_ms[i]
+    known_ms = c.open_ms(i)  # levels valid when the candle opened
     nearest = touched_best = None  # (distance, set rank, price, name)
     near_prices, any_touch, sets_seen = set(), False, 0
     for rank, name in enumerate(SET_ORDER):
         if name not in applicable:
             continue
-        pairs = _set_prices(ctx, name, decision, close, min(lo, near_lo), max(hi, near_hi))
+        pairs = _set_prices(ctx, name, known_ms, close, min(lo, near_lo), max(hi, near_hi))
         if pairs is None:
             out.update({f"dist_up_{name}_atr": None, f"dist_dn_{name}_atr": None, f"touch_{name}": None})
             continue
@@ -250,7 +303,7 @@ def sweep(ctx, i: int) -> dict:
         out.update(sweep_any_up=None, sweep_any_dn=None, sweep_both=None, sweep_dir=None)
         return out
     unit = atr * SCALE
-    high, low, close, decision = c.high[i], c.low[i], c.close[i], c.end_ms[i]
+    high, low, close, known_ms = c.high[i], c.low[i], c.close[i], c.open_ms(i)
     out, depths, seen = {}, [], 0
     for ref in refs:
         if ref == "prior20":
@@ -263,7 +316,7 @@ def sweep(ctx, i: int) -> dict:
             if index is None:
                 out[f"sweep_up_{ref}"] = out[f"sweep_dn_{ref}"] = None
                 continue
-            usable = index.usable(decision)
+            usable = index.usable(known_ms)
             highs = [level.price for level in usable if level.side_hint == "high"]
             lows = [level.price for level in usable if level.side_hint == "low"]
         seen += 1
@@ -288,12 +341,12 @@ def sweep(ctx, i: int) -> dict:
 
 def htf(ctx, i: int) -> dict:
     out = {}
-    decision = ctx.candles.end_ms[i]
+    known_ms = ctx.candles.open_ms(i)  # never the row's own candle
     for higher in HTF_MAP[ctx.minutes]:
         label = HTF_LABEL[higher]
         names = (f"trend_dir_{label}", f"adx_{label}", f"extension_{label}_atr", f"ema_gap_{label}_atr")
         state = ctx.htf_state.get(higher)
-        k = last_closed_index(state.candles, decision) if state is not None else None
+        k = last_closed_index(state.candles, known_ms) if state is not None else None
         if k is None or not state.candles.valid[k]:
             out.update(dict.fromkeys(names))
             continue
@@ -326,9 +379,10 @@ LOCATION_COLUMNS = tuple(
     ("nearest_set", "set of that level (ties: round, prev_day, prev_week, prev_month, swing_tf, swing4h, ...)"),
     ("level_count_near", "distinct usable levels within 0.5 atr_prev of close"),
     ("touch_approach_side", "approach side of the nearest touched level of any set"),
-    ("dist_ath_atr", "(highest high since the series start, through i - close) / atr_prev"),
-    ("dist_atl_atr", "(close - lowest low since the series start, through i) / atr_prev"),
-    ("new_ath_in_candle", "high_i above every earlier high of the series"),
+    ("dist_ath_atr", "(highest high since 2020-01-01 (dk1 start, not necessarily all-time), through i - close) "
+                     "/ atr_prev"),
+    ("dist_atl_atr", "(close - lowest low since 2020-01-01 (dk1 start), through i) / atr_prev"),
+    ("new_ath_in_candle", "high_i above the highest high since 2020-01-01 before candle i"),
 )
 SWEEP_COLUMNS = tuple(
     item for ref in SWEEP_REFS for item in (
@@ -340,10 +394,11 @@ SWEEP_COLUMNS = tuple(
     ("sweep_dir", "-1 swept up only, +1 swept down only, 0 both or none"),
     ("sweep_depth_atr", "largest piercing depth / atr_prev (empty when nothing was swept)"),
 )
+_AT_OPEN = " at or before the row candle's open"
 HTF_COLUMNS = tuple(
     item for higher in (60, 240, 1440, 10080) for label in (HTF_LABEL[higher],) for item in (
-        (f"trend_dir_{label}", f"sign(EMA20 - EMA50) of the last closed {label} candle, through its close"),
-        (f"adx_{label}", f"ADX14 of the last closed {label} candle"),
-        (f"extension_{label}_atr", f"(close - EMA20) / ATR14 of the last closed {label} candle"),
-        (f"ema_gap_{label}_atr", f"(EMA20 - EMA50) / ATR14 of the last closed {label} candle"),
+        (f"trend_dir_{label}", f"sign(EMA20 - EMA50) of the last closed {label} candle{_AT_OPEN}, through its close"),
+        (f"adx_{label}", f"ADX14 of the last closed {label} candle{_AT_OPEN}"),
+        (f"extension_{label}_atr", f"(close - EMA20) / ATR14 of the last closed {label} candle{_AT_OPEN}"),
+        (f"ema_gap_{label}_atr", f"(EMA20 - EMA50) / ATR14 of the last closed {label} candle{_AT_OPEN}"),
     ))
