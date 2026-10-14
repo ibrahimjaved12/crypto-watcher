@@ -43,9 +43,13 @@ that until the tool proves it makes money.
   stop, partial exits, invalidation, expiry.
 - Predictions come in many forms (level hits, next-candle/trend direction, pattern
   completions). All are "strategies" and should be combinable in one analysis.
-- **Success = a profitable trade after costs.** Price eventually touching a target is not
-  success if the stop (or liquidation) came first. Any metric that ignores the stop is
-  misleading. Beware benchmarks any naive strategy would pass (ranging coins revisit prices).
+- **Success as a profitability verdict = a profitable trade after costs.** Price eventually
+  touching a target is not success if the stop (or liquidation) came first. A metric that
+  ignores the stop is misleading as a profitability claim.
+- Always report beside it, never instead of it: (a) direction accuracy at the signal's
+  horizon vs the unconditional base rate, (b) gross (before-cost) barrier results across
+  the stop/target grid, (c) MFE/MAE distributions. These answer "does the signal predict"
+  and inform leverage, stop and target choices.
 - A score such as 90/100 is a ranking, not a win probability.
 
 ### Capabilities wanted (all incremental, in parallel)

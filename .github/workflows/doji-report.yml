@@ -1,0 +1,75 @@
+name: Doji report
+run-name: "Doji report ${{ inputs.segment }}"
+
+# All research output and event rows stay in the PRIVATE research-data repo.
+# Public logs/summaries contain metadata, counts and private report paths only.
+on:
+  workflow_dispatch:
+    inputs:
+      segment:
+        description: "development | validation (never pooled; hidden is refused)"
+        type: choice
+        options: [development, validation]
+        default: development
+      symbols:
+        description: "Comma-separated subset of the six frozen benchmark symbols"
+        type: string
+        default: "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT"
+      horizons:
+        description: "Comma-separated subset of 15,60,240 minutes"
+        type: string
+        default: "15,60,240"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Both segments append to the same private experiment ledger: one writer.
+  group: doji-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Doji report
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            python/requirements.txt
+            python/requirements-research.txt
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+          .venv/bin/python -m pip install -r requirements-research.txt
+      - name: Generate private doji report and merge experiment log
+        env:
+          SEGMENT: ${{ inputs.segment }}
+          SYMBOLS: ${{ inputs.symbols }}
+          HORIZONS: ${{ inputs.horizons }}
+          REPORT_SUMMARY: ${{ runner.temp }}/doji-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: |
+          python/.venv/bin/python scripts/research/doji_report.py --workdir doji-report-work \
+            --summary "$REPORT_SUMMARY" --segment "$SEGMENT" --symbols "$SYMBOLS" --horizons "$HORIZONS"
+      - name: Delete working files
+        if: always()
+        run: rm -rf doji-report-work
+      - name: Public metadata and counts
+        if: always()
+        env:
+          REPORT_SUMMARY: ${{ runner.temp }}/doji-summary.md
+        run: |
+          if [ -f "$REPORT_SUMMARY" ]; then
+            cat "$REPORT_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi

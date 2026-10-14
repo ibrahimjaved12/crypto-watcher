@@ -153,10 +153,15 @@ events. AI is not required to create or manage these setups.
 
 ## Outcome evaluation
 
-Success is a **profitable trade after costs on the stop-aware path**. Price eventually
-touching a target is not a success when the stop (or liquidation) came first, and any
-metric that ignores the stop is misleading. Outcomes use the benchmark label rules, so
-the app and the benchmark cannot disagree:
+Success as a profitability verdict is a **profitable trade after costs on the stop-aware
+path**. Price eventually touching a target is not success if the stop (or liquidation)
+came first. A metric that ignores the stop is misleading as a profitability claim.
+
+Always report beside it, never instead of it: (a) direction accuracy at the signal's
+horizon vs the unconditional base rate, (b) gross (before-cost) barrier results across
+the stop/target grid, (c) MFE/MAE distributions. These answer "does the signal predict"
+and inform leverage, stop and target choices. Outcomes use the benchmark label rules,
+so the app and the benchmark cannot disagree:
 
 | Code | Meaning                                                      |
 | ---- | ------------------------------------------------------------ |
@@ -164,21 +169,28 @@ the app and the benchmark cannot disagree:
 | S    | Stop reached first                                           |
 | E    | Time-limit exit (4 x horizon)                                |
 | L    | Liquidation                                                  |
-| X    | Ambiguous: intrabar order of stop and target cannot be known |
+| X    | Unmeasured outcome because required path/funding data is compromised |
 
 - Results are in **R units** (multiples of the risk at the stop), gross and net of
   costs, at 1x and 2x cost.
-- Ambiguity is never resolved optimistically. X is resolved pessimistically for
-  headline numbers and always reported as its own share. Prefer finer trade or
-  aggregate-trade data when ordering matters, and record the data resolution.
+- Ambiguity is never resolved optimistically. Intrabar stop/target ties retain the
+  label engine's pessimistic cell plus an ambiguity flag. X has no measured R:
+  count it as a loss in headline hit rates, exclude it from monetary means and show
+  its share and the measured denominator. Prefer finer trade or aggregate-trade data
+  when ordering matters, and record the data resolution.
 - Non-trade statuses (volatility not ready, compromised data, incomplete window,
   off-tick entry price, never triggered, expired, invalidated, rejected/unexecutable,
   insufficient data) stay separate and are never counted as wins or losses.
 - Hit rate is always shown next to the **barrier base rate**: ranging coins revisit
   prices, so a benchmark any naive strategy passes proves nothing. Always show sample
   sizes and non-trade counts, per direction and per horizon.
-- Fixed-horizon returns, MFE and MAE stay auxiliary research numbers and never replace
-  the trade-path outcome.
+- Direction accuracy uses the sign of side times ln(open[e+h]/open[e]), with e the
+  next minute after the signal and h its horizon. Count ties separately and exclude
+  them from rates. Compare with all completed candles of the same timeframe, symbols
+  and segment, rather than only signals. Report it alongside the trade-path outcome.
+- Always show gross barrier results over the full stop/target grid and MFE/MAE
+  distributions alongside net results. Per-event gross/net verdicts are true for
+  positive R, false for zero or negative R, ambiguous for X; non-trades get no verdict.
 - Aggregate only across compatible strategy and evaluation versions, with the
   denominator and excluded statuses visible.
 

@@ -1,4 +1,4 @@
-"""Closed, epoch-aligned OHLC candles from exact 1-minute bars (#182 slice F).
+"""Closed, epoch-aligned OHLCV candles from exact 1-minute bars (#182 slice F).
 
 A ``minutes``-candle opens at a UTC epoch multiple of ``minutes`` (a 240-minute
 candle opens at 00:00, 04:00, ... UTC) and covers exactly ``minutes`` 1-minute
@@ -6,8 +6,9 @@ bars: open = first minute's open, high = max high, low = min low, close = last
 minute's close. A trailing partial candle is never built: every candle is closed.
 
 A candle is VALID only if none of its minutes has a MISSING price or a
-``COMPROMISED_FLAGS`` bit. Invalid candles keep ``MISSING`` in every price so no
-consumer can mistake them for data; indicators reset on them.
+``COMPROMISED_FLAGS`` bit. Base volume and taker-buy base volume are sums over
+the same complete interval. Invalid candles keep ``MISSING`` in every price and
+quantity, never a partial sum; indicators reset on them.
 
 ``end_ms[i]`` (open time + minutes) is the end of the candle's last 1-minute bar,
 which is exactly a label-grid decision time for the horizon equal to the candle
@@ -33,6 +34,10 @@ class CandleSeries:
     low: list
     close: list
     valid: list
+    # Price-only callers remain compatible; absent quantities are unavailable,
+    # never fabricated zero volume. build_candles always supplies both columns.
+    volume: list = field(default_factory=list)
+    taker_buy_volume: list = field(default_factory=list)
     end_ms: list = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -42,13 +47,16 @@ class CandleSeries:
         if type(self.start_ms) is not int or self.start_ms % step:
             raise ValueError(f"start_ms must be a UTC epoch multiple of {self.minutes} minutes")
         count = len(self.valid)
-        for name in ("open", "high", "low", "close", "valid"):
+        for name in ("volume", "taker_buy_volume"):
+            if getattr(self, name) == []:
+                object.__setattr__(self, name, [MISSING] * count)
+        for name in ("open", "high", "low", "close", "valid", "volume", "taker_buy_volume"):
             column = getattr(self, name)
             if type(column) is not list or len(column) != count:
                 raise ValueError(f"column {name} must be a list of {count} values")
         if any(type(value) is not bool for value in self.valid):
             raise ValueError("valid must hold bools")
-        for name in ("open", "high", "low", "close"):
+        for name in ("open", "high", "low", "close", "volume", "taker_buy_volume"):
             if any(type(value) is not int for value in getattr(self, name)):
                 raise ValueError(f"column {name} must hold ints")
         object.__setattr__(self, "end_ms", [self.start_ms + (i + 1) * step for i in range(count)])
@@ -60,7 +68,10 @@ class CandleSeries:
         return self.start_ms + index * self.minutes * data_lake.MINUTE_MS
 
     def column(self, name: str) -> list:
-        """A price column with None for invalid candles (the indicators' input form)."""
+        """A column with None for invalid/unavailable values (the indicators' input form)."""
+        if name in ("volume", "taker_buy_volume"):
+            return [value if ok and value != MISSING else None
+                    for value, ok in zip(getattr(self, name), self.valid)]
         return [value if ok else None for value, ok in zip(getattr(self, name), self.valid)]
 
 
@@ -70,6 +81,7 @@ def build_candles(series: BarSeries, minutes: int) -> CandleSeries:
     if series.start_ms % (minutes * data_lake.MINUTE_MS):
         raise ValueError(f"{series.symbol} bars start at {series.start_ms}, not on a {minutes}-minute epoch boundary")
     columns = {name: [] for name in ("open", "high", "low", "close")}
+    volume, taker_buy_volume = [], []
     valid = []
     for first in range(0, series.minutes - minutes + 1, minutes):
         end = first + minutes
@@ -83,5 +95,8 @@ def build_candles(series: BarSeries, minutes: int) -> CandleSeries:
             values = (MISSING,) * 4
         for name, value in zip(("open", "high", "low", "close"), values):
             columns[name].append(int(value))
+        volume.append(sum(series.volume[first:end]) if ok else MISSING)
+        taker_buy_volume.append(sum(series.taker_buy_volume[first:end]) if ok else MISSING)
         valid.append(ok)
-    return CandleSeries(series.symbol, minutes, series.start_ms, valid=valid, **columns)
+    return CandleSeries(series.symbol, minutes, series.start_ms, valid=valid,
+                        volume=volume, taker_buy_volume=taker_buy_volume, **columns)
