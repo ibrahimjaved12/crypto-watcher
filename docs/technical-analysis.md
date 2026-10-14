@@ -1,5 +1,7 @@
 # Technical analysis
 
+The separate [candle-pattern layer](candle-patterns.md) adds unvalidated doji-v1 benchmark variants while preserving ta-v2 semantics.
+
 The shared Python package is the canonical implementation for manual analysis,
 scheduled completed-candle TA, and chronological replay. TanStack remains the
 scheduler, authorization boundary, market-data adapter, response validator, and

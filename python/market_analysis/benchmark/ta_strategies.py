@@ -1,6 +1,6 @@
-"""Six fixed textbook TA baselines as benchmark StrategySpecs (#182 slice F).
+"""Fixed TA baselines and unvalidated doji-v1 variants as benchmark StrategySpecs.
 
-Evaluated on CLOSED candles only. Every rule is a stateless one-step cross: at
+Evaluated on CLOSED candles only. The six baseline rules are one-step crosses: at
 candle i it compares the published values at i - 1 and i (both must be
 published, so no signal precedes warm-up or straddles an invalid candle). Up
 cross: previous <= level and current > level; down cross mirrored. A signal at
@@ -9,11 +9,15 @@ to the candle length; entry is the next minute's open (labels-v1), so nothing
 after the decision time is used.
 
 Each (strategy, timeframe) is one StrategySpec, version ``ta-v1``. These are
-reference baselines with textbook parameters, not tuned strategies.
+reference baselines with textbook parameters, not tuned strategies. The two doji
+variants decide at the doji close from prior ATR/ADX/EMAs and current geometry
+and volume; they have no next-candle confirmation or new execution parameters.
 """
 from __future__ import annotations
 
 from .. import data_lake
+from ..patterns.doji import DOJI_PARAMS, read_doji
+from ..patterns.features import CandleFeatureHistory
 from .candles import TIMEFRAMES, CandleSeries
 from .indicators import (SHIFT, atr, bollinger, ema, ema_warmup, macd, rsi, rsi_at_or_above, rsi_at_or_below,
                          wilder_warmup)
@@ -106,6 +110,37 @@ def keltner_breakout(candles: CandleSeries, n_ema: int, n_atr: int, k: int) -> l
     return sides
 
 
+def _doji_sides(candles: CandleSeries, *, reverse: bool) -> list:
+    p = DOJI_PARAMS
+    history = CandleFeatureHistory(
+        candles, atr_period=p.atr_period, adx_period=p.adx_period,
+        ema_fast_period=p.ema_fast_period, ema_slow_period=p.ema_slow_period,
+        lookback=p.lookback,
+    )
+    sides = [0] * len(candles)
+    for index in range(len(candles)):
+        # Reuse prepared ATR/EMA series; call the final-value ADX helper only
+        # for geometric gate candidates, on their entire prior valid prefix.
+        shape = history.at(index, include_adx=False)
+        if (shape.body_ratio is None or shape.range_atr is None
+                or shape.body_ratio > p.body_max or shape.range_atr < p.range_atr_min
+                or shape.rel_volume is None or shape.trend_dir in (None, 0)):
+            continue
+        features = history.at(index)
+        reading = read_doji(features)
+        if reading.status == "ok" and features.adx_prev >= p.adx_min and features.trend_dir != 0:
+            sides[index] = -features.trend_dir if reverse else features.trend_dir
+    return sides
+
+
+def doji_continuation_v1(candles: CandleSeries) -> list:
+    return _doji_sides(candles, reverse=False)
+
+
+def doji_reversal_v1(candles: CandleSeries) -> list:
+    return _doji_sides(candles, reverse=True)
+
+
 # name -> (kind, parameters, rule, first candle index that can carry a signal)
 STRATEGIES = {
     "ema_cross_20_50": ("ema_cross", {"fast": 20, "slow": 50}, ema_cross, ema_warmup(50)),
@@ -116,11 +151,15 @@ STRATEGIES = {
     "bollinger_20_2_reversion": ("bollinger_reversion", {"n": 20, "k": 2}, bollinger_reversion, 20),
     "keltner_breakout_20_14_2": ("keltner_breakout", {"n_ema": 20, "n_atr": 14, "k": 2}, keltner_breakout,
                                  max(ema_warmup(20), wilder_warmup(14))),
+    "doji_continuation_v1": ("doji_continuation", {}, doji_continuation_v1,
+                             max(DOJI_PARAMS.ema_slow_period, 2 * DOJI_PARAMS.adx_period, DOJI_PARAMS.lookback)),
+    "doji_reversal_v1": ("doji_reversal", {}, doji_reversal_v1,
+                         max(DOJI_PARAMS.ema_slow_period, 2 * DOJI_PARAMS.adx_period, DOJI_PARAMS.lookback)),
 }
 
 
 def first_signal_index(name: str) -> int:
-    """Run index of the first candle whose previous and current values are both published."""
+    """Earliest run index whose required indicator inputs have been published."""
     return STRATEGIES[name][3]
 
 
@@ -132,7 +171,11 @@ def strategy_sides(name: str, candles: CandleSeries) -> list:
 
 def strategy_config(name: str, minutes: int) -> dict:
     kind, parameters, _, _ = STRATEGIES[name]
-    return {"kind": kind, **parameters, "timeframe_min": minutes}
+    config = {"kind": kind, **parameters, "timeframe_min": minutes}
+    if name in ("doji_continuation_v1", "doji_reversal_v1"):
+        config.update(pattern_id=DOJI_PARAMS.pattern_id, pattern_version=DOJI_PARAMS.version,
+                      status="unvalidated")
+    return config
 
 
 def make_specs(symbol_candles: dict, name: str, minutes: int, *, first_ms: int, end_ms: int) -> StrategySpec:
@@ -163,6 +206,6 @@ def make_specs(symbol_candles: dict, name: str, minutes: int, *, first_ms: int, 
 
 
 def all_specs(symbol_candles: dict, *, first_ms: int, end_ms: int) -> list:
-    """The 18 baseline specs: six strategies x (15, 60, 240) minutes."""
+    """Eight registered strategies x (15, 60, 240) minutes, including unvalidated variants."""
     return [make_specs(symbol_candles, name, minutes, first_ms=first_ms, end_ms=end_ms)
             for name in STRATEGIES for minutes in TIMEFRAMES]
