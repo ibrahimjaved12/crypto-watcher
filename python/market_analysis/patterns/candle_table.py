@@ -39,6 +39,7 @@ from ..benchmark import regime as regime_v1
 from ..benchmark.segments import daily_segment_bounds_ms, segment_bounds_ms
 from ..benchmark.volatility import BLOCK_MINUTES, VAR_SCALE, build_variance, horizon_sigma
 from ..daily_lake import DAY_MS, load_symbol_daily, load_symbol_funding_range
+from . import candle_location as loc
 from .daily_candles import candles_from_daily
 from .features import CandleFeatureHistory
 
@@ -259,6 +260,9 @@ class TableContext:
     sigma_model: str
     segments: tuple
     regime: RegimeJoin | None = None
+    levels: dict = field(default_factory=dict)  # level set -> [Level] (candle_location.context_levels)
+    htf: dict = field(default_factory=dict)     # higher minutes -> CandleSeries (candle_location.htf_sources)
+    history_days: CandleSeries | None = None    # dk1 1440 candles, only to seed ATH/ATL (candle_location)
     history: CandleFeatureHistory = field(init=False)
     ind: list = field(init=False)         # indicators through candle j (inclusive)
     streak: list = field(init=False)
@@ -267,6 +271,12 @@ class TableContext:
     squeeze: list = field(init=False)
     squeeze_count: list = field(init=False)
     taker_ratio: list = field(init=False)
+    level_index: dict = field(init=False)
+    htf_state: dict = field(init=False)
+    ath: list = field(init=False)
+    atl: list = field(init=False)
+    ath_before: list = field(init=False)
+    atl_before: list = field(init=False)
 
     def __post_init__(self):
         candles = self.candles
@@ -308,6 +318,7 @@ class TableContext:
         window = PCT_WINDOW[self.minutes]
         self.atr_rank = trailing_rank([value["atr"] for value in self.ind], window)
         self.bb_rank = trailing_rank(widths, window)
+        loc.prepare(self)
 
     @property
     def intraday(self) -> bool:
@@ -493,8 +504,9 @@ TREND_VOL_COLUMNS = (
     ("streak_prev", "signed count of same-colour candles ending at i-1 (0 if i-1 is flat)"),
     ("sigma_tf", "one-candle log-return sigma at the end of candle i"),
     ("sigma_model", "ewma-3d-5m-v1 (intraday) or ewma-30d-daily-v1 (daily, weekly)"),
-    ("ret1_prev_sigma", "ln(close_{i-1} / open_{i-1}) / sigma at the end of i-1"),
-    ("ret3_prev_sigma", "ln(close_{i-1} / open_{i-3}) / sigma at the end of i-1"),
+    ("ret1_prev_sigma", "ln(close_{i-1} / open_{i-1}) in units of the one-candle sigma at the end of i-1"),
+    ("ret3_prev_sigma", "ln(close_{i-1} / open_{i-3}) in units of the one-candle sigma at the end of i-1 "
+                        "(ret3 is not divided by sqrt(3))"),
     ("atr_pct_prev", "fraction of the W ATR14 values of candles i-W..i-1 that are <= atr_prev (full window)"),
     ("bb_width_pct_prev", "same percentile of BB(20,2) width = 4 * population std / SMA20, at i-1"),
     ("squeeze_on_prev", "BB(20,2) inside Keltner EMA20 +/- 1.5 * Wilder ATR20 at i-1"),
@@ -520,12 +532,13 @@ CALENDAR_COLUMNS = (
 REGIME_COLUMN_DOCS = tuple((f"rg_{name}", f"regime-v1 {name} of the UTC day containing decision_ms")
                            for name in (*regime_v1.MARKET_COLUMNS, *regime_v1.SYMBOL_COLUMNS))
 REGIME_COLUMNS = tuple(name for name, _ in REGIME_COLUMN_DOCS)
+_M_NOTE = ("", "; m-candle quantities are in one-candle sigma units, divide by sqrt(m) to compare across m")
 OUTCOME_COLUMNS = tuple(
     item for m in FORWARD_CANDLES for item in (
         (f"ret_{m}_bp", f"1e4 * ln(close_(i+{m}) / open_(i+1))"),
-        (f"ret_{m}_sigma", f"ln(close_(i+{m}) / open_(i+1)) / sigma_tf (one-candle sigma)"),
-        (f"mfe_long_{m}_sigma", f"ln(max high of i+1..i+{m} / open_(i+1)) / sigma_tf (short MAE)"),
-        (f"mae_long_{m}_sigma", f"ln(open_(i+1) / min low of i+1..i+{m}) / sigma_tf (short MFE)"),
+        (f"ret_{m}_sigma", f"ln(close_(i+{m}) / open_(i+1)) / sigma_tf (one-candle sigma){_M_NOTE[m > 1]}"),
+        (f"mfe_long_{m}_sigma", f"ln(max high of i+1..i+{m} / open_(i+1)) / sigma_tf (short MAE){_M_NOTE[m > 1]}"),
+        (f"mae_long_{m}_sigma", f"ln(open_(i+1) / min low of i+1..i+{m}) / sigma_tf (short MFE){_M_NOTE[m > 1]}"),
         (f"fwd_ok_{m}", f"window i+1..i+{m} price-valid, inside the decision's segment, sigma present"),
     )) + (
     ("range1_sigma", "ln(high_(i+1) / low_(i+1)) / sigma_tf"),
@@ -535,7 +548,8 @@ OUTCOME_COLUMNS = tuple(
 )
 
 GROUP_VERSIONS = {"keys": "keys-v1", "geometry": "geo-v1", "trend_vol": "tv-v1", "volume": "vol-v1",
-                  "calendar": "cal-v1", "regime": "regime-v1", "outcomes": "fwd-v1"}
+                  "calendar": "cal-v1", "regime": "regime-v1", "location": "loc-v1", "sweep": "sweep-v1",
+                  "htf": "htf-v1", "outcomes": "fwd-v1"}
 FEATURE_GROUPS_FOR_STATUS = ("geometry", "trend_vol", "volume", "calendar", "regime")
 
 
@@ -547,6 +561,9 @@ def default_registry() -> GroupRegistry:
                                      ("volume", VOLUME_COLUMNS, _volume),
                                      ("calendar", CALENDAR_COLUMNS, _calendar),
                                      ("regime", REGIME_COLUMN_DOCS, _regime),
+                                     ("location", loc.LOCATION_COLUMNS, loc.location),
+                                     ("sweep", loc.SWEEP_COLUMNS, loc.sweep),
+                                     ("htf", loc.HTF_COLUMNS, loc.htf),
                                      ("outcomes", OUTCOME_COLUMNS, _outcomes)):
         registry.register(Group(group_id, GROUP_VERSIONS[group_id], columns, build))
     return registry
@@ -686,23 +703,30 @@ def regime_join(daily: dict, btc_funding, through_month: str = LAST_MONTH) -> Re
 def daily_contexts(symbol: str, daily, regime: RegimeJoin | None, timeframes=DAILY_TIMEFRAMES,
                    through_month: str = LAST_MONTH) -> dict:
     days = candles_from_daily(daily, 1440)
+    weeks = candles_from_daily(daily, 10080)
     sigma_days = daily_sigma(days)
+    shared = loc.shared_levels(days=days, weeks=weeks)
     out = {}
     for minutes in timeframes:
         if minutes == 1440:
             candles, sigma = days, sigma_days
         else:
-            candles = candles_from_daily(daily, minutes)
+            candles = weeks
             sigma = weekly_sigma(days, candles, sigma_days)
         out[minutes] = TableContext(symbol, minutes, candles, sigma, DAILY_SIGMA_MODEL,
-                                    table_segments(minutes, through_month), regime)
+                                    table_segments(minutes, through_month), regime,
+                                    levels=loc.context_levels(minutes, candles, shared),
+                                    htf=loc.htf_sources(minutes, {}, days, weeks), history_days=days)
     return out
 
 
 def intraday_context(symbol: str, minutes: int, bars: BarSeries, candles: CandleSeries, variance,
-                     regime: RegimeJoin | None, through_month: str = LAST_MONTH) -> TableContext:
+                     regime: RegimeJoin | None, through_month: str = LAST_MONTH, *, levels: dict | None = None,
+                     htf: dict | None = None, history_days: CandleSeries | None = None) -> TableContext:
+    """``levels``/``htf`` come from candle_location (shared_levels + context_levels, htf_sources)."""
     return TableContext(symbol, minutes, candles, intraday_sigma(bars, candles, variance), INTRADAY_SIGMA_MODEL,
-                        table_segments(minutes, through_month), regime)
+                        table_segments(minutes, through_month), regime, levels=levels or {}, htf=htf or {},
+                        history_days=history_days)
 
 
 HASH_EXCLUDED = ("content_hash", "code_commit", "created_utc")

@@ -33,8 +33,9 @@ from market_analysis.benchmark.candles import build_candles  # noqa: E402
 from market_analysis.benchmark.canonical import canonical_bytes  # noqa: E402
 from market_analysis.benchmark.market_data import load_symbol_bars  # noqa: E402
 from market_analysis.benchmark.volatility import build_variance  # noqa: E402
+from market_analysis.patterns import candle_location as loc  # noqa: E402
 from market_analysis.patterns import candle_table as ct  # noqa: E402
-from market_analysis.patterns.daily_candles import daily_parity  # noqa: E402
+from market_analysis.patterns.daily_candles import candles_from_daily, daily_parity  # noqa: E402
 
 NOW_UTC = xr.NOW_UTC  # the only wall-clock read (at import of experiment_run)
 PublicError, GitError, Checkout, emit, _quiet = xr.PublicError, xr.GitError, xr.Checkout, xr.emit, xr._quiet
@@ -106,9 +107,17 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
         intraday = [m for m in timeframes if m in ct.INTRADAY_TIMEFRAMES]
         if intraday:
             variance = build_variance(bars, ct.INTRADAY_SIGMA_HALF_LIFE_DAYS).variance
+            # 60/240 are always built: higher-timeframe states and the swing4h levels need them.
+            candles = {m: build_candles(bars, m) for m in sorted({*intraday, 60, 240})}
+            days = candles_from_daily(daily[symbol], 1440)
+            weeks = candles_from_daily(daily[symbol], 10080)
+            shared = loc.shared_levels(bars=bars, days=days, weeks=weeks, candles_240=candles[240])
             for minutes in intraday:
-                contexts[minutes] = ct.intraday_context(symbol, minutes, bars, build_candles(bars, minutes),
-                                                        variance, regime, through)
+                contexts[minutes] = ct.intraday_context(
+                    symbol, minutes, bars, candles[minutes], variance, regime, through,
+                    levels=loc.context_levels(minutes, candles[minutes], shared),
+                    htf=loc.htf_sources(minutes, candles, days, weeks), history_days=days)
+            del candles, shared
         daily_tfs = [m for m in timeframes if m in ct.DAILY_TIMEFRAMES]
         if daily_tfs:
             contexts.update(ct.daily_contexts(symbol, daily[symbol], regime, daily_tfs, through))
