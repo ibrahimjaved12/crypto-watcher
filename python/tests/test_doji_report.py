@@ -5,10 +5,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import csv
+import hashlib
+import importlib.util
+import io
+import json
+import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from market_analysis.benchmark import doji_report as dr
+from market_analysis.benchmark import doji_report as dr, experiment_run as er
 from market_analysis.benchmark.bars import COMPROMISED_FLAGS
 from market_analysis.benchmark.candles import CandleSeries
 from market_analysis.benchmark.hidden_guard import HiddenStretchLocked
@@ -28,6 +33,97 @@ def trending_candles(count, direction):
     return CandleSeries("BTCUSDT", 15, START, list(closes), [c + 2 * scale for c in closes],
                         [c - 2 * scale for c in closes], closes, [True] * count,
                         volume=[100 * scale] * count)
+
+
+class ReportScriptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        scripts = Path(__file__).resolve().parents[2] / "scripts" / "research"
+        definition = importlib.util.spec_from_file_location("test_doji_report_script", scripts / "doji_report.py")
+        cls.module = importlib.util.module_from_spec(definition)
+        previous = sys.path[:]
+        try:
+            sys.path.insert(0, str(scripts))
+            definition.loader.exec_module(cls.module)
+        finally:
+            sys.path[:] = previous
+
+    @staticmethod
+    def write_release(root, symbol, months, params):
+        outputs = []
+        for month in months:
+            name = f"labels__{symbol}__{month}.csv.gz"
+            body = b"PRIVATE-SYNTHETIC-LABEL-ROW"
+            (root / name).write_bytes(body)
+            outputs.append({"month": month, "name": name, "sha256": hashlib.sha256(body).hexdigest()})
+        manifest = {"symbol": symbol, "params_identity": params.identity(),
+                    "cost_model_identity": params.cost_model.identity(), "outputs": outputs, "rd_tags": []}
+        (root / er.label_manifest_name(symbol)).write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_revision_three_snapshot_and_report_for_both_segments_and_symbol_subsets(self):
+        module, params = self.module, LabelParams()
+        for segment, symbols, horizons in (("development", ("BTCUSDT",), (60,)),
+                                            ("validation", ("BTCUSDT", "ETHUSDT"), (15, 240))):
+            args = module.parse_args(["--segment", segment, "--symbols", ",".join(symbols),
+                                      "--horizons", ",".join(map(str, horizons)), "--no-record-trials"])
+            directions = {(h, side, str(k)): dr.direction_stats([])
+                          for h in horizons for side in (1, -1) for k in params.k_grid}
+
+            def download(repo, tag, segment, label_dir, symbol):
+                self.assertEqual(tag, f"lb1-{symbol}-2024-01_2026-09-r3")
+                self.write_release(label_dir, symbol, module.cal.check_segment(segment), params)
+
+            with self.subTest(segment=segment), TemporaryDirectory() as directory:
+                root, stream = Path(directory), io.StringIO()
+                checkout = SimpleNamespace(path=root, commit_and_push=Mock())
+                with patch.object(module.audit, "download_labels", side_effect=download), \
+                        patch.object(module.xr, "_download_symbol_bars") as bars, \
+                        patch.object(dr, "collect_symbol", return_value=([], directions, {})) as collect:
+                    module.run(args, checkout, object(), root / "data", module.audit.AuditProgress(stream))
+                self.assertEqual(bars.call_count, len(symbols))
+                self.assertEqual(collect.call_count, len(symbols))
+                self.assertTrue(all(call.args[-1] == params for call in collect.call_args_list))
+                report = json.loads(next(root.glob("reports/doji/*/summary.json")).read_bytes())
+                self.assertEqual(report["label_params_identity"], params.identity())
+                self.assertEqual(report["label_release_tags"],
+                                 sorted(f"lb1-{symbol}-2024-01_2026-09-r3" for symbol in symbols))
+                self.assertEqual(report["data_snapshot_id"], er.data_snapshot(
+                    root / "data" / "labels", module.cal.check_segment(segment), params, symbols=symbols))
+                self.assertLess(stream.getvalue().index("phase=snapshot"),
+                                stream.getvalue().index("phase=bars_download"))
+                checkout.commit_and_push.assert_called_once()
+
+    def test_invalid_snapshot_fails_before_bars_collection_or_push_with_safe_error(self):
+        module = self.module
+        args = module.parse_args(["--segment", "development", "--symbols", "BTCUSDT", "--horizons", "60"])
+        for failure in ("legacy-grid", "cost-model", "checksum"):
+            def download(repo, tag, segment, label_dir, symbol):
+                params = LabelParams()
+                if failure == "legacy-grid":
+                    params = replace(params, step_minutes=((15, 5), (60, 15), (240, 60)))
+                months = module.cal.check_segment(segment)
+                self.write_release(label_dir, symbol, months, params)
+                if failure == "cost-model":
+                    path = label_dir / er.label_manifest_name(symbol)
+                    manifest = json.loads(path.read_bytes())
+                    manifest["cost_model_identity"] = "PRIVATE-INVALID-IDENTITY"
+                    path.write_text(json.dumps(manifest), encoding="utf-8")
+                if failure == "checksum":
+                    (label_dir / f"labels__{symbol}__{months[0]}.csv.gz").write_bytes(b"tampered")
+
+            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+                root = Path(directory)
+                checkout = SimpleNamespace(path=root, commit_and_push=Mock())
+                with patch.object(module.audit, "download_labels", side_effect=download), \
+                        patch.object(module.xr, "_download_symbol_bars") as bars, \
+                        patch.object(dr, "collect_symbol") as collect, \
+                        self.assertRaises(module.xr.PublicError) as caught:
+                    module.run(args, checkout, object(), root / "data", module.audit.AuditProgress(io.StringIO()))
+                self.assertEqual(str(caught.exception),
+                                 "label snapshot validation failed: check release parameters and monthly checksums")
+                bars.assert_not_called()
+                collect.assert_not_called()
+                checkout.commit_and_push.assert_not_called()
 
 
 class AdxSeriesTests(unittest.TestCase):
