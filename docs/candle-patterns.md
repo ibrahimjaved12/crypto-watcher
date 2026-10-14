@@ -21,6 +21,36 @@ No later candle is read for the decision. Gaps reset indicator initialization;
 unready prior inputs, including a zero volume reference, yield `insufficient`.
 Scaled-integer storage is retained; the adapter uses technical.py's float helpers.
 
+## Timeframes
+
+`benchmark/candles.py` has two sets. `TIMEFRAMES = (15, 60, 240)` is unchanged and
+remains the only set the label engine and strategy registry accept (`make_specs`,
+`all_specs`, `GRID_STEP`, `strategy_config`). `PATTERN_TIMEFRAMES = (15, 60, 240,
+1440, 10080)` adds daily and weekly candles for candle-pattern and multi-day studies
+(owner decision 2026-10-15, #348); `CandleSeries` and `build_candles` accept it.
+
+- Alignment: a candle opens where `(start_ms - anchor) % step == 0`. The anchor is 0
+  (UTC epoch) except for weekly candles, which use `WEEK_ANCHOR_MS` = 1970-01-05, a
+  Monday: weeks run Monday 00:00 UTC to Monday 00:00 UTC, as in `levels._week_start`.
+  Plain epoch multiples of 7 days start on Thursday and are rejected.
+- Source 1, 1m bars: `build_candles(bars, 1440 | 10080)` applies the usual rules. Any
+  missing/compromised minute invalidates the candle, quantities are never partial
+  sums, and a trailing partial candle is never built.
+- Source 2, dk1 daily history: `patterns.daily_candles.candles_from_daily(daily,
+  1440 | 10080)` copies the scaled integers of `daily_lake.DailySeries`. A day is
+  price-valid iff open/high/low/close are present. A MISSING base volume (an int64
+  overflow at scale 10**8, typical for DOGE and XRP) does not invalidate prices; the
+  candle keeps MISSING volume and indicators that read volume see it as unavailable.
+  Weekly candles start at the first Monday on or after the series start; leading and
+  trailing partial weeks are dropped. A week is price-valid iff all 7 days are, and
+  its volume and taker-buy volume are summed only if all 7 days have them (otherwise
+  MISSING, never a partial sum).
+- `daily_parity(daily, bars)` compares dk1 days with 1m-built daily candles on days
+  that are fully covered and price-valid in both. It reports days compared, days with
+  any difference, per-field counts and maximum relative difference in integer ppm
+  (`floor(|a - b| * 10**6 / max(|a|, |b|))`), and the first 10 differing dates.
+  Volume fields are compared only where dk1 has them.
+
 ## Frozen doji-v1
 
 All constants live in frozen `DojiParams` in `patterns/doji.py`. The inclusive
