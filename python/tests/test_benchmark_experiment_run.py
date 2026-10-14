@@ -21,11 +21,14 @@ from market_analysis.benchmark.segments import segment_bounds_ms
 from market_analysis.benchmark.ta_strategies import STRATEGIES, strategy_config
 
 NOW = "2026-10-09T12:00:00Z"
+# Frozen historical question fixture: registry additions must not redefine it.
+TA_BASELINES = ["ema_cross_20_50", "ema_cross_50_200", "rsi_14_reversion", "macd_12_26_9",
+                "bollinger_20_2_reversion", "keltner_breakout_20_14_2"]
 
 
 def question(**changes):
     values = dict(question_id="ta-baselines-v1-60m", hypothesis="Classic TA baselines beat costs", horizon_min=60,
-                  strategies=list(STRATEGIES), seed=20261009, label_revision=2, data_revision=1, created_utc=NOW)
+                  strategies=TA_BASELINES, seed=20261009, label_revision=2, data_revision=1, created_utc=NOW)
     values.update(changes)
     return er.make_question(values.pop("question_id"), values.pop("hypothesis"), values.pop("horizon_min"),
                             values.pop("strategies"), **values)
@@ -237,7 +240,8 @@ class PublicOutputTests(unittest.TestCase):
         text = "\n".join(er.public_summary(report))
         for secret in (*STRATEGIES, "mean", "0.123456", "4.56789", "4321", "0.0777", "BTCUSDT"):
             self.assertNotIn(secret, text)
-        self.assertIn("PASS 3, FRAGILE 0, FAIL 3, NOT_ENOUGH_EVIDENCE 0", text)
+        self.assertIn(f"PASS {(len(STRATEGIES) + 1) // 2}, FRAGILE 0, FAIL {len(STRATEGIES) // 2}, "
+                      "NOT_ENOUGH_EVIDENCE 0", text)
         self.assertIn("projection): 2", text)
         self.assertIn("f" * 64, text)
 

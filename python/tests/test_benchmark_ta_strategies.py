@@ -63,7 +63,12 @@ class StrategyTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(all(s == 0 for s in sides[:first]))
                 self.assertTrue(all(s == 0 for s in sides[k:k + 1 + first]))
-                self.assertTrue(any(sides[first:k]))  # the strategies do fire on a random walk
+                if name.startswith("doji_"):
+                    # This price-only fixture has no volume: a complete doji
+                    # reading is unavailable, so no signal is admissible.
+                    self.assertFalse(any(sides))
+                else:
+                    self.assertTrue(any(sides[first:k]))
 
     def test_no_look_ahead(self):
         closes = walk(8, 1200)
@@ -89,8 +94,8 @@ class StrategyTests(unittest.TestCase):
                             for minutes in (15, 60, 240)}
         first_ms, end_ms = START + 30 * 86_400_000, START + 120 * 86_400_000
         specs = all_specs(data, first_ms=first_ms, end_ms=end_ms)
-        self.assertEqual(len(specs), 18)
-        self.assertEqual(len({(spec.strategy_id, spec.config["timeframe_min"]) for spec in specs}), 18)
+        self.assertEqual(len(specs), 24)
+        self.assertEqual(len({(spec.strategy_id, spec.config["timeframe_min"]) for spec in specs}), 24)
         for spec in specs:
             minutes = spec.config["timeframe_min"]
             self.assertEqual(spec.strategy_version, VERSION)

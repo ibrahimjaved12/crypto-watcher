@@ -2,8 +2,7 @@
 
 Benchmark prices/quantities remain scaled integers in storage. Only this adapter
 converts them to the float convention of technical.py. ATR/EMA series are reused
-once per contiguous valid run. ADX's existing helper exposes only a final value:
-it is called lazily on the prior prefix, never truncated to an invented window.
+once per contiguous valid run, including prefix-identical linear-time ADX.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ from dataclasses import dataclass
 from .. import data_lake
 from ..benchmark.bars import MISSING
 from ..benchmark.candles import CandleSeries
-from ..technical import TechnicalCandle, _adx, _ema, _finite, _true_ranges, _wema
+from ..technical import TechnicalCandle, _adx_series, _ema, _finite, _true_ranges, _wema
 
 
 @dataclass(frozen=True)
@@ -54,6 +53,7 @@ class _FeatureRun:
     atr: tuple[float | None, ...]
     ema_fast: tuple[float | None, ...]
     ema_slow: tuple[float | None, ...]
+    adx: tuple[float | None, ...]
 
 
 class CandleFeatureHistory:
@@ -93,7 +93,8 @@ class CandleFeatureHistory:
             run = _FeatureRun(first, run_candles,
                               tuple(_wema(_true_ranges(run_candles), atr_period)),
                               tuple(_ema(closes, ema_fast_period)),
-                              tuple(_ema(closes, ema_slow_period)))
+                              tuple(_ema(closes, ema_slow_period)),
+                              tuple(value[0] for value in _adx_series(run_candles, adx_period)))
             for j in range(first, end):
                 self._runs[j] = run
             first = end
@@ -123,7 +124,7 @@ class CandleFeatureHistory:
         rel_volume = volume / mean_volume if (_finite(volume) and _finite(mean_volume)
                                                and mean_volume > 0) else None
         # The ADX helper needs 2 * period candles to publish its first value.
-        adx = _adx(run.candles[:local], self._adx_period)[0] if (
+        adx = run.adx[local - 1] if (
             include_adx and local >= 2 * self._adx_period) else None
         missing = tuple(name for name, value in (
             ("atr_prev", atr), ("rel_volume", rel_volume), ("adx_prev", adx),

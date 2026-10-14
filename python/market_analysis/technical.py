@@ -316,6 +316,70 @@ def _adx(candles, period=14):
     return _finite_or_none(adx_values[-1]), _finite_or_none(pdi), _finite_or_none(mdi)
 
 
+def _adx_series(candles, period=14):
+    """Every prefix's (_adx, +DI, -DI), in one pass; None candles reset state.
+
+    Keep the arithmetic and initialization order of _adx/_wema, including
+    propagation of nonfinite DX values. The final-value helper stays unchanged.
+    """
+    output = []
+    previous = None
+    count = dx_count = 0
+    tr_sum = plus_sum = minus_sum = 0
+    tr_seed, plus_seed, minus_seed = [], [], []
+    dx_total = 0.0
+    adx = None
+    for current in candles:
+        if current is None:
+            previous = None
+            count = dx_count = 0
+            tr_sum = plus_sum = minus_sum = 0
+            tr_seed, plus_seed, minus_seed = [], [], []
+            dx_total = 0.0
+            adx = None
+        if previous is None or current is None:
+            output.append((None, None, None))
+            previous = current
+            continue
+        tr = max(current.high - current.low, abs(current.high - previous.close),
+                 abs(current.low - previous.close))
+        up = current.high - previous.high
+        down = previous.low - current.low
+        plus = up if up > down and up > 0 else 0.0
+        minus = down if down > up and down > 0 else 0.0
+        count += 1
+        if count <= period:
+            tr_seed.append(tr)
+            plus_seed.append(plus)
+            minus_seed.append(minus)
+            if count == period:
+                # Use the helper's built-in sum, including its interpreter's
+                # float summation semantics, rather than repeated +=.
+                tr_sum = sum(tr_seed)
+                plus_sum = sum(plus_seed)
+                minus_sum = sum(minus_seed)
+        else:
+            tr_sum = tr_sum - tr_sum / period + tr
+            plus_sum = plus_sum - plus_sum / period + plus
+            minus_sum = minus_sum - minus_sum / period + minus
+        pdi = mdi = None
+        if count >= period:
+            pdi = plus_sum * 100 / tr_sum if tr_sum else float("nan")
+            mdi = minus_sum * 100 / tr_sum if tr_sum else float("nan")
+            denominator = pdi + mdi
+            dx = abs(pdi - mdi) / denominator * 100 if denominator else float("nan")
+            dx_count += 1
+            if dx_count <= period:
+                dx_total += dx
+                if dx_count == period:
+                    adx = dx_total / period
+            else:
+                adx = ((adx * (period - 1)) + dx) / period
+        output.append((_finite_or_none(adx), _finite_or_none(pdi), _finite_or_none(mdi)))
+        previous = current
+    return output
+
+
 def detect_patterns(candle, previous, trend):
     candle_range = candle.high - candle.low
     if candle_range <= 0:

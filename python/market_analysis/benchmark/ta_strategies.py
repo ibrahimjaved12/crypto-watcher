@@ -110,17 +110,20 @@ def keltner_breakout(candles: CandleSeries, n_ema: int, n_atr: int, k: int) -> l
     return sides
 
 
-def _doji_sides(candles: CandleSeries, *, reverse: bool) -> list:
+def doji_readings(candles: CandleSeries):
+    """Yield (index, continuation side, features, reading) for emitted signals.
+
+    Reports and both strategy wrappers share this join point, retaining the
+    existing four-field StrategySpec signal contract.
+    """
     p = DOJI_PARAMS
     history = CandleFeatureHistory(
         candles, atr_period=p.atr_period, adx_period=p.adx_period,
         ema_fast_period=p.ema_fast_period, ema_slow_period=p.ema_slow_period,
         lookback=p.lookback,
     )
-    sides = [0] * len(candles)
     for index in range(len(candles)):
-        # Reuse prepared ATR/EMA series; call the final-value ADX helper only
-        # for geometric gate candidates, on their entire prior valid prefix.
+        # All indicator series, including ADX, are prepared once per valid run.
         shape = history.at(index, include_adx=False)
         if (shape.body_ratio is None or shape.range_atr is None
                 or shape.body_ratio > p.body_max or shape.range_atr < p.range_atr_min
@@ -129,7 +132,13 @@ def _doji_sides(candles: CandleSeries, *, reverse: bool) -> list:
         features = history.at(index)
         reading = read_doji(features)
         if reading.status == "ok" and features.adx_prev >= p.adx_min and features.trend_dir != 0:
-            sides[index] = -features.trend_dir if reverse else features.trend_dir
+            yield index, features.trend_dir, features, reading
+
+
+def _doji_sides(candles: CandleSeries, *, reverse: bool) -> list:
+    sides = [0] * len(candles)
+    for index, side, _, _ in doji_readings(candles):
+        sides[index] = -side if reverse else side
     return sides
 
 
