@@ -99,6 +99,7 @@ class Family:
     strategy_horizons: dict | None = None
     combine: Callable | None = None
     sigma_model: str | None = None  # the label sigma model every question of the family must use
+    default_strategies: tuple | None = None  # explicit registration defaults; named questions retain full registry
 
     @property
     def horizons(self) -> tuple:
@@ -108,6 +109,11 @@ class Family:
         if self.strategy_horizons is None:
             return self.strategies
         return tuple(name for name in self.strategies if horizon in self.strategy_horizons[name])
+
+    def default_strategies_for(self, horizon: int) -> tuple:
+        allowed = self.strategies_for(horizon)
+        return allowed if self.default_strategies is None else tuple(
+            name for name in self.default_strategies if name in allowed)
 
 
 def _load_candles(bars_dir, symbol, last_month, horizon, token, gate):
@@ -151,9 +157,10 @@ def _funding_basis_signals(series, symbol, name, horizon, first_ms, end_ms, para
 
 
 FAMILIES = {family.family_id: family for family in (
-    Family("ta-baselines", ta_strategies.VERSION, tuple(ta_strategies.STRATEGIES),
+    Family("ta-baselines", ta_strategies.VERSION,
+           (*ta_strategies.BASELINE_STRATEGIES, "doji_continuation_v1", "doji_reversal_v1"),
            {minutes: (("1", "2"), (0, 1, 2, 3)) for minutes in ta_strategies.TIMEFRAMES}, "candles", _load_candles,
-           _ta_signals, ta_strategies.strategy_config),
+           _ta_signals, ta_strategies.strategy_config, default_strategies=ta_strategies.BASELINE_STRATEGIES),
     Family("order-flow", order_flow.VERSION, tuple(order_flow.STRATEGIES),
            {order_flow.HORIZON: (tuple(order_flow.K_VALUES), tuple(order_flow.RR_INDICES))}, "bars+funding",
            _load_bars_funding, _order_flow_signals, order_flow.strategy_config),

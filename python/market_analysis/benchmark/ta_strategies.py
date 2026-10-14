@@ -24,6 +24,11 @@ from .indicators import (SHIFT, atr, bollinger, ema, ema_warmup, macd, rsi, rsi_
 from .runner import StrategySpec
 
 VERSION = "ta-v1"
+# Frozen production defaults; adding a research rule must not expand these.
+BASELINE_STRATEGIES = (
+    "ema_cross_20_50", "ema_cross_50_200", "rsi_14_reversion", "macd_12_26_9",
+    "bollinger_20_2_reversion", "keltner_breakout_20_14_2",
+)
 # TA signal grid (minutes) per timeframe: candle closes. Each step is a multiple of the label
 # decision step (labels.LabelParams().step, 240 -> 15 since slice H1), so every TA signal is also
 # a label row.

@@ -186,11 +186,14 @@ so the app and the benchmark cannot disagree:
   sizes and non-trade counts, per direction and per horizon.
 - Direction accuracy uses the sign of side times ln(open[e+h]/open[e]), with e the
   next minute after the signal and h its horizon. Count ties separately and exclude
-  them from rates. Compare with all completed candles of the same timeframe, symbols
-  and segment, rather than only signals. Report it alongside the trade-path outcome.
+  them from rates. In the doji report, compare with valid completed candle end times
+  whose label row has status T, with the same timeframe, symbols, side, k, segment
+  and worst-case eligibility window as the signals. The unconditional barrier/grid
+  baseline uses those same rows at each (k, rr), including non-doji candles.
+  Report direction alongside the trade-path outcome; count unavailable directions separately.
 - Always show gross barrier results over the full stop/target grid and MFE/MAE
   distributions alongside net results. Per-event gross/net verdicts are true for
-  positive R, false for zero or negative R, ambiguous for X; non-trades get no verdict.
+  positive R, false for zero or negative R, unmeasured for X; non-trades get no verdict.
 - Aggregate only across compatible strategy and evaluation versions, with the
   denominator and excluded statuses visible.
 

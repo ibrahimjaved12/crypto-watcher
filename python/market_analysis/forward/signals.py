@@ -1,7 +1,7 @@
 """Forward signal registry and generation (OHLCV-computable strategies only).
 
 Registry ``FORWARD_STRATEGIES`` (id -> ForwardStrategy):
-- every ``ta-v1`` strategy of ``benchmark.ta_strategies.STRATEGIES`` at 15, 60 and 240 minutes,
+- the six explicit ``benchmark.ta_strategies.BASELINE_STRATEGIES`` at 15, 60 and 240 minutes,
   id ``NAME:TF`` (the rules are reused, not copied; the label horizon is the candle length);
 - the CONTROL ``placebo-v1`` matched to each of them, id ``placebo-v1:NAME:TF``: at every hourly
   decision (``signal_ms % 3_600_000 == 0``) it emits a signal for the symbol with probability equal
@@ -61,7 +61,7 @@ class ForwardStrategy:
 
 def _registry() -> dict:
     out = {}
-    for name in ta.STRATEGIES:
+    for name in ta.BASELINE_STRATEGIES:
         for minutes in TIMEFRAMES:
             ta_id = f"{name}:{minutes}"
             out[ta_id] = ForwardStrategy(ta_id, ta.VERSION, "ta", name, minutes, minutes)
