@@ -127,7 +127,7 @@ class LookAheadTests(unittest.TestCase):
                          scale(candles.close), volume=scale(candles.volume), taker=candles.taker_buy_volume)
         changed_sigma = [s if j < i else 9.0 for j, s in enumerate(sigma)]
         row = rows_by_open(context(changed, changed_sigma))[candles.open_ms(i)]
-        prev = [name for name in COLUMNS if "_prev" in name]
+        prev = [name for name, _ in (*ct.GEOMETRY_COLUMNS, *ct.TREND_VOL_COLUMNS) if "_prev" in name]
         self.assertEqual(len(prev), 15)
         prev += ["trend_dir", "taker_ratio_prior20"]  # also read candles through i - 1 only
         self.assertEqual({name: row[name] for name in prev}, {name: base[name] for name in prev})
