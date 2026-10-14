@@ -126,6 +126,8 @@ class ReportMathTests(unittest.TestCase):
         self.assertEqual(result["non_trades"], {"V": 1})
         self.assertAlmostEqual(result["mean_net_r_1x"], -.2)
         self.assertEqual(result["barrier_base_rate"], .5)
+        self.assertEqual(result["target_first_ts"], .5)
+        self.assertIsNone(dr.TradeStats().report(1)["target_first_ts"])
 
     def test_direction_ties_and_inclusive_excursions(self):
         bars = SimpleNamespace(start_ms=START, minutes=17, open=[100] * 17, high=[100] * 17,

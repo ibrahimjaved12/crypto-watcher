@@ -205,7 +205,7 @@ class TradeStats:
                 "x_share": self.outcomes["X"] / n if n else None,
                 "barrier_base_rate": float(random_walk_hit_rate(rr)),
                 "target_first_ts": (self.outcomes["T"] / (self.outcomes["T"] + self.outcomes["S"])
-                                    if self.outcomes["T"] + self.outcomes["S"] else None,
+                                    if self.outcomes["T"] + self.outcomes["S"] else None),
                 "non_trades": dict(sorted(self.non_trades.items())),
                 **{"mean_" + key: self.sums[key] / self.measured if self.measured else None
                    for key in ("gross_r", "net_r_1x", "net_r_2x")}}
