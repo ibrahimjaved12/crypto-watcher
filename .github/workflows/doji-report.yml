@@ -6,6 +6,10 @@ run-name: "Doji report ${{ inputs.segment }}"
 on:
   workflow_dispatch:
     inputs:
+      record_trials:
+        description: "Append primary hypotheses to the private experiment ledger"
+        type: boolean
+        default: true
       segment:
         description: "development | validation (never pooled; hidden is refused)"
         type: choice
@@ -56,12 +60,15 @@ jobs:
           SEGMENT: ${{ inputs.segment }}
           SYMBOLS: ${{ inputs.symbols }}
           HORIZONS: ${{ inputs.horizons }}
+          RECORD_TRIALS: ${{ inputs.record_trials }}
           REPORT_SUMMARY: ${{ runner.temp }}/doji-summary.md
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: |
+          ledger_arg=--record-trials
+          if [ "$RECORD_TRIALS" = "false" ]; then ledger_arg=--no-record-trials; fi
           python/.venv/bin/python scripts/research/doji_report.py --workdir doji-report-work \
-            --summary "$REPORT_SUMMARY" --segment "$SEGMENT" --symbols "$SYMBOLS" --horizons "$HORIZONS"
+            --summary "$REPORT_SUMMARY" --segment "$SEGMENT" --symbols "$SYMBOLS" --horizons "$HORIZONS" "$ledger_arg"
       - name: Delete working files
         if: always()
         run: rm -rf doji-report-work

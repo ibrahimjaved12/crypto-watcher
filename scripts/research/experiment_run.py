@@ -330,7 +330,7 @@ def register(args, checkout: Checkout) -> list[str]:
     if args.family not in er.FAMILIES:
         raise PublicError(f"family must be one of {sorted(er.FAMILIES)}")
     family = er.FAMILIES[args.family]
-    strategies = (list(family.strategies_for(args.horizon)) if args.strategies == "all"
+    strategies = (list(family.default_strategies_for(args.horizon)) if args.strategies == "all"
                   else args.strategies.split(","))
     try:
         hypothesis = er.read_hypothesis(checkout.path / "drafts", args.question_id)

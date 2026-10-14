@@ -86,7 +86,7 @@ nearest unique events to evenly spaced UTC times per tier, with stable tie break
 best/worst selection. Samples show direction / gross / net verdicts in that order.
 
 **True/false is stop-aware after costs for profitability:** net verdict is true
-only for measured positive net R, false for zero/negative R, ambiguous for X.
+only for measured positive net R, false for zero/negative R, unmeasured for X.
 Gross verdict applies the same rule before costs and funding. Non-trade statuses
 get no verdict. Direction is a separately named diagnostic: side times
 ln(open[e+h]/open[e]) >0 / <0 / =0 yields true / false / tie, with e the minute
@@ -94,8 +94,12 @@ opening at the candle-close decision time (the minute after the final signal
 bar), and h the timeframe. Ties are counted and excluded from direction rates.
 
 Primary tables pool symbols and tiers per strategy/timeframe/side. Direction is
-shown against the unconditional rate over all valid completed candles in the
-same symbols/timeframe/segment. Trade tables count X as a loss in hit rates,
+shown against the unconditional rate over valid completed candle end times whose
+label row has status T, for the same symbols/timeframe/side/k and segment, with
+the same worst-case eligibility window as the signals. Ties and unavailable
+directions are excluded from direction-rate denominators and counted separately.
+The unconditional label-grid baseline uses only those same candle-aligned T rows,
+at each (k, rr), including candles without dojis. Trade tables count X as a loss in hit rates,
 exclude X from R means and show both ambiguity and non-trade counts. They show
 the existing 1/(1+rr) target-first barrier reference alongside T/(T+S), plus the
 unconditional same-side label-grid profitability rate. These references have
@@ -104,7 +108,7 @@ profitability rate. Overlapping outcomes make naive Wilson 95% CIs optimistic.
 
 Tier/subtype/symbol/ADX-band tables, the full stop/target grid and MFE/MAE
 quantiles (50/75/90/95/99) are descriptive; tables flag fewer than 100 trades.
-MFE/MAE use all 1m highs/lows in inclusive [e,e+h], even after trade exit, in
+MFE/MAE use all 1m highs/lows in [e,e+h-1], even after trade exit, in
 k times horizon sigma and percent of entry. Missing paths are counted, not
 filled. Shares reaching MAE >=100/L percent for L=3/5/10/20 ignore maintenance
 margin and funding; they are not simulated liquidations.
@@ -113,6 +117,16 @@ The single-writer private merge appends to `experiments/doji-report-v1.jsonl`
 with the existing `ExperimentLog` replay convention. Each strategy/timeframe
 has four separately counted primary hypotheses: A direction and B trade, each
 long/short. Descriptive slices/grid cells do not add primary hypotheses.
+Replay appends non-counting REPLAY audit rows; it does not leave the ledger
+byte-identical. Dispatch `record_trials=false` writes the private report without
+appending trials and prints `experiment ledger skipped` publicly.
+
+Report schema `doji-report-v2` records the corrected baseline population and
+excursion window. Creation time is separate from the hashed content. Identical
+inputs reuse the existing report directory and its original files and timestamp.
+The forward harness and experiment registration's `strategies=all` default remain
+the six explicit TA baselines. Doji research questions must name the variants
+explicitly; the dedicated doji report includes both variants.
 
 To add a pattern, create one module with frozen parameters and a new version,
 implement `CandlePattern.read`, and reuse the feature layer. Keep old definitions

@@ -138,7 +138,7 @@ taker fees on both sides, so its PnL is not the label's micro-R.
 8. **Sizing and caps use the realized balance;** open positions are not marked to market.
    Defaults: 100 USDT, 1% risk, at most 6 positions, total notional at most 5x the balance.
 9. **Placebo rates** are the trailing-30-day point-in-time rates until frozen constants are set.
-10. **Registry size:** it holds all six `ta-v1` strategies of `ta_strategies.STRATEGIES`. The
+10. **Registry size:** it holds the six explicit `ta-v1` strategies in `ta_strategies.BASELINE_STRATEGIES`. The
     MVP prompt said five; the code has six, so six are registered.
 11. **Request coverage:** saved setups whose entry precedes the request's first bar are skipped.
     The caller must send bars from the earliest open setup's entry.

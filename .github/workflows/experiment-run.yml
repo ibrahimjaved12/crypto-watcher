@@ -38,7 +38,7 @@ on:
         type: string
         default: "60"
       strategies:
-        description: "register: comma-separated strategy names of the family or all"
+        description: "register: comma-separated names or all (family defaults; TA: six baselines)"
         type: string
         default: all
       plan_id:

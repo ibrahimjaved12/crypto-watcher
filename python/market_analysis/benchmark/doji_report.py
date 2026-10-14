@@ -15,13 +15,14 @@ from math import isfinite, log, sqrt
 from pathlib import Path
 from types import SimpleNamespace
 import csv
+import json
 
 from .. import data_lake
 from .bars import COMPROMISED_FLAGS, MISSING
 from .baselines import manifest_ticks, random_walk_hit_rate
 from .calibration import _render, check_segment
 from .candles import build_candles
-from .canonical import content_hash, exact_to_str
+from .canonical import canonical_bytes, content_hash, exact_to_str
 from .evaluate import nearest_rank, net_at
 from .labels import LabelParams, read_label_csv
 from .market_data import load_symbol_bars
@@ -29,7 +30,7 @@ from .scan import OUTCOMES, UR
 from .segments import eligible, segment_bounds_ms, worst_case_window_end_ms
 from .ta_strategies import doji_readings
 
-SCHEMA = "doji-report-v1"
+SCHEMA = "doji-report-v2"
 VERSION = "doji-v1"
 STRATEGIES = ("doji_continuation_v1", "doji_reversal_v1")
 QUANTILES = (50, 75, 90, 95, 99)
@@ -67,7 +68,7 @@ def verdict(outcome, value, *, status="trade"):
     if status != "trade":
         return None
     if outcome == "X":
-        return "ambiguous"
+        return "unmeasured"
     if outcome not in OUTCOMES or value is None or not isfinite(value):
         raise ValueError("measured trade requires an outcome and finite R")
     return value > 0
@@ -118,22 +119,22 @@ def direction(bars, signal_ms, horizon, side, segment):
 
 
 def excursions(bars, signal_ms, horizon, side, sigma, k):
-    """Inclusive [e,e+h] 1m extremes; positive magnitudes, k*sigma_h risk units.
+    """[e,e+h-1] 1m extremes; positive magnitudes, k*sigma_h risk units.
 
     These describe the whole signal horizon, including bars after a trade exit.
     They are not a simulated leveraged wallet or a liquidation test.
     """
     e = (signal_ms - bars.start_ms) // MINUTE
     x = e + horizon
-    if e < 0 or x >= bars.minutes:
+    if e < 0 or x > bars.minutes:
         return {}, "incomplete_horizon"
     if any(bars.flags[i] & COMPROMISED_FLAGS or bars.high[i] == MISSING or bars.low[i] == MISSING
-           for i in range(e, x + 1)):
+           for i in range(e, x)):
         return {}, "compromised_path"
     p0 = bars.open[e]
     if p0 == MISSING or p0 <= 0:
         return {}, "entry_unavailable"
-    high, low = max(bars.high[e:x + 1]), min(bars.low[e:x + 1])
+    high, low = max(bars.high[e:x]), min(bars.low[e:x])
     favorable, adverse = ((high - p0, p0 - low) if side == 1 else (p0 - low, high - p0))
     risk = Fraction(k) * sigma * p0 / SIGMA_SCALE
     if risk <= 0:
@@ -230,13 +231,14 @@ def collect_symbol(bars_dir, label_dir, symbol, segment, horizons, params):
     ticks = manifest_ticks(label_dir, symbol, months, params)
     bars = load_symbol_bars(bars_dir, symbol, data_lake.FIRST_MONTH, months[-1])
     events, by_signal = [], defaultdict(list)
-    unconditional = {}
+    aligned = {}
+    direction_values = {(h, side, exact_to_str(k)): []
+                        for h in horizons for side in (1, -1) for k in params.k_grid}
     for horizon in horizons:
         candles = build_candles(bars, horizon)
-        for side in (1, -1):
-            values = [direction(bars, ms, horizon, side, segment)[0]
-                      for i, ms in enumerate(candles.end_ms) if candles.valid[i] and first <= ms < end]
-            unconditional[(horizon, side)] = direction_stats(values)
+        aligned[horizon] = {ms for i, ms in enumerate(candles.end_ms)
+                            if candles.valid[i] and eligible(segment, ms, worst_case_window_end_ms(
+                                ms, horizon, params.time_limit_multiple))}
         for i, continuation, features, reading in doji_readings(candles):
             ms = candles.end_ms[i]
             if not first <= ms < end:
@@ -285,9 +287,14 @@ def collect_symbol(bars_dir, label_dir, symbol, segment, horizons, params):
                 selected = by_signal.get(key, ())
                 if selected:
                     found.add(key)
+                baseline_member = row.status == "T" and row.signal_ms in aligned[row.horizon_min]
+                if baseline_member:
+                    direction_values[(row.horizon_min, row.side, exact_to_str(row.k))].append(
+                        direction(bars, row.signal_ms, row.horizon_min, row.side, segment)[0])
                 for rr_index, rr in enumerate(params.rr_grid):
                     values = cell_values(row, row.cells[rr_index]) if row.status == "T" else {"status": row.status}
-                    baseline[(symbol, row.horizon_min, row.side, exact_to_str(row.k), exact_to_str(rr))].add(values)
+                    if baseline_member:
+                        baseline[(symbol, row.horizon_min, row.side, exact_to_str(row.k), exact_to_str(rr))].add(values)
                     for index, event in selected:
                         if index != rr_index:
                             continue
@@ -310,11 +317,12 @@ def collect_symbol(bars_dir, label_dir, symbol, segment, horizons, params):
                         event["net_verdict"] = verdict(event["outcome"], event["net_r_1x"])
     if set(by_signal) != found:
         raise ValueError("signal missing from label grid; refusing a partial report")
+    unconditional = {key: direction_stats(values) for key, values in direction_values.items()}
     return events, unconditional, baseline
 
 
-def _pooled_direction(unconditional, symbols, horizon, side):
-    rows = [unconditional[(symbol, horizon, side)] for symbol in symbols]
+def _pooled_direction(unconditional, symbols, horizon, side, k):
+    rows = [unconditional[(symbol, horizon, side, k)] for symbol in symbols]
     n, correct = sum(r["n"] for r in rows), sum(r["correct"] for r in rows)
     return {"n": n, "correct": correct, "ties": sum(r["ties"] for r in rows),
             "unavailable": sum(r["unavailable"] for r in rows),
@@ -331,7 +339,7 @@ def summarize(events, unconditional, baseline, symbols, horizons, params):
             stats.add(event)
         direction_result = direction_stats(e["direction_correct"] for e in group)
         direction_result["unconditional"] = _pooled_direction(
-            unconditional, pool_symbols or symbols, horizon, side)
+            unconditional, pool_symbols or symbols, horizon, side, k)
         trade_result = stats.report(Fraction(rr))
         always = TradeStats()
         for symbol in pool_symbols or symbols:
@@ -389,23 +397,27 @@ def build_report(events, unconditional, baseline, *, segment, symbols, horizons,
     report = {"schema": SCHEMA, "pattern_version": VERSION, "labels_version": params.schema,
               "label_params_identity": params.identity(), "segment": segment, "symbols": list(symbols),
               "horizons": list(horizons), "k": "1", "rr": "1", "code_commit": code_commit,
-              "created_utc": created_utc, "data_snapshot_id": data_snapshot_id,
+              "data_snapshot_id": data_snapshot_id,
               "data_release_tags": sorted(data_tags), "label_release_tags": sorted(label_tags),
               "events_count": sum(e["k"] == "1" and e["rr"] == "1" for e in events),
               "grid_event_cells": len(events), "notes": [
                   "Primary A direction and B trade are separate hypotheses for every strategy/timeframe/side.",
                   "Direction ties are excluded from rates and counted. Non-trades get no verdicts.",
-                  "X counts as a loss in hit rates; monetary means exclude X, with n_measured shown.",
+                  "X verdicts are unmeasured; X counts as a loss in hit rates; monetary means exclude X, with n_measured shown.",
+                  "Both unconditional baselines use valid candle-close decision times with label status T, "
+                  "the same side/k and the same segment/worst-case eligibility window as signals. "
+                  "Direction ties and unavailable endpoints are counted separately and excluded from rates.",
                   "Intrabar ambiguity retains the label engine's pessimistic cell and is also counted separately.",
                   "Barrier base rate = existing 1/(1+rr) driftless target-first reference (T/(T+S)); "
                   "net/gross profitability rates have different denominators and costs. The unconditional "
-                  "same-side label-grid profitability baseline is also shown.",
+                  "same-side candle-aligned label profitability baseline is also shown.",
                   "Naive Wilson CIs are optimistic when outcomes overlap; no independence or adjusted significance is claimed.",
-                  "MFE/MAE use inclusive [e,e+h] 1m highs/lows, in k*sigma_h units and percent of entry, including after exit.",
+                  "MFE/MAE use [e,e+h-1] 1m highs/lows, in k*sigma_h units and percent of entry, including after exit.",
                   "2x cost is the existing evaluator's linear cost extrapolation with isolated-wallet floor."],
               **summarize(events, unconditional, baseline, symbols, horizons, params)}
     report = _render(report)
     report["report_hash"] = content_hash(report)
+    report["created_utc"] = created_utc  # provenance, deliberately outside the content hash
     return report
 
 
@@ -413,7 +425,27 @@ def report_directory(report):
     return f"reports/doji/{report['segment']}__{report['report_hash'][:16]}"
 
 
-def public_lines(report):
+def write_report(root, report, events):
+    """Write once by content hash; keep original files and creation time on reruns."""
+    directory = report_directory(report)
+    dest = Path(root) / directory
+    names = ("report.md", "events.csv", "summary.json")
+    if dest.exists():
+        if not all((dest / name).is_file() for name in names):
+            raise ValueError("existing report is incomplete")
+        stored = json.loads((dest / "summary.json").read_text(encoding="utf-8"))
+        body = {key: value for key, value in stored.items() if key not in ("report_hash", "created_utc")}
+        if stored.get("report_hash") != report["report_hash"] or content_hash(body) != report["report_hash"]:
+            raise ValueError("existing report hash differs")
+        return []
+    dest.mkdir(parents=True, exist_ok=False)
+    (dest / "report.md").write_text(markdown(report, events), encoding="utf-8")
+    write_events(dest / "events.csv", [e for e in events if e["k"] == "1" and e["rr"] == "1"])
+    (dest / "summary.json").write_bytes(canonical_bytes(report))
+    return [f"{directory}/{name}" for name in names]
+
+
+def public_lines(report, *, record_trials=True):
     """Allowlisted metadata and counts only. Never dump report dictionaries."""
     lines = [f"doji report {report['pattern_version']} segment={report['segment']} "
              f"labels={report['labels_version']} sha={report['code_commit']} k=1 rr=1",
@@ -423,6 +455,8 @@ def public_lines(report):
                      f"n_signals={cell['trade']['n_signals']} n_trades={cell['trade']['n_trades']} "
                      f"n_direction={cell['direction']['n']}")
     lines.append(f"private report path {report_directory(report)}/report.md")
+    if not record_trials:
+        lines.append("experiment ledger skipped")
     return lines
 
 
@@ -456,7 +490,7 @@ def _table(rows, dimension=None):
     columns = ["strategy", "tf", "side"] + ([dimension] if dimension else []) + [
         "signals / trades / measured", "A direction n / ties", "A hit [Wilson95]", "A unconditional n / hit",
         "B T/S/E/L/X shares", "B net hit [Wilson95] (X loss)", "gross / net2 hit", "amb / X",
-        "barrier base / T/(T+S)", "unconditional grid net hit", "mean gross / net1 / net2 R", "non-trades", "n<100"]
+        "barrier base / T/(T+S)", "candle-aligned T-label net hit", "mean gross / net1 / net2 R", "non-trades", "n<100"]
     lines = ["| " + " | ".join(columns) + " |", "|" + " --- |" * len(columns)]
     for row in rows:
         a, b = row["direction"], row["trade"]
@@ -496,7 +530,7 @@ def markdown(report, events):
                   "Up to 25 nearest unique events to evenly spaced UTC times; no selection by outcome. "
                   "Prediction includes strategy, timeframe and side. Verdict order: direction / gross / net.", "",
                   "| time UTC | symbol | score | subtype | doji O/H/L/C | vol multiple | ADX | trend | prediction | "
-                  "entry/stop/target | outcome | net R | verdict |", "|" + " --- |" * 13]
+                  "entry/stop/target | outcome | net R | verdict (X: unmeasured) |", "|" + " --- |" * 13]
         for e in sample_events([e for e in headline if e["tier"] == tier]):
             lines.append("| " + " | ".join([
                 e["decision_time"], e["symbol"], f"{e['score']:.2f}", e["subtype"],
@@ -511,7 +545,7 @@ def markdown(report, events):
         lines += [f"## {dimension} (descriptive)", "", *_table(report["descriptive"][dimension], dimension), ""]
     lines += ["## Stop/target grid (descriptive)", "",
               "| strategy | tf | side | k | rr | n trades | gross hit | net1 hit | net2 hit | barrier base | "
-              "unconditional grid gross/net1 | mean gross/net1/net2 R |", "|" + " --- |" * 12]
+              "candle-aligned T-label gross/net1 | mean gross/net1/net2 R |", "|" + " --- |" * 12]
     for row in report["grid"]:
         b = row["trade"]
         values = [row["strategy"], str(row["timeframe"]), row["side"], row["k"], row["rr"], str(b["n_trades"]),

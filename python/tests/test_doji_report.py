@@ -86,7 +86,7 @@ class ReportMathTests(unittest.TestCase):
                 ("S", -1.0, -1.2, False, False),
                 ("E", .2, .1, True, True), ("E", .1, -.1, True, False),
                 ("E", -.1, -.3, False, False), ("E", 0.0, 0.0, False, False),
-                ("L", -2.0, -2.1, False, False), ("X", None, None, "ambiguous", "ambiguous")):
+                ("L", -2.0, -2.1, False, False), ("X", None, None, "unmeasured", "unmeasured")):
             with self.subTest(code=code, gross=gross, net=net):
                 self.assertEqual(dr.verdict(code, gross), expected_gross)
                 self.assertEqual(dr.verdict(code, net), expected_net)
@@ -97,6 +97,8 @@ class ReportMathTests(unittest.TestCase):
         row = SimpleNamespace(wallet_ur=1_000_000)
         values = dr.cell_values(row, CellPair(Cell("T", 1, 800_000, 300_000, 100_000)))
         self.assertEqual((values["gross_r"], values["net_r_1x"], values["net_r_2x"]), (1.0, .8, .5))
+        paid = dr.cell_values(row, CellPair(Cell("T", 1, 600_000, 300_000, -100_000)))
+        self.assertEqual(paid["gross_r"], 1.0)
         values = dr.cell_values(row, CellPair(Cell("L", 1, -900_000, 300_000, 0)))
         self.assertEqual(values["net_r_2x"], -1.0)
         values = dr.cell_values(row, CellPair(Cell("X", 1, None, None, None)))
@@ -129,17 +131,21 @@ class ReportMathTests(unittest.TestCase):
         self.assertEqual(result["target_first_ts"], .5)
         self.assertIsNone(dr.TradeStats().report(1)["target_first_ts"])
 
-    def test_direction_ties_and_inclusive_excursions(self):
+    def test_direction_ties_and_excursions_exclude_exit_minute(self):
         bars = SimpleNamespace(start_ms=START, minutes=17, open=[100] * 17, high=[100] * 17,
                                low=[100] * 17, flags=[0] * 17)
         self.assertEqual(dr.direction(bars, START, 15, 1, "development"), ("tie", None))
         bars.open[15] = 110
-        bars.high[15], bars.low[15] = 115, 90
+        bars.high[14], bars.low[14] = 115, 90
+        bars.high[15], bars.low[15] = 200, 1
         self.assertEqual(dr.direction(bars, START, 15, 1, "development"), (True, None))
         self.assertEqual(dr.direction(bars, START, 15, -1, "development"), (False, None))
+        bars.flags[15] = COMPROMISED_FLAGS  # Outside the excursion window.
         values, reason = dr.excursions(bars, START, 15, 1, 10 ** 19, Fraction(1))
         self.assertIsNone(reason)
         self.assertEqual(values, {"mfe_r": 1.5, "mae_r": 1.0, "mfe_pct": 15.0, "mae_pct": 10.0})
+        bars.minutes = 15
+        self.assertEqual(dr.excursions(bars, START, 15, 1, 10 ** 19, Fraction(1)), (values, None))
         bars.flags[5] = COMPROMISED_FLAGS
         self.assertEqual(dr.excursions(bars, START, 15, 1, 10 ** 19, 1), ({}, "compromised_path"))
         a = dr.direction_stats([True, False, "tie", None])
@@ -179,7 +185,9 @@ class ReportBoundaryTests(unittest.TestCase):
         bars = SimpleNamespace(start_ms=START, minutes=200, open=[100 * scale] * 200,
                                high=[110 * scale] * 200, low=[90 * scale] * 200, flags=[0] * 200,
                                index_of=lambda ms: (ms - START) // 60_000)
-        candles = SimpleNamespace(valid=[True], end_ms=[signal], open=[100 * scale], high=[110 * scale],
+        candles = SimpleNamespace(valid=[True, False, True],
+                                  end_ms=[signal, signal + 15 * 60_000, signal + 30 * 60_000],
+                                  open=[100 * scale], high=[110 * scale],
                                   low=[90 * scale], close=[100 * scale])
         features = CandleFeatures(index=0, high=110, low=90, range=20, body=0, body_ratio=0,
                                  upper_ratio=.5, lower_ratio=.5, atr_prev=10, range_atr=2,
@@ -188,6 +196,9 @@ class ReportBoundaryTests(unittest.TestCase):
         trade = LabelRow(signal, 15, 1, Fraction(1), "T", 100 * scale, 10 ** 19, 10,
                          3, 10_000_000, (CellPair(Cell("T", 1, 800_000, 200_000, 0)),))
         nontrade = LabelRow(signal, 15, -1, Fraction(1), "V")
+        rows = [trade, nontrade, replace(trade, signal_ms=signal + 60_000),
+                replace(trade, signal_ms=signal + 15 * 60_000),
+                replace(trade, signal_ms=signal + 30 * 60_000)]
         with TemporaryDirectory() as directory:
             (Path(directory) / "labels__BTCUSDT__2024-01.csv.gz").touch()
             with patch.object(dr, "check_segment", return_value=["2024-01"]), \
@@ -195,7 +206,7 @@ class ReportBoundaryTests(unittest.TestCase):
                     patch.object(dr, "load_symbol_bars", return_value=bars), \
                     patch.object(dr, "build_candles", return_value=candles), \
                     patch.object(dr, "doji_readings", return_value=[(0, 1, features, read_doji(features))]), \
-                    patch.object(dr, "read_label_csv", return_value=iter([trade, nontrade])):
+                    patch.object(dr, "read_label_csv", return_value=iter(rows)):
                 events, unconditional, baseline = dr.collect_symbol(directory, directory, "BTCUSDT",
                                                                      "development", (15,), params)
         self.assertEqual(len(events), 2)
@@ -205,11 +216,14 @@ class ReportBoundaryTests(unittest.TestCase):
         self.assertEqual(short["status"], "V")
         for key in ("gross_verdict", "net_verdict", "direction_correct", "mae_r"):
             self.assertIsNone(short[key])
-        self.assertEqual(unconditional[(15, 1)]["ties"], 1)
-        self.assertEqual(baseline[("BTCUSDT", 15, 1, "1", "1")].trades, 1)
+        self.assertEqual(unconditional[(15, 1, "1")]["ties"], 2)
+        self.assertEqual(unconditional[(15, -1, "1")]["ties"], 0)
+        self.assertEqual(baseline[("BTCUSDT", 15, 1, "1", "1")].trades, 2)
+        self.assertNotIn(("BTCUSDT", 15, -1, "1", "1"), baseline)
 
     def test_empty_primary_cells_and_public_redaction(self):
-        unconditional = {("BTCUSDT", 15, side): dr.direction_stats([True, False, "tie"]) for side in (1, -1)}
+        unconditional = {("BTCUSDT", 15, side, str(k)): dr.direction_stats([True, False, "tie"])
+                         for side in (1, -1) for k in LabelParams().k_grid}
         report = dr.build_report([], unconditional, {}, segment="development", symbols=("BTCUSDT",),
                                  horizons=(15,), params=LabelParams(), code_commit="abc", created_utc="2026-10-14T00:00:00Z",
                                  data_snapshot_id="snapshot", data_tags=["rd-BTCUSDT-2024-01-r1"], label_tags=["lb1-test"])
@@ -219,6 +233,18 @@ class ReportBoundaryTests(unittest.TestCase):
         self.assertIn("## Tier (descriptive)", md)
         self.assertIn("## Subtype (descriptive)", md)
         self.assertIn("time UTC | symbol | score | subtype | doji O/H/L/C", md)
+        self.assertIn("verdict (X: unmeasured)", md)
+        self.assertEqual(dr.public_lines(report, record_trials=False)[-1], "experiment ledger skipped")
+        rerun = dr.build_report([], unconditional, {}, segment="development", symbols=("BTCUSDT",),
+                                horizons=(15,), params=LabelParams(), code_commit="abc", created_utc="2026-10-15T00:00:00Z",
+                                data_snapshot_id="snapshot", data_tags=["rd-BTCUSDT-2024-01-r1"], label_tags=["lb1-test"])
+        self.assertEqual(report["report_hash"], rerun["report_hash"])
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = dr.write_report(root, report, [])
+            original = {path: (root / path).read_bytes() for path in paths}
+            self.assertEqual(dr.write_report(root, rerun, []), [])
+            self.assertEqual({path: (root / path).read_bytes() for path in paths}, original)
         report["primary"][0]["trade"]["mean_net_r_1x"] = "PRIVATE-RETURN"
         report["primary"][0]["direction"]["hit_rate"] = "PRIVATE-RATE"
         text = "\n".join(dr.public_lines(report))
@@ -226,6 +252,17 @@ class ReportBoundaryTests(unittest.TestCase):
         self.assertIn("n_trades=0", text)
         self.assertIn("private report path reports/doji/development__", text)
         self.assertEqual(len(report["grid"]), 2 * 2 * 2 * 4)
+
+    def test_production_defaults_preserve_six_baselines_and_explicit_doji_questions(self):
+        from market_analysis.benchmark.experiment_run import FAMILIES
+        from market_analysis.benchmark.ta_strategies import BASELINE_STRATEGIES
+        from market_analysis.forward.signals import FORWARD_STRATEGIES
+
+        family = FAMILIES["ta-baselines"]
+        self.assertEqual(len(BASELINE_STRATEGIES), 6)
+        self.assertEqual(family.default_strategies_for(15), BASELINE_STRATEGIES)
+        self.assertTrue(set(dr.STRATEGIES).issubset(family.strategies_for(15)))
+        self.assertEqual({spec.name for spec in FORWARD_STRATEGIES.values()}, set(BASELINE_STRATEGIES))
 
 
 if __name__ == "__main__":
