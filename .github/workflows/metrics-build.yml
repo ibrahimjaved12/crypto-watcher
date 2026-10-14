@@ -76,24 +76,30 @@ jobs:
           while f"{year:04d}-{mon:02d}" <= end:
               months.append(f"{year:04d}-{mon:02d}")
               year, mon = (year + 1, 1) if mon == 12 else (year, mon + 1)
-          include = [{"symbol": s, "month": m} for s in symbols for m in months]
+          # Calendar-aligned batches keep overlapping runs under the same lock,
+          # while each job builds at most twelve monthly releases sequentially.
+          years = sorted({m[:4] for m in months})
+          include = [{"symbol": s, "year": y,
+                      "months": " ".join(m for m in months if m[:4] == y)}
+                     for s in symbols for y in years]
           if len(include) > 256:
-              sys.exit(f"{len(include)} symbol-months exceed the 256-job matrix limit")
+              sys.exit(f"{len(include)} symbol-year batches exceed the 256-job matrix limit; split the date range")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write("matrix=" + json.dumps({"include": include}, separators=(",", ":")) + "\n")
-          print(f"planned {len(include)} symbol-months")
+          print(f"planned {len(symbols) * len(months)} symbol-months in {len(include)} symbol-year jobs")
 
   build:
+    name: Metrics ${{ matrix.symbol }} ${{ matrix.year }}
     needs: plan
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     concurrency:
-      group: metrics-${{ matrix.symbol }}-${{ matrix.month }}
+      group: metrics-${{ matrix.symbol }}-${{ matrix.year }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
@@ -102,20 +108,30 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
-      - name: Build metrics ${{ matrix.symbol }} ${{ matrix.month }}
+      - name: Build metrics ${{ matrix.symbol }} ${{ matrix.year }}
         env:
           LAKE_SYMBOL: ${{ matrix.symbol }}
-          LAKE_MONTH: ${{ matrix.month }}
+          LAKE_MONTHS: ${{ matrix.months }}
           LAKE_PUBLISH: ${{ inputs.publish }}
           LAKE_SUMMARY: ${{ runner.temp }}/metrics-summary.md
           RESEARCH_DATA_REPOSITORY: ${{ inputs.publish && vars.RESEARCH_DATA_REPOSITORY || '' }}
           RESEARCH_DATA_TOKEN: ${{ inputs.publish && secrets.RESEARCH_DATA_TOKEN || '' }}
         run: |
-          args=(--symbol "$LAKE_SYMBOL" --month "$LAKE_MONTH" --workdir metrics-build-work --summary "$LAKE_SUMMARY")
-          if [ "$LAKE_PUBLISH" = "true" ]; then
-            args+=(--publish)
-          fi
-          python scripts/research/metrics_build.py "${args[@]}"
+          read -r -a months <<< "$LAKE_MONTHS"
+          status=0
+          for month in "${months[@]}"; do
+            args=(--symbol "$LAKE_SYMBOL" --month "$month" --workdir metrics-build-work --summary "$LAKE_SUMMARY")
+            if [ "$LAKE_PUBLISH" = "true" ]; then
+              args+=(--publish)
+            fi
+            if ! python scripts/research/metrics_build.py "${args[@]}"; then
+              echo "::error::Metrics build failed for $LAKE_SYMBOL $month"
+              printf '\n### Metrics archive %s %s: failed\n' "$LAKE_SYMBOL" "$month" >> "$LAKE_SUMMARY"
+              status=1
+            fi
+            rm -rf metrics-build-work
+          done
+          exit "$status"
       - name: Delete working files
         if: always()
         run: rm -rf metrics-build-work
