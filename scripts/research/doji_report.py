@@ -63,21 +63,27 @@ def run(args, checkout, repo, workdir, progress):
     bars_dir, label_dir = workdir / "bars", workdir / "labels"
     bars_dir.mkdir(parents=True)
     label_dir.mkdir(parents=True)
-    revisions = {"data_revision": 1, "label_revision": 1}
-    tags = {s: xr.label_tag(s, er.LABEL_FIRST_MONTH, er.LABEL_LAST_MONTH, 1, params.sigma_model) for s in symbols}
+    # lb1 r3 uses the current 15-minute decision grid at the 240-minute horizon;
+    # earlier revisions can have the old hourly grid and a different identity.
+    revisions = {"data_revision": 1, "label_revision": 3}
+    tags = {s: xr.label_tag(s, er.LABEL_FIRST_MONTH, er.LABEL_LAST_MONTH,
+                          revisions["label_revision"], params.sigma_model) for s in symbols}
     with progress.stage("label download", total=len(symbols)) as set_symbol:
         for i, symbol in enumerate(symbols, 1):
             set_symbol(i)
             xr._quiet(audit.download_labels, repo, tags[symbol], args.segment, label_dir, symbol)
             progress.phase("label download", symbol_index=i, symbols=len(symbols))
+    progress.phase("snapshot", symbols=len(symbols), months=len(months))
+    try:
+        snapshot = xr._quiet(er.data_snapshot, label_dir, months, params, symbols=symbols)
+    except ValueError:
+        raise xr.PublicError("label snapshot validation failed: check release parameters and monthly checksums") from None
     history = lake.months_between(lake.FIRST_MONTH, months[-1])
     with progress.stage("bars download", total=len(symbols)) as set_symbol:
         for i, symbol in enumerate(symbols, 1):
             set_symbol(i)
             xr._quiet(xr._download_symbol_bars, repo, revisions, bars_dir, label_dir, symbol, history)
             progress.phase("bars download", symbol_index=i, symbols=len(symbols), months=len(history))
-    progress.phase("snapshot", symbols=len(symbols), months=len(months))
-    snapshot = xr._quiet(er.data_snapshot, label_dir, months, params, symbols=symbols)
     events, unconditional, baseline, data_tags = [], {}, {}, set()
     with progress.stage("audit", total=len(symbols)) as set_symbol:
         for i, symbol in enumerate(symbols, 1):
