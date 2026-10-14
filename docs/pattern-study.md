@@ -70,6 +70,7 @@ This study supersedes it.
 | location | loc-v1 | per level set: dist_up/dist_dn (ATR units), touch, approach_side; any_touch, nearest level/set, level_count_near, touch_approach_side, ATH/ATL distances, new_ath_in_candle |
 | sweep | sweep-v1 | per reference (prior20, swing_tf, prev_day, prev_week, prev_month): sweep_up/sweep_dn; any, both, direction, depth |
 | htf | htf-v1 | per higher timeframe (1h, 4h, 1d, 1w): trend_dir, adx, extension_atr, ema_gap_atr of the last closed higher candle |
+| levels2 | lv2-v1 | liquidity pools (distance, touches, touch, swept), anchored VWAP from the last swing low/high, intraday day VWAP, 30d/90d volume profile POC/VAH/VAL |
 | outcomes | fwd-v1 | for m in 1, 2, 4: ret_m_bp, ret_m_sigma, mfe/mae_long_m_sigma, fwd_ok_m; range1_sigma, absret1_sigma, ln_range1_sigma, fwd_status |
 
 **Sigma:**
@@ -191,6 +192,57 @@ Columns of timeframes that are not higher than the row's are not applicable.
 
 location, sweep and htf never change `status`. Their availability is reported by
 `<group>_ok` and `<group>_missing` only.
+
+### Levels 2 (lv2-v1)
+
+All columns follow the open-time rule: a level is used only if it was known when the row
+candle opened. Signed distances are `(level - close) / atr_prev`.
+
+**Liquidity pools (equal highs/lows).**
+
+- Swings: fractal swings with n = 3. Rows of 15m/1h/4h use the dk1 daily candles; 1d/1w rows
+  use their own candles.
+- Clustering: a newly confirmed swing joins every active swing of the same side within
+  0.15 × ATR14 of that series. ATR14 is taken through the confirming candle.
+- Pools: two or more members form a pool at their mean. `pool_touches_*` is the member count.
+  The pool is known at the end of the candle that confirms its latest member.
+- Invalidation: a swing or pool ends after a source close beyond it by more than 0.1 × ATR14,
+  or 90 days after it became known. A pool also ends when a newer pool takes over any of its
+  members.
+- Columns:
+  - `pool_dist_up_atr`, `pool_dist_dn_atr`: distance to the nearest pool above / below.
+  - `pool_touches_up`, `pool_touches_dn`: member count of those pools.
+  - `touch_pool`: a pool lies in the ±0.25 ATR band around the candle.
+  - `pool_swept`: the candle pierced a pool by at least 0.1 `atr_prev` and closed back inside.
+
+**Anchored VWAP.**
+
+- Anchors: the last same-tf fractal swing low and swing high with n = 5, confirmed by the end
+  of candle i-1.
+- VWAP: `sum(typical * volume) / sum(volume)` over the swing candle through i-1, with
+  `typical = (h + l + c) / 3`.
+- Empty when any of those candles is invalid or lacks volume. This includes DOGE/XRP daily
+  volumes that overflow and are stored as MISSING.
+- Intraday rows also get `vwap_day_dist_atr`: the UTC-day VWAP from the day start through
+  i-1. It is empty on the day's first candle.
+
+**Volume profile.** This needs 1m bars, so it is empty before the profile window is complete,
+which first happens in 2024-02.
+
+- Timing: at every UTC day open, the profile is built from the previous 30 / 90 complete days.
+  It is used by every row whose candle opens on that day.
+- Bins: `floor(ln(close) / 0.001)`, i.e. 10 bp.
+- Approximation: each minute's whole volume goes to its close's bin, and the minute's range is
+  ignored.
+- Skipped minutes: those with a missing or compromised price, or missing volume.
+- POC: the max-volume bin, reported at the bin centre. Ties go to the lower bin.
+- Value area: start at the POC. While the area holds less than 70% of the volume, compare the
+  two bins above with the two bins below (fewer at the profile's edge) and add the side with
+  more volume. Ties go to the upper side. VAH and VAL are the area's upper and lower edges.
+- Columns, for 30d and 90d: `dist_poc_*_atr`, `dist_vah_*_atr`, `dist_val_*_atr`,
+  `in_value_area_*`, `touch_poc_*`.
+
+Like location, sweep and htf, levels2 never changes `status`.
 
 ## Adding a group (location, derivatives, advanced levels, ...)
 

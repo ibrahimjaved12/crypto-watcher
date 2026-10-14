@@ -33,6 +33,7 @@ from market_analysis.benchmark.candles import build_candles  # noqa: E402
 from market_analysis.benchmark.canonical import canonical_bytes  # noqa: E402
 from market_analysis.benchmark.market_data import load_symbol_bars  # noqa: E402
 from market_analysis.benchmark.volatility import build_variance  # noqa: E402
+from market_analysis.patterns import candle_levels2 as lv2  # noqa: E402
 from market_analysis.patterns import candle_location as loc  # noqa: E402
 from market_analysis.patterns import candle_table as ct  # noqa: E402
 from market_analysis.patterns.daily_candles import candles_from_daily, daily_parity  # noqa: E402
@@ -103,6 +104,7 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
         progress.phase("table", symbol_index=index, symbols=len(symbols))
         bars = _quiet(load_symbol_bars, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through)
         parity[symbol] = daily_parity(daily[symbol], bars)
+        profiles = lv2.daily_profiles(bars)  # volume profiles per UTC day, from the 1m bars (2024+)
         contexts = {}
         intraday = [m for m in timeframes if m in ct.INTRADAY_TIMEFRAMES]
         if intraday:
@@ -116,11 +118,12 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
                 contexts[minutes] = ct.intraday_context(
                     symbol, minutes, bars, candles[minutes], variance, regime, through,
                     levels=loc.context_levels(minutes, candles[minutes], shared),
-                    htf=loc.htf_sources(minutes, candles, days, weeks), history_days=days)
+                    htf=loc.htf_sources(minutes, candles, days, weeks), history_days=days,
+                    profiles=profiles)
             del candles, shared
         daily_tfs = [m for m in timeframes if m in ct.DAILY_TIMEFRAMES]
         if daily_tfs:
-            contexts.update(ct.daily_contexts(symbol, daily[symbol], regime, daily_tfs, through))
+            contexts.update(ct.daily_contexts(symbol, daily[symbol], regime, daily_tfs, through, profiles=profiles))
         del bars
         for minutes in timeframes:
             name = ct.file_name(symbol, minutes, through)
