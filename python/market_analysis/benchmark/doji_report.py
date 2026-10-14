@@ -3,6 +3,7 @@
 The label CSV reader is the same reader used by label_store. Stream once per
 symbol, retaining only doji events and sufficient statistics for every label
 geometry's unconditional barrier baseline. No outcome data is public output.
+doji-v1 is a frozen exploratory baseline, superseded by docs/pattern-study.md (candle-table-v1).
 """
 from __future__ import annotations
 
