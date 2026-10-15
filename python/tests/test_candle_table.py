@@ -327,6 +327,7 @@ class WriterAndGuardTests(unittest.TestCase):
         self.assertEqual(ct.report_dir(manifest), f"reports/candle-table/ct1__{manifest['content_hash'][:16]}")
         self.assertEqual(files[0]["name"], "candles__BTCUSDT__15__2024-01_2025-12.csv.gz")
         self.assertEqual(manifest["group_versions"]["geometry"], "geo-v1")
+        self.assertEqual(manifest["group_versions"]["trend_vol"], "tv-v2")
         tampered = {**manifest, "through_month": "2025-11"}
         with self.assertRaises(ValueError):
             ct.check_manifest(tampered)
