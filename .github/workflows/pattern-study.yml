@@ -19,6 +19,11 @@ on:
         description: "candle-table report hash (ct1__<hash16>) or reports/candle-table/... path"
         type: string
         required: true
+      universe:
+        description: "daily/weekly families: core (the frozen six) or core+extra (DAILY_EXTRA_SYMBOLS too)"
+        type: choice
+        options: [core, core+extra]
+        default: core
       reference_report:
         description: "optional development doji report hash or path (validation runs only)"
         type: string
@@ -59,13 +64,14 @@ jobs:
           SEGMENT: ${{ inputs.segment }}
           TABLE_REPORT: ${{ inputs.table_report }}
           REFERENCE_REPORT: ${{ inputs.reference_report }}
+          UNIVERSE: ${{ inputs.universe }}
           STUDY_SUMMARY: ${{ runner.temp }}/pattern-study-summary.md
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: |
           python/.venv/bin/python scripts/research/pattern_study.py --workdir pattern-study-work \
             --summary "$STUDY_SUMMARY" --segment "$SEGMENT" --table-report "$TABLE_REPORT" \
-            --reference-report "$REFERENCE_REPORT"
+            --reference-report "$REFERENCE_REPORT" --universe "$UNIVERSE"
       - name: Delete working files
         if: always()
         run: rm -rf pattern-study-work

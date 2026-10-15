@@ -82,7 +82,7 @@ def run(args, checkout: Checkout, progress) -> list[str]:
     with progress.stage("study"):
         report = _quiet(ps.run_study, table_dir, args.segment, table_report=str(table_dir.relative_to(root)),
                         reference=reference, code_commit=os.environ.get("GITHUB_SHA", "local"),
-                        created_utc=NOW_UTC)
+                        created_utc=NOW_UTC, universe=args.universe)
     directory = ps.report_dir(report)
     if (root / directory).exists():
         return [*ps.public_lines(report), "skipped: a report with this hash already exists"]
@@ -105,6 +105,8 @@ def parse_args(argv=None):
     parser.add_argument("--segment", required=True, help="development | validation (hidden is refused)")
     parser.add_argument("--table-report", required=True, help="candle-table report hash or reports/ path")
     parser.add_argument("--reference-report", default="", help="development doji report hash or path (optional)")
+    parser.add_argument("--universe", default="core", choices=ps.UNIVERSES,
+                        help="daily/weekly families: core (the six) or core+extra (DAILY_EXTRA_SYMBOLS too)")
     return parser.parse_args(argv)
 
 

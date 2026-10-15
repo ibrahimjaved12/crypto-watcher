@@ -306,10 +306,10 @@ class ResearchDataRepo:
         raise GitHubError("release inventory exceeds the bounded listing")
 
     def delete_draft(self, release: dict) -> None:
-        lake.validate_tag(release["tag_name"])
+        lake.validate_lake_tag(release["tag_name"])  # rd- or rk- only
         current = self.json("GET", f"{self.prefix}/releases/{int(release['id'])}")
         if current.get("draft") is not True or current.get("tag_name") != release["tag_name"]:
-            raise GitHubError("refusing to delete a release that is not a crashed rd- draft")
+            raise GitHubError("refusing to delete a release that is not a crashed rd-/rk- draft")
         with self.request("DELETE", f"{self.prefix}/releases/{int(release['id'])}"):
             pass
 

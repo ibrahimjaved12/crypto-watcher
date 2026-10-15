@@ -77,9 +77,24 @@ class LiquidityCheckTests(unittest.TestCase):
         self.assertEqual((by["C"]["months"], by["C"]["median_ratio"], by["C"]["min_rank"]), (0, None, None))
         self.assertEqual([row["symbol"] for row in rows], ["A", "B", "C"])
         lines = lc.table(rows, months, 5)
-        self.assertIn("| A | 2/2 | 0.500 | 1.250 | 1 |", lines)
-        self.assertIn("| C | 0/2 | - | - | - |", lines)
-        del totals[("F2", "2024-02")]
+        self.assertIn("| A | 2/2 | 0.500 | 1.250 | 1 | no |", lines)  # 2 months < 24: not eligible
+        self.assertIn("| C | 0/2 | - | - | - | no |", lines)
+        self.assertIn("A,2024-01,2024-02,2,2,0.500000,1.250000,1,0", lines)  # the csv block
+        self.assertTrue(any("NOT this run" in line for line in lines))
+        self.assertFalse(by["A"]["meets_rule"])
+
+    def test_selection_rule(self):
+        lc = self.lc
+        months = lc.lake.months_between(*lc.RULE_WINDOW)
+        frozen = ("F1",)
+        totals = {("F1", m): lc.MonthTotals(Decimal(100), 1, 1) for m in months}
+        totals.update({("A", m): lc.MonthTotals(Decimal(50), 1, 1) for m in months[:24]})   # ratio 0.5, 24 months
+        totals.update({("B", m): lc.MonthTotals(Decimal(49), 1, 1) for m in months})        # ratio 0.49
+        totals.update({("C", m): lc.MonthTotals(Decimal(500), 1, 1) for m in months[:23]})  # 23 months only
+        by = {row["symbol"]: row for row in lc.summarize(totals, months, candidates=("A", "B", "C"), frozen=frozen)}
+        self.assertEqual({s: by[s]["meets_rule"] for s in "ABC"}, {"A": True, "B": False, "C": False})
+        self.assertFalse(any("NOT this run" in line for line in lc.table(list(by.values()), months, 4)))
+        del totals[("F1", "2021-01")]
         with self.assertRaisesRegex(ValueError, "frozen"):
             lc.summarize(totals, months, candidates=("A",), frozen=frozen)
 

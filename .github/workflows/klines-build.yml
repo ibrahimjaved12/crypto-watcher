@@ -1,0 +1,151 @@
+name: Kline lake build
+run-name: "Kline lake build ${{ inputs.symbols }} ${{ inputs.start_month }}..${{ inputs.end_month }} publish=${{ inputs.publish }} parity=${{ inputs.parity }}"
+
+# Kline lake (rk-, owner decision 2026-10-15; scripts/research/klines_build.py): for each
+# (symbol, finished month) in 2020-12..2023-12 download the Binance monthly 1m klines,
+# markPriceKlines, indexPriceKlines and premiumIndexKlines, verify checksums, build 1-minute bars
+# from the klines (bars1m-v1 columns, every minute flagged KLINE_SOURCE, missing minutes marked and
+# never filled) and (only with publish=true) publish one immutable release rk-SYMBOL-MONTH-r1 to the
+# private research-data repository, never marked Latest. aggTrades are not used before 2024-01.
+# parity=true instead builds 2024-01 from the klines per symbol (never published) and compares it
+# with the published rd 2024-01 bars in the job summary. Existing releases are never edited or
+# deleted. Logs and summaries carry only names, sizes, hashes and aggregate statistics: this
+# repository is public. Run a dry run (publish=false) first.
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: Comma-separated subset of BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        type: string
+        default: BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        required: true
+      start_month:
+        description: First month (YYYY-MM, 2020-12..2023-12; ignored with parity)
+        type: string
+        default: "2020-12"
+        required: true
+      end_month:
+        description: Last month (YYYY-MM, 2020-12..2023-12; ignored with parity)
+        type: string
+        default: "2023-12"
+        required: true
+      publish:
+        description: Publish releases (false = build and verify only)
+        type: boolean
+        default: false
+      parity:
+        description: Compare 2024-01 built from klines with the rd 2024-01 bars (never publishes)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Validate inputs and plan the matrix
+        id: plan
+        env:
+          RK_SYMBOLS: ${{ inputs.symbols }}
+          RK_START: ${{ inputs.start_month }}
+          RK_END: ${{ inputs.end_month }}
+          RK_PARITY: ${{ inputs.parity }}
+          RK_PUBLISH: ${{ inputs.publish }}
+        shell: python
+        run: |
+          import json, os, re, sys
+
+          allowed = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT")
+          raw = os.environ["RK_SYMBOLS"]
+          if not re.fullmatch(r"[A-Z]+(,[A-Z]+)*", raw):
+              sys.exit("symbols must be a comma-separated list without spaces")
+          symbols = raw.split(",")
+          if len(set(symbols)) != len(symbols) or any(s not in allowed for s in symbols):
+              sys.exit(f"symbols must be distinct members of {','.join(allowed)}")
+          if os.environ["RK_PARITY"] == "true":
+              if os.environ["RK_PUBLISH"] == "true":
+                  sys.exit("parity never publishes: set publish=false")
+              include = [{"symbol": s, "month": "parity"} for s in symbols]
+          else:
+              month = re.compile(r"(\d{4})-(0[1-9]|1[0-2])")
+              start, end = os.environ["RK_START"], os.environ["RK_END"]
+              if not month.fullmatch(start) or not month.fullmatch(end):
+                  sys.exit("months must be YYYY-MM")
+              if start < "2020-12" or end > "2023-12" or start > end:
+                  sys.exit("months must lie in 2020-12..2023-12 with start <= end")
+              months, year, mon = [], int(start[:4]), int(start[5:])
+              while f"{year:04d}-{mon:02d}" <= end:
+                  months.append(f"{year:04d}-{mon:02d}")
+                  year, mon = (year + 1, 1) if mon == 12 else (year, mon + 1)
+              include = [{"symbol": s, "month": m} for s in symbols for m in months]
+          if len(include) > 256:
+              sys.exit(f"{len(include)} jobs exceed the 256-job matrix limit")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("matrix=" + json.dumps({"include": include}, separators=(",", ":")) + "\n")
+          print(f"planned {len(include)} jobs")
+
+  build:
+    needs: plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    concurrency:
+      group: kline-lake-${{ matrix.symbol }}-${{ matrix.month }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: python/requirements.txt
+      - name: Install Python dependencies (parity reads the private rd release)
+        if: inputs.parity
+        working-directory: python
+        run: python -m pip install -r requirements.txt
+      - name: Build ${{ matrix.symbol }} ${{ matrix.month }}
+        env:
+          RK_SYMBOL: ${{ matrix.symbol }}
+          RK_MONTH: ${{ matrix.month }}
+          RK_PUBLISH: ${{ inputs.publish }}
+          RK_PARITY: ${{ inputs.parity }}
+          RK_SUMMARY: ${{ runner.temp }}/kline-lake-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ (inputs.publish || inputs.parity) && vars.RESEARCH_DATA_REPOSITORY || '' }}
+          RESEARCH_DATA_TOKEN: ${{ (inputs.publish || inputs.parity) && secrets.RESEARCH_DATA_TOKEN || '' }}
+        run: |
+          args=(--symbol "$RK_SYMBOL" --workdir klines-build-work --summary "$RK_SUMMARY")
+          if [ "$RK_PARITY" = "true" ]; then
+            args+=(--parity)
+          else
+            args+=(--month "$RK_MONTH")
+            if [ "$RK_PUBLISH" = "true" ]; then
+              args+=(--publish)
+            fi
+          fi
+          python scripts/research/klines_build.py "${args[@]}"
+      - name: Delete working files
+        if: always()
+        run: rm -rf klines-build-work
+      - name: Summary
+        if: always()
+        env:
+          RK_SUMMARY: ${{ runner.temp }}/kline-lake-summary.md
+        run: |
+          if [ -f "$RK_SUMMARY" ]; then
+            cat "$RK_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi

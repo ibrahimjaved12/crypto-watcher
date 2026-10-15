@@ -11,11 +11,14 @@ time (the last segment ends where the hidden stretch begins). Floats are scaled 
 geometry ratios and flags come from exact integer differences as in ``features.py``. Empty means
 unavailable and is never filled.
 
-Sources. 15/60/240 candles come from the rd 1-minute bars (``build_candles``), 1440/10080 from
-the dk1 daily klines (``candles_from_daily``). Intraday rows start 2024-01 (development to
-2025-06, validation 2025-07..2025-12); daily/weekly rows start 2021-01 (development-ext to
-2025-06, validation); 2020 is indicator warm-up only. ``through_month`` defaults to and may not
-exceed 2025-12; hidden months are never opened.
+Sources. 15/60/240 candles come from 1-minute bars (``build_candles``): the rk- kline bars before
+2024-01 and the rd aggTrades bars from 2024-01 (``bar_source``); 1440/10080 from the dk1 daily
+klines (``candles_from_daily``). Intraday rows start 2021-01 (development-ext 2021-01..2023-12 on
+kline bars, development 2024-01..2025-06, validation 2025-07..2025-12), with 2020-12 bars loaded as
+warm-up; daily/weekly rows start 2020-01 (development-ext to 2025-06, validation); rows whose
+indicators lack history are ``insufficient``, never filled. Daily/weekly rows may include the
+DAILY_EXTRA_SYMBOLS universe; intraday rows are the frozen six only. ``through_month`` defaults to
+and may not exceed 2025-12; hidden months are never opened.
 
 Adding a group: define its columns (name, one-line doc) and a build function
 ``build(ctx, i) -> dict``; register it with ``REGISTRY.register(Group(...))``. A column left out
@@ -37,7 +40,7 @@ from ..benchmark.candles import CandleSeries
 from ..benchmark.canonical import content_hash
 from ..benchmark.hidden_guard import require_months
 from ..benchmark import regime as regime_v1
-from ..benchmark.segments import daily_segment_bounds_ms, segment_bounds_ms
+from ..benchmark.segments import daily_segment_bounds_ms, intraday_segment_bounds_ms
 from ..benchmark.volatility import BLOCK_MINUTES, VAR_SCALE, build_variance, horizon_sigma
 from ..daily_lake import DAY_MS, load_symbol_daily, load_symbol_funding_range
 from . import candle_derivatives as dv
@@ -52,11 +55,12 @@ REPORT_ROOT = "reports/candle-table"
 INTRADAY_TIMEFRAMES = (15, 60, 240)
 DAILY_TIMEFRAMES = (1440, 10080)
 TABLE_TIMEFRAMES = (*INTRADAY_TIMEFRAMES, *DAILY_TIMEFRAMES)
-INTRADAY_FIRST_MONTH = "2024-01"
-DAILY_FIRST_MONTH = "2021-01"
+INTRADAY_FIRST_MONTH = "2021-01"                     # first intraday row month (development-ext)
+INTRADAY_BARS_FIRST_MONTH = data_lake.RK_FIRST_MONTH  # 2020-12: bars loaded as indicator warm-up only
+DAILY_FIRST_MONTH = "2020-01"                        # first daily/weekly row month (owner decision 2026-10-15)
 DAILY_WARMUP_MONTH = "2020-01"
 LAST_MONTH = "2025-12"  # default and maximum through_month: the hidden stretch is never read
-INTRADAY_SEGMENTS = ("development", "validation")
+INTRADAY_SEGMENTS = ("development-ext", "development", "validation")
 DAILY_SEGMENTS_USED = ("development-ext", "validation")
 
 ATR_PERIOD, ADX_PERIOD, EMA_FAST, EMA_SLOW, LOOKBACK = 14, 14, 20, 50, 20
@@ -179,9 +183,13 @@ def table_segments(minutes: int, through_month: str = LAST_MONTH) -> tuple:
     """((name, first_ms, end_ms), ...) of the timeframe's segments, clipped to the end of through_month."""
     end = data_lake.month_bounds_ms(check_through_month(through_month))[1]
     if minutes in INTRADAY_TIMEFRAMES:
-        bounds = [(name, *segment_bounds_ms(name)) for name in INTRADAY_SEGMENTS]
+        bounds = [(name, *intraday_segment_bounds_ms(name)) for name in INTRADAY_SEGMENTS]
     elif minutes in DAILY_TIMEFRAMES:
         bounds = [(name, *daily_segment_bounds_ms(name)) for name in DAILY_SEGMENTS_USED]
+        # The table's daily development-ext starts at DAILY_FIRST_MONTH (2020-01); rows without enough
+        # history are insufficient. benchmark.segments.DAILY_SEGMENTS (2021-01..) is unchanged for other code.
+        bounds = [(name, data_lake.month_bounds_ms(DAILY_FIRST_MONTH)[0] if name == "development-ext" else first,
+                   stop) for name, first, stop in bounds]
     else:
         raise CandleTableError(f"timeframe must be one of {TABLE_TIMEFRAMES}")
     return tuple((name, first, min(stop, end)) for name, first, stop in bounds if first < end)
@@ -454,6 +462,15 @@ def _calendar(ctx: TableContext, i: int) -> dict:
     return out
 
 
+_AGGTRADE_FROM_MS = data_lake.month_bounds_ms(data_lake.FIRST_MONTH)[0]
+
+
+def _source(ctx: TableContext, i: int) -> dict:
+    """kline: rk- kline bars (intraday before 2024-01) or the dk1 daily klines; aggtrade: rd bars."""
+    intraday_aggtrade = ctx.intraday and ctx.candles.open_ms(i) >= _AGGTRADE_FROM_MS
+    return {"bar_source": "aggtrade" if intraday_aggtrade else "kline"}
+
+
 def _regime(ctx: TableContext, i: int) -> dict:
     values = ctx.regime.row(ctx.symbol, ctx.candles.end_ms[i]) if ctx.regime is not None else None
     if values is None:
@@ -542,6 +559,9 @@ VOLUME_COLUMNS = (
     ("taker_ratio_prior20", "mean taker_buy_ratio of candles i-20..i-1"),
     ("taker_imb", "2 * taker_buy_ratio - 1"),
 )
+SOURCE_COLUMNS = (
+    ("bar_source", "kline (intraday rk- bars before 2024-01, and every daily/weekly row) | aggtrade (rd bars)"),
+)
 CALENDAR_COLUMNS = (
     ("utc_dow", "UTC weekday of the open, Monday = 0"), ("utc_hour", "intraday: UTC hour of the open"),
     ("is_weekend", "intraday: open on Saturday or Sunday UTC"),
@@ -569,7 +589,7 @@ OUTCOME_COLUMNS = tuple(
     ("fwd_status", "ok | window_invalid | past_end | sigma_missing (of the one-candle window)"),
 )
 
-GROUP_VERSIONS = {"keys": "keys-v1", "geometry": "geo-v1", "trend_vol": "tv-v2", "volume": "vol-v1",
+GROUP_VERSIONS = {"keys": "keys-v1", "source": "src-v1", "geometry": "geo-v1", "trend_vol": "tv-v2", "volume": "vol-v1",
                   "calendar": "cal-v1", "regime": "regime-v1", "location": "loc-v1", "sweep": "sweep-v1",
                   "htf": "htf-v1", "levels2": "lv2-v1",
                   "derivatives": "deriv-v1", "flush": "flush-v1",
@@ -580,6 +600,7 @@ FEATURE_GROUPS_FOR_STATUS = ("geometry", "trend_vol", "volume", "calendar", "reg
 def default_registry() -> GroupRegistry:
     registry = GroupRegistry()
     registry.register(Group("keys", GROUP_VERSIONS["keys"], KEY_COLUMNS, None, flags=False))
+    registry.register(Group("source", GROUP_VERSIONS["source"], SOURCE_COLUMNS, _source, flags=False))
     for group_id, columns, build in (("geometry", GEOMETRY_COLUMNS, _geometry),
                                      ("trend_vol", TREND_VOL_COLUMNS, _trend_vol),
                                      ("volume", VOLUME_COLUMNS, _volume),
@@ -615,6 +636,8 @@ def build_rows(ctx: TableContext, registry: GroupRegistry = REGISTRY):
                    segment=segment[0])
         if not c.valid[i]:
             row.update(status="invalid", reasons="invalid_candle")
+            if "bar_source" in row:
+                row.update(_source(ctx, i))  # provenance is known even for an invalid candle
             yield tuple(row[name] for name in columns)
             continue
         not_ok = []
@@ -656,7 +679,8 @@ def write_table(fileobj, rows, columns=None, counts: dict | None = None) -> int:
     """Deterministic csv.gz (header first). ``counts`` (optional) accumulates status/segment/fwd_status counts."""
     columns = tuple(columns or REGISTRY.columns())
     where = {name: columns.index(name) for name in ("symbol", "tf", "status", "segment", "fwd_status",
-                                                    "oi_value_end", "reasons", "decision_ms") if name in columns}
+                                                    "oi_value_end", "reasons", "decision_ms", "bar_source")
+             if name in columns}
 
     def lines():
         yield ",".join(columns) + "\n"
@@ -682,13 +706,23 @@ def count_row(counts: dict, row, where: dict) -> None:
             moment = gmtime(row[where["decision_ms"]] // 1000)
             month = f"{prefix}|{moment.tm_year:04d}-{moment.tm_mon:02d}"
             counts.setdefault("insufficient_month", {})[month] = counts.get("insufficient_month", {}).get(month, 0) + 1
+    if "bar_source" in where:
+        source = f"{prefix}|{row[where['bar_source']] or 'none'}"
+        counts.setdefault("bar_source", {})[source] = counts.get("bar_source", {}).get(source, 0) + 1
+    if "decision_ms" in where and row[where["status"]] == "ok":
+        first = counts.setdefault("first_ok", {})
+        if key not in first or row[where["decision_ms"]] < first[key]:
+            first[key] = row[where["decision_ms"]]
     # Rows outside published mx months, or in a metrics gap; invalid candles carry no features and are not counted.
     if "oi_value_end" in where and row[where["oi_value_end"]] is None and row[where["status"]] != "invalid":
         counts.setdefault("oi_missing", {})[prefix] = counts.get("oi_missing", {}).get(prefix, 0) + 1
 
 
 def file_name(symbol: str, minutes: int, through_month: str = LAST_MONTH) -> str:
-    data_lake.validate_symbol(symbol)
+    if minutes in INTRADAY_TIMEFRAMES:
+        data_lake.validate_symbol(symbol)  # intraday: the frozen six only
+    else:
+        data_lake.validate_daily_symbol(symbol)
     first = INTRADAY_FIRST_MONTH if minutes in INTRADAY_TIMEFRAMES else DAILY_FIRST_MONTH
     return f"candles__{symbol}__{minutes}__{first}_{check_through_month(through_month)}.csv.gz"
 
@@ -722,7 +756,7 @@ def load_daily_inputs(daily_dir, symbols, through_month: str = LAST_MONTH, *, to
     """(dk1 daily series per symbol incl. BTCUSDT, BTCUSDT funding) of 2020-01..through_month."""
     guard_months(through_month, token, gate)
     market = regime_v1.MARKET_SYMBOL
-    wanted = [symbol for symbol in data_lake.SYMBOLS if symbol in set(symbols) | {market}]
+    wanted = [symbol for symbol in data_lake.DAILY_UNIVERSE if symbol in set(symbols) | {market}]
     daily = {symbol: load_symbol_daily(daily_dir, symbol, DAILY_WARMUP_MONTH, through_month, token=token, gate=gate)
              for symbol in wanted}
     funding = load_symbol_funding_range(daily_dir, market, DAILY_WARMUP_MONTH, through_month, token=token,
@@ -778,6 +812,9 @@ def build_manifest(*, files: list, counts: dict, inputs: dict, through_month: st
     built again maps to the same directory (which is then skipped)."""
     manifest = {"schema": SCHEMA, "group_versions": registry.versions(), "columns": registry.docs(),
                 "symbols": list(symbols), "timeframes": list(timeframes), "through_month": through_month,
+                "universe": {symbol: data_lake.universe_flag(symbol) for symbol in symbols},
+                "universe_note": "core = the frozen six (every timeframe); extra = DAILY_EXTRA_SYMBOLS "
+                                 "(1440/10080 only)",
                 "files": sorted(files, key=lambda item: item["name"]),
                 "row_counts": dict(sorted(counts.get("rows", {}).items())),
                 "fwd_status_counts": dict(sorted(counts.get("fwd_status", {}).items())),
@@ -785,6 +822,10 @@ def build_manifest(*, files: list, counts: dict, inputs: dict, through_month: st
                 "insufficient_by_month": dict(sorted(counts.get("insufficient_month", {}).items())),
                 "insufficient_note": "insufficient rows per symbol|timeframe|segment|reasons (the reasons column "
                                      "value) and per symbol|timeframe|YYYY-MM of decision_ms (UTC)",
+                "bar_source_counts": dict(sorted(counts.get("bar_source", {}).items())),
+                "first_ok_decision_ms": dict(sorted(counts.get("first_ok", {}).items())),
+                "first_ok_note": "per symbol|timeframe|status|segment: the first decision_ms of a status-ok row (the "
+                                 "effective start of a segment once indicator warm-up and listing dates are met)",
                 "oi_missing_counts": dict(sorted(counts.get("oi_missing", {}).items())),
                 "oi_missing_counts_note": "per symbol|timeframe: non-invalid rows whose oi_value_end is empty "
                                           "(outside published mx months or in a metrics gap)",

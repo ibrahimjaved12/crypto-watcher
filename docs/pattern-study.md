@@ -15,11 +15,27 @@ This study supersedes it.
 
 | Timeframes | Source | Rows | Segments |
 |---|---|---|---|
-| 15, 60, 240 | rd 1-minute bars, `build_candles` | 2024-01 .. through_month | development (to 2025-06), validation (2025-07..2025-12) |
-| 1440, 10080 | dk1 daily klines, `candles_from_daily` | 2021-01 .. through_month | development-ext (2021-01..2025-06), validation |
+| 15, 60, 240 | rk- kline 1-minute bars (2020-12..2023-12) then rd aggTrades bars (2024-01..), `build_candles` | 2021-01 .. through_month | development-ext (2021-01..2023-12, kline bars), development (2024-01..2025-06), validation (2025-07..2025-12) |
+| 1440, 10080 | dk1 daily klines, `candles_from_daily` | 2020-01 .. through_month | development-ext (2020-01..2025-06), validation |
 
-- **Warm-up:** 2020 dk1 data is used only to warm up indicators. Intraday indicators warm
-  up inside 2024-01; those rows are marked `insufficient`, never filled.
+- **Sources (owner decision 2026-10-15).** Intraday bars before 2024-01 come from the rk-
+  releases (`scripts/research/klines_build.py`): the same bars1m-v1 columns built from the
+  monthly 1m klines, every minute flagged `KLINE_SOURCE`; a minute without a kline row or with
+  zero trades has empty prices (Binance repeats the previous close there) and makes its candle
+  invalid, exactly like a minute without aggTrades in the rd bars. The rk and rd months are loaded
+  as one contiguous series (a gap or an overlap at 2023-12 / 2024-01 is an error). Column
+  `bar_source` (group source, src-v1): `kline` for intraday rows before 2024-01 and every
+  daily/weekly row, `aggtrade` for rd rows. The klines-vs-aggTrades difference is quantified by
+  the parity mode of `klines-build.yml` on 2024-01.
+- **Warm-up:** 2020-12 bars warm up the intraday indicators of 2021-01; 2020 dk1 days warm up the
+  daily ones, and daily/weekly rows start in 2020-01. Rows whose indicators still lack history
+  (and rows before a symbol's listing) are `insufficient`, never filled. The effective start of
+  each segment per symbol and timeframe is recorded in the manifest as `first_ok_decision_ms`
+  (listing dates differ: a symbol listed after 2020-01 starts later).
+- **Universe:** intraday rows are the frozen six. Daily/weekly rows may add
+  `data_lake.DAILY_EXTRA_SYMBOLS` (empty until chosen from the liquidity-check table); those rows
+  have no 1-minute data, metrics or round grid (their premium/OI/positioning and round columns
+  are empty). The manifest records `universe` (core | extra per symbol).
 - **`through_month`:** defaults to 2025-12 and may not be later. The hidden guard runs over
   every month before any file is opened, so the hidden stretch is never read.
 - **Files:** one `candles__SYMBOL__TF__FIRST_LAST.csv.gz` per symbol and timeframe. The
@@ -32,6 +48,8 @@ This study supersedes it.
     (symbol|tf|YYYY-MM of the decision time), so clusters show without opening the files;
   - input release tags and sha256s, the git sha and `through_month`;
   - the dk1-vs-1m `daily_parity` per symbol;
+  - `universe`, `bar_source_counts` (symbol|tf|source) and `first_ok_decision_ms`
+    (symbol|tf|ok|segment: the first status-ok decision time);
   - a content hash that leaves out the commit and creation time.
 - **Storage:** everything is written to `reports/candle-table/ct1__<hash16>/` in the private
   research-data repo by `.github/workflows/candle-table-build.yml`. A directory with the same
@@ -431,6 +449,10 @@ Unsigned cells have no bp, hit-rate or cost line.
 
 ### Runs and output
 
+- **Segments read (owner decision 2026-10-15):** a development run reads the intraday rows of
+  `development-ext` and `development` (2021-01..2025-06) and the daily/weekly `development-ext` rows;
+  a validation run reads `validation`. The input `universe` (core | core+extra, default core)
+  selects the daily/weekly symbols; the intraday families are always the frozen six.
 - **Inputs:** `segment` (development | validation; hidden is refused by the guard) and
   `table_report` (a candle-table report hash or path in the private repo).
 - **Replication:** an optional `reference_report` (a development report) adds a same-sign

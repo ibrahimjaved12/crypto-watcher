@@ -51,7 +51,7 @@ VALUE_COLUMNS = ("open", "high", "low", "close", "volume", "quote_volume", "trad
 _SOURCE_INDEX = (1, 2, 3, 4, 5, 7, 8, 9, 10)  # kline columns of VALUE_COLUMNS (6 = close_time, 11 = ignore)
 CSV_COLUMNS = ("open_time_ms", *VALUE_COLUMNS)
 FUNDING_GAP_HOURS = 9
-_SYMBOLS = "|".join(data_lake.SYMBOLS)
+_SYMBOLS = "|".join(data_lake.DAILY_UNIVERSE)  # the frozen six plus DAILY_EXTRA_SYMBOLS (daily/weekly tier)
 _MONTH = r"\d{4}-(?:0[1-9]|1[0-2])"
 _TAG = re.compile(rf"dk1-({_SYMBOLS})-({_MONTH})_({_MONTH})-r([1-9][0-9]{{0,2}})\Z")
 _RANGE_FILE = re.compile(rf"(daily|funding)__({_SYMBOLS})__({_MONTH})_({_MONTH})\.csv\.gz\Z")
@@ -68,7 +68,7 @@ class DailyFormatError(ValueError):
 
 
 def release_tag(symbol: str, first_month: str, last_month: str, revision: int = 1) -> str:
-    data_lake.validate_symbol(symbol)
+    data_lake.validate_daily_symbol(symbol)
     data_lake.months_between(first_month, last_month)  # validates both and their order
     return validate_tag(f"dk1-{symbol}-{first_month}_{last_month}-r{revision}")
 
@@ -81,13 +81,16 @@ def validate_tag(tag: str) -> str:
 
 
 def kline_url(symbol: str, month: str) -> str:
-    data_lake.validate_symbol(symbol)
+    data_lake.validate_daily_symbol(symbol)
     data_lake.validate_month(month)
     return f"{data_lake.BINANCE_BASE}/klines/{symbol}/1d/{symbol}-1d-{month}.zip"
 
 
 def funding_url(symbol: str, month: str) -> str:
-    return data_lake.source_url("fundingRate", symbol, month)
+    """data_lake.source_url's funding path, for any symbol of the daily universe (identical for the six)."""
+    data_lake.validate_daily_symbol(symbol)
+    data_lake.validate_month(month)
+    return f"{data_lake.BINANCE_BASE}/fundingRate/{symbol}/{symbol}-fundingRate-{month}.zip"
 
 
 def _stem(symbol: str, first_month: str, last_month: str) -> str:
@@ -225,7 +228,7 @@ def collect(symbol: str, months, fetcher: Callable[[str], bytes | None]) -> dict
 
     ``fetcher(url) -> bytes | None`` (None = HTTP 404, a recorded gap); a checksum mismatch raises.
     """
-    data_lake.validate_symbol(symbol)
+    data_lake.validate_daily_symbol(symbol)
     out = {}
     for month in months:
         for kind, url in (("klines", kline_url(symbol, month)), ("funding", funding_url(symbol, month))):
@@ -299,7 +302,7 @@ def _range_file(directory, kind: str, symbol: str, first_month: str, last_month:
 
 
 def _bounds(symbol: str, first_month: str, last_month: str, token, gate) -> tuple[int, int]:
-    data_lake.validate_symbol(symbol)
+    data_lake.validate_daily_symbol(symbol)
     months = data_lake.months_between(first_month, last_month)
     require_months(months, token, gate)  # every requested month, before any file is opened
     return data_lake.month_bounds_ms(first_month)[0], data_lake.month_bounds_ms(last_month)[1]

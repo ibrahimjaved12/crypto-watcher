@@ -211,6 +211,8 @@ def _round_prices(symbol: str, close: int, lo: float, hi: float) -> list:
 def _set_prices(ctx, name: str, known_ms: int, close: int, lo: float, hi: float):
     """Usable (price, side) pairs of a set, or None when the set's source is unavailable."""
     if name == "round":
+        if ctx.symbol not in lv.ROUND_SPACING:  # a DAILY_EXTRA_SYMBOLS symbol has no fixed grid: unavailable
+            return None
         return [(price, "grid") for price in _round_prices(ctx.symbol, close, lo, hi)]
     index = ctx.level_index.get(name)
     if index is None:

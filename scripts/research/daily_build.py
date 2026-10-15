@@ -148,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--summary", help="append a markdown summary to this file")
     args = parser.parse_args(argv)
     try:
-        symbol = lake.validate_symbol(args.symbol)
+        symbol = lake.validate_daily_symbol(args.symbol)  # the six plus DAILY_EXTRA_SYMBOLS
         tag = dk.release_tag(symbol, args.first_month, args.last_month, args.revision)
     except ValueError as error:
         parser.error(str(error))

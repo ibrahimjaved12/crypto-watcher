@@ -290,7 +290,7 @@ def build_table(daily: dict, btc_funding: FundingSeries, first_ms: int, end_ms: 
     days = (end_ms - first_ms) // DAY_MS
     market = market_labels(daily[MARKET_SYMBOL], btc_funding, first_ms, end_ms)
     per_symbol = {symbol: symbol_labels(daily[symbol], first_ms, end_ms)
-                  for symbol in data_lake.SYMBOLS if symbol in daily}
+                  for symbol in data_lake.DAILY_UNIVERSE if symbol in daily}  # the six (+ daily extras)
     rows = []
     for j in range(days):
         stamp = _day_text(first_ms + j * DAY_MS)

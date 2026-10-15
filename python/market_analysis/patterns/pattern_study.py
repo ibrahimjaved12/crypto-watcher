@@ -57,8 +57,11 @@ NUMERIC_COLUMNS = (
     "touch_swing1d", "touch_swing1w", "sigma_tf", "ret_1_sigma", "ret_1_bp", "ln_range1_sigma", "ret_2_sigma", "ret_4_sigma",
     "mfe_long_2_sigma", "mae_long_2_sigma", "mfe_long_4_sigma", "mae_long_4_sigma")
 TOUCH_COLUMNS = (("any", "any_touch"), *((name, f"touch_{name}") for name in lv.PATTERN_LEVEL_SETS))
-STUDY_SEGMENTS = {"development": {"intraday": "development", "daily": "development-ext"},
-                  "validation": {"intraday": "validation", "daily": "validation"}}
+# Table segments read by a study segment (owner decision 2026-10-15): intraday development = development-ext
+# (2021-01..2023-12, kline bars) + development (2024-01..2025-06); daily/weekly development = development-ext.
+STUDY_SEGMENTS = {"development": {"intraday": ("development-ext", "development"), "daily": ("development-ext",)},
+                  "validation": {"intraday": ("validation",), "daily": ("validation",)}}
+UNIVERSES = ("core", "core+extra")  # daily/weekly tier only; intraday is always the frozen six
 
 
 def mde_multiplier(alpha: float, power: float = MDE_POWER) -> float:
@@ -840,23 +843,31 @@ def table_paths(report_dir_path: Path, manifest: dict) -> dict:
 
 
 def run_study(table_dir: Path, segment: str, *, table_report: str, reference: dict | None = None,
-              code_commit: str, created_utc: str, B: int = BOOTSTRAP_B) -> dict:
-    """Load a candle-table report directory and build the report (the hidden segment is refused first)."""
+              code_commit: str, created_utc: str, B: int = BOOTSTRAP_B, universe: str = "core") -> dict:
+    """Load a candle-table report directory and build the report (the hidden segment is refused first).
+
+    ``universe`` (daily/weekly families only): core = the frozen six, core+extra adds DAILY_EXTRA_SYMBOLS rows."""
+    from .. import data_lake
     from .candle_table import check_manifest
 
     check_segment(segment)
+    if universe not in UNIVERSES:
+        raise ValueError(f"universe must be one of {UNIVERSES}")
     manifest = json.loads((Path(table_dir) / "manifest.json").read_text(encoding="utf-8"))
     check_manifest(manifest)
     paths = table_paths(table_dir, manifest)
     names = STUDY_SEGMENTS[segment]
     intraday = read_table([p for tf in INTRADAY_TFS for p in paths.get(tf, [])])
-    intraday = subset(intraday, intraday["segment"] == names["intraday"])
+    intraday = subset(intraday, np.isin(intraday["segment"], names["intraday"])
+                      & np.isin(intraday["symbol"], data_lake.SYMBOLS))
+    daily_symbols = data_lake.SYMBOLS if universe == "core" else data_lake.DAILY_UNIVERSE
     daily_frames = {}
     for tf in DAILY_TFS:
         if tf in paths:
             frame = read_table(paths[tf])
-            daily_frames[tf] = subset(frame, frame["segment"] == names["daily"])
-    counts = {"intraday_rows": int(len(intraday["tf"])),
+            daily_frames[tf] = subset(frame, np.isin(frame["segment"], names["daily"])
+                                      & np.isin(frame["symbol"], daily_symbols))
+    counts = {"intraday_rows": int(len(intraday["tf"])), "daily_universe": universe,
               **{f"rows_{tf}": int(len(frame["tf"])) for tf, frame in daily_frames.items()}}
     primary_results = primary(intraday, B)
     descriptive_results = descriptive(intraday, daily_frames, B)
