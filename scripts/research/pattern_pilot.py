@@ -99,11 +99,11 @@ def run(args, checkout: Checkout, progress) -> list[str]:
     frames = {tf: _quiet(pe.read_frame, paths[tf], DEVELOPMENT)[0] for tf in timeframes}
     with progress.stage("sample"):
         built = _quiet(pp.build_pilot, frames, symbol=args.symbol, window=window, per_stratum=args.per_stratum,
-                       seed=args.seed, mode=args.mode)
+                       seed=args.seed, mode=args.mode, variant=args.variant)
     manifest = pp.manifest(symbol=args.symbol, table_report=str(table_dir.relative_to(root)),
                            table_hash=table_manifest["content_hash"], window=window, per_stratum=args.per_stratum,
                            seed=args.seed, mode=args.mode, counts=built["counts"], files=built["files"],
-                           code_commit=os.environ.get("GITHUB_SHA", "local"), created_utc=NOW_UTC)
+                           code_commit=os.environ.get("GITHUB_SHA", "local"), created_utc=NOW_UTC, variant=args.variant)
     directory = pp.pilot_dir(manifest)
     if (root / directory).exists():
         return [*pp.public_lines(manifest), "skipped: a pilot with this hash already exists"]
@@ -131,6 +131,8 @@ def parse_args(argv=None):
     parser.add_argument("--per-stratum", type=int, default=6)
     parser.add_argument("--seed", type=int, default=pp.DEFAULT_SEED)
     parser.add_argument("--mode", default="blind", choices=pp.MODES)
+    parser.add_argument("--variant", default=None, choices=tuple(pe.GEO_V3),
+                        help="doji-geo-v3 variant: adds the 'soft' class (its extra candles); default: none")
     args = parser.parse_args(argv)
     args.timeframes = parse_timeframes(args.timeframes)
     return args

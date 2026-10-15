@@ -81,7 +81,51 @@ def parse_review(text: str):
     return slice_id, bucket
 
 
+def run_geo_v3(args, checkout: Checkout, progress) -> list[str]:
+    """doji-geo-v3: every variant, core and soft members split (docs/pattern-study.md, "doji-geo-v3"); development
+    segments only, no review packs; one experiment-log line per variant x group x timeframe x slice x family."""
+    root = checkout.path
+    if args.segment != "development":
+        check_plan(root, args.plan_id)
+    progress.phase("load")
+    table_dir = resolve(root, args.table_report, prefix="reports/candle-table/ct1__")
+    frames, absent, manifest = _quiet(pe.load_tier, table_dir, args.tier, args.segment)
+    with progress.stage("explore"):
+        report, extra = _quiet(pe.run_variants, frames, tier=args.tier, segment=args.segment,
+                               table_report=str(table_dir.relative_to(root)), table_hash=manifest["content_hash"],
+                               code_commit=os.environ.get("GITHUB_SHA", "local"), created_utc=NOW_UTC,
+                               plan_id=args.plan_id, absent=absent)
+    directory = pe.variants_report_dir(report)
+    if (root / directory).exists():
+        return [*pe.variants_public_lines(report), "skipped: a report with this hash already exists"]
+    files = {"summary.json": canonical_bytes(report),
+             **{name: text.encode("utf-8") for name, text in pe.variants_csv_files(report, extra).items()},
+             "report.md": pe.variants_markdown(report).encode("utf-8")}
+    progress.phase("report write", files=len(files))
+    (root / directory).mkdir(parents=True)
+    for name, data in files.items():
+        (root / directory / name).write_bytes(data)
+    paths = [f"{directory}/{name}" for name in files]
+    if args.record_trials:
+        ledger = root / LEDGER
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        records = pe.variants_experiment_records(
+            report, run_id=os.environ.get("GITHUB_RUN_ID", report["report_hash"][:16]),
+            data_snapshot_id=manifest["content_hash"])
+        _quiet(ExperimentLog(ledger).append_many, records)
+        paths.append(LEDGER)
+    progress.phase("push", files=len(paths))
+    checkout.commit_and_push(paths, f"Doji exploration geo-v3 {args.tier} {args.segment}: "
+                                    f"report {report['report_hash']}")
+    lines = pe.variants_public_lines(report)
+    if not args.record_trials:
+        lines.append("experiment log skipped")
+    return lines
+
+
 def run(args, checkout: Checkout, progress) -> list[str]:
+    if args.definition == "geo-v3":
+        return run_geo_v3(args, checkout, progress)
     root = checkout.path
     if args.segment != "development":
         check_plan(root, args.plan_id)
@@ -129,6 +173,8 @@ def parse_args(argv=None):
     parser.add_argument("--plan-id", default="", help="sha256 plan id of a committed doji-explore plan (validation)")
     parser.add_argument("--table-report", required=True, help="candle-table report hash or reports/ path")
     parser.add_argument("--tier", required=True, help="intraday | daily_weekly")
+    parser.add_argument("--definition", default="geo-v2", choices=("geo-v2", "geo-v3"),
+                        help="geo-v2 (the frozen doji study events, default) or geo-v3 (all variants, core/soft split)")
     parser.add_argument("--review-slice", default="", help="optional '<slice id>=<bucket>' review pack")
     parser.add_argument("--review-mode", default="blind", choices=pe.REVIEW_MODES,
                         help="blind (stratified, no outcome, opaque ids) or open (the old hit/miss packs)")
