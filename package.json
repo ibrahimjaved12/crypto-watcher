@@ -14,6 +14,7 @@
     "runner:gateway": "node scripts/runner-gateway.mjs",
     "runner:jobs": "node scripts/runner-jobs.mjs",
     "alert-charts": "node scripts/alert-charts.mjs",
+    "movement-state-publisher": "node scripts/movement-state-publisher.mjs",
     "collector:worker": "node scripts/collector-worker.mjs",
     "market-quote-publisher": "node scripts/market-quote-publisher.mjs",
     "collector-universe-sync": "node scripts/collector-universe-sync.mjs",

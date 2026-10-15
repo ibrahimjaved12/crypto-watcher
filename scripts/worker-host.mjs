@@ -453,6 +453,11 @@ async function main() {
   // Python venv with matplotlib (python/requirements-machine.txt) and a PNG directory.
   if (env.ALERT_CHARTS_ENABLED !== "false" && env.OPERATIONAL_DB_ENABLED === "true" && env.ALERT_CHART_DIR?.trim())
     specs.push(nodeJob("alert-charts", "scripts/alert-charts.mjs"));
+  // Movement-state publisher (#30): non-essential sibling that copies the engine's persisted state to the hosted
+  // database through the site hook (shared secret, no service key) so the deployed site can show the market strip.
+  if (env.MOVEMENT_STATE_PUBLISH_ENABLED !== "false" && env.OPERATIONAL_DB_ENABLED === "true"
+      && (env.MOVEMENT_STATE_HOSTED_URL?.trim() || env.ALERT_CHART_HOSTED_URL?.trim()))
+    specs.push(nodeJob("movement-state-publisher", "scripts/movement-state-publisher.mjs"));
   for (const spec of specs) {
     records.set(spec.name, {
       ...spec,
@@ -482,6 +487,7 @@ async function main() {
   if (records.has("collector-universe-sync")) launch(records.get("collector-universe-sync"));
   if (records.has("runner-gateway")) launch(records.get("runner-gateway"));
   if (records.has("alert-charts")) launch(records.get("alert-charts"));
+  if (records.has("movement-state-publisher")) launch(records.get("movement-state-publisher"));
   const pythonNames = ["fastapi-analysis", "fastapi-forward"];
   const urls = [endpoints.analysis.origin, endpoints.forward.origin];
   void startAfterPython(records.get("forward-hourly"), urls, pythonNames);

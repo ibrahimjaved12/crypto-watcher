@@ -21,6 +21,7 @@ import { Route as AuthCallbackRouteImport } from './routes/auth_.callback'
 import { Route as ApiPublicHooksMonitorPricesRouteImport } from './routes/api/public/hooks/monitor-prices'
 import { Route as ApiPublicHooksSyncCollectorSubscriptionsRouteImport } from './routes/api/public/hooks/sync-collector-subscriptions'
 import { Route as ApiPublicHooksAlertChartUploadRouteImport } from './routes/api/public/hooks/alert-chart-upload'
+import { Route as ApiPublicHooksMarketStatePublishRouteImport } from './routes/api/public/hooks/market-state-publish'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -83,6 +84,11 @@ const ApiPublicHooksAlertChartUploadRoute = ApiPublicHooksAlertChartUploadRouteI
   path: '/api/public/hooks/alert-chart-upload',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicHooksMarketStatePublishRoute = ApiPublicHooksMarketStatePublishRouteImport.update({
+  id: '/api/public/hooks/market-state-publish',
+  path: '/api/public/hooks/market-state-publish',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -96,6 +102,7 @@ export interface FileRoutesByFullPath {
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
   '/api/public/hooks/alert-chart-upload': typeof ApiPublicHooksAlertChartUploadRoute
+  '/api/public/hooks/market-state-publish': typeof ApiPublicHooksMarketStatePublishRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -109,6 +116,7 @@ export interface FileRoutesByTo {
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
   '/api/public/hooks/alert-chart-upload': typeof ApiPublicHooksAlertChartUploadRoute
+  '/api/public/hooks/market-state-publish': typeof ApiPublicHooksMarketStatePublishRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -124,6 +132,7 @@ export interface FileRoutesById {
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
   '/api/public/hooks/alert-chart-upload': typeof ApiPublicHooksAlertChartUploadRoute
+  '/api/public/hooks/market-state-publish': typeof ApiPublicHooksMarketStatePublishRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -139,6 +148,7 @@ export interface FileRouteTypes {
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
     | '/api/public/hooks/alert-chart-upload'
+    | '/api/public/hooks/market-state-publish'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -152,6 +162,7 @@ export interface FileRouteTypes {
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
     | '/api/public/hooks/alert-chart-upload'
+    | '/api/public/hooks/market-state-publish'
   id:
     | '__root__'
     | '/'
@@ -166,6 +177,7 @@ export interface FileRouteTypes {
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
     | '/api/public/hooks/alert-chart-upload'
+    | '/api/public/hooks/market-state-publish'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -176,6 +188,7 @@ export interface RootRouteChildren {
   ApiPublicHooksMonitorPricesRoute: typeof ApiPublicHooksMonitorPricesRoute
   ApiPublicHooksSyncCollectorSubscriptionsRoute: typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
   ApiPublicHooksAlertChartUploadRoute: typeof ApiPublicHooksAlertChartUploadRoute
+  ApiPublicHooksMarketStatePublishRoute: typeof ApiPublicHooksMarketStatePublishRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -264,6 +277,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicHooksAlertChartUploadRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/hooks/market-state-publish': {
+      id: '/api/public/hooks/market-state-publish'
+      path: '/api/public/hooks/market-state-publish'
+      fullPath: '/api/public/hooks/market-state-publish'
+      preLoaderRoute: typeof ApiPublicHooksMarketStatePublishRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -295,6 +315,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicHooksSyncCollectorSubscriptionsRoute:
     ApiPublicHooksSyncCollectorSubscriptionsRoute,
   ApiPublicHooksAlertChartUploadRoute: ApiPublicHooksAlertChartUploadRoute,
+  ApiPublicHooksMarketStatePublishRoute: ApiPublicHooksMarketStatePublishRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

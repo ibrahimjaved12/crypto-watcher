@@ -119,6 +119,33 @@ export type Database = {
         }
         Relationships: []
       }
+      market_state_published: {
+        Row: {
+          universe_id: string
+          evaluation_boundary_ms: number
+          payload: Json
+          payload_bytes: number
+          version: string
+          published_at: string
+        }
+        Insert: {
+          universe_id: string
+          evaluation_boundary_ms: number
+          payload: Json
+          payload_bytes: number
+          version?: string
+          published_at?: string
+        }
+        Update: {
+          universe_id?: string
+          evaluation_boundary_ms?: number
+          payload?: Json
+          payload_bytes?: number
+          version?: string
+          published_at?: string
+        }
+        Relationships: []
+      }
       alert_chart_files: {
         Row: {
           alert_id: string
@@ -844,6 +871,22 @@ export type Database = {
           p_quotes: Json
         }
         Returns: number
+      }
+      latest_ta_signals: {
+        Args: { p_timeframe: number; p_symbols: string[] }
+        Returns: {
+          symbol: string
+          timeframe: number
+          candle_at: string
+          detected_at: string
+          price: number
+          classification: string
+          score: number | null
+          atr_pct: number | null
+          indicators: Json
+          factor_breakdown: Json
+          patterns: string[]
+        }[]
       }
       register_alert_chart_pending: {
         Args: { p_alert_id: string }

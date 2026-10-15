@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useState } from "react";
 import { automaticQueryOptions, logActivity } from "@/lib/activity-controls";
@@ -9,6 +9,8 @@ import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { QuoteCard } from "@/components/market/quote-card";
 import { MarketRead } from "@/components/market/market-read";
+import { MarketStrip } from "@/components/market/market-strip";
+import { PairAssessment } from "@/components/market/pair-assessment";
 import { TechnicalAnalysis } from "@/components/market/technical-analysis";
 import { Button } from "@/components/ui/button";
 import {
@@ -28,6 +30,19 @@ import { marketQueryKey, useMarketSelfHeal } from "@/lib/market/use-market-self-
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
 import { describeAlertCheck } from "@/lib/monitor/check-message";
 import { getOperationalState } from "@/lib/operational.functions";
+import { getMarketMovementCurrentState } from "@/lib/market-movement.functions";
+import { toMarketMovementCurrentState } from "@/lib/market/market-movement-state";
+import {
+  TA_ASSESSMENT_FRAMES,
+  buildFreshness,
+  buildMarketStrip,
+  buildPairMovement,
+  buildTaFrame,
+  latestTaBySymbol,
+  type MovementReadStatus,
+} from "@/lib/market/assessment";
+import { loadLatestTa } from "@/lib/market/ta-latest";
+import { useNow } from "@/lib/use-now";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
@@ -86,6 +101,8 @@ function Dashboard() {
   const runCheck = useServerFn(runMyMonitorCheck);
   const loadMarket = useServerFn(getMarketSnapshot);
   const loadOperationalState = useServerFn(getOperationalState);
+  const loadMovement = useServerFn(getMarketMovementCurrentState);
+  const now = useNow(15_000);
 
   const watchlist = useQuery({ queryKey: ["watchlist"], queryFn: fetchWatchlist });
   const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
@@ -106,6 +123,47 @@ function Dashboard() {
     enabled: automatic.enabled && symbols.length > 0,
   });
   const { retrying, down } = useMarketSelfHeal(symbols, marketKey);
+
+  // "Current assessment" (#30): the engine's persisted state (read through the existing server function, which
+  // is cheap on the Worker) and the latest saved TA snapshots. Same refresh gates as the data they sit beside;
+  // the engine writes every 30 s, so a 60 s refresh is never faster than its own cadence.
+  const taAutomatic = automaticQueryOptions(import.meta.env["VITE_TA_HISTORY_AUTO_REFRESH_ENABLED"]);
+  const movement = useQuery({
+    queryKey: ["market-movement"],
+    queryFn: () => loadMovement(),
+    ...automatic,
+    enabled: automatic.enabled && symbols.length > 0,
+  });
+  const taQueries = useQueries({
+    queries: TA_ASSESSMENT_FRAMES.map((timeframe) => ({
+      queryKey: ["ta", timeframe, "dashboard-latest", symbols.join(",")],
+      queryFn: () => loadLatestTa(timeframe, symbols),
+      ...taAutomatic,
+      enabled: taAutomatic.enabled && symbols.length > 0,
+    })),
+  });
+  const movementRead: MovementReadStatus = movement.data
+    ? movement.data.readStatus
+    : movement.isError
+      ? "read_failed"
+      : "not_loaded";
+  const movementState = movement.data ?? toMarketMovementCurrentState(null, { now });
+  const taRows = taQueries.flatMap((query) => query.data ?? []);
+  const taLoaded = taQueries.some((query) => query.data !== undefined);
+  const publishedAt = movement.data?.publishedAt ?? null;
+  const strip = buildMarketStrip(movementState, now, movementRead, publishedAt);
+  const freshness = buildFreshness(
+    {
+      state: movementState,
+      read: movementRead,
+      symbols,
+      quotes: (market.data?.quotes ?? []).map((q) => ({ symbol: q.symbol, ok: q.ok, stale: q.stale, lastCandleAt: q.lastCandleAt })),
+      ta: taLoaded ? taRows : undefined,
+      publishedAt,
+    },
+    now,
+  );
+  const latestTa = latestTaBySymbol(taRows);
 
   const operational = useQuery({
     queryKey: ["operational-state"],
@@ -207,7 +265,11 @@ function Dashboard() {
             </Select>
             <Button
               variant="secondary"
-              onClick={() => market.refetch()}
+              onClick={() => {
+                void market.refetch();
+                void movement.refetch();
+                for (const query of taQueries) void query.refetch();
+              }}
               disabled={market.isFetching || symbols.length === 0}
             >
               <RefreshCw
@@ -278,6 +340,8 @@ function Dashboard() {
         </Hint>
       </div>
 
+      {symbols.length > 0 ? <MarketStrip view={strip} freshness={freshness} now={now} /> : null}
+
       <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {watchlist.isLoading
           ? symbols.map((s) => (
@@ -291,6 +355,21 @@ function Dashboard() {
                 <QuoteCard
                   key={symbol}
                   quote={quote}
+                  assessment={
+                    <PairAssessment
+                      symbol={symbol}
+                      now={now}
+                      movement={buildPairMovement(symbol, movementState, movementRead, strip.notLiveNote)}
+                      ta={TA_ASSESSMENT_FRAMES.map((timeframe, index) =>
+                        buildTaFrame(
+                          latestTa.get(`${symbol}|${timeframe}`),
+                          timeframe,
+                          now,
+                          taQueries[index]?.isError ? "failed" : taQueries[index]?.data === undefined ? "not_loaded" : "loaded",
+                        ),
+                      )}
+                    />
+                  }
                   retrying={automatic.enabled && retrying && down.includes(symbol)}
                   onRemove={() => {
                     const item = watchlist.data?.find((w) => w.symbol === quote.symbol);
