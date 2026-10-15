@@ -71,6 +71,8 @@ This study supersedes it.
 | sweep | sweep-v1 | per reference (prior20, swing_tf, prev_day, prev_week, prev_month): sweep_up/sweep_dn; any, both, direction, depth |
 | htf | htf-v1 | per higher timeframe (1h, 4h, 1d, 1w): trend_dir, adx, extension_atr, ema_gap_atr of the last closed higher candle |
 | levels2 | lv2-v1 | liquidity pools (distance, touches, touch, swept), anchored VWAP from the last swing low/high, intraday day VWAP, 30d/90d volume profile POC/VAH/VAL |
+| derivatives | deriv-v1 | funding (last, 90-day percentile, clamp flag, last-3 sum), premium/basis, open interest (end, start, change, z, OI/turnover), positioning (global, top-trader account/position, taker, global z) |
+| flush | flush-v1 | flush_down, flush_up, flush_dir (price beyond 3 sigma with an OI collapse) |
 | outcomes | fwd-v1 | for m in 1, 2, 4: ret_m_bp, ret_m_sigma, mfe/mae_long_m_sigma, fwd_ok_m; range1_sigma, absret1_sigma, ln_range1_sigma, fwd_status |
 
 **Sigma:**
@@ -243,6 +245,223 @@ which first happens in 2024-02.
   `in_value_area_*`, `touch_poc_*`.
 
 Like location, sweep and htf, levels2 never changes `status`.
+
+### Derivatives (deriv-v1) and flush (flush-v1)
+
+Every value is the one known at the decision time. A missing input leaves the column empty; nothing
+is filled from an older row.
+
+**Funding.** All rows (intraday, daily, weekly) use the dk1 funding history from 2020, so the
+90-day percentile has no hole at the start of the intraday table (2024-01). The rd funding is not
+used for the columns; the manifest records `funding_parity` per symbol: on the overlap of the two
+series, with settlements keyed by their time floored to the minute, the number compared, equal,
+differing, rd-only and dk1-only. A settlement counts once its time, floored to the minute, is at or
+before the decision.
+
+- `fund_last`: the last settled rate.
+- `fund_pct90`: the fraction of the rates settled in the previous 90 days (including the last one)
+  that are <= `fund_last`. Empty when the 90-day window starts before the loaded funding.
+- `fund_clamped`: `fund_last == 0.0001`, the clamp value most settlements sit at.
+- `fund_cum_24h`: the sum of the last 3 settlements.
+
+**Premium and basis** (only where 1m data exist, i.e. 2024+; empty for earlier daily/weekly rows):
+
+- `prem_last`: the premium-index close at the candle's last minute.
+- `prem_z`: the candle's mean premium (all its minutes present) against the mean and standard
+  deviation of earlier same-tf candle means in the trailing 30 days; needs at least 100 values. In
+  practice this is empty for daily and weekly rows.
+- `basis_bp`: `1e4 * (mark close - index close) / index close` at the candle's last minute.
+
+**Open interest and positioning** (only months published as mx releases; other rows are empty and
+the manifest counts them per symbol and timeframe in `oi_missing_counts`: non-invalid rows whose
+`oi_value_end` is empty, i.e. outside published months or in a metrics gap; invalid candles carry no
+features and are not counted):
+
+- A metrics row stamped `T` is usable from `T + 5 min` (`metrics_lake.usable_from_ms`). A value at
+  time `t` is the latest 5-minute period usable at `t`; a NaN period stays empty.
+- `oi_value_end` / `oi_value_start`: the open-interest value usable at the decision / at the
+  candle's open. `doi_pct = end / start - 1` needs both.
+- `doi_z`: the screen's robust z (median and 1.4826 × MAD) of `doi_pct` against earlier same-tf
+  candles in a trailing window: 30 days with at least 500 / 300 / 100 values for 15m / 1h / 4h,
+  365 days with at least 90 for 1d, 730 days with at least 52 for 1w.
+- `oi_vol_ratio`: `oi_value_end` divided by the sum of close × base volume over the 24 hours
+  ending at the decision (intraday: the row's own candles; daily/weekly: the dk1 day ending at the
+  decision).
+- `ls_global`, `ls_top_acct`, `ls_top_pos`, `taker_ls`: the global account, top-trader account,
+  top-trader position and taker volume ratios usable at the decision.
+- `ls_global_z`: the screen's global-ls z (30-day history, at least 500 values, hourly decisions)
+  at the latest hourly decision at or before the row's decision.
+
+**Flush proxy (flush-v1).** With `ret = ln(close / open)` of the candle:
+
+- `flush_down`: `ret <= -3 sigma_tf` and `doi_z <= -3` (price fell and OI collapsed: a long
+  liquidation proxy).
+- `flush_up`: `ret >= +3 sigma_tf` and `doi_z <= -3` (a short squeeze proxy).
+- `flush_dir`: -1 for flush_down, +1 for flush_up, 0 for neither.
+
+Real liquidation prints join in a later PR (#349). Neither group changes `status`.
+
+## Doji event study
+
+A pre-registered screen on the candle table (`patterns/study_cells.py`, `patterns/pattern_study.py`,
+`.github/workflows/pattern-study.yml`), in the style of `benchmark/screen.py`. It is descriptive
+only: never a PASS, no trades, no labels, no ledger entry. The report states how many hypotheses
+were examined. The cell definitions (`doji-cells-v1`, event `doji-geo-v2`) are frozen once results
+exist; any change is a new version.
+
+### Definitions
+
+- **Event E (doji-geo-v2):** status ok, `body_ratio <= 0.10`, `range > 0`, `range_atr >= 0.5`.
+- **Controls:** the same context, the same size class (`range_atr >= 0.5`) and another shape
+  (`body_ratio > 0.10`).
+- **Population:** segment rows with a valid one-candle outcome window (`fwd_ok_1`) whose candle is
+  not invalid (`status != invalid`). Rows of status `insufficient` stay: groups that never change
+  `status` (location, sweep, htf, levels2, derivatives, flush) must not drop rows. A cell's own
+  inputs decide, through the missing-control rule below.
+- **Direction:** `s` is fixed by the cell rule, never by the outcome.
+
+| cell | context | direction |
+|---|---|---|
+| A | all candles | unsigned |
+| C1 | `adx_prev >= 20`, `trend_dir != 0`, `|extension_prev_atr| < 1.5`, no level touch, nearest level > 0.5 ATR | `trend_dir` |
+| C2 | `adx_prev >= 20`, `extension_prev_atr * trend_dir >= 2`, the trend-side extreme at or beyond the prior-20 extreme | `-trend_dir` |
+| C3 | exactly one side swept (`sweep_both` false) | `sweep_dir` |
+| C4 | any level touched | `-touch_approach_side` |
+| C5 | `squeeze_on_prev` | unsigned |
+| C6 | `adx_prev < 20`, `trend_dir != 0` (negative control, expected null) | `trend_dir` |
+| C7 | `flush_dir != 0` | `-flush_dir` |
+| C8 | relative volume >= 2 (intraday: `rel_volume_slot`; daily/weekly: `rel_volume_prior20`) and `|ret3_prev_sigma| >= 2·√3` | `-sign(ret3_prev_sigma)` |
+
+C8: `ret3_prev_sigma` is a 3-candle return in **one-candle** sigma units, so a "2 sigma" 3-candle
+shock is `|ret3_prev_sigma| >= 2·√3` (about 3.46).
+
+The C2 prior-20 extreme is the sweep group's prior20 reference: the max high / min low of
+candles i-20..i-1, all valid. It is rebuilt from consecutive table rows of the same symbol and
+timeframe.
+
+**Outcomes (m = 1).**
+
+- Signed cells: `y = s * ret_1_sigma`. Unsigned cells: `y = ln_range1_sigma`.
+- Hit = `s * ret_1_bp > 0`. Ties (`ret_1_bp == 0`) are excluded from hit rates and counted.
+
+### Estimands
+
+**Primary (K = 9: A, C1..C8).** Pooled over the six symbols and the intraday timeframes:
+
+    y = alpha_{symbol,tf} + gamma_hour + beta * D + delta' X + e
+
+- `D` is E within the cell's context.
+- The sample is the context rows with `range_atr >= 0.5`.
+- `X = [ln range_atr, ln rel_volume_prior20, atr_pct_prev, s * ret3_prev_sigma (signed cells),
+  |ret3_prev_sigma|]`. Rows with a missing control are excluded and counted.
+- Covariance is clustered by the UTC day of the candle open.
+- p-values are normal approximations on the clustered t, Holm-adjusted over the 9 tests.
+- The robustness estimator is a stratified difference in means on the same sample.
+  - Strata: symbol, tf, 6-hour bucket, `atr_pct_prev` tercile, `range_atr` bin
+    [0.5, 0.75, 1, 1.5, 2.5, inf) and `rel_volume_prior20` tercile (sample quantiles).
+  - Weights are member counts; a stratum needs at least one member and one control.
+  - The CI comes from a UTC-day cluster bootstrap.
+
+**Reported per cell:**
+
+- Counts: members, controls and days, plus exclusions (missing controls, missing outcome).
+- Mean y for members and for controls.
+- Beta, its clustered SE and 95% CI, in sigma and in bp (beta × the members' mean `sigma_tf`
+  in bp).
+- The stratified difference with its CI, and beside it the same estimator with the decision-time
+  session as an extra stratum (`stratified_session`; a robustness view, not part of the Holm
+  family).
+- The hit-rate difference, with a Wilson interval for each rate.
+- The Holm p-value.
+- The minimum detectable effect at two multipliers: `2.8 × SE` (alpha 0.05, power 0.8) and the
+  Holm-adjusted `(z(1 - 0.05/(2·9)) + z(0.8)) × SE`, about 3.6, computed from the normal quantile.
+- The cost hurdle: an 11 bp round trip, i.e. `11 / mean sigma_tf bp` in sigma.
+- The members' mean signed return (bp) and the controls' mean (bp), each with a UTC-day-clustered
+  95% CI (gross, one candle).
+- `members mean - hurdle` next to `beta - hurdle` (hurdle stays 11 bp).
+- A flag when members < 100.
+
+Unsigned cells have no bp, hit-rate or cost line.
+
+**Population, base rates and diagnostics (counts and rates, no tests):**
+
+- Population counts per timeframe: segment rows, invalid candles, rows without a valid forward
+  window and the population (these counts also appear in the public log); per cell, the rows
+  excluded for missing controls.
+- Context base rates per cell and intraday timeframe: context rows, events and controls, and
+  their shares of the population.
+- Touch base rates per level set (and `any_touch`) and timeframe: rows evaluated (non-invalid rows
+  whose touch flag is not empty) and the share with the flag set. For round levels the median
+  round step (price units) over the median candle range, per symbol and as the median over
+  symbols. A set whose touch share is above 90% or below 1% is labelled **degenerate: not
+  interpretable**: it stays in the output and is never counted as a null result. Cells C1 and C4 use
+  `any_touch`, so a degenerate `any_touch` makes them not interpretable at that timeframe. The
+  `touch_round` column and its definition are not changed by the study.
+
+**Descriptive (labelled, untested):**
+
+- Per-timeframe and per-symbol tables.
+- m = 2 and 4 (`s * ret_m_sigma` and the side's MFE / MAE).
+- Sensitivity runs with `body_ratio <= 0.05` and with `range_atr >= 1.0`.
+- A subtype split.
+- Dose-response within E for cell A: quintiles of `body_ratio`, `range_atr`,
+  `rel_volume_prior20` and `nearest_level_dist_atr`, with Spearman(quintile, mean) and a
+  day-bootstrap CI.
+- Sessions (exploratory): per cell × intraday timeframe × session, with the session taken from the
+  hour of the decision time (the candle's `end_ms`, UTC): asia 00-08, europe 08-13, us 13-21,
+  late 21-24 (daily and weekly rows have the session "all"). Each session reports the event and
+  control counts, the members' and controls' mean signed return (bp; unsigned cells report the
+  next-candle ln range in sigma) with a day-clustered CI, their difference and the Wilson hit
+  rates. A session with fewer than 30 events is shown as "too few", not as zero. Session results
+  are exploratory: a pattern present in only one session is reported as session-specific, and any
+  follow-up tested on validation must be pre-registered in a plan file first. Sessions add no
+  hypothesis (K stays 9).
+- Sigma-seasonality diagnostic: on the control rows of cell A only (population, `range_atr >= 0.5`,
+  `body_ratio > 0.10`), per intraday timeframe and UTC hour of the decision time, the mean of
+  `|ret_1_sigma|` (the next candle's absolute return over `sigma_tf`), the count, and the ratio of
+  the largest to the smallest hourly mean. It would be roughly flat if sigma were well scaled.
+  Sigma (`ewma-3d-5m-v1`) is not changed; this only reports.
+- Daily and weekly families run separately per timeframe, pooled over symbols, with symbol fixed
+  effects and no hour effects. A cell is "not tested" when it has fewer than 30 members. A
+  development run uses the `development-ext` daily rows.
+
+### Runs and output
+
+- **Inputs:** `segment` (development | validation; hidden is refused by the guard) and
+  `table_report` (a candle-table report hash or path in the private repo).
+- **Replication:** an optional `reference_report` (a development report) adds a same-sign
+  replication column to a validation run.
+- **Output:** `reports/pattern-study/doji-<segment>__<hash16>/` with `report.md`, `cells.csv` and
+  `summary.json`. The hash leaves out the commit and creation time, so a run with identical inputs
+  finds its directory and skips.
+- **Public log:** counts, the number of hypotheses examined and the private path; never an effect
+  size.
+
+### What a result means
+
+**What it can show.** A cell with a Holm-significant beta says this: in that context, doji
+candles are followed by a different next-candle outcome than same-size non-doji candles, after the
+listed controls.
+
+**What it cannot show.**
+
+- It is not a profitability verdict. That needs stop-aware, cost-aware trade results
+  (CLAUDE.md section 2). The report's bp lines are gross, one candle, no stop: the members'
+  mean is compared with the 11 bp round trip only as a hurdle, not as a result after costs.
+- It does not prove the doji itself is causal, because the controls are observational.
+- A development result must replicate with the same sign on validation before anything is built
+  on it.
+- An effect below the hurdle (`beta - hurdle < 0`) is not tradable on its own, even if it is
+  significant. A members' mean below the hurdle (`members mean - hurdle < 0`) says the doji
+  candles' own gross drift in that context does not cover the cost either; both can differ, so
+  both are shown.
+- A degenerate level set is not a null result: it means the set cannot discriminate at that
+  timeframe.
+- Session and hourly tables are exploratory; they cannot rescue or reject a primary cell.
+
+A null result is informative only when its MDE is well below the hurdle: compare the MDE at 2.8 SE
+and at the Holm alpha with the hurdle. If the Holm MDE exceeds the hurdle, the study could not
+have detected a tradable effect in that cell.
 
 ## Adding a group (location, derivatives, advanced levels, ...)
 
