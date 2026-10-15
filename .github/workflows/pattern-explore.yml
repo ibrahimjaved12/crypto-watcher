@@ -1,0 +1,92 @@
+name: Doji exploration
+run-name: "Doji exploration ${{ inputs.tier }} ${{ inputs.segment }}"
+
+# Free, descriptive doji exploration on a candle-table-v1 report (scripts/research/pattern_explore.py,
+# docs/pattern-study.md). No stops in discovery, no required outcome, no trades or PASS/FAIL. The report
+# (summary.json, one CSV per metric family, leads.csv, report.md, review/*.html) goes to
+# reports/pattern-explore/ in the private research-data repository, and every slice x metric family is
+# appended to experiments/doji-explore.jsonl there. This public log and the job summary carry only
+# counts, the number of tests, the private path and the report hash (never effect sizes or leads).
+# Validation needs the plan id of a committed doji-explore plan; the hidden stretch is never offered and
+# is refused by the hidden guard in the script and the library.
+on:
+  workflow_dispatch:
+    inputs:
+      segment:
+        description: "development (validation only with a committed plan id)"
+        type: choice
+        options: [development, validation]
+        default: development
+      plan_id:
+        description: "sha256 plan id of a committed doji-explore plan (required for validation)"
+        type: string
+        default: ""
+      table_report:
+        description: "candle-table report: a bare hash or a reports/candle-table/... path"
+        type: string
+        required: true
+      tier:
+        description: "intraday (15/60/240) or daily_weekly (1440/10080)"
+        type: choice
+        options: [intraday, daily_weekly]
+        default: intraday
+      review_slice:
+        description: "optional extra review pack '<slice id>=<bucket>', e.g. touch:touch_sig=1"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pattern-explore  # one writer of experiments/doji-explore.jsonl at a time
+  cancel-in-progress: false
+
+jobs:
+  explore:
+    name: Doji exploration
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            python/requirements.txt
+            python/requirements-research.txt
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+          .venv/bin/python -m pip install -r requirements-research.txt
+      - name: Run exploration
+        env:
+          SEGMENT: ${{ inputs.segment }}
+          PLAN_ID: ${{ inputs.plan_id }}
+          TABLE_REPORT: ${{ inputs.table_report }}
+          TIER: ${{ inputs.tier }}
+          REVIEW_SLICE: ${{ inputs.review_slice }}
+          EXPLORE_SUMMARY: ${{ runner.temp }}/pattern-explore-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: |
+          python/.venv/bin/python scripts/research/pattern_explore.py --workdir pattern-explore-work \
+            --summary "$EXPLORE_SUMMARY" --segment "$SEGMENT" --plan-id "$PLAN_ID" \
+            --table-report "$TABLE_REPORT" --tier "$TIER" --review-slice "$REVIEW_SLICE"
+      - name: Delete working files
+        if: always()
+        run: rm -rf pattern-explore-work
+      - name: Summary
+        if: always()
+        env:
+          EXPLORE_SUMMARY: ${{ runner.temp }}/pattern-explore-summary.md
+        run: |
+          if [ -f "$EXPLORE_SUMMARY" ]; then
+            cat "$EXPLORE_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -467,6 +467,98 @@ A null result is informative only when its MDE is well below the hurdle: compare
 and at the Holm alpha with the hurdle. If the Holm MDE exceeds the hurdle, the study could not
 have detected a tradable effect in that cell.
 
+## Doji exploration (doji-explore-v1)
+
+Free, descriptive discovery after the doji study found no standalone directional edge (owner
+decision 2026-10-15). `python/market_analysis/patterns/pattern_explore.py`,
+`scripts/research/pattern_explore.py`, `.github/workflows/pattern-explore.yml`. **No stops in
+discovery and no required outcome**: the tool describes what follows a doji; strategies are built
+later from what it finds. The doji study and its cells are unchanged.
+
+**Hygiene.** Development only (intraday `development`, daily/weekly `development-ext`). Validation
+needs the plan id of a plan committed as `plans/doji-explore__<id16>.plan.json` (verified with
+`read_plan`); the hidden stretch is always refused by `check_segment`. Paths never cross the
+segment boundary. Every slice x metric family evaluated is appended to
+`experiments/doji-explore.jsonl` (one line each: timeframe, slice, bucket, family, horizons, code
+version, n, report hash, run id), and a rerun of the same table and code is a REPLAY, not a new
+variant. BH q-values are over every test of the run, and the count is in the report.
+
+**Per timeframe.** Every analysis runs per timeframe; nothing is pooled across timeframes (pooling
+let 15m dominate the doji study). Tiers: `intraday` (15/60/240) or `daily_weekly` (1440/10080).
+
+**Groups.**
+
+- Event E = doji-geo-v2 (`body_ratio <= 0.10`, `range_atr >= 0.5`); descriptive variants
+  `body_ratio <= 0.05` and `range_atr >= 1.0` (direction-free headline metrics only).
+- Matched controls: `range_atr >= 0.5`, `body_ratio > 0.10`, reweighted to the events over strata
+  symbol x tf x 6-hour bucket x `atr_pct_prev` tercile x `range_atr` bin x `rel_volume_prior20`
+  tercile (a control's weight = events / controls of its stratum). Events in strata without
+  controls are counted (`events_unmatched`) and left out of the differences. Intraday runs also
+  report the strata with the decision-time session added.
+- Random baseline: population rows sampled without replacement (seed 20261017) per symbol x UTC
+  hour of the open, 2 x the events of that cell (all rows when fewer), so the hour mix matches.
+
+**Paths.** For row i, the consecutive table rows i+1..i+N (N = 24 intraday, 20 daily, 13 weekly;
+built to N + 5 so the break rule keeps N candles after a break). A step must exist, open exactly k
+candles later, not be invalid and lie in the same segment; the path stops at the first failure.
+Incomplete paths are counted per horizon and excluded there, never filled. Entry = open of i+1.
+Units: one-candle sigma of row i (`sigma_tf`; multi-candle values are NOT divided by sqrt(h)), ATR
+(`atr_prev`, price distance / ATR) and bp; `sigma_seas_factor` gives an h = 1 seasonal drift where
+the table has it.
+
+**Direction-free (per h in 1, 2, 3, 4, 6, 8, 12, 24; daily 1..12, 20; weekly 1..8, 13).** Up and
+down excursion (max high / min low vs the entry), total range, net drift, and for +/-k ATR with k
+in 0.5, 1, 1.5, 2, 3: up-first / down-first / AMBIGUOUS (both inside one candle) / neither within
+h, the resolution share (a barrier reached within h) and the time to the first touch.
+
+**Directional rules (no stop).** (a) Break: the first close beyond the event candle's high (long)
+or low (short) within K in 1, 2, 3, 5 candles (K = 3 primary); entry at that close; returns h
+candles after the break with the side's MFE/MAE; the fade is the negative and is reported too.
+(b) Subtype: dragonfly long, gravestone short, entry at the next open; controls use the same wick
+rule without the body rule (lower >= 0.6 and upper <= 0.1 long, the mirror short); baseline rows
+get a seeded random side with the events' long share. (c) The break split into with-trend /
+counter-trend / no trend under `trend_dir`, `trend_agree` (trend_dir where it agrees, else no
+trend), `swing_trend_dir` and `htf_trend_dir`. Each reports n, mean, median, 10/25/50/75/90
+quantiles, share > 0, MFE/MAE, bp, a day-clustered SE and a day-cluster bootstrap CI, for events,
+matched controls and baseline, plus event - control and event - baseline with their CIs.
+
+**Excursion map (a map, not a recommendation).** For rules (a) K = 3 and (b): stop in 1, 1.5, 2, 3
+ATR x target in 1, 2, 3, 4 ATR within N candles (else a time exit at the close), and stop-only time
+exits at every h. First passage over candle highs/lows after the entry; a candle opening beyond
+the stop exits at its open. Both barriers inside one candle = AMBIGUOUS: reported as a share,
+excluded from one mean and counted as a stop in the other (never resolved optimistically). Gross
+and net of `cost_bp` (default 11) per cell, with n.
+
+**Slices.** A registry (`SLICES`, each with the columns it reads; a slice whose columns are absent
+from the table is skipped and listed, so the prev/ctx2/lv3 slices of #358 apply once the table has
+those groups): all, symbol, session, relative-volume quintile (slot volume
+intraday when present), range_atr, body_ratio, subtype, adx, extension, each trend definition, each
+touch set separately (all loc-v1/lv2/lv3 sets and `touch_sig`), significant-level distance, six
+regime labels, `doi_z`, `fund_pct90`, `prem_z`, prev-doji x `confirm_dir`, `climax_age6`,
+`climax_vol_max6`, `flush_prev_dir`, and volume x `touch_sig`, volume x `trend_agree`, subtype x
+`touch_sig`. Controls are matched again inside each bucket (body and subtype buckets, which define
+the event, compare with all matched controls). Families tested per bucket at two lead horizons
+(4 and 12 candles intraday, 3 and 12 daily, 2 and 8 weekly): `expansion` (range in ATR),
+`resolution` (+/-1 ATR within h), `drift` (sigma), `break_follow` (rule (a) K = 3, sigma) and
+`subtype_dir` (rule (b), sigma); events vs matched controls with a day-clustered t.
+
+**Leads.** |t| >= 2, n >= 100 events, the same sign in both halves of the segment (split at the
+middle of its time range) and in at least 4 of the 6 symbols. Output is never gated on
+significance; `leads.csv` lists the top 30 leads per family, and every test is in `slices.csv` with
+raw p and BH q. A lead is a candidate for a validation plan, not a result.
+
+**Review packs.** `review/review_<tf>_all.html` (and an optional `--review-slice slice=bucket`
+pack): seeded random events (any outcome), seeded random controls, and a balanced pack of random
+hits and misses of rule (a) K = 3 at the first lead horizon. Every chart states its sampling rule.
+A balanced pack with no hits (or no misses) is withheld: no pack contains only misses. (The repo
+has no earlier doji chart generator; `doji_report.sample_events` is the time-spread sampler of the
+frozen doji-v1 report and is not changed.)
+
+**Output.** `reports/pattern-explore/doji-<segment>__<hash16>/`: `summary.json`,
+`direction_free.csv`, `directional.csv`, `excursion_map.csv`, `slices.csv`, `leads.csv`, `report.md`
+and `review/*.html`. The public log carries counts, the number of tests, the private path and the
+hash only.
+
 ## Adding a group (location, derivatives, advanced levels, ...)
 
 1. Write `build(ctx, i) -> dict` in `candle_table.py` or a sibling module. It reads only
