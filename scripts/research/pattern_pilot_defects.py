@@ -3,10 +3,12 @@
 
     python scripts/research/pattern_pilot_defects.py --annotations annotations.csv --key pilot_key.csv
 
-Joins the filled annotations.csv (detector_ok y|n|unsure, defect_type, visual_strength, notes) to pilot_key.csv
-and prints the defect rate (n / (y + n); 'unsure' counted apart) by class, timeframe, class x timeframe and
-stratum with n and Wilson 95% intervals, the defect types, and the defect rate split by visual_strength. It
-only reports: it sets no pass threshold and writes nothing. Run it on the private files, locally or in a private
+Joins the filled annotations.csv (detector_ok = the reviewer's visual call: y "I would call it a doji", n "not a
+doji", unsure; defect_type, visual_strength, notes) to pilot_key.csv and prints, per class, class x timeframe and
+stratum, with n and Wilson 95% intervals: for events the false-positive rate n / (y + n), for near-misses and
+controls the missed-doji rate y / (y + n); 'unsure' counted apart. Also the defect types of the events judged n
+and how the reviewer rates the visual strength of events by the detector's strength bucket. It only reports: it
+sets no pass threshold and writes nothing. Run it on the private files, locally or in a private
 context; its output describes the detector's audit and is not meant for public logs.
 """
 from __future__ import annotations

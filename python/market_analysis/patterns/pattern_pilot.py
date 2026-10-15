@@ -5,6 +5,10 @@ The pilot audits the DETECTOR, not the outcome: it shows what the event definiti
 ``body_ratio <= 0.10`` and ``range_atr >= 0.5``) selects, what it just misses, and what ordinary
 same-size candles look like. It computes no return and no outcome.
 
+Annotations: ``detector_ok`` is the reviewer's own visual call on the highlighted candle (y = "I would call this a
+doji", n = "not a doji", unsure), not a guess about the detector. Afterwards an event judged n is a false positive
+and a near-miss or control judged y is a missed doji (``defect_tables``).
+
 Classes (disjoint, all with ``range_atr >= 0.5`` and a usable ATR/sigma, inside the development segments):
 
 - ``event``: ``body_ratio <= 0.10``, stratified by subtype x strength bucket (body <= 0.05 | 0.05-0.10) x
@@ -160,6 +164,26 @@ def _csv(rows: list, fields) -> str:
     return out.getvalue()
 
 
+def annotation_readme(mode: str) -> str:
+    """Written next to annotations.csv (a comment row would break the CSV)."""
+    seen = ("In blind mode you see only the highlighted last candle (40 candles of context, nothing after it)."
+            if mode == "blind" else
+            "In open mode you also see the class, the detector's subtype and fields and 12 candles after it.")
+    return (f"annotations.csv: one row per chart id. {seen}\n\n"
+            "detector_ok is YOUR visual call on the highlighted candle, not a guess about the detector:\n"
+            "  y       I would call this candle a doji\n"
+            "  n       I would not call it a doji\n"
+            "  unsure  I cannot tell\n\n"
+            "defect_type (optional; use it when detector_ok = n):\n"
+            f"  {' | '.join(DEFECT_TYPES)}\n"
+            "visual_strength (optional): " + " | ".join(VISUAL_STRENGTH) + " (how clear a doji it looks)\n"
+            "notes (optional): free text\n\n"
+            "How the answers are read afterwards (pattern_pilot_defects.py):\n"
+            "  events (the detector said doji): n = a false positive\n"
+            "  near-misses and controls (the detector said not a doji): y = a missed doji\n"
+            "  'unsure' is counted apart. The class of an id is in pilot_key.csv, which you do not need.\n")
+
+
 def contact_sheet(f: dict, tf: int, samples: list, ids: list, mode: str, title: str) -> str:
     """HTML contact sheet. Blind: 40 candles ending at the signal candle, id-only title. Open: 12 candles after
     and the fields in the title. Charts are ordered by opaque id (hash order, unrelated to class)."""
@@ -168,9 +192,12 @@ def contact_sheet(f: dict, tf: int, samples: list, ids: list, mode: str, title: 
     after = OPEN_AFTER if mode == "open" else 0
     head = [f"<!doctype html><meta charset='utf-8'><title>{pe._escape(title)}</title>",
             f"<h1>{pe._escape(title)}</h1>",
-            "<p>Judge each chart on its own: is the highlighted (last) candle a doji of the stated kind? "
-            "Fill annotations.csv by id.</p>" if mode == "blind" else
-            "<p>Open mode: the class, the detector fields and 12 candles after the signal are shown.</p>",
+            "<p>Look only at the highlighted (last) candle. Would you call it a doji? Judge each chart on its own "
+            "and fill annotations.csv by id: detector_ok = y (I would call it a doji), n (not a doji) or "
+            "unsure; see annotations_README.txt.</p>" if mode == "blind" else
+            "<p>Open mode: the class, the detector's subtype and fields and 12 candles after the signal are "
+            "shown. detector_ok is still your own visual call on the highlighted candle (y = I would call it a "
+            "doji, n = not a doji, unsure).</p>",
             "<div style='display:flex;flex-wrap:wrap;gap:8px'>"]
     body = []
     for sample, ident in sorted(zip(samples, ids), key=lambda pair: pair[1]):
@@ -182,12 +209,13 @@ def contact_sheet(f: dict, tf: int, samples: list, ids: list, mode: str, title: 
 
 
 def pack_files(f: dict, tf: int, picked: dict, seed: int, mode: str, title: str, prefix: str) -> dict:
-    """{prefix.html, prefix_key.csv, prefix_annotations.csv} of one sampled pack (the key is a separate file)."""
+    """{prefix.html, prefix_key.csv, prefix_annotations.csv, prefix_annotations_README.txt} of one pack."""
     ids = opaque_ids(f, tf, picked["samples"], seed)
     return {f"{prefix}.html": contact_sheet(f, tf, picked["samples"], ids, mode, title),
             f"{prefix}_key.csv": _csv(sorted(key_rows(f, tf, picked["samples"], ids), key=lambda r: r["id"]),
                                       KEY_FIELDS),
-            f"{prefix}_annotations.csv": _csv([{"id": i} for i in sorted(ids)], ANNOTATION_FIELDS)}
+            f"{prefix}_annotations.csv": _csv([{"id": i} for i in sorted(ids)], ANNOTATION_FIELDS),
+            f"{prefix}_annotations_README.txt": annotation_readme(mode)}
 
 
 def window_ms(from_month: str, to_month: str) -> tuple:
@@ -226,6 +254,7 @@ def build_pilot(frames: dict, *, symbol: str, window: tuple, per_stratum: int, s
         counts += [{"tf": tf, **row} for row in picked["counts"]]
     files["pilot_key.csv"] = _csv(sorted(keys, key=lambda r: (r["tf"], r["id"])), KEY_FIELDS)
     files["annotations.csv"] = _csv(annotations, ANNOTATION_FIELDS)
+    files["annotations_README.txt"] = annotation_readme(mode)
     return {"files": files, "counts": counts, "ids": len(keys)}
 
 
@@ -309,40 +338,64 @@ def read_annotations(text: str, key: dict) -> list:
     return out
 
 
-def _rate(rows: list) -> dict:
-    """Defect rate = n / (y + n); 'unsure' is counted apart and excluded from the rate."""
+RATE_KIND = {"event": "false_positive", "near_miss": "missed_doji", "control": "missed_doji"}
+
+
+def _rate(rows: list, cls: str) -> dict:
+    """The reviewer's call against the detector, for rows of ONE class.
+
+    detector_ok is the reviewer's visual call: y = "I would call this candle a doji", n = "not a doji". For events
+    the error is a false positive (the reviewer says n): rate = n / (y + n). For near-misses and controls (which
+    the detector excluded) the error is a missed doji (the reviewer says y): rate = y / (y + n). 'unsure' is
+    counted apart and excluded from the rate."""
     y = sum(r["detector_ok"] == "y" for r in rows)
     n = sum(r["detector_ok"] == "n" for r in rows)
     unsure = sum(r["detector_ok"] == "unsure" for r in rows)
     decided = y + n
-    return {"annotated": len(rows), "ok": y, "defect": n, "unsure": unsure,
-            "rate": n / decided if decided else float("nan"), "wilson95": wilson(n, decided)}
+    kind = RATE_KIND[cls]
+    count = n if kind == "false_positive" else y
+    return {"kind": kind, "annotated": len(rows), "doji": y, "not_doji": n, "unsure": unsure, kind: count,
+            "count": count, "rate": count / decided if decided else float("nan"), "wilson95": wilson(count, decided)}
+
+
+def strength_agreement(rows: list) -> dict:
+    """Events only: how the reviewer rates visual_strength (strong | ok | weak | unrated) per detector strength
+    bucket (body <= 0.05 vs 0.05-0.10); share_strong is of the rated events, with a Wilson 95% interval."""
+    out = {}
+    for r in rows:
+        if r["class"] != "event":
+            continue
+        bucket = r["stratum"].split("|")[1]
+        item = out.setdefault(bucket, {"n": 0, "strong": 0, "ok": 0, "weak": 0, "unrated": 0})
+        item["n"] += 1
+        item[r["visual_strength"] or "unrated"] += 1
+    for item in out.values():
+        rated = item["strong"] + item["ok"] + item["weak"]
+        item["share_strong"] = item["strong"] / rated if rated else float("nan")
+        item["wilson95_strong"] = wilson(item["strong"], rated)
+    return dict(sorted(out.items()))
 
 
 def defect_tables(key: dict, rows: list) -> dict:
-    """Defect rate by class, timeframe, class x timeframe and stratum (n and Wilson 95%), the defect types, and
-    the visual_strength split. It reports only; there is no pass threshold."""
+    """Reviewer-vs-detector rates by class, class x timeframe and class x timeframe x stratum (n and Wilson 95%):
+    false-positive rate for events, missed-doji rate for near-misses and controls. Also the defect types of the
+    events judged n and the strength agreement. It reports only; there is no pass threshold."""
     def group(keyfunc):
         parts = {}
         for r in rows:
             parts.setdefault(keyfunc(r), []).append(r)
-        return {k: _rate(v) for k, v in sorted(parts.items())}
+        return {k: _rate(v, v[0]["class"]) for k, v in sorted(parts.items())}
 
     types = {}
     for r in rows:
-        if r["detector_ok"] == "n":
-            types.setdefault(r["class"], {}).setdefault(r["defect_type"] or "unspecified", 0)
-            types[r["class"]][r["defect_type"] or "unspecified"] += 1
-    strength = {}
-    for r in rows:
-        bucket = strength.setdefault((r["class"], r["visual_strength"] or "unrated"), [])
-        bucket.append(r)
-    return {"key_ids": len(key), "annotated": len(rows), "overall": _rate(rows),
-            "by_class": group(lambda r: r["class"]), "by_timeframe": group(lambda r: f"{int(r['tf'])}"),
+        if r["class"] == "event" and r["detector_ok"] == "n":
+            kind = r["defect_type"] or "unspecified"
+            types[kind] = types.get(kind, 0) + 1
+    return {"key_ids": len(key), "annotated": len(rows),
+            "by_class": group(lambda r: r["class"]),
             "by_class_timeframe": group(lambda r: f"{r['class']}|{int(r['tf'])}"),
             "by_stratum": group(lambda r: f"{r['class']}|{int(r['tf'])}|{r['stratum']}"),
-            "defect_types": types,
-            "by_visual_strength": {f"{c}|{s}": _rate(v) for (c, s), v in sorted(strength.items())}}
+            "defect_types": types, "strength_agreement": strength_agreement(rows)}
 
 
 def _fmt(rate: dict) -> str:
@@ -353,20 +406,30 @@ def _fmt(rate: dict) -> str:
 
 
 def defect_markdown(tables: dict) -> list:
-    lines = [f"Annotated {tables['annotated']} of {tables['key_ids']} ids. Defect rate = n / (y + n), 'unsure' "
-             "counted apart and excluded; Wilson 95% intervals. No threshold is applied.", ""]
-    for name, title in (("by_class", "class"), ("by_timeframe", "timeframe"), ("by_class_timeframe", "class|tf"),
-                        ("by_stratum", "class|tf|stratum"), ("by_visual_strength", "class|visual_strength")):
-        lines += [f"### Defect rate by {title}", "",
-                  f"| {title} | annotated | ok | defect | unsure | rate [Wilson95] |", "|---|---:|---:|---:|---:|---|"]
+    lines = [f"Annotated {tables['annotated']} of {tables['key_ids']} ids. detector_ok is the reviewer's visual call "
+             "(y = would call it a doji, n = not a doji). Events: false_positive rate = n / (y + n). Near-misses and "
+             "controls: missed_doji rate = y / (y + n). 'unsure' counted apart and excluded; Wilson 95% intervals. "
+             "No threshold is applied.", ""]
+    for name, title in (("by_class", "class"), ("by_class_timeframe", "class|tf"),
+                        ("by_stratum", "class|tf|stratum")):
+        lines += [f"### Reviewer vs detector by {title}", "",
+                  f"| {title} | annotated | doji (y) | not doji (n) | unsure | rate kind | count | rate [Wilson95] |",
+                  "|---|---:|---:|---:|---:|---|---:|---|"]
         for key_, rate in tables[name].items():
-            lines.append(f"| {key_} | {rate['annotated']} | {rate['ok']} | {rate['defect']} | {rate['unsure']} | "
-                         f"{_fmt(rate)} |")
+            lines.append(f"| {key_} | {rate['annotated']} | {rate['doji']} | {rate['not_doji']} | {rate['unsure']} | "
+                         f"{rate['kind']} | {rate['count']} | {_fmt(rate)} |")
         lines.append("")
     if tables["defect_types"]:
-        lines += ["### Defect types (detector_ok = n)", ""]
-        lines += [f"- {cls}: " + ", ".join(f"{k}={v}" for k, v in sorted(kinds.items()))
-                  for cls, kinds in sorted(tables["defect_types"].items())]
+        lines += ["### Defect types (events judged n)", "",
+                  ", ".join(f"{k}={v}" for k, v in sorted(tables["defect_types"].items())), ""]
+    if tables["strength_agreement"]:
+        lines += ["### Visual strength of events by detector strength bucket", "",
+                  "| detector bucket | events | strong | ok | weak | unrated | strong share of rated [Wilson95] |",
+                  "|---|---:|---:|---:|---:|---:|---|"]
+        for bucket, item in tables["strength_agreement"].items():
+            share = _fmt({"rate": item["share_strong"], "wilson95": item["wilson95_strong"]})
+            lines.append(f"| {bucket} | {item['n']} | {item['strong']} | {item['ok']} | {item['weak']} | "
+                         f"{item['unrated']} | {share} |")
     return lines
 
 
