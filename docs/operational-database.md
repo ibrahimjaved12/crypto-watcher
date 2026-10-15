@@ -245,6 +245,12 @@ line re-run by event id) and `get_alert_chart_diagnostics` (the `alert charts` l
 Users and anon have no access. Apply it with `npx supabase migration up --local --workdir
 operational-db`; it is additive and needs no reset. See [alert charts](alert-charts.md).
 
+`20261016150000_alert_chart_upload.sql` adds the machine-side state of the hosted copy of movement-alert
+charts (#298): `hosted_status` (`not_applicable`, `pending`, `uploaded`, `refused`), `upload_attempts`,
+`upload_next_at`, `upload_error`, `uploaded_at`, and the functions `queue_alert_chart_upload`,
+`claim_alert_chart_upload` and `finish_alert_chart_upload` (transient failure: 1 minute doubling to 1 hour,
+retried indefinitely; the local PNG is never touched). See [alert charts](alert-charts.md#hosted-copy-and-the-alerts-page-298).
+
 `20261016120000_alert_chart_followups.sql` adds `alert_chart_capture_failures` (a failed or abandoned
 capture, idempotent on kind, symbol, timeframe and event candle; reported by `mvp:check`), the side
 table `alert_chart_event_ids` (every signal/alert id that produced or repeated a chart, so the

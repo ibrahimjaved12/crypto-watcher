@@ -18,6 +18,12 @@ export type AlertChartsConfig = {
   pendingExpiryMinutes: number;
   leaseSeconds: number;
   renderTimeoutMs: number;
+  /**
+   * Hosted copy of movement-alert charts (#298): the site origin the machine uploads to (ALERT_CHART_HOSTED_URL)
+   * and the shared secret it authenticates with (the existing RUNNER_GATEWAY_SECRET). Both must be set;
+   * otherwise nothing is uploaded and no hosted row is created.
+   */
+  hosted: { origin: string; secret: string } | null;
 };
 
 function boundedInteger(value: string | undefined, fallback: number, min: number, max: number, name: string) {
@@ -45,5 +51,27 @@ export function alertChartsConfig(env: Record<string, string | undefined> = proc
       "ALERT_CHART_PENDING_EXPIRY_MINUTES"),
     leaseSeconds: 120,
     renderTimeoutMs: 60_000,
+    hosted: hostedConfig(env),
   };
+}
+
+function hostedConfig(env: Record<string, string | undefined>): { origin: string; secret: string } | null {
+  const raw = env["ALERT_CHART_HOSTED_URL"]?.trim();
+  if (!raw) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("ALERT_CHART_HOSTED_URL must be a URL");
+  }
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if ((url.protocol !== "https:" && !(url.protocol === "http:" && local)) || url.username || url.password
+    || url.search || url.hash || url.pathname !== "/") {
+    throw new Error("ALERT_CHART_HOSTED_URL must be an https origin without a path");
+  }
+  const secret = env["RUNNER_GATEWAY_SECRET"] ?? "";
+  if (!/^[A-Za-z0-9_-]{32,256}$/.test(secret)) {
+    throw new Error("ALERT_CHART_HOSTED_URL needs RUNNER_GATEWAY_SECRET (the same secret the Worker holds)");
+  }
+  return { origin: url.origin, secret };
 }

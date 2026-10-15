@@ -47,6 +47,14 @@ Both `20261011130000_forward_sigma_state.sql` and
 They are not idempotent: do not replay them manually. No existing migration was
 edited, and no security repair migration has been applied.
 
+## Alert chart migration (#298)
+
+`20261016150000_alert_chart_files.sql` adds `alert_chart_files` (display state and storage metadata of the
+movement-alert setup chart; RLS read-own, service-role writes only), four service-role-only functions, and
+the **private** storage bucket `alert-charts` (PNG only, 512 KiB, no public URL, no storage policies: access
+is through signed URLs created by server code). It is additive; apply it with `npx supabase db push`. The
+Worker needs no new secret (the upload hook reuses `RUNNER_GATEWAY_SECRET`). See [alert charts](alert-charts.md).
+
 ## Security verification: pending
 
 Live security verification has not been run. The owner will run

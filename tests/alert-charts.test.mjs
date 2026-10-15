@@ -58,6 +58,7 @@ before(async () => {
     GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;`);
   await db.exec(await read("../operational-db/supabase/migrations/20261016090000_alert_charts.sql"));
   await db.exec(await read("../operational-db/supabase/migrations/20261016120000_alert_chart_followups.sql"));
+  await db.exec(await read("../operational-db/supabase/migrations/20261016150000_alert_chart_upload.sql"));
 });
 beforeEach(() => db.exec("RESET ROLE; TRUNCATE alert_charts, alert_chart_event_ids, alert_chart_capture_failures"));
 after(() => db.close());
@@ -189,6 +190,47 @@ test("capture failures are recorded once per event identity and counted in the d
   const diag = (await db.query("SELECT * FROM get_alert_chart_diagnostics()")).rows[0];
   assert.equal(Number(diag.capture_failures_24h), 1);
   assert.equal(Number(diag.capture_failures_total), 2);
+});
+
+test("hosted upload (#298): a failed upload keeps the rendered chart and retries with backoff; refusal is permanent", async () => {
+  await db.exec("SET ROLE service_role");
+  const q = async (sql, args = []) => (await db.query(sql, args)).rows;
+  const { chart_id } = await enqueue(START, { kind: "movement_alert", scope: USER });
+  await claim("w1");
+  await finish(chart_id, "w1", true);
+  assert.equal((await row(chart_id)).hosted_status, "not_applicable"); // nothing is queued until the consumer asks
+  assert.equal((await q("SELECT queue_alert_chart_upload($1) AS ok", [chart_id]))[0].ok, true);
+  assert.equal((await q("SELECT * FROM claim_alert_chart_upload()"))[0].chart_id, chart_id);
+  assert.equal((await q("SELECT * FROM claim_alert_chart_upload()")).length, 0); // leased: not claimed twice
+  await q("SELECT finish_alert_chart_upload($1,false,false,'offline')", [chart_id]);
+  const failed = await row(chart_id);
+  assert.deepEqual([failed.status, failed.hosted_status, failed.upload_attempts, failed.upload_error, failed.png_path],
+    ["rendered", "pending", 1, "offline", "/charts/a.png"]); // the local chart is untouched
+  assert.equal((await q("SELECT count(*)::int AS n FROM alert_charts WHERE chart_id = $1 AND upload_next_at > now() + interval '50 seconds' AND upload_next_at < now() + interval '70 seconds'", [chart_id]))[0].n, 1);
+  assert.equal((await q("SELECT * FROM claim_alert_chart_upload()")).length, 0); // backing off
+  await asOwner(() => db.query("UPDATE alert_charts SET upload_next_at = now() - interval '1 second' WHERE chart_id = $1", [chart_id]));
+  assert.equal((await q("SELECT * FROM claim_alert_chart_upload()"))[0].chart_id, chart_id);
+  await q("SELECT finish_alert_chart_upload($1,false,false,'offline')", [chart_id]);
+  assert.equal((await row(chart_id)).upload_attempts, 2); // 2 min next
+  await asOwner(() => db.query("UPDATE alert_charts SET upload_next_at = now() - interval '1 second' WHERE chart_id = $1", [chart_id]));
+  await q("SELECT * FROM claim_alert_chart_upload()");
+  await q("SELECT finish_alert_chart_upload($1,true,false,NULL)", [chart_id]);
+  const uploaded = await row(chart_id);
+  assert.deepEqual([uploaded.hosted_status, uploaded.upload_error, uploaded.upload_next_at], ["uploaded", null, null]);
+  assert.ok(uploaded.uploaded_at);
+  // a permanent refusal (cap, deleted alert) is final until the event is re-queued
+  const second = await enqueue(START + Q, { kind: "movement_alert", scope: USER });
+  await claim("w1");
+  await finish(second.chart_id, "w1", true);
+  await q("SELECT queue_alert_chart_upload($1)", [second.chart_id]);
+  await q("SELECT * FROM claim_alert_chart_upload()");
+  await q("SELECT finish_alert_chart_upload($1,false,true,'The per-account chart limit is reached')", [second.chart_id]);
+  assert.deepEqual([(await row(second.chart_id)).hosted_status], ["refused"]);
+  // pattern charts are never uploaded
+  const pattern = await enqueue(START + 2 * Q);
+  await claim("w1");
+  await finish(pattern.chart_id, "w1", true);
+  assert.equal((await q("SELECT queue_alert_chart_upload($1) AS ok", [pattern.chart_id]))[0].ok, false);
 });
 
 // ---------------------------------------------------------------- capture windows

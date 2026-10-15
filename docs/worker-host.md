@@ -81,7 +81,9 @@ environment; an empty value counts as defined and is then caught by the value ch
 - Universe sync: `COLLECTOR_UNIVERSE_SYNC_ENABLED=false` disables only that child;
   `COLLECTOR_UNIVERSE_SYNC_INTERVAL_MS` defaults to 60000, minimum 10000. See
   [collector response and latency](binance-futures-collector.md#machine-side-collector-universe-sync-329).
-- Alert charts: `ALERT_CHART_DIR` (absolute) starts `alert-charts`; install matplotlib once with
+- Alert charts: `ALERT_CHART_DIR` (absolute) starts `alert-charts`; `ALERT_CHART_HOSTED_URL` (the site origin) turns on the
+  hosted copy of movement-alert charts for the Alerts page (uses the existing `RUNNER_GATEWAY_SECRET`; see
+  [alert charts](alert-charts.md#hosted-copy-and-the-alerts-page-298)); install matplotlib once with
   `python/.venv/bin/python -m pip install -r python/requirements-machine.txt`. See [alert charts](alert-charts.md).
 - Durable jobs: `RUNNER_JOBS_ENABLED=true` enables `runner-jobs`; it uses the existing
   `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. No new secrets or publishable key are required on the
