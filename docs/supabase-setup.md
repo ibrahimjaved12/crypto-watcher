@@ -51,7 +51,7 @@ edited, and no security repair migration has been applied.
 
 `20261016150000_alert_chart_files.sql` adds `alert_chart_files` (display state and storage metadata of the
 movement-alert setup chart; RLS read-own, service-role writes only), four service-role-only functions, and
-the **private** storage bucket `alert-charts` (PNG only, 512 KiB, no public URL, no storage policies: access
+the **private** storage bucket `alert-charts` (PNG only, 2 MiB, no public URL, no storage policies: access
 is through signed URLs created by server code). It is additive; apply it with `npx supabase db push`. The
 Worker needs no new secret (the upload hook reuses `RUNNER_GATEWAY_SECRET`). See [alert charts](alert-charts.md).
 

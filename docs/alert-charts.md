@@ -145,7 +145,7 @@ so `--event-id` accepts any of them.
 
 The Alerts page shows the setup chart of a **movement alert** behind an expandable row. The site reads
 hosted data only, so the machine uploads each rendered movement-alert PNG to a **private** hosted bucket
-(`alert-charts`, path `<user_id>/<alert_id>.png`, PNG only, 512 KiB per file). Pattern charts are not
+(`alert-charts`, path `<user_id>/<alert_id>.png`, PNG only, 2 MiB per file). Pattern charts are not
 uploaded and stay on the machine.
 
 **Transport.** The runner gateway only carries Worker -> machine calls, so it cannot carry an upload.

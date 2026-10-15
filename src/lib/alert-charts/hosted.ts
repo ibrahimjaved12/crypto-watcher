@@ -5,7 +5,7 @@
 import { MOVEMENT_RULE_VERSION } from "./capture";
 
 export const CHART_BUCKET = "alert-charts";
-export const CHART_MAX_BYTES_PER_FILE = 524_288;
+export const CHART_MAX_BYTES_PER_FILE = 2_097_152;
 export const HOOK_PATH = "/api/public/hooks/alert-chart-upload";
 /** Signed URLs live ten minutes; the page asks again after five. */
 export const SIGNED_URL_SECONDS = 600;
