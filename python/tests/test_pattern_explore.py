@@ -340,14 +340,14 @@ class ReportTests(unittest.TestCase):
             log.append_many(pe.experiment_records(report, run_id="2", data_snapshot_id="f" * 64))
             self.assertEqual(log.trial_count(pe.QUESTION_ID), len(keys))  # a rerun is a REPLAY, not new variants
 
-    def run(self, frames, **kwargs):
+    def explore(self, frames, **kwargs):
         return pe.run_explore(frames, tier="intraday", segment="development", table_report="reports/x",
                               table_hash="f" * 64, code_commit="abc", created_utc="2026-10-16T00:00:00Z", B=10,
                               absent=["touch_sig"], **kwargs)
 
     def test_blind_review_is_the_default_and_open_mode_keeps_old_parameters(self):
         frames = {240: synthetic(symbols=("BTCUSDT",), count=240)}
-        blind, files = self.run(frames, review=("touch:touch_round", "1"))
+        blind, files = self.explore(frames, review=("touch:touch_round", "1"))
         self.assertEqual(blind["parameters"]["review"]["mode"], "blind")
         self.assertEqual(blind["by_tf"]["240"]["review"]["mode"], "blind")
         self.assertEqual({"review_240_blind.html", "review_240_blind_key.csv", "review_240_blind_annotations.csv",
@@ -357,11 +357,11 @@ class ReportTests(unittest.TestCase):
         self.assertIn("class", files["review_240_blind_key.csv"].splitlines()[0])
         self.assertNotIn("event", files["review_240_blind.html"].lower())
         self.assertIn("Blind review pack", pe.markdown(blind, sorted(files)))
-        opened, _ = self.run(frames, review_mode="open")
+        opened, _ = self.explore(frames, review_mode="open")
         self.assertNotIn("review", opened["parameters"])  # an open-mode report keeps its old parameters
         self.assertNotEqual(opened["report_hash"], blind["report_hash"])
         with self.assertRaises(pe.ExploreError):
-            self.run(frames, review_mode="x")
+            self.explore(frames, review_mode="x")
 
     def test_review_pack_is_never_misses_only(self):
         f = synthetic(count=120)
