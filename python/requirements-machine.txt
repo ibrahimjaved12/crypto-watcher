@@ -1,0 +1,4 @@
+# Machine-side extras for the owner's worker host (#299 alert setup charts). Install on top of
+# requirements.txt: python/.venv/bin/python -m pip install -r python/requirements-machine.txt
+# Never imported by the calculation core (market_analysis) and not installed by the default CI job.
+matplotlib==3.10.3

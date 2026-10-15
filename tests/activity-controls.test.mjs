@@ -121,6 +121,7 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
     }));
   const { runTA } = await import(
     await moduleUrl("../src/lib/ta/engine.server.ts", {
+      "../alert-charts/capture.server": "data:text/javascript,export async function capturePatternCharts(){return [];}",
       "../activity-controls": controlsUrl,
       "../monitor/run-context": stub(`
         const metrics=()=>({exchangeRequests:0,candleRows:0,marketCacheHits:0,taCalculations:0,taSignalsSaved:0,taOutcomesUpdated:0,databaseReads:0,databaseWriteAttempts:0,databaseNoOps:0});

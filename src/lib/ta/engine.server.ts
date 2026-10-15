@@ -15,6 +15,7 @@ import {
   TA_VERSION,
 } from "./schedule";
 import type { OperationalStore } from "../operational/types";
+import { capturePatternCharts } from "../alert-charts/capture.server";
 
 type Client = Pick<SupabaseClient<Database>, "from" | "rpc">;
 
@@ -346,9 +347,20 @@ export async function runTA(
               onConflict: "user_id,symbol,timeframe,candle_at,version",
               ignoreDuplicates: true,
             })
-            .select("id");
+            .select("id, candle_at, patterns");
           if (error) throw new Error(error.message);
           context.metrics.taSignalsSaved += saved?.length ?? 0;
+          // Setup chart windows for newly written pattern events (#299). Only rows inserted now
+          // (duplicates return nothing); the capture is idempotent and never throws.
+          const patternEvents = (saved ?? [])
+            .filter((row) => Array.isArray(row.patterns) && row.patterns.length > 0)
+            .map((row) => ({ id: row.id, candleAt: Date.parse(row.candle_at), patterns: row.patterns }));
+          if (patternEvents.length > 0) {
+            await capturePatternCharts({
+              symbol, source: generationMarket.source, timeframe, ruleVersion: TA_VERSION, candles,
+              events: patternEvents,
+            });
+          }
         }
 
         if (pending.length === 0) return;

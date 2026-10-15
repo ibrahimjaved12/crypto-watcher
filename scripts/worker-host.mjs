@@ -449,6 +449,10 @@ async function main() {
     specs.push(nodeJob("runner-gateway", "scripts/runner-gateway.mjs"));
   if (env.RUNNER_JOBS_ENABLED === "true")
     specs.push(nodeJob("runner-jobs", "scripts/runner-jobs.mjs"));
+  // Alert setup chart renderer (#299): non-essential, needs only the operational database, the
+  // Python venv with matplotlib (python/requirements-machine.txt) and a PNG directory.
+  if (env.ALERT_CHARTS_ENABLED !== "false" && env.OPERATIONAL_DB_ENABLED === "true" && env.ALERT_CHART_DIR?.trim())
+    specs.push(nodeJob("alert-charts", "scripts/alert-charts.mjs"));
   for (const spec of specs) {
     records.set(spec.name, {
       ...spec,
@@ -477,6 +481,7 @@ async function main() {
   if (records.has("quote-publisher")) launch(records.get("quote-publisher"));
   if (records.has("collector-universe-sync")) launch(records.get("collector-universe-sync"));
   if (records.has("runner-gateway")) launch(records.get("runner-gateway"));
+  if (records.has("alert-charts")) launch(records.get("alert-charts"));
   const pythonNames = ["fastapi-analysis", "fastapi-forward"];
   const urls = [endpoints.analysis.origin, endpoints.forward.origin];
   void startAfterPython(records.get("forward-hourly"), urls, pythonNames);
