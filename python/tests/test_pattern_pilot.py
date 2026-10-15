@@ -170,7 +170,14 @@ class BlindTests(unittest.TestCase):
         window = (int(f["open_ms"][0]), int(f["open_ms"][-1]) + MIN60)
         built = pp.build_pilot({60: f}, symbol="BTCUSDT", window=window, per_stratum=2, seed=5, mode="blind")
         files = built["files"]
-        self.assertEqual(set(files), {"pilot_60.html", "pilot_key.csv", "annotations.csv"})
+        self.assertEqual(set(files), {"pilot_60.html", "pilot_key.csv", "annotations.csv", "annotations_README.txt"})
+        readme = files["annotations_README.txt"]
+        self.assertIn("YOUR visual call", readme)
+        self.assertIn("y       I would call this candle a doji", readme)
+        self.assertIn("a false positive", readme)
+        self.assertNotEqual(readme, pp.annotation_readme("open"))
+        self.assertNotIn("stated kind", files["pilot_60.html"])
+        self.assertIn("Would you call it a doji?", files["pilot_60.html"])
         key = pp.read_key(files["pilot_key.csv"])
         self.assertEqual(len(key), built["ids"])
         self.assertEqual(files["annotations.csv"].splitlines()[0], "id,detector_ok,defect_type,visual_strength,notes")
@@ -208,38 +215,71 @@ class DefectTests(unittest.TestCase):
            "P5,BTCUSDT,240,1,2,near_miss,t1,0.12,1.0,\n"
            "P6,BTCUSDT,240,1,2,control,t1,0.5,1.0,\n"
            "P7,BTCUSDT,240,1,2,control,t1,0.6,1.0,\n")
+    # detector_ok is the reviewer's visual call: y = "I would call it a doji"
     ANN = ("id,detector_ok,defect_type,visual_strength,notes\n"
            "P1,y,,strong,\nP2,y,,ok,\nP3,n,not_doji,weak,looks like a spinning top\nP4,unsure,,weak,\n"
-           "P5,n,wrong_subtype,weak,\nP6,y,,,\nP7,,,,\n")
+           "P5,y,,ok,\nP6,n,,,\nP7,,,,\n")
 
     def tables(self):
         key = pp.read_key(self.KEY)
         return pp.defect_tables(key, pp.read_annotations(self.ANN, key))
 
-    def test_rates_by_class_timeframe_and_stratum(self):
+    def test_events_report_a_false_positive_rate(self):
         t = self.tables()
         self.assertEqual((t["key_ids"], t["annotated"]), (7, 6))  # P7 is not annotated
         event = t["by_class"]["event"]
-        self.assertEqual((event["annotated"], event["ok"], event["defect"], event["unsure"]), (4, 2, 1, 1))
-        self.assertAlmostEqual(event["rate"], 1 / 3)  # unsure is excluded from the rate
+        self.assertEqual((event["kind"], event["annotated"], event["doji"], event["not_doji"], event["unsure"]),
+                         ("false_positive", 4, 2, 1, 1))
+        self.assertEqual((event["false_positive"], event["count"]), (1, 1))
+        self.assertAlmostEqual(event["rate"], 1 / 3)  # n / (y + n); unsure is excluded
         lo, hi = event["wilson95"]
         self.assertTrue(0 < lo < 1 / 3 < hi < 1)
-        self.assertEqual(t["by_class"]["near_miss"]["rate"], 1.0)
-        self.assertEqual(t["by_timeframe"]["60"]["defect"], 1)
-        self.assertEqual(t["by_class_timeframe"]["event|240"]["unsure"], 1)
-        self.assertEqual(t["by_stratum"]["event|60|dragonfly|b<=0.05|t1"]["defect"], 0)
-        self.assertEqual(t["by_stratum"]["event|60|standard|b0.05-0.10|t2"]["defect"], 1)
-        self.assertEqual(t["defect_types"], {"event": {"not_doji": 1}, "near_miss": {"wrong_subtype": 1}})
 
-    def test_visual_strength_split(self):
-        split = self.tables()["by_visual_strength"]
-        self.assertEqual(split["event|strong"]["ok"], 1)
-        self.assertEqual(split["event|weak"]["defect"], 1)
-        self.assertEqual(split["event|weak"]["unsure"], 1)
-        self.assertEqual(split["control|unrated"]["annotated"], 1)
+    def test_near_misses_report_a_missed_doji_rate(self):
+        near = self.tables()["by_class"]["near_miss"]
+        self.assertEqual((near["kind"], near["doji"], near["not_doji"]), ("missed_doji", 1, 0))
+        self.assertEqual((near["missed_doji"], near["rate"]), (1, 1.0))  # the reviewer calls it a doji: y / (y + n)
+        self.assertNotIn("false_positive", near)
+
+    def test_controls_report_a_missed_doji_rate(self):
+        control = self.tables()["by_class"]["control"]
+        self.assertEqual((control["kind"], control["annotated"], control["doji"], control["not_doji"]),
+                         ("missed_doji", 1, 0, 1))
+        self.assertEqual((control["missed_doji"], control["rate"]), (0, 0.0))  # P7 is blank: not counted
+
+    def test_rate_direction_per_class(self):
+        rows = lambda cls, call, n: [{"class": cls, "detector_ok": call} for _ in range(n)]  # noqa: E731
+        self.assertEqual(pp._rate(rows("event", "n", 4), "event")["rate"], 1.0)  # all rejected: all false positives
+        self.assertEqual(pp._rate(rows("event", "y", 4), "event")["rate"], 0.0)
+        for cls in ("near_miss", "control"):
+            self.assertEqual(pp._rate(rows(cls, "y", 4), cls)["rate"], 1.0)             # all accepted: all missed dojis
+            self.assertEqual(pp._rate(rows(cls, "n", 4), cls)["rate"], 0.0)
+            self.assertTrue(np.isnan(pp._rate(rows(cls, "unsure", 3), cls)["rate"]))    # nothing decided
+
+    def test_by_timeframe_and_stratum(self):
+        t = self.tables()
+        self.assertEqual(t["by_class_timeframe"]["event|60"]["false_positive"], 1)
+        self.assertEqual(t["by_class_timeframe"]["event|240"]["unsure"], 1)
+        self.assertTrue(np.isnan(t["by_class_timeframe"]["event|240"]["rate"]))
+        self.assertEqual(t["by_stratum"]["event|60|dragonfly|b<=0.05|t1"]["false_positive"], 0)
+        self.assertEqual(t["by_stratum"]["event|60|standard|b0.05-0.10|t2"]["false_positive"], 1)
+        self.assertEqual(t["by_stratum"]["near_miss|240|t1"]["missed_doji"], 1)
+        self.assertNotIn("defect", t["by_class"]["event"])  # renamed
+
+    def test_defect_types_are_those_of_events_judged_n(self):
+        self.assertEqual(self.tables()["defect_types"], {"not_doji": 1})
+
+    def test_strength_agreement_with_the_detector_bucket(self):
+        agreement = self.tables()["strength_agreement"]
+        strong, weak = agreement["b<=0.05"], agreement["b0.05-0.10"]
+        self.assertEqual((strong["n"], strong["strong"], strong["ok"], strong["weak"]), (2, 1, 1, 0))
+        self.assertEqual(strong["share_strong"], 0.5)
+        self.assertEqual((weak["n"], weak["weak"], weak["strong"]), (2, 2, 0))
+        self.assertEqual(weak["share_strong"], 0.0)
         text = "\n".join(pp.defect_markdown(self.tables()))
-        self.assertIn("No threshold is applied", text)
-        self.assertIn("[Wilson95]", text)
+        for word in ("false_positive", "missed_doji", "No threshold is applied", "[Wilson95]", "reviewer's visual call",
+                     "strong share of rated"):
+            self.assertIn(word, text)
 
     def test_invalid_annotations_are_rejected(self):
         key = pp.read_key(self.KEY)
@@ -269,8 +309,8 @@ class DefectTests(unittest.TestCase):
             out = io.StringIO()
             with redirect_stdout(out):
                 module.main(["--annotations", str(Path(tmp) / "ann.csv"), "--key", str(Path(tmp) / "key.csv")])
-        self.assertIn("### Defect rate by class", out.getvalue())
-        self.assertIn("| event | 4 | 2 | 1 | 1 |", out.getvalue())
+        self.assertIn("### Reviewer vs detector by class", out.getvalue())
+        self.assertIn("| event | 4 | 2 | 1 | 1 | false_positive | 1 |", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -351,8 +351,10 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(blind["parameters"]["review"]["mode"], "blind")
         self.assertEqual(blind["by_tf"]["240"]["review"]["mode"], "blind")
         self.assertEqual({"review_240_blind.html", "review_240_blind_key.csv", "review_240_blind_annotations.csv",
+                          "review_240_blind_annotations_README.txt",
                           "review_240_touch-touch_round_1_blind.html", "review_240_touch-touch_round_1_blind_key.csv",
-                          "review_240_touch-touch_round_1_blind_annotations.csv"}, set(files))
+                          "review_240_touch-touch_round_1_blind_annotations.csv",
+                          "review_240_touch-touch_round_1_blind_annotations_README.txt"}, set(files))
         self.assertNotIn("Sampling rule", files["review_240_blind.html"])
         self.assertIn("class", files["review_240_blind_key.csv"].splitlines()[0])
         self.assertNotIn("event", files["review_240_blind.html"].lower())
