@@ -160,6 +160,78 @@ def make_zip_two_members():
     return buffer.getvalue()
 
 
+def prefixes_page(names, keys=()):
+    contents = "".join(f"<Contents><Key>{key}</Key><Size>1</Size></Contents>" for key in keys)
+    common = "".join(f"<CommonPrefixes><Prefix>{name}</Prefix></CommonPrefixes>" for name in names)
+    return (f"<ListBucketResult xmlns='http://s3.amazonaws.com/doc/2006-03-01/'><IsTruncated>false</IsTruncated>"
+            f"{contents}{common}</ListBucketResult>").encode()
+
+
+def fake_getter(pages):
+    """pages: {substring of the url: (status, body, error)}; the first matching substring wins."""
+    def getter(url):
+        for part, answer in pages.items():
+            if part in url:
+                return answer
+        return 404, b"", f"download failed: HTTP 404: {url}"
+    return getter
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def test_diagnose_counts_status_bytes_and_first_keys(self):
+        body = page([(f"k{i}", 1) for i in range(5)], truncated=True)
+        got = probe.diagnose_listing(P, fake_getter({"liquidationSnapshot": (200, body, None)}))
+        self.assertEqual((got["status"], got["bytes"], got["truncated"], got["contents"], got["prefixes"]),
+                         (200, len(body), True, 5, 0))
+        self.assertEqual(got["first_keys"], ["k0", "k1", "k2"])
+        self.assertTrue(got["listed"])
+        folders = probe.diagnose_listing(P, fake_getter({"um": (200, prefixes_page(["a/", "b/"]), None)}))
+        self.assertEqual((folders["contents"], folders["prefixes"], folders["prefix_names"]), (0, 2, ["a/", "b/"]))
+
+    def test_http_errors_and_bad_bodies_are_not_listed(self):
+        got = probe.diagnose_listing(P, fake_getter({"": (403, b"", "download failed: HTTP 403: u")}))
+        self.assertEqual((got["status"], got["listed"], got["contents"]), (403, False, None))
+        got = probe.diagnose_listing(P, fake_getter({"": (200, b"<Error/>", None)}))
+        self.assertEqual((got["status"], got["listed"]), (200, False))
+        self.assertIn("unexpected listing root", got["error"])
+
+    def listing_pages(self, klines, liquidation):
+        return {"klines": klines, "liquidationSnapshot/BTCUSDT": liquidation,
+                "liquidationSnapshot": (200, prefixes_page([]), None), "um/daily/": (200, prefixes_page(["x/"]), None)}
+
+    def run_probe(self, klines, liquidation):
+        getter = fake_getter(self.listing_pages(klines, liquidation))
+        diagnoser = lambda key_prefix: probe.diagnose_listing(key_prefix, getter)  # noqa: E731
+        lister = lambda key_prefix: probe.parse_listing(getter(probe.listing_url(key_prefix))[1])[0]  # noqa: E731
+        results = [probe.probe_symbol("BTCUSDT", lister, lambda url: None, diagnoser)]
+        return results, probe.run_controls(diagnoser)
+
+    def test_archive_empty_versus_probe_could_not_list(self):
+        keys = (200, page([(f"k{i}", 1) for i in range(3)]), None)
+        empty = (200, page([]), None)
+        results, controls = self.run_probe(keys, empty)
+        self.assertEqual(probe.verdict(results, controls)[0], "ARCHIVE EMPTY")
+        self.assertEqual({item["state"] for item in results[0]["families"].values()}, {"archive empty"})
+        self.assertIn("**ARCHIVE EMPTY**", "\n".join(probe.report(results, controls)))
+        results, controls = self.run_probe(empty, empty)  # control (b) has no keys: the probe is broken
+        self.assertEqual(probe.verdict(results, controls)[0], "PROBE COULD NOT LIST")
+        results, controls = self.run_probe((403, b"", "download failed: HTTP 403: u"), empty)
+        self.assertEqual(probe.verdict(results, controls)[0], "PROBE COULD NOT LIST")
+        results, controls = self.run_probe(keys, (403, b"", "download failed: HTTP 403: u"))
+        self.assertEqual(probe.verdict(results, controls)[0], "PROBE COULD NOT LIST")
+        self.assertEqual(results[0]["families"]["daily"]["state"], "could not list")
+        self.assertEqual(probe.verdict(results, None)[0], "NO CONTROLS")
+
+    def test_found_keys_and_report_columns(self):
+        keys = (200, page([(f"k{i}", 1) for i in range(3)]), None)
+        results, controls = self.run_probe(keys, (200, page([(daily_key("2024-01-01"), 5)]), None))
+        self.assertEqual(probe.verdict(results, controls)[0], "ARCHIVE HAS KEYS")
+        text = "\n".join(probe.report(results, controls))
+        for column in ("HTTP", "bytes", "IsTruncated", "Contents", "CommonPrefixes", "first 3 keys"):
+            self.assertIn(column, text)
+        self.assertIn(f"`{daily_key('2024-01-01')}`", text)
+
+
 class DownloadTests(unittest.TestCase):
     def test_checksum_verification_and_gaps(self):
         body = b"zip-bytes"

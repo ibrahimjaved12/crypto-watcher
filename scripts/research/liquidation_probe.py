@@ -13,6 +13,13 @@ and last available; daily if the symbol has any, else monthly), verifies each ag
 (404 = a recorded gap, a mismatch = an error) and profiles it. Downloads are limited to periods up
 to 2025-12 so the hidden stretch is never read; the listing itself covers every key.
 
+Diagnostics: for every family and symbol the first listing page is also recorded raw (HTTP status,
+response bytes, IsTruncated, Contents and CommonPrefixes counts, first 3 keys), and three control
+listings (no downloads) say how to read an empty result: (a) the CommonPrefixes of
+data/futures/um/daily/ (does liquidationSnapshot exist at all), (b) data/futures/um/daily/klines/
+BTCUSDT/1d/ (must return keys, else the probe itself is broken) and (c) the COIN-M BTCUSD_PERP
+liquidationSnapshot folder (context only). The summary states "archive empty" versus "probe could not list".
+
 Standard library only; download mechanics are data_lake_build's.
 """
 from __future__ import annotations
@@ -67,8 +74,9 @@ def listing_url(key_prefix: str, marker: str | None = None) -> str:
     return S3_ROOT + "?" + urllib.parse.urlencode(query, quote_via=urllib.parse.quote, safe="/")
 
 
-def parse_listing(body: bytes) -> tuple[list, bool, str | None]:
-    """([(key, size)], is_truncated, next_marker) of one S3 ListBucketResult page (namespace-agnostic)."""
+def parse_listing_detail(body: bytes) -> dict:
+    """{'keys': [(key, size)], 'prefixes': [CommonPrefixes], 'truncated', 'marker'} of one S3 ListBucketResult page
+    (namespace-agnostic)."""
     if b"<!DOCTYPE" in body or b"<!ENTITY" in body:
         raise ProbeError("listing contains a DTD")
     try:
@@ -78,19 +86,27 @@ def parse_listing(body: bytes) -> tuple[list, bool, str | None]:
     name = lambda element: element.tag.rsplit("}", 1)[-1]  # noqa: E731
     if name(root) != "ListBucketResult":
         raise ProbeError(f"unexpected listing root {name(root)!r}")
-    keys, truncated, marker = [], False, None
+    out = {"keys": [], "prefixes": [], "truncated": False, "marker": None}
     for child in root:
         tag = name(child)
         if tag == "IsTruncated":
-            truncated = (child.text or "").strip().lower() == "true"
+            out["truncated"] = (child.text or "").strip().lower() == "true"
         elif tag == "NextMarker":
-            marker = (child.text or "").strip() or None
+            out["marker"] = (child.text or "").strip() or None
+        elif tag == "CommonPrefixes":
+            out["prefixes"].extend((item.text or "") for item in child if name(item) == "Prefix")
         elif tag == "Contents":
             fields = {name(item): (item.text or "") for item in child}
             if "Key" not in fields or not _INTEGER.match(fields.get("Size", "")):
                 raise ProbeError("listing entry without Key or integer Size")
-            keys.append((fields["Key"], int(fields["Size"])))
-    return keys, truncated, marker
+            out["keys"].append((fields["Key"], int(fields["Size"])))
+    return out
+
+
+def parse_listing(body: bytes) -> tuple[list, bool, str | None]:
+    """([(key, size)], is_truncated, next_marker) of one S3 ListBucketResult page."""
+    page = parse_listing_detail(body)
+    return page["keys"], page["truncated"], page["marker"]
 
 
 def fetch_bytes(url: str) -> bytes:
@@ -111,6 +127,81 @@ def list_keys(key_prefix: str, fetcher=fetch_bytes, max_pages: int = MAX_PAGES) 
             raise ProbeError("listing is truncated but the marker does not advance")
         marker = following
     raise ProbeError(f"listing exceeds {max_pages} pages")
+
+
+# ---------------------------------------------------------------- diagnostics
+
+CONTROL_PREFIXES = {
+    "um_daily_families": "data/futures/um/daily/",
+    "um_klines_btc_1d": "data/futures/um/daily/klines/BTCUSDT/1d/",
+    "cm_liquidation_btcusd_perp": "data/futures/cm/daily/liquidationSnapshot/BTCUSD_PERP/",
+}
+FIRST_KEYS = 3
+
+
+def raw_get(url: str) -> tuple:
+    """(HTTP status or None, body, error text or None). A success is 200; other statuses come from the error."""
+    try:
+        return 200, fetch_bytes(url), None
+    except RuntimeError as error:
+        found = re.search(r"HTTP (\d{3})", str(error))
+        return (int(found.group(1)) if found else None), b"", str(error)
+
+
+def diagnose_listing(key_prefix: str, getter=raw_get) -> dict:
+    """The first listing page of ``key_prefix`` as the server returned it. ``listed`` is True only for HTTP 200
+    with a parseable ListBucketResult; otherwise ``error`` says why the probe could not list."""
+    status, body, error = getter(listing_url(key_prefix))
+    out = {"prefix": key_prefix, "status": status, "bytes": len(body), "truncated": None, "contents": None,
+           "prefixes": None, "first_keys": [], "prefix_names": [], "error": error, "listed": False}
+    if status != 200:
+        out["error"] = error or f"HTTP {status}"
+        return out
+    try:
+        page = parse_listing_detail(body)
+    except ProbeError as problem:
+        out["error"] = str(problem)
+        return out
+    out.update(truncated=page["truncated"], contents=len(page["keys"]), prefixes=len(page["prefixes"]),
+               first_keys=[key for key, _ in page["keys"][:FIRST_KEYS]], prefix_names=page["prefixes"], listed=True)
+    return out
+
+
+def run_controls(diagnoser=diagnose_listing) -> dict:
+    return {name: diagnoser(key_prefix) for name, key_prefix in CONTROL_PREFIXES.items()}
+
+
+def listing_state(diagnosis: dict | None, keys: int, error: str | None) -> str:
+    """could not list | archive empty | only sub-prefixes | has keys, for one family listing."""
+    if error or (diagnosis is not None and not diagnosis["listed"]):
+        return "could not list"
+    if keys:
+        return "has keys"
+    if diagnosis is not None and diagnosis["prefixes"]:
+        return "only sub-prefixes"
+    return "archive empty"
+
+
+def verdict(results: list, controls: dict | None) -> tuple:
+    """(label, explanation): archive empty versus probe could not list, from the control (b) and every listing."""
+    states = [item["state"] for result in results for item in result["families"].values()]
+    if controls is None:
+        return "NO CONTROLS", "control listings were not run: an empty result cannot be told from a broken probe"
+    klines = controls["um_klines_btc_1d"]
+    if not klines["listed"]:
+        return "PROBE COULD NOT LIST", f"control (b) klines/BTCUSDT/1d failed ({klines['error']}): the probe is broken"
+    if not klines["contents"]:
+        return "PROBE COULD NOT LIST", "control (b) klines/BTCUSDT/1d returned 0 keys: the probe itself is broken"
+    if "could not list" in states:
+        return "PROBE COULD NOT LIST", "control (b) works, but some liquidationSnapshot listings failed (see table)"
+    if states and all(state == "archive empty" for state in states):
+        families = controls["um_daily_families"]
+        exists = ("not listed" if not families["listed"] else
+                  "present" if any(name.endswith("/liquidationSnapshot/") for name in families["prefix_names"])
+                  else "absent")
+        return "ARCHIVE EMPTY", (f"control (b) returned {klines['contents']} keys, every liquidationSnapshot listing "
+                                 f"returned 0 keys and 0 prefixes; the folder is {exists} in the um/daily listing (a)")
+    return "ARCHIVE HAS KEYS", "at least one liquidationSnapshot listing returned keys or sub-prefixes (see table)"
 
 
 # ---------------------------------------------------------------- periods and gaps
@@ -321,14 +412,28 @@ def download_verified(url: str, fetcher=fetch_or_none) -> bytes | None:
 # ---------------------------------------------------------------- probe
 
 
-def probe_symbol(symbol: str, lister=list_keys, fetcher=fetch_or_none) -> dict:
+def probe_symbol(symbol: str, lister=list_keys, fetcher=fetch_or_none, diagnoser=None) -> dict:
+    """``diagnoser`` (diagnose_listing in main) records the first raw page per family; a listing that fails is
+    recorded as "could not list" instead of ending the run."""
     families = {}
     for family in FAMILIES:
-        found = split_keys(family, symbol, lister(prefix(family, symbol)))
+        key_prefix = prefix(family, symbol)
+        diagnosis = diagnoser(key_prefix) if diagnoser else None
+        listing, error = [], None
+        if diagnosis is not None and not diagnosis["listed"]:
+            error = diagnosis["error"] or "listing failed"
+        else:
+            try:
+                listing = lister(key_prefix)
+            except (ProbeError, RuntimeError) as problem:
+                error = f"{type(problem).__name__}: {problem}"
+        found = split_keys(family, symbol, listing)
         missing = missing_periods(found["periods"], family)
         families[family] = {**found, "first": found["periods"][0] if found["periods"] else None,
                             "last": found["periods"][-1] if found["periods"] else None,
-                            "missing": len(missing), "missing_ranges": compress_ranges(missing, family)}
+                            "missing": len(missing), "missing_ranges": compress_ranges(missing, family),
+                            "listing": diagnosis, "error": error,
+                            "state": listing_state(diagnosis, len(listing), error)}
     source = next((f for f in FAMILIES if families[f]["periods"]), None)
     result = {"symbol": symbol, "families": families, "probe_family": source, "zips": [], "gaps": 0}
     if source is None:
@@ -357,10 +462,47 @@ def probe_symbol(symbol: str, lister=list_keys, fetcher=fetch_or_none) -> dict:
     return result
 
 
-def report(results: list) -> list:
-    lines = ["### Liquidation snapshot archive probe", "",
-             "| symbol | family | zip keys | first | last | missing | bytes | checksums | other keys |",
-             "|---|---|---|---|---|---|---|---|---|"]
+def _count(value) -> str:
+    return "-" if value is None else str(value)
+
+
+def report_diagnostics(results: list, controls: dict | None) -> list:
+    label, why = verdict(results, controls)
+    lines = ["### Liquidation snapshot archive probe", "", f"**{label}**: {why}", "",
+             "#### Control listings (listing only, no downloads)", "",
+             "| control | prefix | HTTP | bytes | IsTruncated | Contents | CommonPrefixes | first keys / prefixes |",
+             "|---|---|---|---|---|---|---|---|"]
+    notes = {"um_daily_families": "(a) does liquidationSnapshot exist at all (lists the folders)",
+             "um_klines_btc_1d": "(b) must return keys, else the probe is broken",
+             "cm_liquidation_btcusd_perp": "(c) COIN-M, context only (out of scope)"}
+    for name, diagnosis in (controls or {}).items():
+        shown = diagnosis["prefix_names"] if name == "um_daily_families" else diagnosis["first_keys"]
+        lines.append(f"| {notes[name]} | `{diagnosis['prefix']}` | {_count(diagnosis['status'])} | "
+                     f"{diagnosis['bytes']} | {_count(diagnosis['truncated'])} | {_count(diagnosis['contents'])} | "
+                     f"{_count(diagnosis['prefixes'])} | {', '.join(f'`{item}`' for item in shown) or '-'}"
+                     f"{' ERROR: ' + diagnosis['error'] if diagnosis['error'] else ''} |")
+    lines += ["", "#### First listing page per symbol and family", "",
+              "| symbol | family | HTTP | bytes | IsTruncated | Contents | CommonPrefixes | first 3 keys | state |",
+              "|---|---|---|---|---|---|---|---|---|"]
+    for result in results:
+        for family in FAMILIES:
+            item = result["families"][family]
+            diagnosis = item.get("listing")
+            if diagnosis is None:
+                continue
+            lines.append(f"| {result['symbol']} | {family} | {_count(diagnosis['status'])} | {diagnosis['bytes']} | "
+                         f"{_count(diagnosis['truncated'])} | {_count(diagnosis['contents'])} | "
+                         f"{_count(diagnosis['prefixes'])} | "
+                         f"{', '.join(f'`{key}`' for key in diagnosis['first_keys']) or '-'} | "
+                         f"{item['state']}{': ' + item['error'] if item.get('error') else ''} |")
+    return lines + [""]
+
+
+def report(results: list, controls: dict | None = None) -> list:
+    lines = report_diagnostics(results, controls)
+    lines += ["#### Coverage", "",
+              "| symbol | family | zip keys | first | last | missing | bytes | checksums | other keys |",
+              "|---|---|---|---|---|---|---|---|---|"]
     for result in results:
         for family in FAMILIES:
             item = result["families"][family]
@@ -417,7 +559,8 @@ def parse_args(argv=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
     symbols = parse_symbols(args.symbols)
-    lines = report([probe_symbol(symbol) for symbol in symbols])
+    controls = run_controls()
+    lines = report([probe_symbol(symbol, diagnoser=diagnose_listing) for symbol in symbols], controls)
     print("\n".join(lines), flush=True)
     write_summary(args.summary or os.environ.get("LIQUIDATION_PROBE_SUMMARY"), lines)
     return 0

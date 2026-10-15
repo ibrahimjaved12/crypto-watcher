@@ -26,8 +26,9 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right, insort
 from dataclasses import dataclass, field
-from math import isfinite, log, sqrt
+from math import ceil, isfinite, log, sqrt
 from statistics import median
+from time import gmtime
 from typing import Callable
 
 from .. import data_lake
@@ -62,6 +63,9 @@ ATR_PERIOD, ADX_PERIOD, EMA_FAST, EMA_SLOW, LOOKBACK = 14, 14, 20, 50, 20
 BB_PERIOD, BB_K = 20, 2
 KC_ATR_PERIOD, KC_K = 20, 1.5
 PCT_WINDOW = {15: 2880, 60: 720, 240: 180, 1440: 90, 10080: 52}
+# A percentile needs at least this fraction of its window present; an invalid candle inside the window
+# is skipped (the rank is over the available values) instead of blanking the next W candles.
+MIN_RANK_FRACTION = 0.8
 SLOT_DAYS, SLOT_MIN_VALUES = 20, 10
 INTRADAY_SIGMA_HALF_LIFE_DAYS = 3  # = screen.SIGMA_HALF_LIFE_DAYS
 INTRADAY_SIGMA_MODEL = "ewma-3d-5m-v1"
@@ -188,22 +192,23 @@ def _f(value: int) -> float:
 
 
 def trailing_rank(values: list, window: int) -> list:
-    """out[j] = fraction of values[j-window+1..j] that are <= values[j]; None unless all ``window`` exist."""
+    """out[j] = (present values of values[j-window+1..j] that are <= values[j]) / (present values in that window).
+
+    None if values[j] is None, if j < window - 1, or if fewer than MIN_RANK_FRACTION * window values are
+    present. Uses only values up to j. With no missing value this is the plain fraction over ``window``.
+    """
     out = [None] * len(values)
-    ordered, missing = [], 0
+    need = ceil(MIN_RANK_FRACTION * window - 1e-9)
+    ordered = []
     for j, value in enumerate(values):
-        if value is None:
-            missing += 1
-        else:
+        if value is not None:
             insort(ordered, value)
         if j >= window:
             old = values[j - window]
-            if old is None:
-                missing -= 1
-            else:
+            if old is not None:
                 del ordered[bisect_left(ordered, old)]
-        if j >= window - 1 and not missing:
-            out[j] = bisect_right(ordered, value) / window
+        if j >= window - 1 and value is not None and len(ordered) >= need:
+            out[j] = bisect_right(ordered, value) / len(ordered)
     return out
 
 
@@ -523,7 +528,8 @@ TREND_VOL_COLUMNS = (
     ("ret1_prev_sigma", "ln(close_{i-1} / open_{i-1}) in units of the one-candle sigma at the end of i-1"),
     ("ret3_prev_sigma", "ln(close_{i-1} / open_{i-3}) in units of the one-candle sigma at the end of i-1 "
                         "(ret3 is not divided by sqrt(3))"),
-    ("atr_pct_prev", "fraction of the W ATR14 values of candles i-W..i-1 that are <= atr_prev (full window)"),
+    ("atr_pct_prev", "share of the available ATR14 values of candles i-W..i-1 that are <= atr_prev; empty if "
+                    "fewer than 80% of the W values exist (invalid candles are skipped, not filled)"),
     ("bb_width_pct_prev", "same percentile of BB(20,2) width = 4 * population std / SMA20, at i-1"),
     ("squeeze_on_prev", "BB(20,2) inside Keltner EMA20 +/- 1.5 * Wilder ATR20 at i-1"),
     ("squeeze_bars_prev", "consecutive candles with squeeze on ending at i-1"),
@@ -563,7 +569,7 @@ OUTCOME_COLUMNS = tuple(
     ("fwd_status", "ok | window_invalid | past_end | sigma_missing (of the one-candle window)"),
 )
 
-GROUP_VERSIONS = {"keys": "keys-v1", "geometry": "geo-v1", "trend_vol": "tv-v1", "volume": "vol-v1",
+GROUP_VERSIONS = {"keys": "keys-v1", "geometry": "geo-v1", "trend_vol": "tv-v2", "volume": "vol-v1",
                   "calendar": "cal-v1", "regime": "regime-v1", "location": "loc-v1", "sweep": "sweep-v1",
                   "htf": "htf-v1", "levels2": "lv2-v1",
                   "derivatives": "deriv-v1", "flush": "flush-v1",
@@ -650,7 +656,7 @@ def write_table(fileobj, rows, columns=None, counts: dict | None = None) -> int:
     """Deterministic csv.gz (header first). ``counts`` (optional) accumulates status/segment/fwd_status counts."""
     columns = tuple(columns or REGISTRY.columns())
     where = {name: columns.index(name) for name in ("symbol", "tf", "status", "segment", "fwd_status",
-                                                    "oi_value_end") if name in columns}
+                                                    "oi_value_end", "reasons", "decision_ms") if name in columns}
 
     def lines():
         yield ",".join(columns) + "\n"
@@ -669,6 +675,13 @@ def count_row(counts: dict, row, where: dict) -> None:
     if "fwd_status" in where:
         fwd = f"{prefix}|{row[where['fwd_status']] or 'none'}"
         counts.setdefault("fwd_status", {})[fwd] = counts.get("fwd_status", {}).get(fwd, 0) + 1
+    if "reasons" in where and row[where["status"]] == "insufficient":
+        reason = f"{prefix}|{row[where['segment']]}|{row[where['reasons']]}"
+        counts.setdefault("insufficient_reason", {})[reason] = counts.get("insufficient_reason", {}).get(reason, 0) + 1
+        if "decision_ms" in where:
+            moment = gmtime(row[where["decision_ms"]] // 1000)
+            month = f"{prefix}|{moment.tm_year:04d}-{moment.tm_mon:02d}"
+            counts.setdefault("insufficient_month", {})[month] = counts.get("insufficient_month", {}).get(month, 0) + 1
     # Rows outside published mx months, or in a metrics gap; invalid candles carry no features and are not counted.
     if "oi_value_end" in where and row[where["oi_value_end"]] is None and row[where["status"]] != "invalid":
         counts.setdefault("oi_missing", {})[prefix] = counts.get("oi_missing", {}).get(prefix, 0) + 1
@@ -768,6 +781,10 @@ def build_manifest(*, files: list, counts: dict, inputs: dict, through_month: st
                 "files": sorted(files, key=lambda item: item["name"]),
                 "row_counts": dict(sorted(counts.get("rows", {}).items())),
                 "fwd_status_counts": dict(sorted(counts.get("fwd_status", {}).items())),
+                "insufficient_reason_counts": dict(sorted(counts.get("insufficient_reason", {}).items())),
+                "insufficient_by_month": dict(sorted(counts.get("insufficient_month", {}).items())),
+                "insufficient_note": "insufficient rows per symbol|timeframe|segment|reasons (the reasons column "
+                                     "value) and per symbol|timeframe|YYYY-MM of decision_ms (UTC)",
                 "oi_missing_counts": dict(sorted(counts.get("oi_missing", {}).items())),
                 "oi_missing_counts_note": "per symbol|timeframe: non-invalid rows whose oi_value_end is empty "
                                           "(outside published mx months or in a metrics gap)",

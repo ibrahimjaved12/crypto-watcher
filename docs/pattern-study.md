@@ -28,6 +28,8 @@ This study supersedes it.
 - **Manifest:** `manifest.json` (schema `candle-table-v1`) holds:
   - the group versions and every column with its one-line doc;
   - row counts per (symbol, tf, status, segment) and `fwd_status` counts;
+  - `insufficient_reason_counts` (symbol|tf|segment|`reasons` value) and `insufficient_by_month`
+    (symbol|tf|YYYY-MM of the decision time), so clusters show without opening the files;
   - input release tags and sha256s, the git sha and `through_month`;
   - the dk1-vs-1m `daily_parity` per symbol;
   - a content hash that leaves out the commit and creation time.
@@ -63,7 +65,7 @@ This study supersedes it.
 |---|---|---|
 | keys | keys-v1 | symbol, tf, open_ms, decision_ms, segment, status, reasons |
 | geometry | geo-v1 | OHLC, range/body/wicks and their ratios, color, atr_prev (Wilder ATR14 through i-1), range_atr, body_atr, doji_b05, doji_b10, doji_subtype, size_ge_05, size_ge_10 |
-| trend_vol | tv-v1 | EMA20/50, trend_dir, ema_gap_atr_prev, ADX/+DI/-DI, extension_prev_atr, streak_prev, sigma_tf, sigma_model, ret1/ret3_prev_sigma, atr_pct_prev, bb_width_pct_prev, squeeze_on_prev, squeeze_bars_prev |
+| trend_vol | tv-v2 | EMA20/50, trend_dir, ema_gap_atr_prev, ADX/+DI/-DI, extension_prev_atr, streak_prev, sigma_tf, sigma_model, ret1/ret3_prev_sigma, atr_pct_prev, bb_width_pct_prev, squeeze_on_prev, squeeze_bars_prev |
 | volume | vol-v1 | volume, rel_volume_prior20, rel_volume_slot (intraday), taker_buy_ratio, taker_ratio_prior20, taker_imb |
 | calendar | cal-v1 | utc_dow; intraday: utc_hour, is_weekend, session_bin, funding_in_candle, mins_to_funding |
 | regime | regime-v1 | `rg_` + every market and symbol column of `regime.build_table` (built from dk1 inside the run) |
@@ -86,8 +88,10 @@ This study supersedes it.
 - **Weekly:** the daily sigma at the week's Sunday times `sqrt(7)`.
 
 **Percentiles:** `atr_pct_prev` and `bb_width_pct_prev` are the fraction of the last W values
-(W = 2880, 720, 180, 90, 52 for 15m..1w) that are <= the value at `i - 1`. The window must be
-complete.
+(W = 2880, 720, 180, 90, 52 for 15m..1w) that are <= the value at `i - 1`. Since tv-v2 the rank is over the values that are present in the window
+(an invalid candle is skipped, not filled), and it is empty when fewer than 80% of the W values are present
+(`MIN_RANK_FRACTION`), when the value at `i - 1` is missing, or during warm-up (fewer than W candles).
+tv-v1 required all W values, so one invalid candle blanked the next W candles (about 30 days on 15m).
 
 **Short side:** there are no extra columns. The short MFE is `mae_long`, the short MAE is
 `mfe_long`, and the short return is `-ret`.

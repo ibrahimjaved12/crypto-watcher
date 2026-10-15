@@ -26,6 +26,21 @@ text columns, never row values. The data is public market data.
 5. **Duplication.** Share of rows identical to the previous row. A share near 0.5 means each event
    is stored twice in a row (a pairwise duplicate).
 
+6. **Raw listing diagnostics.** For every family and symbol the job summary records the first
+   listing page as the server returned it: HTTP status, response bytes, `IsTruncated`, the number
+   of `Contents` entries, the number of `CommonPrefixes` and the first 3 raw keys. A listing that
+   fails (HTTP error, not a `ListBucketResult`) is shown as `could not list` and does not end the run.
+7. **Controls (listing only, no downloads).** They say how to read a result of zero keys:
+   - (a) `data/futures/um/daily/` `CommonPrefixes`: does a `liquidationSnapshot` folder exist at all.
+   - (b) `data/futures/um/daily/klines/BTCUSDT/1d/`: must return more than 0 keys. If it does not,
+     the probe itself is broken and the verdict is `PROBE COULD NOT LIST`.
+   - (c) `data/futures/cm/daily/liquidationSnapshot/BTCUSD_PERP/`: context only (COIN-M is out of
+     scope) and never part of the verdict.
+
+   The first line of the summary is the verdict: `ARCHIVE EMPTY` (control (b) lists keys and every
+   `liquidationSnapshot` listing returned 0 keys and 0 prefixes), `PROBE COULD NOT LIST` (control (b)
+   failed or returned 0 keys, or some `liquidationSnapshot` listing failed) or `ARCHIVE HAS KEYS`.
+
 ## What the probe does not answer
 
 Whether the snapshots are the full liquidation stream or a sample, the price/quantity
