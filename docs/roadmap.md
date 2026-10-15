@@ -2,7 +2,7 @@
 
 > **Provisional.** This document is AI-generated and is not the source of truth. The owner's
 > intent in [`CLAUDE.md`](../CLAUDE.md) takes precedence. Reconciliation is tracked in
-> [#181](https://github.com/ibrahimjaved12/crypto-watcher/issues/181).
+> [#340](https://github.com/ibrahimjaved12/crypto-watcher/issues/340) (successor of [#181](https://github.com/ibrahimjaved12/crypto-watcher/issues/181)).
 
 Snapshot: 2026-10-09, reset under [#189](https://github.com/ibrahimjaved12/crypto-watcher/issues/189)
 and [#181](https://github.com/ibrahimjaved12/crypto-watcher/issues/181). Order numbers are

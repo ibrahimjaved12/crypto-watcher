@@ -1,8 +1,8 @@
 # CLAUDE.md — Crypto Watch (crypto-watcher)
 
-> v1, 2026-10-07. Written from the owner's original idea and the 2026-10-07 review session,
+> v2, 2026-10-16. Written from the owner's original idea and the 2026-10-07 review session,
 > and committed with the owner's approval. Review it when the research in #180 lands. The
-> reconciliation of tickets/docs with this file is tracked in #181.
+> reconciliation of tickets/docs with this file is tracked in #340 (successor of #181).
 
 ## 1. What is true and what is not
 
@@ -62,6 +62,8 @@ that until the tool proves it makes money.
   realistic futures costs (fees, funding, slippage, liquidation).
 - Later: ML/AI layers, only if they measurably beat simple baselines out of sample.
 
+Forex is planned for later as a separate, owner-led strategy track (#374); nothing is scheduled.
+
 ## 3. Current priorities (set 2026-10-07)
 
 1. **Trading algorithms / maths / trade-prediction research**: find and test good strategies
@@ -70,7 +72,9 @@ that until the tool proves it makes money.
 2. **Reflect and reset the plan before implementing**: fix tickets/docs so they point at the
    intent, then implement.
 3. Parked, do not work on unless asked: **news ingestion** (separate conversation, later),
-   **email/WhatsApp/notification delivery**, other backlog polish.
+   **email/WhatsApp/notification delivery**, other backlog polish. The market-wide breadth alert
+   needs research first (#373). Multi-day trend families (#222) are in the backlog. Paper trading
+   (#36, #38) stays in the backlog until a few strategies survive costs (owner decisions 2026-10-16).
 
 Project is roughly 20% complete; things proceed incrementally and in parallel.
 
@@ -104,6 +108,8 @@ external operational Postgres is no longer planned; Python (FastAPI + shared cal
 under `python/market_analysis`); Binance USDⓈ-M collector using WebSocket (live) + REST (bootstrap/gap recovery);
 GitHub Actions for heavy studies. Providers: **Binance primary, OKX and Kraken as fallbacks** (owner-confirmed 2026-10-07).
 Keep price types and contract identity explicit when a fallback is used.
+Binance is blocked from Cloudflare Worker egress; the machine publishes Binance quotes to hosted `market_quotes` and the Worker only reads them (#323). Kraken/OKX are a temporary Worker fallback, removed after 30 days of machine uptime (#339).
+Setup charts are rendered on the owner's machine from windows captured at event time; movement-alert charts also have a private hosted copy shown on the Alerts page (#299, #298; docs/alert-charts.md).
 
 ## 6. Working rules for Claude Code
 
@@ -118,22 +124,17 @@ Keep price types and contract identity explicit when a fallback is used.
 
 ## 7. Known drift under review (2026-10-07)
 
-- No ticket owns choosing/evaluating actual predictive trading algorithms; the "EXP-75"
-  methods (EWMA, CUSUM, Kalman, PELT, BOCPD, ATR, PCA, correlation, HMM, mark/trade, OI/funding,
-  taker flow) are market-state descriptors. They may still be useful as features/filters.
-- #123 (historical-market-state-study-v1) measures state quality and incremental information vs
-  V1, not trade profitability. Recommended: pause (see discussion), its test days
-  have no special status under the new splits.
 - #31 contains an illustrative support-bounce example only; no real strategies are chosen.
-- Roadmap order numbers differ between issue bodies and `docs/roadmap.md`.
 - Roughly 30 closed tickets are replay/state-classifier/study machinery; setups, outcomes,
   paper trading, dashboard and backtests (#30-#33, #36, #38) are all still open.
+- Lovable-era tickets #49, #51 and #41 (closed 2026-10-13; their bodies still describe Lovable-era plans): pending owner decision.
 
 ## 8. Open decisions
 
-- Research and tracking tickets: #180 (strategy research + benchmark), #181 (reset/reconcile).
+- Research and tracking tickets: #180 (strategy research + benchmark).
 
-- Final list of strategy/predictor families to build and benchmark (research pending).
+- Final list of strategy/predictor families to build and benchmark (research pending, owner-led).
 - How to benchmark predictors against trade-level profit (stop-aware labels).
-- Fate of #123/#152/#163 and the state-classifier work.
+- Always-on host: not needed during development (decided 2026-10-13); revisit at about 80% completion.
+- Doji work: paused by the owner on 2026-10-16; see #361-#366 (resume order in the #364 comments).
 - Django vs FastAPI stays FastAPI unless reopened.
