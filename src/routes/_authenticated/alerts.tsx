@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { ArrowDownRight, ArrowUpRight, BellRing, Download, FlaskConical, Trash2 } from "lucide-react";
+import { Fragment, useMemo, useRef, useState } from "react";
+import { ArrowDownRight, ArrowUpRight, BellRing, ChevronRight, Download, FlaskConical, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
@@ -20,7 +20,10 @@ import { Hint } from "@/components/hint";
 import { EmptyState, PageHeader, TimeAgo } from "@/components/plain";
 import { relativeTime, sourceLabel } from "@/lib/labels";
 import { cn } from "@/lib/utils";
-import { createTestAlert, deleteAlert, fetchAlerts, fetchWatchlist, type AlertRow } from "@/lib/db";
+import { createTestAlert, fetchAlertCharts, fetchAlerts, fetchWatchlist, type AlertRow } from "@/lib/db";
+import { AlertChartPanel } from "@/components/alert-chart-panel";
+import { chartViewModel, type ChartMeta } from "@/lib/alert-charts/hosted";
+import { deleteAlertWithChart } from "@/lib/alert-charts/view.functions";
 import { WINDOW_LABELS } from "@/lib/market/symbols";
 
 export const Route = createFileRoute("/_authenticated/alerts")({
@@ -67,7 +70,36 @@ function AlertsPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
 
+  // Rows open independently (several at once). Charts load lazily, only for open rows (see AlertChartPanel).
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
   const alerts = useQuery({ queryKey: ["alerts"], queryFn: fetchAlerts });
+  const alertsRef = useRef(alerts.data);
+  alertsRef.current = alerts.data;
+  // Chart metadata is small; it refreshes every 60 s (the existing automatic cadence) only while an open row
+  // shows a state that can still change (waiting, drawing, uploading).
+  const charts = useQuery({
+    queryKey: ["alert-charts"],
+    queryFn: fetchAlertCharts,
+    refetchInterval: (query) => {
+      const byId = new Map((query.state.data ?? []).map((row) => [row.alert_id, row as ChartMeta]));
+      const rows = alertsRef.current ?? [];
+      return rows.some((a) => expandedRef.current.has(a.id) && chartViewModel(a, byId.get(a.id), Date.now()).changing)
+        ? 60_000
+        : false;
+    },
+  });
+  const chartById = useMemo(
+    () => new Map((charts.data ?? []).map((row) => [row.alert_id, row as ChartMeta])),
+    [charts.data],
+  );
+  const toggle = (id: string) =>
+    setExpanded((open) => {
+      const next = new Set(open);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
   const watchlist = useQuery({ queryKey: ["watchlist"], queryFn: fetchWatchlist });
 
   const filtered = useMemo(() => {
@@ -91,9 +123,14 @@ function AlertsPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  // Also removes the hosted chart (stored image and its metadata row) in the same server call.
   const remove = useMutation({
-    mutationFn: deleteAlert,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["alerts"] }),
+    mutationFn: (alertId: string) => deleteAlertWithChart({ data: { alertId } }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["alerts"] });
+      queryClient.invalidateQueries({ queryKey: ["alert-charts"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
   });
 
   function exportCsv() {
@@ -161,6 +198,9 @@ function AlertsPage() {
           <Table className="min-w-[720px]">
             <TableHeader>
               <TableRow>
+                <TableHead className="w-10">
+                  <span className="sr-only">Chart</span>
+                </TableHead>
                 <TableHead>Pair</TableHead>
                 <TableHead>When</TableHead>
                 <TableHead>Move</TableHead>
@@ -182,8 +222,30 @@ function AlertsPage() {
                 const change = Number(a.change_pct);
                 const up = change >= 0;
                 const Arrow = up ? ArrowUpRight : ArrowDownRight;
+                const open = expanded.has(a.id);
+                const meta = chartById.get(a.id);
+                const chart = chartViewModel(a, meta, Date.now());
+                const panelId = `alert-chart-${a.id}`;
                 return (
-                  <TableRow key={a.id}>
+                  <Fragment key={a.id}>
+                  <TableRow>
+                    <TableCell className="w-10 px-2">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-expanded={open}
+                        aria-controls={panelId}
+                        aria-label={`${open ? "Hide" : "Show"} setup chart for ${a.symbol}${chart.ready ? " (ready)" : ""}`}
+                        title="Setup chart"
+                        onClick={() => toggle(a.id)}
+                        className="relative"
+                      >
+                        <ChevronRight className={cn("size-4 transition-transform", open && "rotate-90")} aria-hidden />
+                        {chart.ready ? (
+                          <span className="absolute right-1 top-1 size-2 rounded-full bg-bull" aria-hidden />
+                        ) : null}
+                      </Button>
+                    </TableCell>
                     <TableCell className="num font-medium">
                       {a.symbol.replace(/USDT$/, "")}
                       <span className="text-muted-foreground">/USDT</span>
@@ -245,6 +307,14 @@ function AlertsPage() {
                       </Button>
                     </TableCell>
                   </TableRow>
+                  {open ? (
+                    <TableRow className="hover:bg-transparent">
+                      <TableCell colSpan={9} className="whitespace-normal bg-muted/20 p-0">
+                        <AlertChartPanel alert={a} meta={meta} id={panelId} />
+                      </TableCell>
+                    </TableRow>
+                  ) : null}
+                  </Fragment>
                 );
               })}
             </TableBody>

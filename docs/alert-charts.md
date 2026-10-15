@@ -141,10 +141,62 @@ pattern chart is market-wide and stored under the first account's `ta_signals.id
 id for that candle is mapped in `alert_chart_event_ids` on each capture attempt (also for duplicates),
 so `--event-id` accepts any of them.
 
+## Hosted copy and the Alerts page (#298)
+
+The Alerts page shows the setup chart of a **movement alert** behind an expandable row. The site reads
+hosted data only, so the machine uploads each rendered movement-alert PNG to a **private** hosted bucket
+(`alert-charts`, path `<user_id>/<alert_id>.png`, PNG only, 512 KiB per file). Pattern charts are not
+uploaded and stay on the machine.
+
+**Transport.** The runner gateway only carries Worker -> machine calls, so it cannot carry an upload.
+The machine therefore calls a small site hook, `POST /api/public/hooks/alert-chart-upload`, authenticated
+with the **same shared secret** the Worker already holds for the gateway (`RUNNER_GATEWAY_SECRET`); the
+machine gets no hosted service key. The hook (a TanStack server route, the privileged writer) only
+exchanges small JSON: `begin` checks the alert and the per-account cap and returns a **one-time signed
+upload URL**; the machine PUTs the PNG straight to storage (the Worker never touches image bytes);
+`complete` checks that the stored object has exactly the announced size and publishes the chart.
+`status` reports progress (rendering, failed with a short error, rendered locally and not uploaded).
+Hosted state is in `alert_chart_files` (migration `20261016150000_alert_chart_files.sql`: status, sha256,
+bytes, rendered time; no image bytes). The site shows the image through a short-lived (10 minute) signed
+URL made by a server function that checks the caller owns the alert; another user's alert id answers
+"Chart not found".
+
+**Machine settings.** `ALERT_CHART_HOSTED_URL` (the site origin, e.g. `https://app.example`) and the
+existing `RUNNER_GATEWAY_SECRET`; without both nothing is uploaded and no hosted row exists. The Worker
+reads `ALERT_CHART_HOSTED_MAX_CHARTS` (default 5000) and `ALERT_CHART_HOSTED_MAX_BYTES` (default 1 GiB) per
+account. Apply the hosted migration to the main project and the operational migration
+`20261016150000_alert_chart_upload.sql` on the machine.
+
+**Offline and retries.** The local PNG is never moved or deleted by an upload. A failed or offline upload
+leaves the hosted row on "pending" and is retried by the consumer with backoff (1 minute doubling to
+1 hour, indefinitely; `alert_charts.hosted_status/upload_attempts/upload_next_at`). A permanent refusal
+(the alert was deleted, or the account is at its cap) stops the retries; `--event-id` queues a new upload
+(for example after freeing space). Nothing here blocks or fails alert creation.
+
+**Retention.** At the per-account cap the upload is refused visibly ("Chart not stored"), nothing is
+deleted automatically. **Deleting an alert** on the Alerts page calls one server function that removes the
+stored object and then the alert (its `alert_chart_files` row cascades); if the file cannot be removed the
+alert is kept and the error is shown. An account deletion cascades the metadata rows but not storage
+objects; they would need a manual cleanup of the bucket.
+
+**What leaves the machine, and what does not.** One PNG per movement alert: candles of that coin (24 h of
+15m, plus the alert minute), EMA 20/50, volume, RSI, the **account's** baseline and alert prices and the
+threshold, and the market breadth reading. The window JSON, the pattern charts, the operational database
+and the other accounts' data stay on the machine. The bucket has no public URL; objects are readable only
+through signed URLs for their owner. The image is not encrypted at rest beyond Supabase's own storage.
+
+**The page.** Each row has a chevron (a dot on it when a chart is ready) that opens a panel under the row
+(several rows can be open). The signed URL is requested only when a row is first opened, never for collapsed
+rows; the image box reserves its height; the panel shows "Download PNG" and the facts the chart does not
+show (UTC and local time, baseline price and time, alert price, change, threshold, rule and version, data
+source). Explicit states: no chart (alert older than the feature, capture off, or a test alert), waiting for
+your machine (with the age), drawing, chart not uploaded yet, failed (short error), expired (waiting longer
+than 7 days), and "chart not stored" at the cap. Chart metadata refreshes every 60 s only while an open row
+is in a state that can still change. CSV export and the other columns are unchanged.
+
 ## Not done here
 
-- No site change: the site reads hosted data only, and the chart lives on the machine. The viewer and
-  any "chart available" flag belong to #298.
+- Pattern charts have no hosted copy or viewer.
 - No delivery (email/WhatsApp), parked.
 - Trade overlay and equity charts are not produced automatically yet.
 - A window whose capture failed is not rebuilt later (see "Capture failures" above).

@@ -159,6 +159,15 @@ export async function captureMovementAlertChart(deps: MovementCaptureDeps): Prom
     });
     stopped();
     const saved = await store.enqueue(capture);
+    // Hosted copy (#298): show the alert's chart as "waiting for the machine" on the Alerts page. Only when this
+    // machine is configured to upload; best effort (the upload protocol creates the row anyway).
+    if (config.hosted) {
+      try {
+        await deps.db.rpc("register_alert_chart_pending", { p_alert_id: alert.id });
+      } catch (error) {
+        console.warn(`[alert-charts] hosted chart row not registered for ${deps.symbol}: ${message(error)}`);
+      }
+    }
     return { status: saved.created ? "captured" : "duplicate" };
   } catch (error) {
     const text = message(error);

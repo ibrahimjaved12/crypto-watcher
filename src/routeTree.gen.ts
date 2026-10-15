@@ -20,6 +20,7 @@ import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticat
 import { Route as AuthCallbackRouteImport } from './routes/auth_.callback'
 import { Route as ApiPublicHooksMonitorPricesRouteImport } from './routes/api/public/hooks/monitor-prices'
 import { Route as ApiPublicHooksSyncCollectorSubscriptionsRouteImport } from './routes/api/public/hooks/sync-collector-subscriptions'
+import { Route as ApiPublicHooksAlertChartUploadRouteImport } from './routes/api/public/hooks/alert-chart-upload'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -77,6 +78,11 @@ const ApiPublicHooksSyncCollectorSubscriptionsRoute =
     path: '/api/public/hooks/sync-collector-subscriptions',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicHooksAlertChartUploadRoute = ApiPublicHooksAlertChartUploadRouteImport.update({
+  id: '/api/public/hooks/alert-chart-upload',
+  path: '/api/public/hooks/alert-chart-upload',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -89,6 +95,7 @@ export interface FileRoutesByFullPath {
   '/auth/callback': typeof AuthCallbackRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
+  '/api/public/hooks/alert-chart-upload': typeof ApiPublicHooksAlertChartUploadRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -101,6 +108,7 @@ export interface FileRoutesByTo {
   '/auth/callback': typeof AuthCallbackRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
+  '/api/public/hooks/alert-chart-upload': typeof ApiPublicHooksAlertChartUploadRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -115,6 +123,7 @@ export interface FileRoutesById {
   '/auth_/callback': typeof AuthCallbackRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
+  '/api/public/hooks/alert-chart-upload': typeof ApiPublicHooksAlertChartUploadRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -129,6 +138,7 @@ export interface FileRouteTypes {
     | '/auth/callback'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
+    | '/api/public/hooks/alert-chart-upload'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -141,6 +151,7 @@ export interface FileRouteTypes {
     | '/auth/callback'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
+    | '/api/public/hooks/alert-chart-upload'
   id:
     | '__root__'
     | '/'
@@ -154,6 +165,7 @@ export interface FileRouteTypes {
     | '/auth_/callback'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
+    | '/api/public/hooks/alert-chart-upload'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -163,6 +175,7 @@ export interface RootRouteChildren {
   AuthCallbackRoute: typeof AuthCallbackRoute
   ApiPublicHooksMonitorPricesRoute: typeof ApiPublicHooksMonitorPricesRoute
   ApiPublicHooksSyncCollectorSubscriptionsRoute: typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
+  ApiPublicHooksAlertChartUploadRoute: typeof ApiPublicHooksAlertChartUploadRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -244,6 +257,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicHooksSyncCollectorSubscriptionsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/hooks/alert-chart-upload': {
+      id: '/api/public/hooks/alert-chart-upload'
+      path: '/api/public/hooks/alert-chart-upload'
+      fullPath: '/api/public/hooks/alert-chart-upload'
+      preLoaderRoute: typeof ApiPublicHooksAlertChartUploadRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -274,6 +294,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicHooksMonitorPricesRoute: ApiPublicHooksMonitorPricesRoute,
   ApiPublicHooksSyncCollectorSubscriptionsRoute:
     ApiPublicHooksSyncCollectorSubscriptionsRoute,
+  ApiPublicHooksAlertChartUploadRoute: ApiPublicHooksAlertChartUploadRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

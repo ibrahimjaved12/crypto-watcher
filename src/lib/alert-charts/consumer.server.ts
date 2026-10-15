@@ -45,11 +45,11 @@ function safe(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 500);
 }
 
-/** Render one claimed job and record the outcome. Returns the final status written. */
+/** Render one claimed job and record the outcome. Returns the final status written (and the error when failed). */
 export async function renderClaimedJob(
   job: AlertChartJob,
   deps: { store: AlertChartStore; workerId: string; directory: string; render: RenderRunner },
-): Promise<"rendered" | "failed"> {
+): Promise<{ status: "rendered" | "failed"; error?: string }> {
   let result: Parameters<AlertChartStore["finish"]>[2];
   try {
     const path = chartPath(deps.directory, job);
@@ -63,5 +63,5 @@ export async function renderClaimedJob(
   }
   const accepted = await deps.store.finish(job.chart_id, deps.workerId, result);
   if (!accepted) throw new Error("Alert chart completion rejected: the lease is no longer owned");
-  return result.ok ? "rendered" : "failed";
+  return result.ok ? { status: "rendered" } : { status: "failed", error: result.error };
 }

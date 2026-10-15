@@ -119,6 +119,48 @@ export type Database = {
         }
         Relationships: []
       }
+      alert_chart_files: {
+        Row: {
+          alert_id: string
+          user_id: string
+          status: string
+          rendered_local: boolean
+          error: string | null
+          storage_path: string | null
+          sha256: string | null
+          bytes: number | null
+          rendered_at: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          alert_id: string
+          user_id: string
+          status?: string
+          rendered_local?: boolean
+          error?: string | null
+          storage_path?: string | null
+          sha256?: string | null
+          bytes?: number | null
+          rendered_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          alert_id?: string
+          user_id?: string
+          status?: string
+          rendered_local?: boolean
+          error?: string | null
+          storage_path?: string | null
+          sha256?: string | null
+          bytes?: number | null
+          rendered_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       alerts: {
         Row: {
           baseline_at: string | null
@@ -802,6 +844,10 @@ export type Database = {
           p_quotes: Json
         }
         Returns: number
+      }
+      register_alert_chart_pending: {
+        Args: { p_alert_id: string }
+        Returns: boolean
       }
       expire_my_stale_runner_jobs: {
         Args: Record<PropertyKey, never>

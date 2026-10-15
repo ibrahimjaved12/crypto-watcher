@@ -17,6 +17,16 @@ export type AlertChartJob = {
   attempts: number;
 };
 
+/** A rendered movement-alert chart whose hosted upload is due (claim_alert_chart_upload). */
+export type AlertChartUploadJob = {
+  chart_id: string;
+  event_id: string;
+  png_path: string | null;
+  png_sha256: string | null;
+  png_bytes: number | null;
+  upload_attempts: number;
+};
+
 export type AlertChartDiagnostics = {
   chart_rows: number;
   window_bytes: number;
@@ -53,6 +63,11 @@ export interface AlertChartStore {
   requeue(eventId: string): Promise<RequeueOutcome[]>;
   /** Record a capture that failed or was abandoned (idempotent on the event identity). */
   recordFailure(failure: CaptureFailure): Promise<void>;
+  /** Queue the hosted upload of a rendered movement-alert chart. */
+  queueUpload(chartId: string): Promise<boolean>;
+  claimUpload(chartId?: string): Promise<AlertChartUploadJob | null>;
+  /** Record an upload attempt: ok, transient failure (backoff, retried) or permanent refusal. */
+  finishUpload(chartId: string, result: { ok: true } | { ok: false; permanent: boolean; error: string }): Promise<void>;
   diagnostics(): Promise<AlertChartDiagnostics>;
 }
 
@@ -115,6 +130,19 @@ export function createAlertChartStore(client: RpcClient, config: AlertChartsConf
         p_event_kind: failure.eventKind, p_event_id: failure.eventId, p_symbol: failure.symbol,
         p_timeframe_minutes: failure.timeframeMinutes, p_event_candle_at: failure.eventCandleAt,
         p_error: failure.error.slice(0, 500),
+      });
+    },
+    async queueUpload(chartId) {
+      return call<boolean>("queue_alert_chart_upload", { p_chart_id: chartId });
+    },
+    async claimUpload(chartId) {
+      const rows = await call<AlertChartUploadJob[]>("claim_alert_chart_upload", { p_chart_id: chartId ?? null });
+      return rows?.[0] ?? null;
+    },
+    async finishUpload(chartId, result) {
+      await call<boolean>("finish_alert_chart_upload", {
+        p_chart_id: chartId, p_ok: result.ok, p_permanent: result.ok ? false : result.permanent,
+        p_error: result.ok ? null : result.error.slice(0, 300),
       });
     },
     async diagnostics() {

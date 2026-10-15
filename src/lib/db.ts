@@ -36,6 +36,16 @@ export type AlertRow = {
   data_source: string;
   is_test: boolean;
 };
+export type AlertChartFileRow = {
+  alert_id: string;
+  status: "pending" | "rendering" | "ready" | "failed" | "capped";
+  rendered_local: boolean;
+  error: string | null;
+  bytes: number | null;
+  rendered_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
 export type NoteRow = {
   id: string;
   symbol: string | null;
@@ -173,10 +183,17 @@ export async function createTestAlert(symbol: string): Promise<void> {
   if (error) throw error;
 }
 
-export async function deleteAlert(id: string): Promise<void> {
-  const { error } = await supabase.from("alerts").delete().eq("id", id);
+/** Chart metadata of the signed-in user's alerts (RLS); the image itself comes from a signed URL on demand. */
+export async function fetchAlertCharts(): Promise<AlertChartFileRow[]> {
+  const { data, error } = await supabase
+    .from("alert_chart_files")
+    .select("alert_id, status, rendered_local, error, bytes, rendered_at, created_at, updated_at");
   if (error) throw error;
+  return (data ?? []) as AlertChartFileRow[];
 }
+
+// Alerts are deleted through the deleteAlertWithChart server function (alert-charts/view.functions), which
+// also removes the hosted chart; a direct client delete would leave the stored PNG behind.
 
 export async function fetchNotes(): Promise<NoteRow[]> {
   const { data, error } = await supabase
