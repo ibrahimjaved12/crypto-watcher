@@ -1,0 +1,51 @@
+name: Liquidation archive probe
+run-name: "Liquidation archive probe ${{ inputs.symbols }}"
+
+# Probe-only (scripts/research/liquidation_probe.py, docs/liquidation-data.md): lists the Binance
+# USD-M liquidationSnapshot keys (daily and monthly) of each symbol, downloads and checksum-verifies
+# three zips per symbol (periods up to 2025-12 only) and prints a table of findings: key counts,
+# first/last/missing periods, compressed bytes, the observed header, row counts, timestamps and counts
+# of distinct values of low-cardinality text columns. It publishes and stores nothing (no release, no
+# artifact, no secrets); the data is public market data and no row values are printed.
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: Comma-separated subset of BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        type: string
+        default: BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: liquidation-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Liquidation archive probe
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Probe the archive
+        env:
+          PROBE_SYMBOLS: ${{ inputs.symbols }}
+          LIQUIDATION_PROBE_SUMMARY: ${{ runner.temp }}/liquidation-probe-summary.md
+        run: python scripts/research/liquidation_probe.py --symbols "$PROBE_SYMBOLS"
+      - name: Summary
+        if: always()
+        env:
+          LIQUIDATION_PROBE_SUMMARY: ${{ runner.temp }}/liquidation-probe-summary.md
+        run: |
+          if [ -f "$LIQUIDATION_PROBE_SUMMARY" ]; then
+            cat "$LIQUIDATION_PROBE_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
