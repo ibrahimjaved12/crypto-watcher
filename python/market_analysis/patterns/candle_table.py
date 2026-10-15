@@ -284,6 +284,7 @@ class TableContext:
     pool_index: dict | None = field(init=False)
     avwap_low_anchor: list = field(init=False)
     avwap_high_anchor: list = field(init=False)
+    vwap_prefix: object = field(init=False)
     prem: list = field(init=False)
     prem_z: list = field(init=False)
     oi_end: list = field(init=False)
@@ -668,7 +669,8 @@ def count_row(counts: dict, row, where: dict) -> None:
     if "fwd_status" in where:
         fwd = f"{prefix}|{row[where['fwd_status']] or 'none'}"
         counts.setdefault("fwd_status", {})[fwd] = counts.get("fwd_status", {}).get(fwd, 0) + 1
-    if "oi_value_end" in where and row[where["oi_value_end"]] is None:  # outside published mx months, or a gap
+    # Rows outside published mx months, or in a metrics gap; invalid candles carry no features and are not counted.
+    if "oi_value_end" in where and row[where["oi_value_end"]] is None and row[where["status"]] != "invalid":
         counts.setdefault("oi_missing", {})[prefix] = counts.get("oi_missing", {}).get(prefix, 0) + 1
 
 
@@ -758,7 +760,7 @@ HASH_EXCLUDED = ("content_hash", "code_commit", "created_utc")
 
 def build_manifest(*, files: list, counts: dict, inputs: dict, through_month: str, parity: dict,
                    symbols, timeframes, code_commit: str, created_utc: str,
-                   registry: GroupRegistry = REGISTRY) -> dict:
+                   registry: GroupRegistry = REGISTRY, funding_parity: dict | None = None) -> dict:
     """``content_hash`` covers everything except the commit and creation time, so an identical table
     built again maps to the same directory (which is then skipped)."""
     manifest = {"schema": SCHEMA, "group_versions": registry.versions(), "columns": registry.docs(),
@@ -767,6 +769,11 @@ def build_manifest(*, files: list, counts: dict, inputs: dict, through_month: st
                 "row_counts": dict(sorted(counts.get("rows", {}).items())),
                 "fwd_status_counts": dict(sorted(counts.get("fwd_status", {}).items())),
                 "oi_missing_counts": dict(sorted(counts.get("oi_missing", {}).items())),
+                "oi_missing_counts_note": "per symbol|timeframe: non-invalid rows whose oi_value_end is empty "
+                                          "(outside published mx months or in a metrics gap)",
+                "funding_parity": funding_parity or {},
+                "funding_source": "dk1 funding history for all rows; funding_parity compares it with the rd "
+                                  "funding per symbol on their overlap",
                 "inputs": inputs, "daily_parity": parity,
                 "sigma_models": {"intraday": INTRADAY_SIGMA_MODEL, "daily": DAILY_SIGMA_MODEL},
                 "code_commit": code_commit, "created_utc": created_utc,

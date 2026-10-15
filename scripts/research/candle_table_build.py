@@ -124,7 +124,7 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     daily, funding = _quiet(ct.load_daily_inputs, daily_dir, symbols, through)
     progress.phase("regime", symbols=len(daily_symbols))
     regime = _quiet(ct.regime_join, daily, funding, through)
-    files, counts, parity = [], {}, {}
+    files, counts, parity, funding_parity = [], {}, {}, {}
     for index, symbol in enumerate(symbols, 1):
         progress.phase("table", symbol_index=index, symbols=len(symbols))
         bars = _quiet(load_symbol_bars, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through)
@@ -135,12 +135,12 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
                    if published else None)
         basis = _quiet(load_symbol_basis, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through)
         ls_z = dv.hourly_ls_global_z(metrics)
-        derivs_intraday = dv.DerivInputs(
-            funding=_quiet(load_symbol_funding, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through),
-            metrics=metrics, basis=basis, mark_close=bars.mark_close, ls_global_z=ls_z)
-        derivs_daily = dv.DerivInputs(
-            funding=_quiet(load_symbol_funding_range, daily_dir, symbol, ct.DAILY_WARMUP_MONTH, through),
-            metrics=metrics, basis=basis, mark_close=bars.mark_close, ls_global_z=ls_z)
+        # dk1 funding (2020..) serves every timeframe; the rd funding is only compared with it (manifest).
+        dk1_funding = _quiet(load_symbol_funding_range, daily_dir, symbol, ct.DAILY_WARMUP_MONTH, through)
+        funding_parity[symbol] = dv.funding_parity(
+            dk1_funding, _quiet(load_symbol_funding, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through))
+        derivs = dv.DerivInputs(funding=dk1_funding, metrics=metrics, basis=basis, mark_close=bars.mark_close,
+                                ls_global_z=ls_z)
         contexts = {}
         intraday = [m for m in timeframes if m in ct.INTRADAY_TIMEFRAMES]
         if intraday:
@@ -155,12 +155,12 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
                     symbol, minutes, bars, candles[minutes], variance, regime, through,
                     levels=loc.context_levels(minutes, candles[minutes], shared),
                     htf=loc.htf_sources(minutes, candles, days, weeks), history_days=days,
-                    profiles=profiles, derivs=derivs_intraday)
+                    profiles=profiles, derivs=derivs)
             del candles, shared
         daily_tfs = [m for m in timeframes if m in ct.DAILY_TIMEFRAMES]
         if daily_tfs:
             contexts.update(ct.daily_contexts(symbol, daily[symbol], regime, daily_tfs, through, profiles=profiles,
-                                            derivs=derivs_daily))
+                                            derivs=derivs))
         del bars
         for minutes in timeframes:
             name = ct.file_name(symbol, minutes, through)
@@ -170,7 +170,7 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
             files.append({"name": name, "rows": rows, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
         gc.collect()
     manifest = ct.build_manifest(files=files, counts=counts, inputs=inputs, through_month=through, parity=parity,
-                                 symbols=symbols, timeframes=timeframes,
+                                 symbols=symbols, timeframes=timeframes, funding_parity=funding_parity,
                                  code_commit=os.environ.get("GITHUB_SHA", "local"), created_utc=NOW_UTC)
     directory = ct.report_dir(manifest)
     root = checkout.path

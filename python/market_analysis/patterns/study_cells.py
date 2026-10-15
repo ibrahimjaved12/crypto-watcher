@@ -11,6 +11,7 @@ input never satisfies a condition (NaN comparisons are false), so such rows fall
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import sqrt
 from typing import Callable
 
 import numpy as np
@@ -26,7 +27,18 @@ EXTENSION_CALM = 1.5
 EXTENSION_STRETCHED = 2.0
 LEVEL_CLEAR_ATR = 0.5
 REL_VOLUME_SPIKE = 2.0
+# ret3_prev_sigma is a 3-candle log return in ONE-candle sigma units, so a "2 sigma" 3-candle shock is
+# |ret3_prev_sigma| >= 2 * sqrt(3) (the 3-candle sigma is sqrt(3) one-candle sigmas).
 RET3_SHOCK_SIGMA = 2.0
+RET3_SHOCK_THRESHOLD = RET3_SHOCK_SIGMA * sqrt(3)
+# Descriptive diagnostics (no hypothesis tests; K stays 9).
+MIN_EVENTS_DESCRIPTIVE = 30  # fewer events in a descriptive cell (e.g. a session) is "too few", not zero
+TOUCH_SHARE_MAX = 0.90       # a level set whose touch flag is set on more than 90 % of evaluated rows ...
+TOUCH_SHARE_MIN = 0.01       # ... or on fewer than 1 % is degenerate for that timeframe: "not interpretable"
+# Sessions from the decision time (hour of the candle's end_ms, UTC): asia 00-08, europe 08-13, us 13-21,
+# late 21-24. Daily and weekly rows have the single session "all".
+SESSIONS = ((0, 8, "asia"), (8, 13, "europe"), (13, 21, "us"), (21, 24, "late"))
+SESSION_NAMES = tuple(name for _, _, name in SESSIONS)
 
 
 def _is(frame, name: str, value: float) -> np.ndarray:
@@ -39,8 +51,30 @@ def _side(values) -> np.ndarray:
 
 
 def population(frame) -> np.ndarray:
-    """Segment rows with status ok and a valid one-candle outcome window."""
-    return (frame["status"] == "ok") & _is(frame, "fwd_ok_1", 1.0)
+    """Segment rows with a valid one-candle outcome window whose candle is not invalid.
+
+    Rows of status ``insufficient`` stay: groups that never change ``status`` (location, sweep, htf, levels2,
+    derivatives, flush) must not drop rows; a cell's own inputs decide through the missing-control rule.
+    """
+    return (frame["status"] != "invalid") & _is(frame, "fwd_ok_1", 1.0)
+
+
+def session_labels(decision_ms, intraday: bool) -> np.ndarray:
+    """Session of each row from the UTC hour of its decision time; 'all' for daily and weekly rows."""
+    decision_ms = np.asarray(decision_ms, dtype=float)
+    if not intraday:
+        return np.array(["all"] * len(decision_ms), dtype=object)
+    hour = np.floor_divide(np.nan_to_num(decision_ms, nan=-1.0), 3_600_000.0) % 24
+    out = np.array([""] * len(decision_ms), dtype=object)
+    for low, high, name in SESSIONS:
+        out[(hour >= low) & (hour < high)] = name
+    out[np.isnan(decision_ms)] = ""
+    return out
+
+
+def degenerate_touch(share: float) -> bool:
+    """True when a level set's touch share is above TOUCH_SHARE_MAX or below TOUCH_SHARE_MIN."""
+    return share > TOUCH_SHARE_MAX or share < TOUCH_SHARE_MIN
 
 
 def sized(frame, range_atr_min: float = RANGE_ATR_MIN) -> np.ndarray:
@@ -119,7 +153,7 @@ def _c7(frame, intraday):
 def _c8(frame, intraday):
     volume = frame["rel_volume_slot"] if intraday else frame["rel_volume_prior20"]
     ret3 = frame["ret3_prev_sigma"]
-    mask = (volume >= REL_VOLUME_SPIKE) & (np.abs(ret3) >= RET3_SHOCK_SIGMA)
+    mask = (volume >= REL_VOLUME_SPIKE) & (np.abs(ret3) >= RET3_SHOCK_THRESHOLD)
     return mask, np.where(mask, -np.sign(ret3), 0.0)
 
 
@@ -134,8 +168,9 @@ CELLS = (
     Cell("C5", False, "squeeze on at i-1 (unsigned: next-candle range)", _c5),
     Cell("C6", True, "adx_prev < 20, trend_dir != 0 -> trend_dir (negative control, expected null)", _c6),
     Cell("C7", True, "flush proxy fired -> -flush_dir (reversal after a flush)", _c7),
-    Cell("C8", True, "relative volume >= 2 (intraday: same-slot; daily/weekly: prior-20) and |ret3_prev_sigma| >= 2 "
-                     "-> -sign(ret3_prev_sigma) (climax reversal)", _c8),
+    Cell("C8", True, "relative volume >= 2 (intraday: same-slot; daily/weekly: prior-20) and |ret3_prev_sigma| >= "
+                     "2*sqrt(3) (a 2-sigma 3-candle move; ret3 is in one-candle sigma units) -> "
+                     "-sign(ret3_prev_sigma) (climax reversal)", _c8),
 )
 CELL_IDS = tuple(cell.id for cell in CELLS)
 K_PRIMARY = len(CELLS)

@@ -2,7 +2,9 @@
 from array import array
 from fractions import Fraction
 import io
+from pathlib import Path
 import random
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -12,6 +14,8 @@ from market_analysis import data_lake
 from market_analysis import metrics_lake as mx
 from market_analysis.benchmark import screen
 from market_analysis.benchmark.bars import MISSING, BarSeries
+from market_analysis.benchmark.hidden_guard import HiddenStretchLocked
+from market_analysis.benchmark.premium import read_basis_csv
 from market_analysis.benchmark.candles import CandleSeries
 from market_analysis.benchmark.funding import FundingSeries
 from market_analysis.benchmark.premium import BasisSeries
@@ -114,6 +118,23 @@ class MetricsTimingTests(unittest.TestCase):
         ct.write_table(io.BytesIO(), ct.build_rows(ctx), counts=counts)
         self.assertEqual(counts["oi_missing"], {"BTCUSDT|15": 20})
 
+    def test_invalid_candles_are_not_counted_as_missing_oi(self):
+        series = flat(20)
+        series.valid[3] = False
+        for name in ("open", "high", "low", "close"):
+            getattr(series, name)[3] = MISSING
+        counts = {}
+        ctx = ct.TableContext(series.symbol, 15, series, [0.01] * 20, "test", ct.table_segments(15), None)
+        ct.write_table(io.BytesIO(), ct.build_rows(ctx), counts=counts)
+        self.assertEqual(counts["oi_missing"], {"BTCUSDT|15": 19})
+        manifest = ct.build_manifest(files=[], counts=counts, inputs={}, through_month="2025-12", parity={},
+                                     symbols=["BTCUSDT"], timeframes=[15], code_commit="a", created_utc="b",
+                                     funding_parity={"BTCUSDT": {"compared": 1}})
+        self.assertEqual(manifest["oi_missing_counts"], {"BTCUSDT|15": 19})
+        self.assertIn("non-invalid", manifest["oi_missing_counts_note"])
+        self.assertEqual(manifest["funding_parity"], {"BTCUSDT": {"compared": 1}})
+        ct.check_manifest(manifest)
+
     def test_ls_global_z_matches_the_screen(self):
         rng = random.Random(4)
         days = 25
@@ -130,6 +151,29 @@ class MetricsTimingTests(unittest.TestCase):
         mine = dv.hourly_ls_global_z(metrics)
         self.assertGreater(len(expected), 0)
         self.assertEqual({t: mine[t] for t in expected}, expected)
+
+
+class FundingParityTests(unittest.TestCase):
+    def series(self, items, start=0, end=10 * DAY):
+        return FundingSeries(tuple(t for t, _ in items), (8,) * len(items), tuple(Fraction(r, 10_000) for _, r in items),
+                             start, end)
+
+    def test_counts_on_the_overlap(self):
+        dk1 = self.series([(1 * DAY, 1), (2 * DAY, 2), (3 * DAY + 30_000, 3), (4 * DAY, 4), (9 * DAY, 9)])
+        rd = self.series([(2 * DAY, 2), (3 * DAY, 5), (4 * DAY, 4), (5 * DAY, 6)], start=2 * DAY, end=8 * DAY)
+        out = dv.funding_parity(dk1, rd)
+        # overlap [2d, 8d): dk1 has 2d, 3d(+30 s), 4d; rd has 2d, 3d, 4d, 5d. Times are floored to the minute.
+        self.assertEqual(out, {"overlap_start_ms": 2 * DAY, "overlap_end_ms": 8 * DAY, "compared": 3, "equal": 2,
+                               "differing": 1, "rd_only": 1, "dk1_only": 0})
+        self.assertEqual(dv.funding_parity(None, rd)["compared"], 0)
+
+    def test_dk1_funding_gives_the_early_intraday_rows_a_percentile(self):
+        times = [START - 100 * DAY + 8 * HOUR * k for k in range(400)]
+        funding = FundingSeries(tuple(times), (8,) * 400, tuple(Fraction(1 + k % 3, 10_000) for k in range(400)),
+                                START - 100 * DAY, START - 100 * DAY + 134 * DAY)
+        out = dv._funding(funding, START + 8 * HOUR)  # the first hours of the intraday table
+        self.assertIsNotNone(out["fund_pct90"])
+        self.assertIsNotNone(out["fund_cum_24h"])
 
 
 class PremiumTests(unittest.TestCase):
@@ -154,6 +198,124 @@ class PremiumTests(unittest.TestCase):
         self.assertEqual(z[:100], [None] * 100)
         z = dv._trailing_mean_z(times + [1000], [float(i % 2) for i in range(100)] + [1.0], 10_000, 100)
         self.assertAlmostEqual(z[100], 1.0)  # mean 0.5, std 0.5
+
+
+class BasisReaderTests(unittest.TestCase):
+    MONTH = "2024-02"  # a leap February: 29 * 1440 minutes
+
+    def month_text(self, mutate=None, drop_last=False):
+        start, _, days = data_lake.month_bounds_ms(self.MONTH)
+        names = {name: k for k, name in enumerate(data_lake.COLUMNS)}
+        lines = [",".join(data_lake.COLUMNS)]
+        for minute in range(days * 1440 - (1 if drop_last else 0)):
+            row = [""] * len(data_lake.COLUMNS)
+            row[names["open_time_ms"]] = str(start + minute * MIN)
+            row[names["premium_close"]] = f"0.0001{minute % 10}000"
+            row[names["index_close"]] = f"{100 + minute % 5}.50000000"
+            flags = 0
+            if minute == 5:
+                row[names["premium_close"]], flags = "", data_lake.FLAG_PREMIUM_MISSING
+            if minute == 6:
+                row[names["index_close"]], flags = "", data_lake.FLAG_INDEX_MISSING
+            row[names["flags"]] = str(flags)
+            if mutate:
+                mutate(minute, row, names)
+            lines.append(",".join(row))
+        return "\n".join(lines) + "\n"
+
+    def test_reads_premium_and_index_close_with_their_flags(self):
+        series = read_basis_csv(io.StringIO(self.month_text()), "BTCUSDT", self.MONTH)
+        self.assertEqual((series.minutes, series.start_ms), (29 * 1440, data_lake.month_bounds_ms(self.MONTH)[0]))
+        self.assertEqual(series.premium_close[0], 10_000)  # 0.00010000 at scale 10**8
+        self.assertEqual(series.premium_close[3], 13_000)
+        self.assertEqual(series.index_close[1], 101 * S + S // 2)
+        self.assertEqual(series.premium_close[5], MISSING)
+        self.assertEqual(series.index_close[5], 100 * S + S // 2)  # minute 5: 100 + 5 % 5 = 100.5
+        self.assertEqual(series.index_close[6], MISSING)
+        self.assertNotEqual(series.premium_close[6], MISSING)
+        self.assertEqual(series.flags[5], data_lake.FLAG_PREMIUM_MISSING)
+        self.assertEqual(series.end_ms, series.start_ms + 29 * 1440 * MIN)
+
+    def test_rejects_disagreeing_flags_and_incomplete_months(self):
+        def flag_without_gap(minute, row, names):
+            if minute == 7:
+                row[names["flags"]] = str(data_lake.FLAG_INDEX_MISSING)  # flag set but the value is present
+
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            read_basis_csv(io.StringIO(self.month_text(flag_without_gap)), "BTCUSDT", self.MONTH)
+        with self.assertRaisesRegex(ValueError, "expected"):
+            read_basis_csv(io.StringIO(self.month_text(drop_last=True)), "BTCUSDT", self.MONTH)
+
+
+class MetricsMonthsTests(unittest.TestCase):
+    def write(self, directory, month, stamps, value):
+        rows = [mx.MetricsRow(stamp, (value, value, "1.5", "2.5", "3.5", "4.5")) for stamp in stamps]
+        with open(Path(directory) / mx.csv_asset_name("BTCUSDT", month), "wb") as stream:
+            mx.write_metrics_csv_gz(stream, rows)
+
+    def test_reads_only_the_listed_months_and_never_fills_forward(self):
+        jan, feb, mar = (data_lake.month_bounds_ms(m)[0] for m in ("2024-01", "2024-02", "2024-03"))
+        with tempfile.TemporaryDirectory() as directory:
+            self.write(directory, "2024-01", [jan, feb - 5 * MIN], "1000")  # the last row is usable at Feb 1 00:00
+            self.write(directory, "2024-03", [mar], "2000")                # February has no file at all
+            series = mx.load_symbol_metrics_months(directory, "BTCUSDT", ["2024-03", "2024-01"], "2024-01",
+                                                   "2024-03")
+        column = series.columns[dv.OI_COLUMN]
+        self.assertEqual(series.start_ms, jan + 5 * MIN)
+        self.assertEqual(dv.metrics_value(series, dv.OI_COLUMN, jan + 5 * MIN), 1000.0)
+        self.assertEqual(dv.metrics_value(series, dv.OI_COLUMN, feb), 1000.0)  # stamped feb - 5 min: usable at feb
+        self.assertIsNone(dv.metrics_value(series, dv.OI_COLUMN, feb + 5 * MIN))  # no February rows: not filled
+        self.assertIsNone(dv.metrics_value(series, dv.OI_COLUMN, feb + 10 * DAY))
+        self.assertIsNone(dv.metrics_value(series, dv.OI_COLUMN, mar))
+        self.assertEqual(dv.metrics_value(series, dv.OI_COLUMN, mar + 5 * MIN), 2000.0)
+        self.assertEqual(int(np.isfinite(column).sum()), 3)  # exactly the three rows that exist
+
+    def test_months_outside_the_window_and_hidden_months_are_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                mx.load_symbol_metrics_months(directory, "BTCUSDT", ["2024-05"], "2024-01", "2024-03")
+            with self.assertRaises(HiddenStretchLocked):  # before any file is opened
+                mx.load_symbol_metrics_months(directory, "BTCUSDT", ["2026-01"], "2025-12", "2026-01")
+
+
+class TurnoverTests(unittest.TestCase):
+    def test_oi_vol_ratio_intraday(self):
+        series = flat(100)  # close 105, volume 10: 1050 per candle; 96 candles per 24 h
+        metrics = metrics_series(START, 400, 201_600.0)
+        _, table = rows(series, dv.DerivInputs(metrics=metrics))
+        self.assertAlmostEqual(table[99]["oi_vol_ratio"], 201_600.0 / (96 * 1050))
+        self.assertAlmostEqual(table[99]["oi_vol_ratio"], 2.0)
+        self.assertIsNone(table[94]["oi_vol_ratio"])  # fewer than 96 candles of history
+        self.assertIsNotNone(table[95]["oi_vol_ratio"])
+        no_oi = rows(series, dv.DerivInputs())[1]
+        self.assertIsNone(no_oi[99]["oi_vol_ratio"])
+
+    def test_turnover_24h_intraday_missing_volume_and_invalid_candle(self):
+        series = flat(100)
+        ctx = SimpleNamespace(minutes=15, candles=series)
+        self.assertAlmostEqual(dv._turnover_24h(ctx, 99), 96 * 1050.0)
+        self.assertIsNone(dv._turnover_24h(ctx, 94))
+        series.volume[50] = MISSING
+        self.assertIsNone(dv._turnover_24h(ctx, 99))
+        broken = flat(100)
+        broken.valid[60] = False
+        self.assertIsNone(dv._turnover_24h(SimpleNamespace(minutes=15, candles=broken), 99))
+
+    def test_turnover_24h_daily_and_weekly_use_the_day_ending_at_the_decision(self):
+        count = 14
+        days = CandleSeries("BTCUSDT", 1440, START, open=[100 * S] * count, high=[101 * S] * count,
+                            low=[99 * S] * count, close=[100 * S] * count, valid=[True] * count,
+                            volume=[(j + 1) * S for j in range(count)], taker_buy_volume=[S] * count)
+        daily = SimpleNamespace(minutes=1440, candles=days, history_days=days)
+        self.assertAlmostEqual(dv._turnover_24h(daily, 3), 100 * 4.0)  # day 3's close * volume
+        weeks = CandleSeries("BTCUSDT", 10080, START, open=[100 * S] * 2, high=[101 * S] * 2, low=[99 * S] * 2,
+                             close=[100 * S] * 2, valid=[True] * 2, volume=[S] * 2, taker_buy_volume=[S] * 2)
+        weekly = SimpleNamespace(minutes=10080, candles=weeks, history_days=days)
+        self.assertAlmostEqual(dv._turnover_24h(weekly, 0), 100 * 7.0)  # Sunday (day 6)
+        self.assertAlmostEqual(dv._turnover_24h(weekly, 1), 100 * 14.0)
+        self.assertIsNone(dv._turnover_24h(SimpleNamespace(minutes=1440, candles=days, history_days=None), 3))
+        days.volume[3] = MISSING
+        self.assertIsNone(dv._turnover_24h(daily, 3))
 
 
 class FlushTests(unittest.TestCase):

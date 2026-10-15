@@ -3,7 +3,8 @@
 Every value is as known at the row's decision time (the candle's ``end_ms``); a missing input gives
 an empty value and is never filled from an older row.
 
-- Funding (all rows; rd funding for intraday rows, dk1 funding from 2020 for daily/weekly rows):
+- Funding (ALL rows use the dk1 funding history from 2020, so the 90-day percentile has no hole at
+  the start of the intraday table; the rd funding is only compared with it, see ``funding_parity``):
   a settlement counts once its time floored to the minute is at or before the decision.
 - Premium/basis (rows whose minutes are covered by the 1m bars, 2024+): premium-index close at the
   candle's last minute, z of the candle's mean premium against the trailing 30 days of same-tf
@@ -48,7 +49,7 @@ OI_COLUMN = "sum_open_interest_value"
 class DerivInputs:
     """Per-symbol inputs; any of them may be None (its columns are then empty)."""
 
-    funding: object = None      # benchmark.funding.FundingSeries
+    funding: object = None      # benchmark.funding.FundingSeries (dk1 history, for every timeframe)
     metrics: object = None      # metrics_lake.MetricsSeries (load_symbol_metrics_months)
     basis: object = None        # benchmark.premium.BasisSeries (1m premium / index closes)
     mark_close: object = None   # array('q') of BarSeries.mark_close, aligned with ``basis``
@@ -64,6 +65,24 @@ def metrics_value(metrics, column: str, time_ms: int):
         return None
     value = float(metrics.columns[column][index])
     return value if isfinite(value) else None
+
+
+def funding_parity(dk1, rd) -> dict:
+    """dk1-vs-rd funding on their overlap [max(start), min(end)), settlements keyed by time floored to the
+    minute: compared (in both), equal (same exact rate), differing, rd_only and dk1_only. Pure integers."""
+    if dk1 is None or rd is None:
+        return {"overlap_start_ms": None, "overlap_end_ms": None, "compared": 0, "equal": 0, "differing": 0,
+                "rd_only": 0, "dk1_only": 0}
+    start, end = max(dk1.start_ms, rd.start_ms), min(dk1.end_ms, rd.end_ms)
+
+    def within(series):
+        return {t // MINUTE * MINUTE: rate for t, rate in zip(series.calc_time_ms, series.rate) if start <= t < end}
+
+    a, b = within(dk1), within(rd)
+    both = a.keys() & b.keys()
+    equal = sum(1 for t in both if a[t] == b[t])
+    return {"overlap_start_ms": start, "overlap_end_ms": end, "compared": len(both), "equal": equal,
+            "differing": len(both) - equal, "rd_only": len(b.keys() - a.keys()), "dk1_only": len(a.keys() - b.keys())}
 
 
 def hourly_ls_global_z(metrics) -> dict:

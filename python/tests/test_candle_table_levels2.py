@@ -1,5 +1,6 @@
 """candle-table group lv2-v1: liquidity pools, anchored VWAP and volume profile (hand-computed, small data)."""
 from array import array
+import random
 import unittest
 
 from market_analysis import data_lake
@@ -22,6 +23,20 @@ def candles(minutes, rows, volume=None, valid=None):
     return CandleSeries("ETHUSDT", minutes, START, open=o, high=h, low=l, close=c,
                         valid=list(valid) if valid else [True] * count, volume=list(volume),
                         taker_buy_volume=[S] * count)
+
+
+def reference_vwap(candles, first, stop):
+    """The original O(window) implementation, kept here as the reference for VwapPrefix."""
+    if not 0 <= first < stop <= len(candles):
+        return None
+    total = weight = 0
+    for k in range(first, stop):
+        volume = candles.volume[k]
+        if not candles.valid[k] or volume == MISSING:
+            return None
+        total += (candles.high[k] + candles.low[k] + candles.close[k]) * volume
+        weight += volume
+    return total / (3 * weight * S) if weight > 0 else None
 
 
 def context(series, **extra):
@@ -82,12 +97,35 @@ class AvwapTests(unittest.TestCase):
         series = candles(15, [(10, 12, 8, 10), (11, 14, 10, 12), (12, 15, 11, 13), (13, 20, 1, 9)],
                          volume=[1 * S, 3 * S, 2 * S, 50 * S])
         # typical prices 10, 12, 13 with volumes 1, 3, 2: (10 + 36 + 26) / 6 = 12; candle 3 is not read
-        self.assertAlmostEqual(lv2.anchored_vwap(series, 0, 3), 12.0)
-        self.assertIsNone(lv2.anchored_vwap(series, 2, 2))
+        self.assertAlmostEqual(reference_vwap(series, 0, 3), 12.0)
+        self.assertIsNone(reference_vwap(series, 2, 2))
         gap = candles(15, [(10, 12, 8, 10)] * 3, volume=[S, MISSING, S])
-        self.assertIsNone(lv2.anchored_vwap(gap, 0, 3))
+        self.assertIsNone(reference_vwap(gap, 0, 3))
         broken = candles(15, [(10, 12, 8, 10)] * 3, valid=[True, False, True])
-        self.assertIsNone(lv2.anchored_vwap(broken, 0, 3))
+        self.assertIsNone(reference_vwap(broken, 0, 3))
+
+    def test_prefix_sums_equal_the_reference(self):
+        rng = random.Random(8)
+        count = 60
+        rows_ = [(rng.uniform(90, 110),) * 4 for _ in range(count)]
+        rows_ = [(o, o + rng.uniform(0, 5), o - rng.uniform(0, 5), o + rng.uniform(-2, 2)) for (o, *_) in rows_]
+        volume = [rng.randint(0, 50) * S for _ in range(count)]
+        valid = [rng.random() > 0.1 for _ in range(count)]
+        for j in (7, 8):
+            volume[j] = MISSING
+        volume[20:25] = [0] * 5  # a zero-volume window: no VWAP
+        series = candles(15, rows_, volume=volume, valid=valid)
+        prefix = lv2.VwapPrefix(series)
+        for first in range(-1, count + 1):
+            for stop in range(first - 1, count + 2):
+                expected, actual = reference_vwap(series, first, stop), prefix.vwap(first, stop)
+                if expected is None:
+                    self.assertIsNone(actual, (first, stop))
+                else:
+                    self.assertAlmostEqual(actual, expected, places=9)
+        clean = candles(15, [(10, 12, 8, 10)] * 5, volume=[S] * 5)
+        self.assertEqual(lv2.VwapPrefix(clean).vwap(0, 5), reference_vwap(clean, 0, 5))
+        self.assertIsNone(lv2.VwapPrefix(candles(15, [])).vwap(0, 1))
 
     def rows_with_swing_low(self, volume=None):
         data = [BASE] * 20
@@ -100,10 +138,10 @@ class AvwapTests(unittest.TestCase):
         series, ctx, table = self.rows_with_swing_low()
         self.assertIsNone(table[15]["avwap_lo_dist_atr"])  # swing 10 is confirmed at the end of candle 15
         atr = ctx.ind[15]["atr"]
-        expected = lv2.anchored_vwap(series, 10, 16)
+        expected = reference_vwap(series, 10, 16)
         self.assertAlmostEqual(table[16]["avwap_lo_dist_atr"], (expected - 105) / atr)
         self.assertIsNone(table[16]["avwap_hi_dist_atr"])  # no swing high
-        day = lv2.anchored_vwap(series, 0, 16)
+        day = reference_vwap(series, 0, 16)
         self.assertAlmostEqual(table[16]["vwap_day_dist_atr"], (day - 105) / atr)
 
     def test_missing_volume_empties_vwaps(self):

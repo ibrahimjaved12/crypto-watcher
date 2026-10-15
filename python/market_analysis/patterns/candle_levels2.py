@@ -123,18 +123,30 @@ def liquidity_pools(candles: CandleSeries, n: int = POOL_N) -> list:
 # ---------------------------------------------------------------- anchored VWAP
 
 
-def anchored_vwap(candles: CandleSeries, first: int, stop: int):
-    """VWAP (price, float) over candles ``first .. stop-1``; None if empty, invalid or volume missing."""
-    if not 0 <= first < stop <= len(candles):
-        return None
-    total = weight = 0
-    for k in range(first, stop):
-        volume = candles.volume[k]
-        if not candles.valid[k] or volume == MISSING:
+class VwapPrefix:
+    """Exact-integer prefix sums of typical * volume and volume with a counter of unusable candles.
+
+    ``vwap(first, stop)`` is the VWAP over candles ``first .. stop-1`` in O(1): None if the window is
+    empty, contains an invalid candle or a candle without volume, or holds no volume. (typical * 3 is
+    summed, so the result is exact up to the final division.)
+    """
+
+    def __init__(self, candles: CandleSeries):
+        self.size = len(candles)
+        self.numerator, self.weight, self.bad = [0], [0], [0]
+        for k in range(self.size):
+            volume = candles.volume[k]
+            usable = candles.valid[k] and volume != MISSING
+            self.bad.append(self.bad[-1] + (0 if usable else 1))
+            self.numerator.append(self.numerator[-1]
+                                  + ((candles.high[k] + candles.low[k] + candles.close[k]) * volume if usable else 0))
+            self.weight.append(self.weight[-1] + (volume if usable else 0))
+
+    def vwap(self, first: int, stop: int):
+        if not 0 <= first < stop <= self.size or self.bad[stop] - self.bad[first]:
             return None
-        total += (candles.high[k] + candles.low[k] + candles.close[k]) * volume
-        weight += volume
-    return total / (3 * weight * SCALE) if weight > 0 else None
+        weight = self.weight[stop] - self.weight[first]
+        return (self.numerator[stop] - self.numerator[first]) / (3 * weight * SCALE) if weight > 0 else None
 
 
 def _last_swing_index(candles: CandleSeries, n: int) -> tuple[list, list]:
@@ -229,6 +241,7 @@ def prepare(ctx) -> None:
         pools = liquidity_pools(source)
         ctx.pool_index = {side: LevelIndex([p for p in pools if p.side_hint == side]) for side in ("high", "low")}
     ctx.avwap_low_anchor, ctx.avwap_high_anchor = _last_swing_index(ctx.candles, AVWAP_N)
+    ctx.vwap_prefix = VwapPrefix(ctx.candles)
 
 
 def _touch(price: float, low: float, high: float, atr: float) -> bool:
@@ -264,12 +277,12 @@ def levels2(ctx, i: int) -> dict:
             else (low <= p.price / SCALE - pierce and close > p.price / SCALE) for p in usable)
     # anchored VWAP (anchors confirmed by the end of i-1; window anchor .. i-1)
     for label, anchor in (("lo", ctx.avwap_low_anchor[i]), ("hi", ctx.avwap_high_anchor[i])):
-        vwap = anchored_vwap(c, anchor, i) if anchor is not None else None
+        vwap = ctx.vwap_prefix.vwap(anchor, i) if anchor is not None else None
         out[f"avwap_{label}_dist_atr"] = (vwap - close) / atr if vwap is not None else None
         out[f"touch_avwap_{label}"] = _touch(vwap, low, high, atr) if vwap is not None else None
     if intraday:
         first = (opened // DAY_MS * DAY_MS - c.start_ms) // (ctx.minutes * data_lake.MINUTE_MS)
-        vwap = anchored_vwap(c, max(first, 0), i) if first >= 0 else None
+        vwap = ctx.vwap_prefix.vwap(max(first, 0), i) if first >= 0 else None
         out["vwap_day_dist_atr"] = (vwap - close) / atr if vwap is not None else None
     # volume profile of the UTC day containing the candle's open
     profiles = getattr(ctx, "profiles", None) or {}

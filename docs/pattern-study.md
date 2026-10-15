@@ -251,8 +251,12 @@ Like location, sweep and htf, levels2 never changes `status`.
 Every value is the one known at the decision time. A missing input leaves the column empty; nothing
 is filled from an older row.
 
-**Funding.** Intraday rows use the rd funding (2024+); daily and weekly rows use the dk1 funding
-from 2020. A settlement counts once its time, floored to the minute, is at or before the decision.
+**Funding.** All rows (intraday, daily, weekly) use the dk1 funding history from 2020, so the
+90-day percentile has no hole at the start of the intraday table (2024-01). The rd funding is not
+used for the columns; the manifest records `funding_parity` per symbol: on the overlap of the two
+series, with settlements keyed by their time floored to the minute, the number compared, equal,
+differing, rd-only and dk1-only. A settlement counts once its time, floored to the minute, is at or
+before the decision.
 
 - `fund_last`: the last settled rate.
 - `fund_pct90`: the fraction of the rates settled in the previous 90 days (including the last one)
@@ -269,7 +273,9 @@ from 2020. A settlement counts once its time, floored to the minute, is at or be
 - `basis_bp`: `1e4 * (mark close - index close) / index close` at the candle's last minute.
 
 **Open interest and positioning** (only months published as mx releases; other rows are empty and
-the manifest counts them per symbol and timeframe in `oi_missing_counts`):
+the manifest counts them per symbol and timeframe in `oi_missing_counts`: non-invalid rows whose
+`oi_value_end` is empty, i.e. outside published months or in a metrics gap; invalid candles carry no
+features and are not counted):
 
 - A metrics row stamped `T` is usable from `T + 5 min` (`metrics_lake.usable_from_ms`). A value at
   time `t` is the latest 5-minute period usable at `t`; a NaN period stays empty.
@@ -308,7 +314,10 @@ exist; any change is a new version.
 - **Event E (doji-geo-v2):** status ok, `body_ratio <= 0.10`, `range > 0`, `range_atr >= 0.5`.
 - **Controls:** the same context, the same size class (`range_atr >= 0.5`) and another shape
   (`body_ratio > 0.10`).
-- **Population:** segment rows with status ok and `fwd_ok_1`.
+- **Population:** segment rows with a valid one-candle outcome window (`fwd_ok_1`) whose candle is
+  not invalid (`status != invalid`). Rows of status `insufficient` stay: groups that never change
+  `status` (location, sweep, htf, levels2, derivatives, flush) must not drop rows. A cell's own
+  inputs decide, through the missing-control rule below.
 - **Direction:** `s` is fixed by the cell rule, never by the outcome.
 
 | cell | context | direction |
@@ -321,7 +330,10 @@ exist; any change is a new version.
 | C5 | `squeeze_on_prev` | unsigned |
 | C6 | `adx_prev < 20`, `trend_dir != 0` (negative control, expected null) | `trend_dir` |
 | C7 | `flush_dir != 0` | `-flush_dir` |
-| C8 | relative volume >= 2 (intraday: `rel_volume_slot`; daily/weekly: `rel_volume_prior20`) and `|ret3_prev_sigma| >= 2` | `-sign(ret3_prev_sigma)` |
+| C8 | relative volume >= 2 (intraday: `rel_volume_slot`; daily/weekly: `rel_volume_prior20`) and `|ret3_prev_sigma| >= 2·√3` | `-sign(ret3_prev_sigma)` |
+
+C8: `ret3_prev_sigma` is a 3-candle return in **one-candle** sigma units, so a "2 sigma" 3-candle
+shock is `|ret3_prev_sigma| >= 2·√3` (about 3.46).
 
 The C2 prior-20 extreme is the sweep group's prior20 reference: the max high / min low of
 candles i-20..i-1, all valid. It is rebuilt from consecutive table rows of the same symbol and
@@ -352,19 +364,39 @@ timeframe.
 
 **Reported per cell:**
 
-- Counts: members, controls and days, plus exclusions.
+- Counts: members, controls and days, plus exclusions (missing controls, missing outcome).
 - Mean y for members and for controls.
 - Beta, its clustered SE and 95% CI, in sigma and in bp (beta × the members' mean `sigma_tf`
   in bp).
-- The stratified difference with its CI.
+- The stratified difference with its CI, and beside it the same estimator with the decision-time
+  session as an extra stratum (`stratified_session`; a robustness view, not part of the Holm
+  family).
 - The hit-rate difference, with a Wilson interval for each rate.
 - The Holm p-value.
-- The minimum detectable effect, `2.8 × SE`.
-- The cost hurdle: an 11 bp round trip, i.e. `11 / mean sigma_tf bp` in sigma, and
-  `effect_bp - hurdle_bp`.
+- The minimum detectable effect at two multipliers: `2.8 × SE` (alpha 0.05, power 0.8) and the
+  Holm-adjusted `(z(1 - 0.05/(2·9)) + z(0.8)) × SE`, about 3.6, computed from the normal quantile.
+- The cost hurdle: an 11 bp round trip, i.e. `11 / mean sigma_tf bp` in sigma.
+- The members' mean signed return (bp) and the controls' mean (bp), each with a UTC-day-clustered
+  95% CI (gross, one candle).
+- `members mean - hurdle` next to `beta - hurdle` (hurdle stays 11 bp).
 - A flag when members < 100.
 
 Unsigned cells have no bp, hit-rate or cost line.
+
+**Population, base rates and diagnostics (counts and rates, no tests):**
+
+- Population counts per timeframe: segment rows, invalid candles, rows without a valid forward
+  window and the population (these counts also appear in the public log); per cell, the rows
+  excluded for missing controls.
+- Context base rates per cell and intraday timeframe: context rows, events and controls, and
+  their shares of the population.
+- Touch base rates per level set (and `any_touch`) and timeframe: rows evaluated (non-invalid rows
+  whose touch flag is not empty) and the share with the flag set. For round levels the median
+  round step (price units) over the median candle range, per symbol and as the median over
+  symbols. A set whose touch share is above 90% or below 1% is labelled **degenerate: not
+  interpretable**: it stays in the output and is never counted as a null result. Cells C1 and C4 use
+  `any_touch`, so a degenerate `any_touch` makes them not interpretable at that timeframe. The
+  `touch_round` column and its definition are not changed by the study.
 
 **Descriptive (labelled, untested):**
 
@@ -375,6 +407,20 @@ Unsigned cells have no bp, hit-rate or cost line.
 - Dose-response within E for cell A: quintiles of `body_ratio`, `range_atr`,
   `rel_volume_prior20` and `nearest_level_dist_atr`, with Spearman(quintile, mean) and a
   day-bootstrap CI.
+- Sessions (exploratory): per cell × intraday timeframe × session, with the session taken from the
+  hour of the decision time (the candle's `end_ms`, UTC): asia 00-08, europe 08-13, us 13-21,
+  late 21-24 (daily and weekly rows have the session "all"). Each session reports the event and
+  control counts, the members' and controls' mean signed return (bp; unsigned cells report the
+  next-candle ln range in sigma) with a day-clustered CI, their difference and the Wilson hit
+  rates. A session with fewer than 30 events is shown as "too few", not as zero. Session results
+  are exploratory: a pattern present in only one session is reported as session-specific, and any
+  follow-up tested on validation must be pre-registered in a plan file first. Sessions add no
+  hypothesis (K stays 9).
+- Sigma-seasonality diagnostic: on the control rows of cell A only (population, `range_atr >= 0.5`,
+  `body_ratio > 0.10`), per intraday timeframe and UTC hour of the decision time, the mean of
+  `|ret_1_sigma|` (the next candle's absolute return over `sigma_tf`), the count, and the ratio of
+  the largest to the smallest hourly mean. It would be roughly flat if sigma were well scaled.
+  Sigma (`ewma-3d-5m-v1`) is not changed; this only reports.
 - Daily and weekly families run separately per timeframe, pooled over symbols, with symbol fixed
   effects and no hour effects. A cell is "not tested" when it has fewer than 30 members. A
   development run uses the `development-ext` daily rows.
@@ -400,15 +446,22 @@ listed controls.
 **What it cannot show.**
 
 - It is not a profitability verdict. That needs stop-aware, cost-aware trade results
-  (CLAUDE.md section 2).
+  (CLAUDE.md section 2). The report's bp lines are gross, one candle, no stop: the members'
+  mean is compared with the 11 bp round trip only as a hurdle, not as a result after costs.
 - It does not prove the doji itself is causal, because the controls are observational.
 - A development result must replicate with the same sign on validation before anything is built
   on it.
-- An effect below the hurdle (`effect_bp - hurdle_bp < 0`) is not tradable on its own, even if
-  it is significant.
+- An effect below the hurdle (`beta - hurdle < 0`) is not tradable on its own, even if it is
+  significant. A members' mean below the hurdle (`members mean - hurdle < 0`) says the doji
+  candles' own gross drift in that context does not cover the cost either; both can differ, so
+  both are shown.
+- A degenerate level set is not a null result: it means the set cannot discriminate at that
+  timeframe.
+- Session and hourly tables are exploratory; they cannot rescue or reject a primary cell.
 
-A null result with an MDE well below the hurdle is informative: within that context, doji shape
-carries no tradable edge at this horizon.
+A null result is informative only when its MDE is well below the hurdle: compare the MDE at 2.8 SE
+and at the Holm alpha with the hurdle. If the Holm MDE exceeds the hurdle, the study could not
+have detected a tradable effect in that cell.
 
 ## Adding a group (location, derivatives, advanced levels, ...)
 
