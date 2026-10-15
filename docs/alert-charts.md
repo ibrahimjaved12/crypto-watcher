@@ -2,7 +2,7 @@
 
 Owner decision 2026-10-16: every movement alert and every TA pattern event gets a setup chart, made
 and stored on the owner's machine now. Delivery (email/WhatsApp) stays parked; it will attach the
-stored PNG later. The site viewer stays in #298.
+stored PNG later. The movement-alert viewer on the Alerts page is in #298 (PR #371); the pattern-chart viewer is still open in #298.
 
 ## Flow
 
