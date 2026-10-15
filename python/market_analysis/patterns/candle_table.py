@@ -181,16 +181,24 @@ class RegimeJoin:
         return values
 
 
-def table_segments(minutes: int, through_month: str = LAST_MONTH) -> tuple:
+# include_ext=False reproduces the table as it was before the 2026-10-15 extension: intraday from 2024-01 on rd
+# bars only (no development-ext, no 2020-12 warm-up month), daily/weekly from 2021-01.
+LEGACY_INTRADAY_SEGMENTS = ("development", "validation")
+LEGACY_DAILY_FIRST_MONTH = "2021-01"
+
+
+def table_segments(minutes: int, through_month: str = LAST_MONTH, include_ext: bool = True) -> tuple:
     """((name, first_ms, end_ms), ...) of the timeframe's segments, clipped to the end of through_month."""
     end = data_lake.month_bounds_ms(check_through_month(through_month))[1]
     if minutes in INTRADAY_TIMEFRAMES:
-        bounds = [(name, *intraday_segment_bounds_ms(name)) for name in INTRADAY_SEGMENTS]
+        names = INTRADAY_SEGMENTS if include_ext else LEGACY_INTRADAY_SEGMENTS
+        bounds = [(name, *intraday_segment_bounds_ms(name)) for name in names]
     elif minutes in DAILY_TIMEFRAMES:
         bounds = [(name, *daily_segment_bounds_ms(name)) for name in DAILY_SEGMENTS_USED]
         # The table's daily development-ext starts at DAILY_FIRST_MONTH (2020-01); rows without enough
         # history are insufficient. benchmark.segments.DAILY_SEGMENTS (2021-01..) is unchanged for other code.
-        bounds = [(name, data_lake.month_bounds_ms(DAILY_FIRST_MONTH)[0] if name == "development-ext" else first,
+        daily_first = DAILY_FIRST_MONTH if include_ext else LEGACY_DAILY_FIRST_MONTH
+        bounds = [(name, data_lake.month_bounds_ms(daily_first)[0] if name == "development-ext" else first,
                    stop) for name, first, stop in bounds]
     else:
         raise CandleTableError(f"timeframe must be one of {TABLE_TIMEFRAMES}")
@@ -763,12 +771,15 @@ def count_row(counts: dict, row, where: dict) -> None:
         counts.setdefault("oi_missing", {})[prefix] = counts.get("oi_missing", {}).get(prefix, 0) + 1
 
 
-def file_name(symbol: str, minutes: int, through_month: str = LAST_MONTH) -> str:
+def file_name(symbol: str, minutes: int, through_month: str = LAST_MONTH, include_ext: bool = True) -> str:
     if minutes in INTRADAY_TIMEFRAMES:
         data_lake.validate_symbol(symbol)  # intraday: the frozen six only
     else:
         data_lake.validate_daily_symbol(symbol)
-    first = INTRADAY_FIRST_MONTH if minutes in INTRADAY_TIMEFRAMES else DAILY_FIRST_MONTH
+    if include_ext:
+        first = INTRADAY_FIRST_MONTH if minutes in INTRADAY_TIMEFRAMES else DAILY_FIRST_MONTH
+    else:
+        first = data_lake.FIRST_MONTH if minutes in INTRADAY_TIMEFRAMES else LEGACY_DAILY_FIRST_MONTH
     return f"candles__{symbol}__{minutes}__{first}_{check_through_month(through_month)}.csv.gz"
 
 
@@ -817,7 +828,8 @@ def regime_join(daily: dict, btc_funding, through_month: str = LAST_MONTH) -> Re
 
 
 def daily_contexts(symbol: str, daily, regime: RegimeJoin | None, timeframes=DAILY_TIMEFRAMES,
-                   through_month: str = LAST_MONTH, *, profiles: dict | None = None, derivs=None) -> dict:
+                   through_month: str = LAST_MONTH, *, profiles: dict | None = None, derivs=None,
+                   include_ext: bool = True) -> dict:
     days = candles_from_daily(daily, 1440)
     weeks = candles_from_daily(daily, 10080)
     sigma_days = daily_sigma(days)
@@ -830,7 +842,7 @@ def daily_contexts(symbol: str, daily, regime: RegimeJoin | None, timeframes=DAI
             candles = weeks
             sigma = weekly_sigma(days, candles, sigma_days)
         out[minutes] = TableContext(symbol, minutes, candles, sigma, DAILY_SIGMA_MODEL,
-                                    table_segments(minutes, through_month), regime,
+                                    table_segments(minutes, through_month, include_ext), regime,
                                     levels=loc.context_levels(minutes, candles, shared),
                                     htf=loc.htf_sources(minutes, {}, days, weeks), history_days=days,
                                     profiles=profiles, derivs=derivs)
@@ -840,10 +852,11 @@ def daily_contexts(symbol: str, daily, regime: RegimeJoin | None, timeframes=DAI
 def intraday_context(symbol: str, minutes: int, bars: BarSeries, candles: CandleSeries, variance,
                      regime: RegimeJoin | None, through_month: str = LAST_MONTH, *, levels: dict | None = None,
                      htf: dict | None = None, history_days: CandleSeries | None = None,
-                     profiles: dict | None = None, derivs=None) -> TableContext:
+                     profiles: dict | None = None, derivs=None, include_ext: bool = True) -> TableContext:
     """``levels``/``htf`` come from candle_location (shared_levels + context_levels, htf_sources)."""
     return TableContext(symbol, minutes, candles, intraday_sigma(bars, candles, variance), INTRADAY_SIGMA_MODEL,
-                        table_segments(minutes, through_month), regime, levels=levels or {}, htf=htf or {},
+                        table_segments(minutes, through_month, include_ext), regime, levels=levels or {},
+                        htf=htf or {},
                         history_days=history_days, profiles=profiles, derivs=derivs)
 
 
@@ -865,11 +878,16 @@ HASH_EXCLUDED = ("content_hash", "code_commit", "created_utc")
 
 def build_manifest(*, files: list, counts: dict, inputs: dict, through_month: str, parity: dict,
                    symbols, timeframes, code_commit: str, created_utc: str,
-                   registry: GroupRegistry = REGISTRY, funding_parity: dict | None = None) -> dict:
+                   registry: GroupRegistry = REGISTRY, funding_parity: dict | None = None,
+                   include_ext: bool = True) -> dict:
     """``content_hash`` covers everything except the commit and creation time, so an identical table
     built again maps to the same directory (which is then skipped)."""
     manifest = {"schema": SCHEMA, "group_versions": registry.versions(), "columns": registry.docs(),
                 "symbols": list(symbols), "timeframes": list(timeframes), "through_month": through_month,
+                "extension_included": include_ext,
+                "extension_note": "true: intraday development-ext (2021-01..2023-12 on rk- kline bars, 2020-12 "
+                                  "warm-up) and daily/weekly rows from 2020-01; false: the table as before the "
+                                  "extension (intraday from 2024-01 on rd bars only, daily/weekly from 2021-01)",
                 "universe": {symbol: data_lake.universe_flag(symbol) for symbol in symbols},
                 "universe_note": "core = the frozen six (every timeframe); extra = DAILY_EXTRA_SYMBOLS "
                                  "(1440/10080 only)",

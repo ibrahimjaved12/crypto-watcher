@@ -18,6 +18,12 @@ This study supersedes it.
 | 15, 60, 240 | rk- kline 1-minute bars (2020-12..2023-12) then rd aggTrades bars (2024-01..), `build_candles` | 2021-01 .. through_month | development-ext (2021-01..2023-12, kline bars), development (2024-01..2025-06), validation (2025-07..2025-12) |
 | 1440, 10080 | dk1 daily klines, `candles_from_daily` | 2020-01 .. through_month | development-ext (2020-01..2025-06), validation |
 
+- **`include_ext` (candle-table-build input, default false).** The extension below needs the
+  published rk- releases. With `include_ext=false` the build reads no rk- release and gives the
+  pre-extension table: intraday from 2024-01 on rd bars only (segments development, validation),
+  daily/weekly from 2021-01; rows from 2024-01 have the same values as with the extension. The
+  manifest records `extension_included`. With `include_ext=true` and a missing rk- release the
+  build stops with a "missing published kline release" error before building anything.
 - **Sources (owner decision 2026-10-15).** Intraday bars before 2024-01 come from the rk-
   releases (`scripts/research/klines_build.py`): the same bars1m-v1 columns built from the
   monthly 1m klines, every minute flagged `KLINE_SOURCE`; a minute without a kline row or with

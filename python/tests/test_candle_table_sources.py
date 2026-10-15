@@ -55,6 +55,52 @@ class SegmentTests(unittest.TestCase):
                          ("2021-01", "2020-12", "2020-01"))
 
 
+class IncludeExtTests(unittest.TestCase):
+    def test_off_reproduces_the_pre_extension_table_shape(self):
+        legacy = ct.table_segments(15, include_ext=False)
+        self.assertEqual([name for name, _, _ in legacy], ["development", "validation"])
+        self.assertEqual(legacy, ct.table_segments(15)[1:])  # the same bounds as the extended table's rows from 2024-01
+        daily = ct.table_segments(1440, include_ext=False)
+        self.assertEqual(daily[0][:2], ("development-ext", data_lake.month_bounds_ms("2021-01")[0]))
+        self.assertEqual(daily[1:], ct.table_segments(1440)[1:])
+        self.assertEqual(ct.file_name("BTCUSDT", 15, include_ext=False), "candles__BTCUSDT__15__2024-01_2025-12.csv.gz")
+        self.assertEqual(ct.file_name("BTCUSDT", 1440, include_ext=False),
+                         "candles__BTCUSDT__1440__2021-01_2025-12.csv.gz")
+        self.assertEqual(ct.file_name("BTCUSDT", 15), "candles__BTCUSDT__15__2021-01_2025-12.csv.gz")
+
+    def test_rows_from_2024_are_identical_with_and_without_the_extension(self):
+        candles = walk(40, 15, RD_START)
+        def table(include_ext):
+            segments = ct.table_segments(15, include_ext=include_ext)
+            ctx = ct.TableContext("BTCUSDT", 15, candles, [0.01] * 40, "test", segments, None)
+            return [dict(zip(COLUMNS, v)) for v in ct.build_rows(ctx)]
+        self.assertEqual(table(False), table(True))  # same data from 2024-01: same rows, same values
+
+    def test_manifest_records_whether_the_extension_was_included(self):
+        common = dict(files=[], counts={}, inputs={}, through_month="2025-12", parity={}, symbols=["BTCUSDT"],
+                      timeframes=[15], code_commit="a", created_utc="b")
+        on, off = ct.build_manifest(**common), ct.build_manifest(**common, include_ext=False)
+        self.assertEqual((on["extension_included"], off["extension_included"]), (True, False))
+        self.assertNotEqual(on["content_hash"], off["content_hash"])
+        ct.check_manifest(off)
+
+    def test_the_build_script_defaults_to_no_extension(self):
+        import importlib.util
+        import sys
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[2] / "scripts" / "research"
+        spec = importlib.util.spec_from_file_location("test_candle_table_build_script", path / "candle_table_build.py")
+        module = importlib.util.module_from_spec(spec)
+        previous = sys.path[:]
+        try:
+            sys.path.insert(0, str(path))
+            spec.loader.exec_module(module)
+        finally:
+            sys.path[:] = previous
+        self.assertFalse(module.parse_args([]).include_ext)
+        self.assertTrue(module.parse_args(["--include-ext"]).include_ext)
+
+
 class BarSourceTests(unittest.TestCase):
     def test_kline_before_2024_and_aggtrade_after(self):
         start = RD_START - 16 * MIN15
