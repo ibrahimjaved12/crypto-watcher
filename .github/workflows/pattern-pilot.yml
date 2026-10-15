@@ -1,0 +1,106 @@
+name: Doji pilot
+run-name: "Doji pilot ${{ inputs.symbol }} ${{ inputs.mode }}"
+
+# Visual pilot of the doji detector (scripts/research/pattern_pilot.py, docs/pattern-study.md). Samples
+# seeded stratified events (subtype x strength x range_atr tercile), size-matched controls and near-miss
+# candles of one symbol inside the development segments of a candle-table-v1 report and writes HTML contact
+# sheets, an annotations.csv template and pilot_key.csv to reports/pattern-pilot/<hash16>/ in the private
+# research-data repository. Blind mode shows 40 candles ending at the signal candle (nothing after it, no
+# outcome, no detector label, opaque ids). This public log and the job summary carry only counts, the private
+# path and the hash. Validation and hidden months are refused. Defect statistics: pattern_pilot_defects.py.
+on:
+  workflow_dispatch:
+    inputs:
+      table_report:
+        description: "candle-table report: a bare hash or a reports/candle-table/... path"
+        type: string
+        required: true
+      symbol:
+        description: "symbol (intraday timeframes: one of the frozen six)"
+        type: string
+        default: BTCUSDT
+      from_month:
+        description: "first month (YYYY-MM, inside the development segments)"
+        type: string
+        default: "2025-01"
+      to_month:
+        description: "last month (YYYY-MM, inside the development segments, at most 2025-06)"
+        type: string
+        default: "2025-06"
+      timeframes:
+        description: "comma-separated candle minutes"
+        type: string
+        default: "60,240,1440,10080"
+      per_stratum:
+        description: "events per stratum (controls and near-misses scale with it); strata with fewer rows give all"
+        type: string
+        default: "6"
+      seed:
+        description: "sampling seed"
+        type: string
+        default: "20261019"
+      mode:
+        description: "blind (no later candle, no outcome, opaque ids) or open (12 candles after, fields in the title)"
+        type: choice
+        options: [blind, open]
+        default: blind
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pattern-pilot
+  cancel-in-progress: false
+
+jobs:
+  pilot:
+    name: Doji pilot
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            python/requirements.txt
+            python/requirements-research.txt
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+          .venv/bin/python -m pip install -r requirements-research.txt
+      - name: Run pilot
+        env:
+          TABLE_REPORT: ${{ inputs.table_report }}
+          PILOT_SYMBOL: ${{ inputs.symbol }}
+          FROM_MONTH: ${{ inputs.from_month }}
+          TO_MONTH: ${{ inputs.to_month }}
+          TIMEFRAMES: ${{ inputs.timeframes }}
+          PER_STRATUM: ${{ inputs.per_stratum }}
+          SEED: ${{ inputs.seed }}
+          MODE: ${{ inputs.mode }}
+          PILOT_SUMMARY: ${{ runner.temp }}/pattern-pilot-summary.md
+          RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
+          RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
+        run: |
+          python/.venv/bin/python scripts/research/pattern_pilot.py --workdir pattern-pilot-work \
+            --summary "$PILOT_SUMMARY" --table-report "$TABLE_REPORT" --symbol "$PILOT_SYMBOL" \
+            --from-month "$FROM_MONTH" --to-month "$TO_MONTH" --timeframes "$TIMEFRAMES" \
+            --per-stratum "$PER_STRATUM" --seed "$SEED" --mode "$MODE"
+      - name: Delete working files
+        if: always()
+        run: rm -rf pattern-pilot-work
+      - name: Summary
+        if: always()
+        env:
+          PILOT_SUMMARY: ${{ runner.temp }}/pattern-pilot-summary.md
+        run: |
+          if [ -f "$PILOT_SUMMARY" ]; then
+            cat "$PILOT_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi

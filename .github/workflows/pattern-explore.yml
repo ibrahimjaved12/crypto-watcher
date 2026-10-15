@@ -30,6 +30,11 @@ on:
         type: choice
         options: [intraday, daily_weekly]
         default: intraday
+      review_mode:
+        description: "blind (default: stratified blind packs, key in a separate file) or open (the old hit/miss packs)"
+        type: choice
+        options: [blind, open]
+        default: blind
       review_slice:
         description: "optional extra review pack '<slice id>=<bucket>', e.g. touch:touch_sig=1"
         type: string
@@ -72,13 +77,15 @@ jobs:
           TABLE_REPORT: ${{ inputs.table_report }}
           TIER: ${{ inputs.tier }}
           REVIEW_SLICE: ${{ inputs.review_slice }}
+          REVIEW_MODE: ${{ inputs.review_mode }}
           EXPLORE_SUMMARY: ${{ runner.temp }}/pattern-explore-summary.md
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: |
           python/.venv/bin/python scripts/research/pattern_explore.py --workdir pattern-explore-work \
             --summary "$EXPLORE_SUMMARY" --segment "$SEGMENT" --plan-id "$PLAN_ID" \
-            --table-report "$TABLE_REPORT" --tier "$TIER" --review-slice "$REVIEW_SLICE"
+            --table-report "$TABLE_REPORT" --tier "$TIER" --review-slice "$REVIEW_SLICE" \
+            --review-mode "$REVIEW_MODE"
       - name: Delete working files
         if: always()
         run: rm -rf pattern-explore-work

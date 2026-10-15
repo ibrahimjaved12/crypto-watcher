@@ -584,7 +584,7 @@ decision 2026-10-15). `python/market_analysis/patterns/pattern_explore.py`,
 discovery and no required outcome**: the tool describes what follows a doji; strategies are built
 later from what it finds. The doji study and its cells are unchanged.
 
-**Hygiene.** Development only (intraday `development`, daily/weekly `development-ext`). Validation
+**Hygiene.** Development only (intraday `development-ext` + `development`, daily/weekly `development-ext`). Validation
 needs the plan id of a plan committed as `plans/doji-explore__<id16>.plan.json` (verified with
 `read_plan`); the hidden stretch is always refused by `check_segment`. Paths never cross the
 segment boundary. Every slice x metric family evaluated is appended to
@@ -656,17 +656,69 @@ middle of its time range) and in at least 4 of the 6 symbols. Output is never ga
 significance; `leads.csv` lists the top 30 leads per family, and every test is in `slices.csv` with
 raw p and BH q. A lead is a candidate for a validation plan, not a result.
 
-**Review packs.** `review/review_<tf>_all.html` (and an optional `--review-slice slice=bucket`
-pack): seeded random events (any outcome), seeded random controls, and a balanced pack of random
-hits and misses of rule (a) K = 3 at the first lead horizon. Every chart states its sampling rule.
-A balanced pack with no hits (or no misses) is withheld: no pack contains only misses. (The repo
-has no earlier doji chart generator; `doji_report.sample_events` is the time-spread sampler of the
-frozen doji-v1 report and is not changed.)
+**Review packs (blind by default).** New runs sample with the pilot's stratified sampler
+(`pattern_pilot`, "Doji pilot" below): per timeframe, seeded events stratified by subtype x strength
+x `range_atr` tercile (2 per stratum), size-matched controls and near-misses; each chart shows 40
+candles ending AT the signal candle (no later candle, no outcome, no detector label) with an opaque
+id. Files: `review/review_<tf>_blind.html`, `review_<tf>_blind_key.csv` (id -> row, class, stratum,
+detector fields; a separate file) and `review_<tf>_blind_annotations.csv`; `--review-slice
+slice=bucket` adds a blind pack of 10 events of that slice (plus controls and near-misses). The report
+holds only counts per class and stratum. `--review-mode open` (workflow input `review_mode`) keeps the
+old open packs (random events, random controls, balanced hits and misses of rule (a) K = 3, never
+misses-only) so old reports reproduce; an open-mode report has no `parameters.review` entry and keeps its
+old hash. The blind/open choice is recorded in `parameters.review` of a blind report.
+
+**Extended intraday rows.** The intraday development set is `development-ext` + `development`
+(table rows from 2021-01 when the table was built with `include_ext`); a table without development-ext
+rows selects exactly the old rows and gives the same report. A path never crosses the 2024-01 boundary
+between kline and aggTrades bars: every step must have the same segment and the same `bar_source` as
+row i (a table without the column is one source).
 
 **Output.** `reports/pattern-explore/doji-<segment>__<hash16>/`: `summary.json`,
 `direction_free.csv`, `directional.csv`, `excursion_map.csv`, `slices.csv`, `leads.csv`, `report.md`
 and `review/*.html`. The public log carries counts, the number of tests, the private path and the
 hash only.
+
+## Doji pilot (pattern-pilot-v1)
+
+A visual audit of the detector before more is built on it: `pattern_pilot.py` (library),
+`scripts/research/pattern_pilot.py` and `.github/workflows/pattern-pilot.yml` (main only, `contents:
+read`), `scripts/research/pattern_pilot_defects.py` (statistics). It computes no return and no outcome.
+
+**Inputs.** `table_report`, `symbol` (default BTCUSDT), `from_month`/`to_month` (default 2025-01 and
+2025-06; the window must lie inside the table's development segments of every timeframe, so validation
+and hidden months are refused), `timeframes` (default 60,240,1440,10080), `per_stratum` (default 6),
+`seed`, `mode` (blind | open).
+
+**Classes** (disjoint; all with `range_atr >= 0.5`, a usable ATR and sigma, non-invalid):
+
+- `event`: doji-geo-v2 (`body_ratio <= 0.10`), stratified by subtype x strength bucket (body <= 0.05 |
+  0.05-0.10) x `range_atr` tercile (terciles of the events in the window), `per_stratum` per stratum;
+- `control`: size-matched non-doji, `body_ratio > 0.15` (so it is disjoint from the near-misses), per
+  event tercile, 4 x `per_stratum` each;
+- `near_miss`: `0.10 < body_ratio <= 0.15` to audit the boundary, per tercile, 2 x `per_stratum` each.
+
+A stratum with fewer rows than requested yields all of them. The manifest reports requested,
+available and sampled per timeframe, class and stratum; a sample is never padded. Sampling is seeded
+per (seed, timeframe, class, stratum) over the rows in table order, so a rerun gives the same sample.
+
+**Blind mode.** Each chart shows 40 candles of context ending AT the signal candle (highlighted, last
+column): no candle after it, no outcome, no detector label; the title is an opaque id
+(`P` + 8 hex of sha256(seed|symbol|tf|open time)), and charts are ordered by id, so the order does not
+reveal the class. `pilot_key.csv` (id, symbol, tf, open_ms, decision_ms, class, stratum, body_ratio,
+range_atr, subtype) is a separate file. **Open mode** shows 12 candles after the signal and the class,
+stratum and detector fields in the title.
+
+**Output** (`reports/pattern-pilot/<hash16>/`, private repo): `pilot_<tf>.html`, `annotations.csv`
+(template: `id,detector_ok,defect_type,visual_strength,notes`; detector_ok y|n|unsure; defect_type
+not_doji|wrong_subtype|tiny_range|data_artifact|gap_artifact|other; visual_strength strong|ok|weak),
+`pilot_key.csv` and `manifest.json`. The public log and job summary carry counts per timeframe and
+class, the private path and the hash only.
+
+**Defect statistics.** `python scripts/research/pattern_pilot_defects.py --annotations annotations.csv
+--key pilot_key.csv` (run on the private files) prints the defect rate (n / (y + n); 'unsure' counted
+apart) by class, timeframe, class x timeframe and stratum with n and Wilson 95% intervals, the defect
+types, and the defect rate by class x visual_strength. It only reports: it sets no pass threshold.
 
 ## Adding a group (location, derivatives, advanced levels, ...)
 

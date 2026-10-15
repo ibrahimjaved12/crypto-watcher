@@ -219,6 +219,70 @@ class GuardTests(unittest.TestCase):
             pe.check_tier("hourly")
 
 
+class ExtensionTests(unittest.TestCase):
+    """Intraday development = development-ext + development; paths never cross the kline / aggTrades boundary."""
+
+    def test_study_segments_and_in_segment_membership(self):
+        self.assertEqual(pe.STUDY_SEGMENTS["development"]["intraday"], ("development-ext", "development"))
+        self.assertEqual(pe.STUDY_SEGMENTS["development"]["daily_weekly"], ("development-ext",))
+        self.assertEqual(pe.STUDY_SEGMENTS["validation"]["intraday"], ("validation",))
+        f = frame_from([candle(0, 100, 101, 99, 100, segment="development-ext"),
+                        candle(1, 100, 101, 99, 100, segment="development"),
+                        candle(2, 100, 101, 99, 100, segment="validation")])
+        names = pe.STUDY_SEGMENTS["development"]["intraday"]
+        self.assertEqual(np.isin(f["segment"], names).tolist(), [True, True, False])
+
+    def test_paths_stop_at_the_bar_source_boundary(self):
+        rows = [candle(k, 100, 101, 99, 100) for k in range(8)]
+        f = frame_from(rows)
+        f["bar_source"] = np.array(["kline"] * 4 + ["aggtrade"] * 4, dtype=object)
+        p = pe.build_paths(f, [0, 2, 3, 4], 4)
+        self.assertEqual(p.length.tolist(), [3, 1, 0, 3])  # the same segment, but never across kline -> aggtrade
+        plain = pe.build_paths(frame_from(rows), [0, 2, 3, 4], 4)  # no bar_source column: one source
+        self.assertEqual(plain.length.tolist(), [4, 4, 4, 3])
+
+    def extended(self, with_ext: bool):
+        """Doji-rich frame; with_ext adds 2023 kline rows (development-ext) before the 2024 aggTrades rows."""
+        base = synthetic(symbols=("BTCUSDT",), count=240, seed=4)
+        if not with_ext:
+            return base
+        ext = synthetic(symbols=("BTCUSDT",), count=240, seed=5)
+        shift = -240 * H4
+        ext["open_ms"] = ext["open_ms"] + shift
+        ext["decision_ms"] = ext["decision_ms"] + shift
+        ext["segment"] = np.array(["development-ext"] * 240, dtype=object)
+        merged = {name: np.concatenate([ext[name], base[name]]) for name in base if name != "in_segment"}
+        merged["bar_source"] = np.array(["kline"] * 240 + ["aggtrade"] * 240, dtype=object)
+        merged["in_segment"] = np.isin(merged["segment"], pe.STUDY_SEGMENTS["development"]["intraday"])
+        return merged
+
+    def test_extension_rows_are_read_and_paths_do_not_cross(self):
+        f = self.extended(True)
+        pop = pe.population(f)
+        self.assertEqual(int(pop[:240].sum()) > 0, True)  # development-ext rows are in the population
+        last_ext = np.array([239])
+        self.assertEqual(pe.build_paths(f, last_ext, 6).length.tolist(), [0])
+        unit = pe.build_unit(f, 240, intraday=True)
+        self.assertTrue(((f["bar_source"][unit.rows][unit.event] == "kline")).any())
+        for k in range(6):  # a kline event row's path never touches aggtrade rows
+            kline_rows = unit.rows[unit.paths.length > k][f["bar_source"][unit.rows[unit.paths.length > k]]
+                                                          == "kline"]
+            self.assertTrue((f["bar_source"][kline_rows + k + 1] == "kline").all())
+
+    def test_a_table_without_extension_rows_gives_the_same_report(self):
+        base = synthetic(symbols=("BTCUSDT",), count=200, seed=2)
+        def report(frame):
+            return pe.run_explore({240: frame}, tier="intraday", segment="development", table_report="reports/x",
+                                  table_hash="f" * 64, code_commit="abc", created_utc="2026-10-16T00:00:00Z", B=10,
+                                  absent=["touch_sig"], review_mode="open")[0]["report_hash"]
+        reference = report(base)
+        with_source = {**base, "bar_source": np.array(["aggtrade"] * 200, dtype=object)}
+        with_set = {**base, "in_segment": np.isin(base["segment"], pe.STUDY_SEGMENTS["development"]["intraday"])}
+        self.assertEqual(report(with_source), reference)  # an all-aggtrade bar_source column changes nothing
+        self.assertEqual(report(with_set), reference)     # membership in the segment set = the old equality
+        self.assertEqual(report({**base, "bar_source": np.array([""] * 200, dtype=object)}), reference)
+
+
 class ReportTests(unittest.TestCase):
     def test_read_frame_keeps_neighbours_and_lists_absent_columns(self):
         f = synthetic(symbols=("BTCUSDT",), count=12)
@@ -233,6 +297,10 @@ class ReportTests(unittest.TestCase):
                     writer.writerow([seg if n == "segment" else
                                      (f[n][i] if n in TEXT else repr(float(f[n][i]))) for n in header])
             frame, absent = pe.read_frame([path], "development")
+            both, _ = pe.read_frame([path], ("development-ext", "development"))
+            self.assertEqual(both["in_segment"].tolist(), frame["in_segment"].tolist())
+            self.assertEqual(frame["bar_source"].tolist(), [""] * 12)  # absent column: one source
+            self.assertNotIn("bar_source", absent)
         self.assertEqual(len(frame["tf"]), 12)
         self.assertEqual(int(frame["in_segment"].sum()), 10)
         self.assertIn("touch_sig", absent)
@@ -242,7 +310,8 @@ class ReportTests(unittest.TestCase):
         frames = {240: synthetic()}
         report, reviews = pe.run_explore(frames, tier="intraday", segment="development", table_report="reports/x",
                                          table_hash="f" * 64, code_commit="abc", created_utc="2026-10-16T00:00:00Z",
-                                         B=20, absent=["touch_sig"], review=("touch:touch_round", "1"))
+                                         B=20, absent=["touch_sig"], review=("touch:touch_round", "1"),
+                                         review_mode="open")  # the old packs: old reports reproduce
         pe.check_report(report)
         self.assertEqual(report["by_tf"]["15"], {"status": "no rows"})
         self.assertGreater(report["tests_evaluated"], 0)
@@ -270,6 +339,29 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(log.trial_count(pe.QUESTION_ID), len(keys))
             log.append_many(pe.experiment_records(report, run_id="2", data_snapshot_id="f" * 64))
             self.assertEqual(log.trial_count(pe.QUESTION_ID), len(keys))  # a rerun is a REPLAY, not new variants
+
+    def run(self, frames, **kwargs):
+        return pe.run_explore(frames, tier="intraday", segment="development", table_report="reports/x",
+                              table_hash="f" * 64, code_commit="abc", created_utc="2026-10-16T00:00:00Z", B=10,
+                              absent=["touch_sig"], **kwargs)
+
+    def test_blind_review_is_the_default_and_open_mode_keeps_old_parameters(self):
+        frames = {240: synthetic(symbols=("BTCUSDT",), count=240)}
+        blind, files = self.run(frames, review=("touch:touch_round", "1"))
+        self.assertEqual(blind["parameters"]["review"]["mode"], "blind")
+        self.assertEqual(blind["by_tf"]["240"]["review"]["mode"], "blind")
+        self.assertEqual({"review_240_blind.html", "review_240_blind_key.csv", "review_240_blind_annotations.csv",
+                          "review_240_touch-touch_round_1_blind.html", "review_240_touch-touch_round_1_blind_key.csv",
+                          "review_240_touch-touch_round_1_blind_annotations.csv"}, set(files))
+        self.assertNotIn("Sampling rule", files["review_240_blind.html"])
+        self.assertIn("class", files["review_240_blind_key.csv"].splitlines()[0])
+        self.assertNotIn("event", files["review_240_blind.html"].lower())
+        self.assertIn("Blind review pack", pe.markdown(blind, sorted(files)))
+        opened, _ = self.run(frames, review_mode="open")
+        self.assertNotIn("review", opened["parameters"])  # an open-mode report keeps its old parameters
+        self.assertNotEqual(opened["report_hash"], blind["report_hash"])
+        with self.assertRaises(pe.ExploreError):
+            self.run(frames, review_mode="x")
 
     def test_review_pack_is_never_misses_only(self):
         f = synthetic(count=120)
