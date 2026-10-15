@@ -57,14 +57,13 @@ def pattern_window(n=60):
 
 
 def movement_window(n=96, close=False, minutes_after=7):
-    """A movement alert. ``close=True``: calm candles and an alert that fired as soon as the change reached the
-    threshold, so baseline and alert price are almost equal (the label-collision case)."""
-    sigma = 0.08 if close else 0.7
-    candles = synthetic_candles(n, 15, sigma=sigma)
+    """A movement alert. ``close=True``: a low threshold (0.2%) against a wide 24 h range, so the baseline and the
+    alert price are closer than the label gap (the label-collision case, as for a low threshold on a volatile coin)."""
+    candles = synthetic_candles(n, 15, sigma=0.7)
     last = candles[-1]
     alert_ms = last[0] + 15 * 60_000 + minutes_after * 60_000
     baseline = candles[40][4]
-    threshold, change = (1.5, 1.51) if close else (2.0, 2.1)
+    threshold, change = (0.2, 0.21) if close else (2.0, 2.1)
     price = round(baseline * (1 + change / 100), 4)
     closes = [c[4] for c in candles]
     return {"version": ac.WINDOW_VERSION, "kind": "movement_alert", "synthetic": True, "symbol": "ETHUSDT",

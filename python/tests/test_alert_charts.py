@@ -87,7 +87,7 @@ class LayoutTests(unittest.TestCase):
             self.assertTrue(lo <= min(layout["label_y"].values()) and max(layout["label_y"].values()) <= hi)
         close = ac.movement_layout(movement_window(close=True))
         self.assertLess(abs(close["anchors"]["alert"] - close["anchors"]["baseline"]), close["min_gap"])  # the real case
-        self.assertIn("threshold 1.5%", close["alert_text"])  # one merged label; no separate threshold label
+        self.assertIn("threshold 0.2%", close["alert_text"])  # one merged label; no separate threshold label
         self.assertNotIn("Threshold", close["alert_text"] + close["baseline_text"])
 
     def test_the_timing_note_is_computed_and_never_claims_adjacency(self):
