@@ -243,6 +243,10 @@ npm run up -- --update-worker-secret
 5. Writes the new tunnel URL into the Worker’s RUNNER_GATEWAY_URL secret, so the live site can reach your laptop.
 6. Restarts the tunnel if it dies (the URL changes, and it updates the secret again). Ctrl+C shuts everything down cleanly.
 
+For the charts:
+```sh
+npm run alert-charts -- --mode production --event-id <alerts.id>
+```
 The repository pins Node 22 in `.nvmrc` and the Supabase CLI in `package-lock.json`.
 
 Architecture: [operational PostgreSQL](docs/operational-database.md) and the
