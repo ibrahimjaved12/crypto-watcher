@@ -14,6 +14,13 @@ months available, the minimum and median of that ratio, and the minimum (best)
 rank. Nothing else from the archive is printed or kept. The ratios cover the whole
 window, so they are a screening aid, not a point-in-time liquidity rule.
 
+Selection of DAILY_EXTRA_SYMBOLS (daily/weekly tier only, owner decision 2026-10-15): the rule is fixed
+before any result is seen: median ratio >= 0.5 and at least 24 months with data, over the window
+2021-01..2025-12 (run with --first-month 2021-01 --last-month 2025-12). The table marks each candidate
+``meets_rule`` and is also written as CSV (``--csv`` and a csv block in the summary), so the selection
+is mechanical. Survivorship: only currently listed candidates are checked; symbols delisted before
+today never enter the table.
+
 Standard library only; zips are deleted as soon as they are summed.
 """
 from __future__ import annotations
@@ -43,6 +50,9 @@ CANDIDATES = ("ADAUSDT", "LINKUSDT", "AVAXUSDT", "TRXUSDT", "LTCUSDT", "SUIUSDT"
 FROZEN = lake.SYMBOLS
 QUOTE_VOLUME, TRADES = 7, 8  # Binance kline CSV columns
 OPEN_TIME = 0
+RULE_MIN_MEDIAN_RATIO = Fraction(1, 2)
+RULE_MIN_MONTHS = 24
+RULE_WINDOW = ("2021-01", "2025-12")
 
 
 class MonthTotals(NamedTuple):
@@ -130,9 +140,12 @@ def summarize(totals: dict, months: list[str], candidates=CANDIDATES, frozen=FRO
     for symbol in candidates:
         available = [month for month in months if totals.get((symbol, month)) is not None]
         ratios = [Fraction(totals[(symbol, month)].quote_volume) / Fraction(floors[month]) for month in available]
+        middle = median(ratios) if ratios else None
         rows.append({"symbol": symbol, "months": len(available),
-                     "min_ratio": min(ratios) if ratios else None, "median_ratio": median(ratios) if ratios else None,
-                     "min_rank": min(ranks[(symbol, month)] for month in available) if available else None})
+                     "min_ratio": min(ratios) if ratios else None, "median_ratio": middle,
+                     "min_rank": min(ranks[(symbol, month)] for month in available) if available else None,
+                     "meets_rule": bool(middle is not None and middle >= RULE_MIN_MEDIAN_RATIO
+                                        and len(available) >= RULE_MIN_MONTHS)})
     rows.sort(key=lambda row: (row["median_ratio"] is None, -(row["median_ratio"] or 0), row["symbol"]))
     return rows
 
@@ -142,15 +155,32 @@ def _ratio(value: Fraction | None) -> str:
 
 
 def table(rows: list[dict], months: list[str], universe: int) -> list[str]:
+    in_window = (months[0], months[-1]) == RULE_WINDOW
     lines = [f"### Liquidity check {months[0]}..{months[-1]} ({len(months)} months, {universe} symbols ranked)", "",
              "Ratio = monthly quote volume / smallest monthly quote volume of the frozen six in that month; "
-             "rank 1 = largest quote volume among symbols with data that month.", "",
-             "| candidate | months available | min ratio | median ratio | min rank |",
-             "| --- | ---: | ---: | ---: | ---: |"]
+             "rank 1 = largest quote volume among symbols with data that month.",
+             f"meets_rule = median ratio >= {float(RULE_MIN_MEDIAN_RATIO)} and >= {RULE_MIN_MONTHS} months with data "
+             f"(the DAILY_EXTRA_SYMBOLS rule; it applies to the window {RULE_WINDOW[0]}..{RULE_WINDOW[1]}"
+             f"{'' if in_window else ', NOT this run'}). Survivorship: only currently listed candidates are checked.",
+             "", "| candidate | months available | min ratio | median ratio | min rank | meets rule |",
+             "| --- | ---: | ---: | ---: | ---: | --- |"]
     for row in rows:
         lines.append(f"| {row['symbol']} | {row['months']}/{len(months)} | {_ratio(row['min_ratio'])} | "
-                     f"{_ratio(row['median_ratio'])} | {row['min_rank'] if row['min_rank'] is not None else '-'} |")
+                     f"{_ratio(row['median_ratio'])} | {row['min_rank'] if row['min_rank'] is not None else '-'} | "
+                     f"{'yes' if row['meets_rule'] else 'no'} |")
+    lines += ["", "```csv", *csv_lines(rows, months), "```"]
     return lines
+
+
+def csv_lines(rows: list[dict], months: list[str]) -> list[str]:
+    """The table as CSV (exact ratios to 6 decimals), for the selection."""
+    out = ["symbol,first_month,last_month,months_available,months_total,min_ratio,median_ratio,min_rank,meets_rule"]
+    for row in rows:
+        ratio = lambda value: "" if value is None else f"{float(value):.6f}"  # noqa: E731
+        out.append(f"{row['symbol']},{months[0]},{months[-1]},{row['months']},{len(months)},{ratio(row['min_ratio'])},"
+                   f"{ratio(row['median_ratio'])},{'' if row['min_rank'] is None else row['min_rank']},"
+                   f"{'1' if row['meets_rule'] else '0'}")
+    return out
 
 
 def main(argv=None) -> int:
@@ -160,6 +190,7 @@ def main(argv=None) -> int:
     parser.add_argument("--workdir", type=Path, default=Path("liquidity-check-work"))
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--summary", type=Path, help="append the table (markdown)")
+    parser.add_argument("--csv", type=Path, help="write the table as CSV")
     args = parser.parse_args(argv)
     months = lake.months_between(args.first_month, args.last_month)
     symbols = (*CANDIDATES, *FROZEN)
@@ -173,7 +204,10 @@ def main(argv=None) -> int:
     totals = dict(zip(jobs, results))
     published = sum(result is not None for result in results)
     print(f"summed {published} of {len(jobs)} symbol-months (checksums verified; others not published)", flush=True)
-    lines = table(summarize(totals, months), months, len(symbols))
+    rows = summarize(totals, months)
+    lines = table(rows, months, len(symbols))
+    if args.csv:
+        args.csv.write_text("\n".join(csv_lines(rows, months)) + "\n", encoding="ascii")
     print("\n".join(lines), flush=True)
     if args.summary:
         with args.summary.open("a", encoding="utf-8") as stream:

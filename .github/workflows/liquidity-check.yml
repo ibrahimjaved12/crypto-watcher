@@ -3,7 +3,10 @@ run-name: "Liquidity check ${{ inputs.first_month }}..${{ inputs.last_month }}"
 
 # #183: candidate USDT perpetuals vs the frozen six, from the public Binance archive
 # (data.binance.vision monthly 1m klines, .CHECKSUM verified). The log and the job
-# summary carry only the aggregate table (months, quote-volume ratios, best rank).
+# summary carry only the aggregate table (months, quote-volume ratios, best rank, meets_rule) and the
+# same table as a csv block. For the DAILY_EXTRA_SYMBOLS selection (daily/weekly tier) run it with
+# first_month 2021-01 and last_month 2025-12: the rule (median ratio >= 0.5, >= 24 months) is fixed
+# before any result; only currently listed candidates are checked (survivorship).
 on:
   workflow_dispatch:
     inputs:

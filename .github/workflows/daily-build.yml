@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       symbols:
-        description: Comma-separated subset of BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
+        description: Comma-separated subset of the six (plus data_lake.DAILY_EXTRA_SYMBOLS, daily/weekly tier only)
         type: string
         default: BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT
         required: true
@@ -44,6 +44,9 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
@@ -57,7 +60,10 @@ jobs:
         run: |
           import calendar, json, os, re, sys, time
 
-          allowed = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT")
+          sys.path.insert(0, "python")
+          from market_analysis import data_lake  # standard library only
+
+          allowed = data_lake.DAILY_UNIVERSE  # the frozen six plus DAILY_EXTRA_SYMBOLS (empty until chosen)
           raw = os.environ["DAILY_SYMBOLS"]
           if not re.fullmatch(r"[A-Z]+(,[A-Z]+)*", raw):
               sys.exit("symbols must be a comma-separated list without spaces")

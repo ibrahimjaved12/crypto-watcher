@@ -6,6 +6,13 @@ trades to the neighbouring minute, so bars are built from aggTrades; kline,
 mark, index and premium values are kept only as cross-check columns with flags.
 Nothing is forward-filled or repaired: differences are marked.
 
+Kline extension (``rk-`` releases, owner decision 2026-10-15): finished months before 2024-01
+(2020-12 warm-up, 2021-01..2023-12 development-ext) have bars built from the monthly 1m klines
+(aggTrades are not used before 2024-01). They use the same bars1m-v1 columns, so every reader
+loads them unchanged; every minute carries FLAG_KLINE_SOURCE, and a minute without a kline row or
+with zero trades has empty prices and FLAG_NO_AGGTRADES (Binance fills a no-trade kline with the
+previous close: that is not a traded price, so it is never used).
+
 All stored numbers are exact decimal strings. Prices and quantities are parsed
 to integers at scale 10**8 (quote amounts at 10**16); no floats are used.
 Binance sometimes publishes numbers in exponent form (funding rates such as
@@ -27,7 +34,14 @@ from typing import Iterable, Iterator
 LAKE_SCHEMA_VERSION = "bars1m-v1"
 MANIFEST_VERSION = "data-lake-manifest-v1"
 SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT")
+# Extra liquid symbols for the daily/weekly tier ONLY (owner decision 2026-10-15); the six above stay the
+# frozen set for all intraday work. Empty until the owner picks them from the liquidity-check table.
+DAILY_EXTRA_SYMBOLS: tuple = ()
+DAILY_UNIVERSE = (*SYMBOLS, *DAILY_EXTRA_SYMBOLS)
 FIRST_MONTH = "2024-01"
+RK_FIRST_MONTH = "2020-12"  # kline bars (rk-): 2020-12 is warm-up, 2021-01..2023-12 development-ext
+RK_LAST_MONTH = "2023-12"
+RK_MANIFEST_VERSION = "kline-lake-manifest-v1"
 BINANCE_BASE = "https://data.binance.vision/data/futures/um/monthly"
 MINUTE_MS = 60_000
 SCALE_DIGITS = 8
@@ -58,6 +72,8 @@ FLAG_BITS = {
     "PREMIUM_MISSING": FLAG_PREMIUM_MISSING,
     "KLINE_TAKER_DIFFERS": FLAG_KLINE_TAKER_DIFFERS,
 }
+FLAG_KLINE_SOURCE = 256  # rk- bars: OHLCV from the 1m klines, not from aggTrades
+RK_FLAG_BITS = {**FLAG_BITS, "KLINE_SOURCE": FLAG_KLINE_SOURCE}
 
 KLINE_CHECK_COLUMNS = ("k_open", "k_high", "k_low", "k_close", "k_volume", "k_quote_volume", "k_trades",
                        "k_taker_buy_volume", "k_taker_buy_quote_volume")
@@ -77,6 +93,7 @@ FUNDING_COLUMNS = ("calc_time_ms", "funding_interval_hours", "last_funding_rate"
 
 _MONTH = re.compile(r"(\d{4})-(0[1-9]|1[0-2])\Z")
 _TAG = re.compile(r"rd-(" + "|".join(SYMBOLS) + r")-(\d{4}-(?:0[1-9]|1[0-2]))-r([1-9][0-9]{0,2})\Z")
+_RK_TAG = re.compile(r"rk-(" + "|".join(SYMBOLS) + r")-(\d{4}-(?:0[1-9]|1[0-2]))-r([1-9][0-9]{0,2})\Z")
 _DECIMAL = re.compile(r"(-?)([0-9]+)(?:\.([0-9]+))?\Z")
 _INTEGER = re.compile(r"-?[0-9]+\Z")
 # A finite decimal number as published in kline/funding files, optionally in exponent form.
@@ -125,6 +142,42 @@ def validate_symbol(symbol: str) -> str:
     if symbol not in SYMBOLS:
         raise ValueError(f"symbol is not in the frozen six-symbol universe: {symbol!r}")
     return symbol
+
+
+def validate_daily_symbol(symbol: str) -> str:
+    """A symbol of the daily/weekly universe (the frozen six plus DAILY_EXTRA_SYMBOLS)."""
+    if symbol not in DAILY_UNIVERSE:
+        raise ValueError(f"symbol is not in the daily/weekly universe: {symbol!r}")
+    return symbol
+
+
+def universe_flag(symbol: str) -> str:
+    """'core' for the frozen six, 'extra' for DAILY_EXTRA_SYMBOLS."""
+    return "core" if validate_daily_symbol(symbol) in SYMBOLS else "extra"
+
+
+def bar_source(month: str) -> str:
+    """'kline' (rk- releases) before FIRST_MONTH, 'aggtrade' (rd-) from it."""
+    return "kline" if validate_month(month) < FIRST_MONTH else "aggtrade"
+
+
+def rk_release_tag(symbol: str, month: str, revision: int = 1) -> str:
+    if not RK_FIRST_MONTH <= validate_month(month) <= RK_LAST_MONTH:
+        raise ValueError(f"rk- months are {RK_FIRST_MONTH}..{RK_LAST_MONTH}, not {month}")
+    return validate_rk_tag(f"rk-{validate_symbol(symbol)}-{month}-r{revision}")
+
+
+def validate_rk_tag(tag: str) -> str:
+    if not isinstance(tag, str) or not _RK_TAG.match(tag):
+        raise ValueError(f"invalid kline lake release tag: {tag!r}")
+    return tag
+
+
+def validate_lake_tag(tag: str) -> str:
+    """An rd- or rk- tag (the builders' crashed-draft cleanup accepts only these)."""
+    if isinstance(tag, str) and (_TAG.match(tag) or _RK_TAG.match(tag)):
+        return tag
+    raise ValueError(f"invalid data lake release tag: {tag!r}")
 
 
 def release_tag(symbol: str, month: str, revision: int = 1) -> str:
@@ -697,3 +750,120 @@ def write_funding_csv_gz(fileobj, rows: Iterable[list[str]], month: str) -> dict
     stats["rows"] = write_csv_gz(fileobj, lines())
     stats["interval_hours"] = sorted(intervals, key=int)
     return stats
+
+
+# ---------------------------------------------------------------- kline bars (rk-)
+
+
+def _canonical_scaled(text: str, digits: int = SCALE_DIGITS) -> str:
+    return render_scaled(parse_published_scaled(text, digits), digits)
+
+
+def _rk_bar_lines(month: str, klines: KlineIndex | None, mark: KlineIndex | None, index: KlineIndex | None,
+                  premium: KlineIndex | None, flag_counts: dict) -> Iterator[str]:
+    start, _, days = month_bounds_ms(month)
+    yield ",".join(COLUMNS) + "\n"
+    empty_k = ("",) * len(KLINE_CHECK_COLUMNS)
+    empty_ohlc = ("",) * 4
+    kline_rows = klines.rows if klines is not None else {}
+    families = ((mark.rows if mark is not None else {}, FLAG_MARK_MISSING),
+                (index.rows if index is not None else {}, FLAG_INDEX_MISSING),
+                (premium.rows if premium is not None else {}, FLAG_PREMIUM_MISSING))
+    bit_counts = {bit: 0 for bit in RK_FLAG_BITS.values()}
+    for minute in range(days * 1440):
+        open_time = start + minute * MINUTE_MS
+        flags = FLAG_KLINE_SOURCE
+        kline = kline_rows.get(open_time)
+        if kline is None:
+            flags |= FLAG_KLINE_ROW_MISSING | FLAG_NO_AGGTRADES
+            prices, volumes, trades, k_values = empty_ohlc, ("0", "0", "0", "0"), "0", empty_k
+        else:
+            trades = str(_integer(kline[6], "kline trades"))
+            volumes = (_canonical_scaled(kline[4]), _canonical_scaled(kline[5], QUOTE_DIGITS),
+                       _canonical_scaled(kline[7]), _canonical_scaled(kline[8], QUOTE_DIGITS))
+            if trades == "0":  # Binance repeats the previous close on a minute without trades: not a price
+                flags |= FLAG_NO_AGGTRADES
+                prices = empty_ohlc
+            else:
+                prices = tuple(_canonical_scaled(value) for value in kline[:4])
+            k_values = kline
+        cross = []
+        for rows, missing_bit in families:
+            values = rows.get(open_time)
+            if values is None:
+                values = empty_ohlc
+                flags |= missing_bit
+            cross.extend(values)
+        for bit in bit_counts:
+            if flags & bit:
+                bit_counts[bit] += 1
+        yield ",".join((str(open_time), *prices, volumes[0], volumes[1], volumes[2], volumes[3], "0", trades, "", "",
+                        *k_values, *cross, str(flags))) + "\n"
+    flag_counts.update({name: bit_counts[bit] for name, bit in RK_FLAG_BITS.items()})
+
+
+def write_rk_bars_csv_gz(fileobj, month: str, *, klines: KlineIndex | None, mark: KlineIndex | None = None,
+                         index: KlineIndex | None = None, premium: KlineIndex | None = None) -> dict:
+    """bars1m-v1 file of one month from the 1m kline indexes; returns {'rows', 'flag_counts'}.
+
+    Columns as the rd bars: OHLC, volume, quote volume, taker volumes and trades from the kline row;
+    agg_rows 0 and empty agg ids (no aggTrades); k_* = the kline row as published; mark/index/premium
+    OHLC as published. Every minute is present (missing kline rows are marked, never filled)."""
+    flag_counts: dict = {}
+    rows = write_csv_gz(fileobj, _rk_bar_lines(month, klines, mark, index, premium, flag_counts))
+    return {"rows": rows, "flag_counts": flag_counts}
+
+
+def _bar_rows(fileobj):
+    text = fileobj if isinstance(fileobj.read(0), str) else io.TextIOWrapper(
+        gzip.GzipFile(fileobj=fileobj, mode="rb"), encoding="ascii", newline="")
+    reader = csv.reader(text)
+    header = next(reader, None)
+    if header is None or header != list(COLUMNS):
+        raise ValueError("bars file header differs from the bars1m-v1 schema")
+    return reader
+
+
+def compare_bars(kline_bars, aggtrade_bars) -> dict:
+    """Parity of kline-built bars against aggTrades-built (rd) bars of the same month: counts and aggregate
+    differences only (no prices). Prices and volumes are compared as exact integers."""
+    fields = ("open", "high", "low", "close")
+    where = {name: COLUMNS.index(name) for name in (*fields, "volume", "taker_buy_volume", "trades", "open_time_ms")}
+    out = {"minutes": 0, "both_priced": 0, "kline_only_priced": 0, "aggtrade_only_priced": 0, "neither_priced": 0,
+           "ohlc_differs": 0, **{f"{name}_differs": 0 for name in fields}, "volume_differs": 0,
+           "taker_buy_volume_differs": 0, "trades_differs": 0,
+           **{f"max_abs_{name}_diff_bp": 0.0 for name in fields}}
+    totals = {"kline": [0, 0], "aggtrade": [0, 0]}
+    for line, (a, b) in enumerate(zip(_bar_rows(kline_bars), _bar_rows(aggtrade_bars)), 1):
+        if a[where["open_time_ms"]] != b[where["open_time_ms"]]:
+            raise ValueError(f"bars line {line}: open times differ")
+        out["minutes"] += 1
+        for label, row in (("kline", a), ("aggtrade", b)):
+            totals[label][0] += parse_published_scaled(row[where["volume"]])
+            totals[label][1] += parse_published_scaled(row[where["taker_buy_volume"]])
+        priced_a, priced_b = a[where["open"]] != "", b[where["open"]] != ""
+        if priced_a and priced_b:
+            out["both_priced"] += 1
+            differs = False
+            for name in fields:
+                x, y = parse_published_scaled(a[where[name]]), parse_published_scaled(b[where[name]])
+                if x != y:
+                    differs = True
+                    out[f"{name}_differs"] += 1
+                    out[f"max_abs_{name}_diff_bp"] = max(out[f"max_abs_{name}_diff_bp"], abs(x - y) / y * 1e4)
+            out["ohlc_differs"] += differs
+        elif priced_a:
+            out["kline_only_priced"] += 1
+        elif priced_b:
+            out["aggtrade_only_priced"] += 1
+        else:
+            out["neither_priced"] += 1
+        for name in ("volume", "taker_buy_volume", "trades"):
+            if parse_published_scaled(a[where[name]], 0 if name == "trades" else SCALE_DIGITS) != \
+                    parse_published_scaled(b[where[name]], 0 if name == "trades" else SCALE_DIGITS):
+                out[f"{name}_differs"] += 1
+    out["total_volume"] = {label: render_scaled(value[0]) for label, value in totals.items()}
+    out["total_taker_buy_volume"] = {label: render_scaled(value[1]) for label, value in totals.items()}
+    for name in fields:
+        out[f"max_abs_{name}_diff_bp"] = round(out[f"max_abs_{name}_diff_bp"], 4)
+    return out

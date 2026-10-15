@@ -17,6 +17,19 @@ DAILY_SEGMENTS = {
 }
 
 
+# Intraday development extension on rk- kline bars (owner decision 2026-10-15). Also kept OUT of SEGMENTS:
+# only the candle table (and the pattern studies through it) use it; validation and hidden are unchanged.
+INTRADAY_EXT_SEGMENTS = {
+    "development-ext": ("2021-01", "2024-01"),
+}
+
+
+def intraday_segment_bounds_ms(name: str) -> tuple[int, int]:
+    """Bounds of a candle-table intraday segment: the intraday segments plus INTRADAY_EXT_SEGMENTS."""
+    first, end = {**SEGMENTS, **INTRADAY_EXT_SEGMENTS}[name]
+    return month_bounds_ms(first)[0], month_bounds_ms(end)[0]
+
+
 def daily_segment_bounds_ms(name: str) -> tuple[int, int]:
     """Bounds of a daily-research segment: the intraday segments plus DAILY_SEGMENTS."""
     first, end = {**SEGMENTS, **DAILY_SEGMENTS}[name]

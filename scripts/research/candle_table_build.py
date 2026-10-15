@@ -2,11 +2,13 @@
 """candle-table-v1 build (docs/pattern-study.md) against the private research-data repo.
 
 Downloads the dk1 daily releases (2020-01..2026-09; the loaders stop at through_month) of the
-requested symbols plus BTCUSDT (regime market labels and funding) and the rd 1-minute bars of
-2024-01..through_month, builds one csv.gz per symbol x timeframe with
-``market_analysis.patterns.candle_table`` (15/60/240 from the bars, 1440/10080 from dk1), the
-regime-v1 join and the dk1-vs-1m daily parity per symbol, and commits the files plus
-manifest.json to reports/candle-table/ct1__<hash16>/ in the private repo. A directory with the
+requested symbols plus BTCUSDT (regime market labels and funding), the rk- kline bars of
+2020-12..2023-12 (2020-12 is warm-up) and the rd aggTrades bars of 2024-01..through_month, stitched
+into one contiguous 1-minute series per symbol, builds one csv.gz per symbol x timeframe with
+``market_analysis.patterns.candle_table`` (15/60/240 from the bars, 1440/10080 from dk1; column
+bar_source), the regime-v1 join and the dk1-vs-1m daily parity per symbol, and commits the files plus
+manifest.json to reports/candle-table/ct1__<hash16>/ in the private repo. Symbols of
+data_lake.DAILY_EXTRA_SYMBOLS are accepted for the 1440/10080 timeframes only (no 1-minute data). A directory with the
 same content hash that already exists is skipped. The hidden stretch is never read:
 through_month is at most 2025-12 and the hidden guard runs before any file is opened.
 
@@ -18,6 +20,7 @@ from __future__ import annotations
 import argparse
 import gc
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -28,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
 import experiment_run as xr  # noqa: E402  (scripts/research: Checkout, Progress, downloads)
 from daily_download import DAILY_FIRST_MONTH, DAILY_LAST_MONTH, download_daily  # noqa: E402
 from data_lake_build import GitHubError, ResearchDataRepo  # noqa: E402
+from label_build import download  # noqa: E402
 from market_analysis import data_lake as lake  # noqa: E402
 from market_analysis.benchmark.candles import build_candles  # noqa: E402
 from market_analysis.benchmark.canonical import canonical_bytes  # noqa: E402
@@ -79,6 +83,37 @@ def _bars_provenance(repo, symbol: str, months: list[str], data_revision: int, b
             for month, item in sorted(provenance.items())}
 
 
+def _kline_provenance(repo, symbol: str, months: list[str], revision: int, bars_dir: Path) -> dict:
+    """Download the rk- kline bars of ``months`` into ``bars_dir`` (sha256-verified with the asset digest, else
+    the release manifest); returns {month: {rk_tag, bars_sha256}}."""
+    out = {}
+    for month in months:
+        tag = lake.rk_release_tag(symbol, month, revision)
+        release = repo.published_release(tag)
+        if release is None or release.get("tag_name") != tag or release.get("draft") is not False:
+            raise PublicError(f"missing published kline release: {tag}")
+        assets = repo.assets(release["id"])
+        name = lake.bars_asset_name(symbol, month)
+        if name not in assets:
+            raise PublicError(f"{tag}: missing asset {name}")
+        expected = None
+        if not assets[name].get("digest"):
+            if "manifest.json" not in assets:
+                raise PublicError(f"{tag}: missing manifest.json for checksum fallback")
+            manifest_path = bars_dir / f"{tag}.manifest.json"
+            download(repo, assets["manifest.json"], manifest_path, limit=16 << 20)
+            manifest = json.loads(manifest_path.read_bytes())
+            if manifest.get("release_tag") != tag or manifest.get("symbol") != symbol or manifest.get("month") != month:
+                raise PublicError(f"{tag}: manifest identity mismatch")
+            matches = [item["sha256"] for item in manifest.get("assets", []) if item.get("name") == name]
+            if len(matches) != 1:
+                raise PublicError(f"{tag}: no unique sha256 for {name}")
+            expected = matches[0]
+        sha, _ = download(repo, assets[name], bars_dir / name, expected)
+        out[month] = {"rk_tag": tag, "bars_sha256": sha}
+    return out
+
+
 def _metrics_months(repo, symbol: str, months: list[str], dest: Path) -> dict:
     """{month: sha256} of the months published as mx releases (others are absent: their OI/positioning
     columns stay empty and are counted in the manifest)."""
@@ -98,8 +133,11 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     metrics_dir = workdir / "metrics"
     for path in (daily_dir, bars_dir, out_dir, metrics_dir):
         path.mkdir(parents=True)
-    daily_symbols = [symbol for symbol in lake.SYMBOLS if symbol in set(symbols) | {"BTCUSDT"}]
-    inputs = {"daily_revision": args.daily_revision, "data_revision": args.data_revision, "dk1": {}, "rd": {}, "mx": {},
+    daily_symbols = [symbol for symbol in lake.DAILY_UNIVERSE if symbol in set(symbols) | {"BTCUSDT"}]
+    core = [symbol for symbol in symbols if symbol in lake.SYMBOLS]  # only these have 1-minute data
+    ext = args.include_ext
+    inputs = {"daily_revision": args.daily_revision, "data_revision": args.data_revision,
+              "kline_revision": args.kline_revision if ext else None, "dk1": {}, "rk": {}, "rd": {}, "mx": {},
               "metrics_revision": METRICS_REVISION}
     with progress.stage("daily download", total=len(daily_symbols)) as set_symbol:
         for index, symbol in enumerate(daily_symbols, 1):
@@ -107,18 +145,23 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
             inputs["dk1"][symbol] = _quiet(download_daily, repo, symbol, DAILY_FIRST_MONTH, DAILY_LAST_MONTH,
                                            args.daily_revision, daily_dir)
             progress.phase("daily download", symbol_index=index, symbols=len(daily_symbols), files=2)
-    months = lake.months_between(ct.INTRADAY_FIRST_MONTH, through)
-    with progress.stage("bars download", total=len(symbols)) as set_symbol:
-        for index, symbol in enumerate(symbols, 1):
+    kline_months = lake.months_between(ct.INTRADAY_BARS_FIRST_MONTH, lake.RK_LAST_MONTH) if ext else []
+    months = lake.months_between(lake.FIRST_MONTH, through)
+    with progress.stage("bars download", total=len(core)) as set_symbol:
+        for index, symbol in enumerate(core, 1):
             set_symbol(index)
+            if ext:  # without the extension no rk- release is needed or read
+                inputs["rk"][symbol] = _quiet(_kline_provenance, repo, symbol, kline_months, args.kline_revision,
+                                              bars_dir)
             inputs["rd"][symbol] = _quiet(_bars_provenance, repo, symbol, months, args.data_revision, bars_dir)
-            progress.phase("bars download", symbol_index=index, symbols=len(symbols), months=len(months))
+            progress.phase("bars download", symbol_index=index, symbols=len(core),
+                           months=len(kline_months) + len(months))
     metric_months = lake.months_between(ct.DAILY_WARMUP_MONTH, through)
-    with progress.stage("metrics download", total=len(symbols)) as set_symbol:
-        for index, symbol in enumerate(symbols, 1):
+    with progress.stage("metrics download", total=len(core)) as set_symbol:
+        for index, symbol in enumerate(core, 1):
             set_symbol(index)
             inputs["mx"][symbol] = _quiet(_metrics_months, repo, symbol, metric_months, metrics_dir)
-            progress.phase("metrics download", symbol_index=index, symbols=len(symbols),
+            progress.phase("metrics download", symbol_index=index, symbols=len(core),
                            months=len(inputs["mx"][symbol]))
     progress.phase("load", symbols=len(daily_symbols))
     daily, funding = _quiet(ct.load_daily_inputs, daily_dir, symbols, through)
@@ -127,18 +170,27 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     files, counts, parity, funding_parity = [], {}, {}, {}
     for index, symbol in enumerate(symbols, 1):
         progress.phase("table", symbol_index=index, symbols=len(symbols))
-        bars = _quiet(load_symbol_bars, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through)
+        dk1_funding = _quiet(load_symbol_funding_range, daily_dir, symbol, ct.DAILY_WARMUP_MONTH, through)
+        if symbol not in lake.SYMBOLS:  # a daily/weekly extra: dk1 only (no 1-minute bars, metrics or basis)
+            contexts = ct.daily_contexts(symbol, daily[symbol], regime, timeframes, through,
+                                         derivs=dv.DerivInputs(funding=dk1_funding), include_ext=ext)
+            _write_files(contexts, symbol, timeframes, through, out_dir, files, counts, ext)
+            continue
+        # rk- kline bars 2020-12..2023-12 then rd aggTrades bars 2024-01..: one contiguous series (concat
+        # refuses a gap or an overlap at the boundary).
+        bars_first = ct.INTRADAY_BARS_FIRST_MONTH if ext else lake.FIRST_MONTH
+        bars = _quiet(load_symbol_bars, bars_dir, symbol, bars_first, through)
         parity[symbol] = daily_parity(daily[symbol], bars)
         profiles = lv2.daily_profiles(bars)  # volume profiles per UTC day, from the 1m bars (2024+)
         published = sorted(inputs["mx"][symbol])
         metrics = (_quiet(mx.load_symbol_metrics_months, metrics_dir, symbol, published, published[0], through)
                    if published else None)
-        basis = _quiet(load_symbol_basis, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through)
+        basis = _quiet(load_symbol_basis, bars_dir, symbol, bars_first, through)
         ls_z = dv.hourly_ls_global_z(metrics)
-        # dk1 funding (2020..) serves every timeframe; the rd funding is only compared with it (manifest).
-        dk1_funding = _quiet(load_symbol_funding_range, daily_dir, symbol, ct.DAILY_WARMUP_MONTH, through)
+        # dk1 funding (2020..) serves every timeframe; the rd funding (2024-01.., rk- has none) is only compared
+        # with it (manifest).
         funding_parity[symbol] = dv.funding_parity(
-            dk1_funding, _quiet(load_symbol_funding, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through))
+            dk1_funding, _quiet(load_symbol_funding, bars_dir, symbol, lake.FIRST_MONTH, through))
         derivs = dv.DerivInputs(funding=dk1_funding, metrics=metrics, basis=basis, mark_close=bars.mark_close,
                                 ls_global_z=ls_z)
         contexts = {}
@@ -155,22 +207,16 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
                     symbol, minutes, bars, candles[minutes], variance, regime, through,
                     levels=loc.context_levels(minutes, candles[minutes], shared),
                     htf=loc.htf_sources(minutes, candles, days, weeks), history_days=days,
-                    profiles=profiles, derivs=derivs)
+                    profiles=profiles, derivs=derivs, include_ext=ext)
             del candles, shared
         daily_tfs = [m for m in timeframes if m in ct.DAILY_TIMEFRAMES]
         if daily_tfs:
             contexts.update(ct.daily_contexts(symbol, daily[symbol], regime, daily_tfs, through, profiles=profiles,
-                                            derivs=derivs))
+                                              derivs=derivs, include_ext=ext))
         del bars
-        for minutes in timeframes:
-            name = ct.file_name(symbol, minutes, through)
-            path = out_dir / name
-            with path.open("wb") as stream:
-                rows = ct.write_table(stream, ct.build_rows(contexts.pop(minutes)), counts=counts)
-            files.append({"name": name, "rows": rows, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
-        gc.collect()
+        _write_files(contexts, symbol, timeframes, through, out_dir, files, counts, ext)
     manifest = ct.build_manifest(files=files, counts=counts, inputs=inputs, through_month=through, parity=parity,
-                                 symbols=symbols, timeframes=timeframes, funding_parity=funding_parity,
+                                 symbols=symbols, timeframes=timeframes, funding_parity=funding_parity, include_ext=ext,
                                  code_commit=os.environ.get("GITHUB_SHA", "local"), created_utc=NOW_UTC)
     directory = ct.report_dir(manifest)
     root = checkout.path
@@ -189,11 +235,23 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
     return ct.public_lines(manifest)
 
 
+def _write_files(contexts: dict, symbol: str, timeframes, through: str, out_dir: Path, files: list,
+                 counts: dict, include_ext: bool = True) -> None:
+    for minutes in timeframes:
+        name = ct.file_name(symbol, minutes, through, include_ext)
+        path = out_dir / name
+        with path.open("wb") as stream:
+            rows = ct.write_table(stream, ct.build_rows(contexts.pop(minutes)), counts=counts)
+        files.append({"name": name, "rows": rows, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    gc.collect()
+
+
 def _symbols(text: str) -> list[str]:
+    """The six, plus DAILY_EXTRA_SYMBOLS (checked against the timeframes in parse_args)."""
     symbols = [item.strip() for item in text.split(",") if item.strip()]
-    if not symbols or len(set(symbols)) != len(symbols) or any(s not in lake.SYMBOLS for s in symbols):
-        raise PublicError(f"symbols must be distinct values of {','.join(lake.SYMBOLS)}")
-    return [symbol for symbol in lake.SYMBOLS if symbol in symbols]
+    if not symbols or len(set(symbols)) != len(symbols) or any(s not in lake.DAILY_UNIVERSE for s in symbols):
+        raise PublicError(f"symbols must be distinct values of {','.join(lake.DAILY_UNIVERSE)}")
+    return [symbol for symbol in lake.DAILY_UNIVERSE if symbol in symbols]
 
 
 def _timeframes(text: str) -> tuple:
@@ -212,9 +270,15 @@ def parse_args(argv=None):
     parser.add_argument("--through-month", default=ct.LAST_MONTH)
     parser.add_argument("--data-revision", type=int, default=1, help="rd revision of the 1-minute bars")
     parser.add_argument("--daily-revision", type=int, default=1, help="dk1 release revision")
+    parser.add_argument("--kline-revision", type=int, default=1, help="rk revision of the kline 1-minute bars")
+    parser.add_argument("--include-ext", action=argparse.BooleanOptionalAction, default=False,
+                        help="include the 2020-12..2023-12 kline extension (needs the rk- releases); default off")
     args = parser.parse_args(argv)
     args.symbols = _symbols(args.symbols)
     args.timeframes = _timeframes(args.timeframes)
+    extra = [symbol for symbol in args.symbols if symbol not in lake.SYMBOLS]
+    if extra and any(minutes in ct.INTRADAY_TIMEFRAMES for minutes in args.timeframes):
+        raise PublicError("DAILY_EXTRA_SYMBOLS are for the 1440/10080 timeframes only; the intraday tier is the six")
     try:
         ct.check_through_month(args.through_month)
     except ValueError as error:

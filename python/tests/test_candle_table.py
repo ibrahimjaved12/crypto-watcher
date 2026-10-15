@@ -110,7 +110,8 @@ class GeometryTests(unittest.TestCase):
         broken = series(15, START, candles.open, candles.high, candles.low, candles.close, valid=valid)
         row = rows_by_open(context(broken))[START + 20 * MIN15]
         self.assertEqual((row["status"], row["reasons"]), ("invalid", "invalid_candle"))
-        self.assertTrue(all(row[name] is None for name in COLUMNS[7:]))
+        self.assertEqual(row["bar_source"], "aggtrade")  # provenance is filled even for an invalid candle
+        self.assertTrue(all(row[name] is None for name in COLUMNS[8:]))
 
 
 class LookAheadTests(unittest.TestCase):
@@ -325,7 +326,7 @@ class WriterAndGuardTests(unittest.TestCase):
         other = ct.build_manifest(code_commit="b", created_utc="2026-10-16T00:00:00Z", **common)
         self.assertEqual(manifest["content_hash"], other["content_hash"])
         self.assertEqual(ct.report_dir(manifest), f"reports/candle-table/ct1__{manifest['content_hash'][:16]}")
-        self.assertEqual(files[0]["name"], "candles__BTCUSDT__15__2024-01_2025-12.csv.gz")
+        self.assertEqual(files[0]["name"], "candles__BTCUSDT__15__2021-01_2025-12.csv.gz")
         self.assertEqual(manifest["group_versions"]["geometry"], "geo-v1")
         self.assertEqual(manifest["group_versions"]["trend_vol"], "tv-v2")
         tampered = {**manifest, "through_month": "2025-11"}
@@ -344,7 +345,7 @@ class WriterAndGuardTests(unittest.TestCase):
         hidden = data_lake.month_bounds_ms("2026-01")[0]
         for minutes in ct.TABLE_TIMEFRAMES:
             self.assertTrue(all(end <= hidden for _, _, end in ct.table_segments(minutes)))
-        self.assertEqual(ct.table_segments(1440)[0][:2], ("development-ext", DAILY_START))
+        self.assertEqual(ct.table_segments(1440)[0][:2], ("development-ext", data_lake.month_bounds_ms("2020-01")[0]))
 
     def test_duplicate_columns_rejected(self):
         registry = ct.default_registry()
