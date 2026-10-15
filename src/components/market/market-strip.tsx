@@ -4,7 +4,7 @@ import type { Level } from "@/lib/labels";
 import { cn } from "@/lib/utils";
 import { formatAge, type FreshnessItem, type MarketStripView, type StatusTone } from "@/lib/market/assessment";
 
-const TONE_LEVEL: Record<StatusTone, Level> = { live: "ok", warming: "wait", stale: "problem", unavailable: "wait" };
+const TONE_LEVEL: Record<StatusTone, Level> = { live: "ok", warming: "wait", stale: "problem", offline: "problem", unavailable: "wait" };
 const time = (ms: number | null) => (ms === null ? "—" : new Date(ms).toLocaleTimeString());
 
 /** Market-wide line (#30 "Current assessment"): what the whole watched market is doing now, and how fresh that is. */
@@ -34,14 +34,13 @@ export function MarketStrip({
         ) : null}
         <span className="text-xs text-muted-foreground">{view.explanation}</span>
       </div>
+      <p className="mt-1 text-[11px] text-muted-foreground">Source: {view.source}.</p>
 
       {view.windows.length > 0 ? (
         <>
-          {!view.current ? (
+          {view.notLiveNote ? (
             <p className="mt-2 text-xs text-warn" role="status">
-              {view.status === "STALE"
-                ? `As of ${time(view.times.evaluationBoundary)} (${view.evaluationAge} ago), not live.`
-                : "Provisional while the engine warms up."}
+              {view.notLiveNote}
             </p>
           ) : null}
           <div className={cn("mt-3 grid gap-3 md:grid-cols-3", !view.current && "opacity-70")}>

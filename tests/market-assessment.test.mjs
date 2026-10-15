@@ -241,3 +241,98 @@ test("freshness: unreadable engine and unloaded TA are unavailable, not blank", 
 test("age formatting", () => {
   assert.deepEqual([a.formatAge(10_000), a.formatAge(5 * 60_000), a.formatAge(3 * 3_600_000), a.formatAge(72 * 3_600_000)], ["10 s", "5 min", "3 h", "3 days"]);
 });
+
+// ---------------------------------------------------------------- published copy, offline, summary, remembered choice (H1/H2)
+
+const movementState = await import(load("../src/lib/market/market-movement-state.ts"));
+
+test("the machine-offline window is the engine's stale window plus one publish interval (derived, not a market threshold)", () => {
+  assert.equal(movementState.MOVEMENT_ENGINE_STALE_AFTER_MS, 60_000);
+  assert.equal(movementState.MOVEMENT_PUBLISH_INTERVAL_MS, 30_000);
+  assert.equal(movementState.PUBLISHED_COPY_OFFLINE_AFTER_MS, 90_000);
+});
+
+test("an evaluation that aged past the engine's stale window is STALE even if the state was read as LIVE", () => {
+  const view = a.buildMarketStrip(state({ status: "LIVE", boundaryAgo: 5 * 60_000 }), NOW);
+  assert.deepEqual([view.status, view.tone, view.current], ["STALE", "stale", false]);
+  assert.match(view.notLiveNote, /not live/);
+});
+
+test("published copy: live copy, stale evaluation, machine offline and no row are four different states", () => {
+  const live = a.buildMarketStrip(state(), NOW, "published", NOW - 20_000);
+  assert.deepEqual([live.tone, live.current, live.machineOffline, live.notLiveNote], ["live", true, false, null]);
+  assert.match(live.source, /^Published copy from your machine, last reported 20 s ago$/);
+  const stale = a.buildMarketStrip(state({ status: "STALE", boundaryAgo: 5 * 60_000 }), NOW, "published", NOW - 20_000);
+  assert.deepEqual([stale.tone, stale.machineOffline, stale.current], ["stale", false, false]); // machine alive, engine stalled
+  const offline = a.buildMarketStrip(state(), NOW, "published", NOW - 3 * 60_000);
+  assert.deepEqual([offline.tone, offline.statusLabel, offline.machineOffline, offline.current], ["offline", "Machine offline", true, false]);
+  assert.match(offline.explanation, /has not reported for 3 min \(it reports every 30 s; offline after 90 s\)/);
+  assert.match(offline.notLiveNote, /not live: machine offline/);
+  assert.ok(offline.windows.length === 3 && offline.universe); // the old copy stays visible, captioned
+  const justInside = a.buildMarketStrip(state(), NOW, "published", NOW - 89_000);
+  assert.equal(justInside.machineOffline, false);
+  assert.equal(a.buildMarketStrip(state(), NOW, "published", NOW - 91_000).machineOffline, true);
+  const none = a.buildMarketStrip(empty, NOW, "published_none");
+  assert.deepEqual([none.tone, none.statusLabel, none.current], ["unavailable", "Unavailable", false]);
+  assert.match(none.explanation, /has not published a market state yet/);
+  assert.match(a.buildMarketStrip(state(), NOW, "ok").source, /Read live from the market engine's database/);
+});
+
+test("per-pair rows read a published copy and carry the not-live caption", () => {
+  const s = state();
+  assert.equal(a.buildPairMovement("BTCUSDT", s, "published").kind, "ok");
+  const captioned = a.buildPairMovement("BTCUSDT", s, "published", "As of 11:59:00 (1 min ago), not live");
+  assert.equal(captioned.notLive, "As of 11:59:00 (1 min ago), not live");
+  assert.equal(a.buildPairMovement("BTCUSDT", s, "published").notLive, null);
+  assert.match(a.buildPairMovement("BTCUSDT", empty, "published_none").reason, /has not published/);
+});
+
+test("freshness of a published copy names the copy and the offline machine", () => {
+  const fresh = a.buildFreshness({ state: state(), read: "published", publishedAt: NOW - 10_000, symbols: SYMBOLS, quotes: quotes(), ta: fullTa() }, NOW);
+  assert.equal(fresh[1].status, "fresh");
+  assert.match(fresh[1].detail, /published copy, machine reported 10 s ago/);
+  const offline = a.buildFreshness({ state: state(), read: "published", publishedAt: NOW - 5 * 60_000, symbols: SYMBOLS, quotes: quotes(), ta: fullTa() }, NOW);
+  assert.equal(offline[1].status, "stale");
+  assert.match(offline[1].detail, /machine OFFLINE \(last reported 5 min ago\)/);
+  const none = a.buildFreshness({ state: empty, read: "published_none", symbols: SYMBOLS, quotes: quotes(), ta: fullTa() }, NOW);
+  assert.deepEqual([none[0].status, none[1].status], ["unavailable", "unavailable"]);
+  assert.match(none[1].detail, /No published copy yet/);
+});
+
+test("collapsed summary line: movement label, 1h TA lean and snapshot age, in every state", () => {
+  const ok = a.buildPairMovement("BTCUSDT", state());
+  const frames = (row, load) => [15, 60, 240].map((tf) => a.buildTaFrame(tf === 60 ? row : undefined, tf, NOW, tf === 60 ? load : "loaded"));
+  assert.equal(a.summarizePair(ok, frames(taRow(60, 90 * 60_000)), NOW), "15m move: unusually sharp drop · 1h TA: bullish lean · snapshot 29 min old");
+  assert.equal(a.summarizePair(ok, frames(taRow(60, 4 * 3_600_000)), NOW), "15m move: unusually sharp drop · 1h TA: bullish lean (stale) · snapshot 3 h old"); // stale
+  assert.equal(a.summarizePair(ok, frames(undefined, "loaded"), NOW), "15m move: unusually sharp drop · 1h TA: no snapshot"); // missing
+  assert.equal(a.summarizePair(ok, frames(undefined, "failed"), NOW), "15m move: unusually sharp drop · 1h TA: could not load"); // failed
+  assert.equal(a.summarizePair(ok, frames(undefined, "not_loaded"), NOW), "15m move: unusually sharp drop · 1h TA: not loaded"); // not loaded
+  assert.equal(a.summarizePair(ok, [], NOW), "15m move: unusually sharp drop · 1h TA: no snapshot");
+  assert.equal(a.summarizePair(a.buildPairMovement("DOGEUSDT", state({ excluded: ["DOGEUSDT"] })), [], NOW), "15m move: left out of the engine · 1h TA: no snapshot");
+  assert.equal(a.summarizePair(a.buildPairMovement("BTCUSDT", empty, "store_disabled"), [], NOW), "15m move: no engine data · 1h TA: no snapshot");
+  const notLive = a.buildPairMovement("BTCUSDT", state(), "published", "As of 11:00, not live");
+  assert.match(a.summarizePair(notLive, [], NOW), /^15m move: unusually sharp drop \(not live\)/);
+  const noWindow = { ...ok, windows: ok.windows.map((w) => (w.minutes === 15 ? { ...w, available: false } : w)) };
+  assert.match(a.summarizePair(noWindow, [], NOW), /^15m move: unavailable/);
+});
+
+test("the remembered collapse choice survives unavailable or throwing storage", () => {
+  const store = new Map();
+  const ok = () => ({ getItem: (k) => store.get(k) ?? null, setItem: (k, v) => void store.set(k, v) });
+  assert.equal(a.readStoredFlag(ok, "k", false), false); // nothing stored: the fallback (expanded)
+  assert.equal(a.writeStoredFlag(ok, "k", true), true);
+  assert.equal(a.readStoredFlag(ok, "k", false), true);
+  assert.equal(a.writeStoredFlag(ok, "k", false), true);
+  assert.equal(a.readStoredFlag(ok, "k", true), false);
+  store.set("k", "garbage");
+  assert.equal(a.readStoredFlag(ok, "k", true), true);
+  const throwing = () => ({ getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("quota"); } });
+  assert.equal(a.readStoredFlag(throwing, "k", true), true);
+  assert.equal(a.writeStoredFlag(throwing, "k", true), false);
+  const blocked = () => { throw new Error("SecurityError"); }; // touching window.localStorage itself throws
+  assert.equal(a.readStoredFlag(blocked, "k", false), false);
+  assert.equal(a.writeStoredFlag(blocked, "k", true), false);
+  assert.equal(a.readStoredFlag(() => null, "k", false), false);
+  assert.equal(a.writeStoredFlag(() => undefined, "k", true), false);
+  assert.match(a.PAIR_COLLAPSED_KEY, /pair-assessment-collapsed/);
+});

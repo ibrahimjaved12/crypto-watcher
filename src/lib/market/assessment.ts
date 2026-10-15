@@ -8,6 +8,8 @@ import type { ClassifierMetric, MarketClassificationWindow } from "./market-stat
 import {
   MINIMUM_MARKET_UNIVERSE_SIZE,
   MOVEMENT_ENGINE_STALE_AFTER_MS,
+  MOVEMENT_PUBLISH_INTERVAL_MS,
+  PUBLISHED_COPY_OFFLINE_AFTER_MS,
   type MarketMovementCurrentState,
   type MovementEngineStatus,
 } from "./market-movement-state";
@@ -23,16 +25,24 @@ export const TA_ASSESSMENT_FRAMES = [15, 60, 240] as const;
  */
 export const TA_RUN_ALLOWANCE_MS = 10 * 60_000;
 
-/** Whether the page could read the engine state at all; separate from the engine's own status. */
-export type MovementReadStatus = "ok" | "store_disabled" | "read_failed" | "not_loaded";
+/**
+ * Where the engine state came from, or why it is missing; separate from the engine's own status.
+ * ok: read from the operational store; published: the machine's published copy in the hosted database;
+ * published_none: no copy has been published yet.
+ */
+export type MovementReadStatus =
+  | "ok" | "published" | "published_none" | "store_disabled" | "read_failed" | "not_loaded";
 
-export type StatusTone = "live" | "warming" | "stale" | "unavailable";
+export type StatusTone = "live" | "warming" | "stale" | "offline" | "unavailable";
+
+/** The state was read (directly or as a published copy), so its numbers can be mapped. */
+const readable = (read: MovementReadStatus) => read === "ok" || read === "published";
 
 // ---------------------------------------------------------------- shared helpers
 
 export function formatAge(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
-  if (seconds < 90) return `${seconds} s`;
+  if (seconds <= 90) return `${seconds} s`;
   const minutes = Math.round(seconds / 60);
   if (minutes < 90) return `${minutes} min`;
   const hours = Math.round(minutes / 60);
@@ -91,7 +101,14 @@ export type WindowSummary = {
 };
 
 export type MarketStripView = {
+  /** The engine's status, recomputed against `now` (a LIVE state older than the engine's stale window is STALE). */
   status: MovementEngineStatus;
+  /** The machine stopped reporting: the published copy is older than PUBLISHED_COPY_OFFLINE_AFTER_MS. */
+  machineOffline: boolean;
+  /** Where the numbers come from, in plain words (always filled). */
+  source: string;
+  /** "As of hh:mm, not live" for everything that is not LIVE and current; null when the numbers are current. */
+  notLiveNote: string | null;
   tone: StatusTone;
   statusLabel: string;
   /** One sentence on what the status means for the numbers below; never empty. */
@@ -168,6 +185,9 @@ function windowSummary(window: MarketClassificationWindow, thresholds: ReturnTyp
 /** The unavailable reason, in plain language, for a state that is UNAVAILABLE. */
 function unavailableReason(state: MarketMovementCurrentState, read: MovementReadStatus): string {
   if (read === "not_loaded") return "Not loaded yet. Press Refresh if automatic refresh is paused.";
+  if (read === "published_none") {
+    return "Your machine has not published a market state yet. Start the worker host with publishing on (see docs/worker-host.md); per-pair prices and technical analysis below are unaffected.";
+  }
   if (read === "store_disabled") {
     return "This site cannot reach the market engine: it runs on your machine's operational database, which this deployment does not read. Per-pair prices and technical analysis below are unaffected.";
   }
@@ -183,17 +203,36 @@ function unavailableReason(state: MarketMovementCurrentState, read: MovementRead
     : "The engine could not form a market-wide state from the pairs it has.";
 }
 
+const clock = (ms: number) => new Date(ms).toLocaleTimeString();
+
+/**
+ * @param read where the state came from (see MovementReadStatus)
+ * @param publishedAt for a published copy: when the machine last reported (publish or heartbeat), in ms
+ */
 export function buildMarketStrip(
   state: MarketMovementCurrentState,
   now: number,
   read: MovementReadStatus = "ok",
+  publishedAt: number | null = null,
 ): MarketStripView {
   const boundary = state.timestamps?.evaluationBoundaryTime ?? null;
-  // The status is the engine's; a read failure or a disabled store always shows as unavailable.
-  const status: MovementEngineStatus = read === "ok" ? state.status : "UNAVAILABLE";
+  const published = read === "published";
+  const machineOffline = published && publishedAt !== null && now - publishedAt > PUBLISHED_COPY_OFFLINE_AFTER_MS;
+  // The engine's own status, recomputed against `now`: a state that was LIVE when read but whose evaluation has
+  // aged past the engine's stale window is STALE, so an old render or copy is never shown as live.
+  const engineStatus: MovementEngineStatus =
+    state.status === "LIVE" && boundary !== null && now - boundary > MOVEMENT_ENGINE_STALE_AFTER_MS ? "STALE" : state.status;
+  const status: MovementEngineStatus = readable(read) ? engineStatus : "UNAVAILABLE";
   const age = boundary === null ? null : formatAge(now - boundary);
+  const source = published
+    ? `Published copy from your machine${publishedAt === null ? "" : `, last reported ${formatAge(now - publishedAt)} ago`}`
+    : read === "ok"
+      ? "Read live from the market engine's database"
+      : "No data source";
   const base = {
     status,
+    machineOffline,
+    source,
     times: {
       evaluationBoundary: boundary,
       lastReceivedAt: state.timestamps?.lastReceivedAt ?? null,
@@ -220,22 +259,29 @@ export function buildMarketStrip(
   const direction = primary ? { label: DIRECTION_LABEL[primary.directionState] ?? humanizeToken(primary.directionState), state: primary.directionState } : null;
   const paceValue = primary ? classifierValue(primary.evidence.pace) : null;
   const pace = paceValue ? (PACE_LABEL[paceValue] ?? humanizeToken(paceValue).toLowerCase()) : null;
+  const asOf = boundary === null ? "" : `As of ${clock(boundary)} (${age} ago)`;
 
   if (status === "UNAVAILABLE") {
-    return { ...base, tone: "unavailable", statusLabel: "Unavailable", current: false, explanation: unavailableReason(state, read),
-      direction: null, pace: null, windows: [], universe };
+    return { ...base, tone: "unavailable", statusLabel: "Unavailable", current: false, notLiveNote: null,
+      explanation: unavailableReason(state, read), direction: null, pace: null, windows: [], universe };
+  }
+  if (machineOffline) {
+    return { ...base, tone: "offline", statusLabel: "Machine offline", current: false,
+      notLiveNote: `${asOf}, not live: machine offline`,
+      explanation: `Your machine has not reported for ${formatAge(now - publishedAt!)} (it reports every ${formatAge(MOVEMENT_PUBLISH_INTERVAL_MS)}; offline after ${formatAge(PUBLISHED_COPY_OFFLINE_AFTER_MS)}). This is the last published copy, not live.`,
+      direction, pace, windows, universe };
   }
   if (status === "STALE") {
-    return { ...base, tone: "stale", statusLabel: "Stale", current: false,
+    return { ...base, tone: "stale", statusLabel: "Stale", current: false, notLiveNote: `${asOf}, not live`,
       explanation: `Not live: the last evaluation is ${age} old (older than ${formatAge(MOVEMENT_ENGINE_STALE_AFTER_MS)}). The numbers below are as of then.`,
       direction, pace, windows, universe };
   }
   if (status === "WARMING") {
-    return { ...base, tone: "warming", statusLabel: "Warming up", current: false,
+    return { ...base, tone: "warming", statusLabel: "Warming up", current: false, notLiveNote: "Provisional while the engine warms up",
       explanation: "The engine is collecting live 5-second history; the market-wide state appears once there is enough.",
       direction, pace, windows, universe };
   }
-  return { ...base, tone: "live", statusLabel: "Live", current: true,
+  return { ...base, tone: "live", statusLabel: "Live", current: true, notLiveNote: null,
     explanation: `Evaluated ${age} ago on ${universe?.included.length ?? 0} of ${universe?.configured.length ?? 0} watched pairs.`,
     direction, pace, windows, universe };
 }
@@ -265,6 +311,8 @@ export type PairMovementView =
       outlier: { direction: "rising" | "falling"; window: number; text: string } | null;
       /** Some window excludes the pair (its reasons are named), though others may show. */
       partialReasons: string[];
+      /** "As of hh:mm, not live" when the engine state is stale, warming or a copy of an offline machine; else null. */
+      notLive: string | null;
     };
 
 function zLabel(z: number, thresholds: ReturnType<typeof engineThresholds>, material: boolean): { label: string; tone: PairWindowView["tone"] } {
@@ -276,8 +324,13 @@ function zLabel(z: number, thresholds: ReturnType<typeof engineThresholds>, mate
   return { label: z > 0 ? "a little stronger than usual" : "a little weaker than usual", tone: direction };
 }
 
-export function buildPairMovement(symbol: string, state: MarketMovementCurrentState, read: MovementReadStatus = "ok"): PairMovementView {
-  if (read !== "ok" || !state.available) return { kind: "unavailable", reason: unavailableReason(state, read) };
+export function buildPairMovement(
+  symbol: string,
+  state: MarketMovementCurrentState,
+  read: MovementReadStatus = "ok",
+  notLive: string | null = null,
+): PairMovementView {
+  if (!readable(read) || !state.available) return { kind: "unavailable", reason: unavailableReason(state, read) };
   if (state.universe && !state.universe.configuredSymbols.includes(symbol)) {
     return { kind: "unavailable", reason: "Not in the engine's market universe yet; it is synced from your watchlist every minute or so." };
   }
@@ -322,7 +375,7 @@ export function buildPairMovement(symbol: string, state: MarketMovementCurrentSt
   if (excluded && windows.every((w) => !w.available)) {
     return { kind: "excluded", reasons: excluded.reasons.map((r) => humanizeToken(r)) };
   }
-  return { kind: "ok", windows, rvol, rvolReason, outlier, partialReasons: [...partial] };
+  return { kind: "ok", windows, rvol, rvolReason, outlier, partialReasons: [...partial], notLive };
 }
 
 // ---------------------------------------------------------------- completed-candle TA per timeframe
@@ -433,19 +486,21 @@ export type FreshnessInput = {
   quotes: ReadonlyArray<{ symbol: string; ok: boolean; stale: boolean; lastCandleAt: number | null }>;
   /** Latest TA rows (any order); undefined while not loaded. */
   ta: readonly TaRowInput[] | undefined;
+  /** For a published copy: when the machine last reported (ms). */
+  publishedAt?: number | null;
 };
 
 /** Four separate source lines. A fresh page render never hides one of them being old. */
 export function buildFreshness(input: FreshnessInput, now: number): FreshnessItem[] {
-  const { state, read, symbols, quotes, ta } = input;
+  const { state, read, symbols, quotes, ta, publishedAt = null } = input;
   const items: FreshnessItem[] = [];
   const engineLimit = formatAge(MOVEMENT_ENGINE_STALE_AFTER_MS);
 
   // Market stream: the engine's per-symbol source-time evidence at its last evaluation.
   const primary = state.context.find((w) => w.windowMinutes === 5);
-  if (read !== "ok" || !primary) {
+  if (!readable(read) || !primary) {
     items.push({ id: "stream", label: "Market stream", status: "unavailable",
-      detail: read === "store_disabled" ? "Not readable from this site." : "No stream evidence from the engine.", asOf: null });
+      detail: read === "store_disabled" ? "Not readable from this site." : read === "published_none" ? "No published copy yet." : "No stream evidence from the engine.", asOf: null });
   } else {
     const evidence = primary.sourceTimeEvidence ?? [];
     const watched = symbols.length ? symbols : evidence.map((e) => e.symbol);
@@ -465,13 +520,17 @@ export function buildFreshness(input: FreshnessInput, now: number): FreshnessIte
 
   // Movement evaluation.
   const boundary = state.timestamps?.evaluationBoundaryTime ?? null;
-  if (read !== "ok" || boundary === null) {
+  if (!readable(read) || boundary === null) {
     items.push({ id: "movement", label: "Movement evaluation", status: "unavailable",
-      detail: read === "store_disabled" ? "Not readable from this site." : "No evaluation saved yet.", asOf: null });
+      detail: read === "store_disabled" ? "Not readable from this site." : read === "published_none" ? "No published copy yet." : "No evaluation saved yet.", asOf: null });
   } else {
     const old = now - boundary > MOVEMENT_ENGINE_STALE_AFTER_MS;
-    items.push({ id: "movement", label: "Movement evaluation", asOf: boundary, status: old ? "stale" : "fresh",
-      detail: `Last evaluation ${formatAge(now - boundary)} ago (stale after ${engineLimit}); engine status ${state.status.toLowerCase()}.` });
+    const offline = read === "published" && publishedAt !== null && now - publishedAt > PUBLISHED_COPY_OFFLINE_AFTER_MS;
+    const copy = read === "published"
+      ? `; published copy, machine ${offline ? `OFFLINE (last reported ${formatAge(now - (publishedAt ?? now))} ago)` : `reported ${formatAge(now - (publishedAt ?? now))} ago`}`
+      : "";
+    items.push({ id: "movement", label: "Movement evaluation", asOf: boundary, status: old || offline ? "stale" : "fresh",
+      detail: `Last evaluation ${formatAge(now - boundary)} ago (stale after ${engineLimit}); engine status ${(old && state.status === "LIVE" ? "STALE" : state.status).toLowerCase()}${copy}.` });
   }
 
   // Completed candles behind the price cards.
@@ -515,4 +574,59 @@ export function buildFreshness(input: FreshnessInput, now: number): FreshnessIte
       detail: problems.length ? problems.join("; ") : "Every pair has a current snapshot for 15m, 1h and 4h." });
   }
   return items;
+}
+
+// ---------------------------------------------------------------- collapsed per-pair summary and remembered choice
+
+/**
+ * The one line shown when a pair's assessment is collapsed: the 15m movement label, the 1h TA lean and the
+ * snapshot age. Every state is worded (stale, missing, failed, not loaded, unavailable); nothing is left out.
+ */
+export function summarizePair(movement: PairMovementView, ta: readonly TaFrameView[], now: number): string {
+  let move: string;
+  if (movement.kind === "unavailable") move = "15m move: no engine data";
+  else if (movement.kind === "excluded") move = "15m move: left out of the engine";
+  else {
+    const w = movement.windows.find((x) => x.minutes === 15);
+    move = w && w.available ? `15m move: ${w.label}` : "15m move: unavailable";
+    if (movement.notLive) move += " (not live)";
+  }
+  const frame = ta.find((f) => f.timeframe === 60);
+  let lean: string;
+  let snapshot = "";
+  if (!frame || frame.status === "missing") lean = "1h TA: no snapshot";
+  else if (frame.status === "error") lean = "1h TA: could not load";
+  else if (frame.status === "not_loaded") lean = "1h TA: not loaded";
+  else {
+    lean = `1h TA: ${frame.leanText.toLowerCase()}${frame.status === "stale" ? " (stale)" : ""}`;
+    const at = frame.savedAt ?? frame.candleClosedAt;
+    if (at !== null) snapshot = ` · snapshot ${formatAge(Math.max(0, now - at))} old`;
+  }
+  return `${move} · ${lean}${snapshot}`;
+}
+
+export type KeyValueStorage = { getItem(key: string): string | null; setItem(key: string, value: string): void };
+/** The choice is per viewer (this browser), one flag for every pair card. */
+export const PAIR_COLLAPSED_KEY = "crypto-watch:pair-assessment-collapsed";
+
+/** Reads a remembered boolean. `getStorage` is a thunk because merely touching localStorage can throw. */
+export function readStoredFlag(getStorage: () => KeyValueStorage | null | undefined, key: string, fallback: boolean): boolean {
+  try {
+    const value = getStorage()?.getItem(key);
+    return value === "1" ? true : value === "0" ? false : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Remembers a boolean; returns false (and does nothing else) when storage is unavailable. */
+export function writeStoredFlag(getStorage: () => KeyValueStorage | null | undefined, key: string, value: boolean): boolean {
+  try {
+    const storage = getStorage();
+    if (!storage) return false;
+    storage.setItem(key, value ? "1" : "0");
+    return true;
+  } catch {
+    return false;
+  }
 }

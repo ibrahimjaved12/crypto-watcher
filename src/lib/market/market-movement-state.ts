@@ -32,6 +32,16 @@ export const MINIMUM_MARKET_UNIVERSE_SIZE = 5;
  */
 export const MOVEMENT_ENGINE_STALE_AFTER_MS = 60_000;
 
+/** The machine publishes the persisted state to the hosted copy at most this often (the engine writes every 30 s). */
+export const MOVEMENT_PUBLISH_INTERVAL_MS = 30_000;
+
+/**
+ * A published copy whose `published_at` is older than this means the machine stopped reporting ("machine
+ * offline"). It is derived, not a market threshold: the engine's own persisted-state staleness window
+ * (60 s) plus one publish interval (30 s), so a healthy machine never trips it.
+ */
+export const PUBLISHED_COPY_OFFLINE_AFTER_MS = MOVEMENT_ENGINE_STALE_AFTER_MS + MOVEMENT_PUBLISH_INTERVAL_MS;
+
 export type MovementEngineStatus = "LIVE" | "WARMING" | "STALE" | "UNAVAILABLE";
 
 /** Structural mirror of the collector health status used as a movement source gate. */
@@ -183,7 +193,7 @@ export function deriveMovementEngineStatus(input: MovementEngineStatusInput): Mo
   return "LIVE";
 }
 
-type PersistedCurrentLike = {
+export type PersistedCurrentLike = {
   universeId: string;
   universeVersion: string;
   evaluationBoundaryTime: number;

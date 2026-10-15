@@ -150,7 +150,8 @@ function Dashboard() {
   const movementState = movement.data ?? toMarketMovementCurrentState(null, { now });
   const taRows = taQueries.flatMap((query) => query.data ?? []);
   const taLoaded = taQueries.some((query) => query.data !== undefined);
-  const strip = buildMarketStrip(movementState, now, movementRead);
+  const publishedAt = movement.data?.publishedAt ?? null;
+  const strip = buildMarketStrip(movementState, now, movementRead, publishedAt);
   const freshness = buildFreshness(
     {
       state: movementState,
@@ -158,6 +159,7 @@ function Dashboard() {
       symbols,
       quotes: (market.data?.quotes ?? []).map((q) => ({ symbol: q.symbol, ok: q.ok, stale: q.stale, lastCandleAt: q.lastCandleAt })),
       ta: taLoaded ? taRows : undefined,
+      publishedAt,
     },
     now,
   );
@@ -355,7 +357,9 @@ function Dashboard() {
                   quote={quote}
                   assessment={
                     <PairAssessment
-                      movement={buildPairMovement(symbol, movementState, movementRead)}
+                      symbol={symbol}
+                      now={now}
+                      movement={buildPairMovement(symbol, movementState, movementRead, strip.notLiveNote)}
                       ta={TA_ASSESSMENT_FRAMES.map((timeframe, index) =>
                         buildTaFrame(
                           latestTa.get(`${symbol}|${timeframe}`),
