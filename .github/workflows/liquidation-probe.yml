@@ -6,7 +6,9 @@ run-name: "Liquidation archive probe ${{ inputs.symbols }}"
 # three zips per symbol (periods up to 2025-12 only) and prints a table of findings: key counts,
 # first/last/missing periods, compressed bytes, the observed header, row counts, timestamps and counts
 # of distinct values of low-cardinality text columns. It publishes and stores nothing (no release, no
-# artifact, no secrets); the data is public market data and no row values are printed.
+# artifact, no secrets); the data is public market data and no row values are printed. The summary
+# starts with a verdict (archive empty vs probe could not list), backed by the raw first listing page
+# of every family/symbol and three control listings (um/daily folders, BTCUSDT 1d klines, COIN-M).
 on:
   workflow_dispatch:
     inputs:
