@@ -295,6 +295,121 @@ the manifest counts them per symbol and timeframe in `oi_missing_counts`):
 
 Real liquidation prints join in a later PR (#349). Neither group changes `status`.
 
+## Doji event study
+
+A pre-registered screen on the candle table (`patterns/study_cells.py`, `patterns/pattern_study.py`,
+`.github/workflows/pattern-study.yml`), in the style of `benchmark/screen.py`. It is descriptive
+only: never a PASS, no trades, no labels, no ledger entry. The report states how many hypotheses
+were examined. The cell definitions (`doji-cells-v1`, event `doji-geo-v2`) are frozen once results
+exist; any change is a new version.
+
+### Definitions
+
+- **Event E (doji-geo-v2):** status ok, `body_ratio <= 0.10`, `range > 0`, `range_atr >= 0.5`.
+- **Controls:** the same context, the same size class (`range_atr >= 0.5`) and another shape
+  (`body_ratio > 0.10`).
+- **Population:** segment rows with status ok and `fwd_ok_1`.
+- **Direction:** `s` is fixed by the cell rule, never by the outcome.
+
+| cell | context | direction |
+|---|---|---|
+| A | all candles | unsigned |
+| C1 | `adx_prev >= 20`, `trend_dir != 0`, `|extension_prev_atr| < 1.5`, no level touch, nearest level > 0.5 ATR | `trend_dir` |
+| C2 | `adx_prev >= 20`, `extension_prev_atr * trend_dir >= 2`, the trend-side extreme at or beyond the prior-20 extreme | `-trend_dir` |
+| C3 | exactly one side swept (`sweep_both` false) | `sweep_dir` |
+| C4 | any level touched | `-touch_approach_side` |
+| C5 | `squeeze_on_prev` | unsigned |
+| C6 | `adx_prev < 20`, `trend_dir != 0` (negative control, expected null) | `trend_dir` |
+| C7 | `flush_dir != 0` | `-flush_dir` |
+| C8 | relative volume >= 2 (intraday: `rel_volume_slot`; daily/weekly: `rel_volume_prior20`) and `|ret3_prev_sigma| >= 2` | `-sign(ret3_prev_sigma)` |
+
+The C2 prior-20 extreme is the sweep group's prior20 reference: the max high / min low of
+candles i-20..i-1, all valid. It is rebuilt from consecutive table rows of the same symbol and
+timeframe.
+
+**Outcomes (m = 1).**
+
+- Signed cells: `y = s * ret_1_sigma`. Unsigned cells: `y = ln_range1_sigma`.
+- Hit = `s * ret_1_bp > 0`. Ties (`ret_1_bp == 0`) are excluded from hit rates and counted.
+
+### Estimands
+
+**Primary (K = 9: A, C1..C8).** Pooled over the six symbols and the intraday timeframes:
+
+    y = alpha_{symbol,tf} + gamma_hour + beta * D + delta' X + e
+
+- `D` is E within the cell's context.
+- The sample is the context rows with `range_atr >= 0.5`.
+- `X = [ln range_atr, ln rel_volume_prior20, atr_pct_prev, s * ret3_prev_sigma (signed cells),
+  |ret3_prev_sigma|]`. Rows with a missing control are excluded and counted.
+- Covariance is clustered by the UTC day of the candle open.
+- p-values are normal approximations on the clustered t, Holm-adjusted over the 9 tests.
+- The robustness estimator is a stratified difference in means on the same sample.
+  - Strata: symbol, tf, 6-hour bucket, `atr_pct_prev` tercile, `range_atr` bin
+    [0.5, 0.75, 1, 1.5, 2.5, inf) and `rel_volume_prior20` tercile (sample quantiles).
+  - Weights are member counts; a stratum needs at least one member and one control.
+  - The CI comes from a UTC-day cluster bootstrap.
+
+**Reported per cell:**
+
+- Counts: members, controls and days, plus exclusions.
+- Mean y for members and for controls.
+- Beta, its clustered SE and 95% CI, in sigma and in bp (beta × the members' mean `sigma_tf`
+  in bp).
+- The stratified difference with its CI.
+- The hit-rate difference, with a Wilson interval for each rate.
+- The Holm p-value.
+- The minimum detectable effect, `2.8 × SE`.
+- The cost hurdle: an 11 bp round trip, i.e. `11 / mean sigma_tf bp` in sigma, and
+  `effect_bp - hurdle_bp`.
+- A flag when members < 100.
+
+Unsigned cells have no bp, hit-rate or cost line.
+
+**Descriptive (labelled, untested):**
+
+- Per-timeframe and per-symbol tables.
+- m = 2 and 4 (`s * ret_m_sigma` and the side's MFE / MAE).
+- Sensitivity runs with `body_ratio <= 0.05` and with `range_atr >= 1.0`.
+- A subtype split.
+- Dose-response within E for cell A: quintiles of `body_ratio`, `range_atr`,
+  `rel_volume_prior20` and `nearest_level_dist_atr`, with Spearman(quintile, mean) and a
+  day-bootstrap CI.
+- Daily and weekly families run separately per timeframe, pooled over symbols, with symbol fixed
+  effects and no hour effects. A cell is "not tested" when it has fewer than 30 members. A
+  development run uses the `development-ext` daily rows.
+
+### Runs and output
+
+- **Inputs:** `segment` (development | validation; hidden is refused by the guard) and
+  `table_report` (a candle-table report hash or path in the private repo).
+- **Replication:** an optional `reference_report` (a development report) adds a same-sign
+  replication column to a validation run.
+- **Output:** `reports/pattern-study/doji-<segment>__<hash16>/` with `report.md`, `cells.csv` and
+  `summary.json`. The hash leaves out the commit and creation time, so a run with identical inputs
+  finds its directory and skips.
+- **Public log:** counts, the number of hypotheses examined and the private path; never an effect
+  size.
+
+### What a result means
+
+**What it can show.** A cell with a Holm-significant beta says this: in that context, doji
+candles are followed by a different next-candle outcome than same-size non-doji candles, after the
+listed controls.
+
+**What it cannot show.**
+
+- It is not a profitability verdict. That needs stop-aware, cost-aware trade results
+  (CLAUDE.md section 2).
+- It does not prove the doji itself is causal, because the controls are observational.
+- A development result must replicate with the same sign on validation before anything is built
+  on it.
+- An effect below the hurdle (`effect_bp - hurdle_bp < 0`) is not tradable on its own, even if
+  it is significant.
+
+A null result with an MDE well below the hurdle is informative: within that context, doji shape
+carries no tradable edge at this horizon.
+
 ## Adding a group (location, derivatives, advanced levels, ...)
 
 1. Write `build(ctx, i) -> dict` in `candle_table.py` or a sibling module. It reads only
