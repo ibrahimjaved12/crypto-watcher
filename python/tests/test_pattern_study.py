@@ -110,10 +110,23 @@ class CellTests(unittest.TestCase):
         self.assertEqual(sc.session_labels(ms[:3], False).tolist(), ["all"] * 3)
         self.assertEqual(sc.session_labels([np.nan], True).tolist(), [""])
 
+    def test_dose_response_uses_row_level_spearman(self):
+        x = np.arange(60.0)
+        rho = ps.row_spearman(x, x ** 3, np.repeat(np.arange(12), 5), B=50)
+        self.assertAlmostEqual(rho["rho"], 1.0)
+        self.assertEqual(rho["n"], 60)
+        self.assertTrue(np.isnan(ps.row_spearman([1.0, 2.0], [1.0, 2.0], [0, 0])["rho"]))
+        sample = {"D": np.ones(60), "y": -x, "day": np.repeat(np.arange(12), 5), "rows": {"body_ratio": x}}
+        out = ps.dose_response(sample, "body_ratio", B=50)
+        self.assertAlmostEqual(out["spearman_row"], -1.0)
+        self.assertNotIn("spearman", out)  # the 5-point Spearman over bucket means is gone
+        self.assertEqual(len(out["bucket_means"]), ps.DOSE_BUCKETS)
+
     def test_degenerate_touch_thresholds(self):
-        self.assertEqual((sc.TOUCH_SHARE_MAX, sc.TOUCH_SHARE_MIN), (0.90, 0.01))
-        self.assertFalse(sc.degenerate_touch(0.90))
-        self.assertTrue(sc.degenerate_touch(0.9000001))
+        self.assertEqual((sc.TOUCH_SHARE_MAX, sc.TOUCH_SHARE_MIN), (0.80, 0.01))
+        self.assertFalse(sc.degenerate_touch(0.80))
+        self.assertTrue(sc.degenerate_touch(0.8000001))
+        self.assertTrue(sc.degenerate_touch(0.96))  # any_touch on 96-99.8 % of rows in the first build
         self.assertFalse(sc.degenerate_touch(0.01))
         self.assertTrue(sc.degenerate_touch(0.0099))
         self.assertFalse(sc.degenerate_touch(0.5))
@@ -320,7 +333,7 @@ class DiagnosticsTests(unittest.TestCase):
                     touch_round=[1.0] * 190 + [0.0] * 10,           # 95 %: above the upper limit
                     touch_prev_day=[1.0] + [0.0] * 199,             # 0.5 %: below the lower limit
                     touch_prev_week=[1.0] * 100 + [0.0] * 100,      # 50 %: interpretable
-                    any_touch=[1.0] * 180 + [0.0] * 20)             # 90 %: not above 90 %
+                    any_touch=[1.0] * 160 + [0.0] * 40)             # 80 %: not above 80 %
         out = ps.level_diagnostics({15: frame}, "intraday")["by_tf"]["15"]
         self.assertEqual(out["round"]["evaluated"], n)
         self.assertAlmostEqual(out["round"]["touch_share"], 0.95)

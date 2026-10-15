@@ -400,8 +400,31 @@ def subtypes(sample: dict) -> dict:
     return out
 
 
+def row_spearman(x, y, day, B: int = BOOTSTRAP_B, seed: int = BOOTSTRAP_SEED) -> dict:
+    """Row-level Spearman rho of (x, y) with a day-cluster bootstrap 95% interval (whole UTC days resampled)."""
+    x, y, day = np.asarray(x, float), np.asarray(y, float), np.asarray(day)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y, day = x[ok], y[ok], day[ok]
+    if x.size < 3:
+        return {"n": int(x.size), "rho": float("nan"), "ci95": [float("nan")] * 2}
+    rho = spearman_points(x, y)
+    if not B:
+        return {"n": int(x.size), "rho": rho, "ci95": [float("nan")] * 2}
+    _, cluster = np.unique(day, return_inverse=True)
+    groups = int(cluster.max()) + 1
+    order = np.argsort(cluster, kind="stable")
+    starts = np.searchsorted(cluster[order], np.arange(groups + 1))
+    members = [order[starts[g]:starts[g + 1]] for g in range(groups)]
+    rhos = []
+    for row in cluster_weights(groups, B, seed).astype(np.int64):
+        take = np.concatenate([np.repeat(members[g], row[g]) for g in np.flatnonzero(row)])
+        rhos.append(spearman_points(x[take], y[take]))
+    return {"n": int(x.size), "rho": rho, "ci95": _interval(rhos)}
+
+
 def dose_response(sample: dict, variable: str, B: int = BOOTSTRAP_B, seed: int = BOOTSTRAP_SEED) -> dict:
-    """Within members: quintile means of y on ``variable`` and Spearman(quintile, mean), day-bootstrap CI."""
+    """Within members: quintile means of y on ``variable`` (descriptive) and the ROW-level Spearman of (variable,
+    y) with a day-cluster bootstrap CI. A Spearman over 5 bucket means had only 5 points and is not reported."""
     D = sample["D"].astype(bool)
     x, y = sample["rows"][variable][D], sample["y"][D]
     ok = np.isfinite(x)
@@ -417,13 +440,11 @@ def dose_response(sample: dict, variable: str, B: int = BOOTSTRAP_B, seed: int =
     np.add.at(counts, (bucket, cluster), 1)
     with np.errstate(divide="ignore", invalid="ignore"):
         means = sums.sum(axis=1) / counts.sum(axis=1)
-        weights = cluster_weights(groups, B, seed)
-        drawn = (weights @ sums.T) / (weights @ counts.T)
-    index = np.arange(DOSE_BUCKETS)
-    rhos = np.array([spearman_points(index, row) for row in drawn]) if B else np.zeros(0)
+    rank = row_spearman(x, y, day, B, seed)
     return {"variable": variable, "n": int(x.size), "edges": [float(e) for e in edges],
             "bucket_means": [float(v) for v in means], "bucket_n": [int(v) for v in counts.sum(axis=1)],
-            "spearman": spearman_points(index, means), "spearman_ci95": _interval(rhos)}
+            "spearman_row": rank["rho"], "spearman_row_ci95": rank["ci95"],
+            "spearman_basis": "row level (variable, y) within members; day-cluster bootstrap"}
 
 
 # ---------------------------------------------------------------- population, base rates, level diagnostics
