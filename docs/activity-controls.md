@@ -11,7 +11,7 @@ Missing, empty, or invalid values use the documented default.
 | Environment variable                   | Scope          | Default  | Behavior                                                                                           |
 | -------------------------------------- | -------------- | -------- | -------------------------------------------------------------------------------------------------- |
 | `VITE_TA_HISTORY_AUTO_REFRESH_ENABLED` | Browser build  | Disabled | `true` enables initial loading and 60-second TA-history refresh; otherwise history is manual-only. |
-| `VITE_MARKET_AUTO_REFRESH_ENABLED`     | Browser build  | Disabled | `true` enables initial loading and 60-second market refresh; otherwise prices are manual-only.     |
+| `VITE_MARKET_AUTO_REFRESH_ENABLED`     | Browser build  | Disabled | `true` enables initial loading and 60-second market refresh; otherwise prices are manual-only. The dashboard's "Market now" strip (movement engine state) follows this flag; its per-pair TA lines follow the TA-history flag. With a flag off those parts show "Not loaded yet" until Refresh is pressed. |
 | `SCHEDULED_MONITOR_ENABLED`            | Server runtime | Disabled | `true` lets authenticated cron requests run; otherwise they return skipped before database access. |
 | `TA_GENERATION_ENABLED`                | Server runtime | Enabled  | `false` skips new TA calculations and snapshot upserts during manual or scheduled checks.          |
 | `TA_OUTCOME_EVALUATION_ENABLED`        | Server runtime | Enabled  | `false` skips pending-outcome queries and updates during manual or scheduled checks.               |

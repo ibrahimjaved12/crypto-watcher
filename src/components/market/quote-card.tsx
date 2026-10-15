@@ -1,4 +1,5 @@
 import { Area, AreaChart, ResponsiveContainer, Tooltip, YAxis } from "recharts";
+import type { ReactNode } from "react";
 import { AlertTriangle, Loader2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -28,10 +29,13 @@ export function QuoteCard({
   quote,
   onRemove,
   retrying = false,
+  assessment,
 }: {
   quote: SymbolQuote;
   onRemove?: () => void;
   retrying?: boolean;
+  /** The per-pair "Current assessment" block (#30), shown under the existing price and changes. */
+  assessment?: ReactNode;
 }) {
   const now = useNow();
   const unavailable = isUnavailable(quote);
@@ -162,6 +166,7 @@ export function QuoteCard({
           </p>
         </>
       )}
+      {assessment}
     </article>
   );
 }

@@ -167,8 +167,33 @@ This measures movement evaluation/current-state snapshot age. It is distinct fro
 30s socket-silence rule and Python's 15s real-trade endpoint/carry freshness.
 
 Reads go through the operational store's explicit field mapping; the service-role credential never
-reaches the browser. This integration does not build #30's dashboard, #31 setups/scoring, or any
-prediction.
+reaches the browser. This integration does not build #31 setups/scoring or any prediction.
+
+## Consumer: the dashboard's "Current assessment" (#30)
+
+The Market page reads `getMarketMovementCurrentState` (now returning `readStatus`: `ok`, `store_disabled`
+when the site's deployment has no operational store, or `read_failed`) and maps it with the pure functions in
+`src/lib/market/assessment.ts`. No engine logic, threshold or prediction was added; every cut-off is either the
+engine's own constant or a named freshness window.
+
+| Shown | Fed by |
+| --- | --- |
+| Engine status chip (Live / Warming up / Stale / Unavailable, distinct; stale numbers carry an "as of" caption and are dimmed) | `status` (`deriveMovementEngineStatus`), `timestamps.evaluationBoundaryTime` |
+| Primary 5m direction and pace | `primary.directionState`, `primary.evidence.pace` |
+| 1m / 5m / 15m: "4 of 6 pairs fell materially in 15 min", rising/falling counts | `context[w].breadth` (`rising`, `falling`, `materialRising`, `materialFalling`, `denominator`) |
+| What "material" means, with its value | `DEFAULT_MARKET_MOVEMENT_CONFIG.materialZ` / `flatZ`, only when the evidence's `movementConfigVersion` equals that config's version; for any other saved version the page says it does not know the value and shows no number |
+| Median move, dispersion, isolated outliers | `medianRawReturn` (as a percent), `dispersionMadNormalizedMovement`, `isolatedOutliers` |
+| Universe, exclusions with reasons, boundary / latest receive / exchange event / state-saved times | `universe`, `timestamps` |
+| Per pair: normalized move for 1m / 5m / 15m with a label, volume, outlier badge | `context[w].movementSnapshot.symbols[]` (`normalizedZ`, `materialRising/Falling`, `rvol`, `outlierCandidate`, `exclusionReasons`); label bands are the engine's `flatZ` and `materialZ` |
+| Per pair: TA lean, score, RSI, trend, volatility, patterns, snapshot age for 15m / 1h / 4h | the latest `ta_signals` row per pair and timeframe (RLS client query, three queries for all pairs) |
+| Freshness lines: market stream, movement evaluation, completed candles, TA snapshots | `sourceTimeEvidence[].lastReceivedAtMs` (stale after the engine's 60 s), the evaluation boundary (60 s), quote `lastCandleAt`/`stale` (10 min, `QUOTE_STALE_MS`), TA candle close (stale after one timeframe plus 10 minutes, `TA_RUN_ALLOWANCE_MS`) |
+
+Fewer than 5 watched contracts shows UNAVAILABLE with the reason; per-pair rows still render. Where the
+deployment cannot read the operational store (the Cloudflare Worker, `OPERATIONAL_DB_ENABLED=false`) the strip says
+so explicitly instead of looking empty; the market-wide numbers need a deployment that can read it (local
+`dev:local:all`), or a published copy, which is not built here. The 60-second refresh follows the market
+refresh flag and is never faster than the engine's 30-second write cadence. Not shown, by design: support/resistance levels,
+news and scheduled events, setups, scores, entries or any forecast (#31 and later).
 
 ## Persistence
 
