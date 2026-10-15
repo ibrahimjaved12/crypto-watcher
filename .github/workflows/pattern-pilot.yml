@@ -44,6 +44,11 @@ on:
         type: choice
         options: [blind, open]
         default: blind
+      variant:
+        description: "none (the default pack) or a doji-geo-v3 variant: adds the 'soft' class (its extra candles)"
+        type: choice
+        options: [none, soft15, softatr]
+        default: none
 
 permissions:
   contents: read
@@ -85,14 +90,17 @@ jobs:
           PER_STRATUM: ${{ inputs.per_stratum }}
           SEED: ${{ inputs.seed }}
           MODE: ${{ inputs.mode }}
+          VARIANT: ${{ inputs.variant }}
           PILOT_SUMMARY: ${{ runner.temp }}/pattern-pilot-summary.md
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
         run: |
+          variant_args=()
+          if [ "$VARIANT" != "none" ]; then variant_args=(--variant "$VARIANT"); fi
           python/.venv/bin/python scripts/research/pattern_pilot.py --workdir pattern-pilot-work \
             --summary "$PILOT_SUMMARY" --table-report "$TABLE_REPORT" --symbol "$PILOT_SYMBOL" \
             --from-month "$FROM_MONTH" --to-month "$TO_MONTH" --timeframes "$TIMEFRAMES" \
-            --per-stratum "$PER_STRATUM" --seed "$SEED" --mode "$MODE"
+            --per-stratum "$PER_STRATUM" --seed "$SEED" --mode "$MODE" "${variant_args[@]}"
       - name: Delete working files
         if: always()
         run: rm -rf pattern-pilot-work

@@ -741,6 +741,62 @@ the detector's strength bucket (body <= 0.05 vs 0.05-0.10): per bucket, how many
 rates strong / ok / weak / unrated and the strong share of the rated ones. It only reports: it sets no
 pass threshold.
 
+## doji-geo-v3: a soft body tier next to the frozen core (provisional)
+
+**Status: a hypothesis, not a result.** Library `pattern_explore.py` (`GEO_V3`, `run_variants`),
+`scripts/research/pattern_explore.py --definition geo-v3` (workflow input `definition`), pilot class `soft`
+(`pattern_pilot.py`, `--variant`). doji-geo-v2 (`run_explore`, the doji study) is untouched and its reports stay
+reproducible bit for bit.
+
+**Why.** A blind visual review of the BTC pilot (118 charts, 1h/4h/1d/1w, development 2025-01..06, **one rater**)
+found the doji-geo-v2 events almost all look like dojis (51 of 54 yes), while candles just outside the cutoff
+often do too: near-misses with `0.10 < body_ratio <= 0.15` were called doji 14 of 21 times (0 no; the 7 unsure
+were mostly in the largest `range_atr` tercile), and 8 of 43 controls at `body_ratio` 0.15-0.30 were called doji
+as well. So the 0.10 cutoff may be slightly strict, and a flat ratio too lenient for big-range candles. This
+is 118 charts, one rater, one symbol and one half year: it motivates the variants below, nothing more.
+
+**Variants (frozen now, chosen before any outcome was looked at, never tuned afterwards).**
+
+| variant | events |
+|---|---|
+| `core` | `body_ratio <= 0.10` and `range_atr >= 0.5` (doji-geo-v2, unchanged) |
+| `soft15` | core OR (`0.10 < body_ratio <= 0.15` and `range_atr >= 0.5`) |
+| `softatr` | core OR (`0.10 < body_ratio <= 0.15`, `range_atr >= 0.5` and `body_ratio * range_atr <= 0.12`) |
+
+`body_ratio * range_atr` is the body in ATR units; point-in-time because `range_atr` is. Subtype rules are
+unchanged. Every event row carries a **tier** (`core` | `soft`); `variant_tier(f, variant)` gives the column and
+`events.csv` of a run has `tier_<variant>` per event row. The registry is hashed
+(`geo_v3_hash()`, over the fixed-format rule text and the guard band) and the hash is in every report, check,
+experiment-log record and pilot manifest; a changed threshold is a different hash and `check_variants_report`
+refuses a report made under another definition.
+
+**Controls (what changed).** doji-geo-v2 controls: `body_ratio > 0.10` and `range_atr >= 0.5`, no guard band, so a
+0.101 candle was a control next to a 0.099 event. v3 controls are the same size-matched non-doji candles but need
+`body_ratio > variant upper bound + 0.05` (`core` > 0.15, `soft15` and `softatr` > 0.20): candles in the guard band
+are in neither group. Matching strata, the hour-matched baseline and the slice engine are unchanged.
+Consequence: v3's `core` numbers use guard-banded controls, so they are not the v2 report's numbers; the v2 run
+remains the reference for v2.
+
+**Run.** All five slice-engine families (expansion, resolution, drift, break_follow, subtype_dir) on each
+variant, per timeframe, development segments only, no stops, no outcome required, no PASS. For a variant with a soft
+tier the run reports **all** members, the **core** members and the **soft** members separately, each against that
+variant's controls (so the core members of `soft15` are compared with `soft15`'s guard band). BH q-values are over
+every test of the run. Every variant x group x timeframe x slice bucket x family is appended to
+`experiments/doji-explore.jsonl` with the variant name, group and definition hash in its config, so the
+multiple-testing count rises by exactly the variants evaluated (a rerun is a REPLAY). Output:
+`reports/pattern-explore/doji-geo-v3-<segment>__<hash16>/` with `summary.json`, `direction_free.csv`,
+`slices.csv`, `leads.csv`, `events.csv`, `report.md`.
+
+**Pilot class `soft`.** `pattern_pilot.py --variant soft15|softatr` adds the class `soft` (the extra candles the
+variant admits; sampled per `range_atr` tercile, 2 x `per_stratum`) so a later blind pack can check them; the
+classes stay disjoint (`near_miss` loses the soft rows, `control` uses the guard-banded bound). Without
+`--variant` nothing changes, and the existing pack is not regenerated. A soft candle judged n is a false
+positive of the variant (same rate kind as events).
+
+**What it cannot show.** A soft tier that looks like a doji to the eye may still carry no information; a soft tier that
+behaves like the core says the geometry cutoff was not what mattered. Neither is a profitability claim.
+Validation and hidden stay closed.
+
 ## Adding a group (location, derivatives, advanced levels, ...)
 
 1. Write `build(ctx, i) -> dict` in `candle_table.py` or a sibling module. It reads only

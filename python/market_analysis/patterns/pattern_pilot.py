@@ -18,6 +18,11 @@ Classes (disjoint, all with ``range_atr >= 0.5`` and a usable ATR/sigma, inside 
 - ``near_miss``: ``0.10 < body_ratio <= 0.15``, to audit the boundary, per tercile, ``NEAR_MISS_FACTOR`` x
   per_stratum each.
 
+Optional ``variant`` (doji-geo-v3, ``pattern_explore.GEO_V3``): adds the class ``soft`` = the extra candles the
+variant admits (its soft tier; empty for "core"), so a later blind pack can check them. The classes stay
+disjoint: ``near_miss`` loses the soft rows and ``control`` uses the variant's guard-banded bound (body_ratio >
+upper bound + 0.05). Without a variant nothing changes: same classes, same samples, same manifest bytes.
+
 A stratum with fewer rows than requested yields all of them: counts per class and stratum (requested,
 available, sampled) are always reported and a sample is never padded.
 
@@ -67,17 +72,24 @@ class PilotError(ValueError):
 # ---------------------------------------------------------------- classes and strata
 
 
-def class_masks(f: dict, window=None) -> dict:
-    """{class: bool mask} over the frame rows; ``window`` = (first_ms, end_ms) on the candle open."""
+def class_masks(f: dict, window=None, variant: str | None = None) -> dict:
+    """{class: bool mask} over the frame rows; ``window`` = (first_ms, end_ms) on the candle open. With a doji-geo-v3
+    ``variant`` the extra class ``soft`` is added (see the module docstring)."""
     pop = pe.population(f)
     if window is not None:
         pop = pop & (f["open_ms"] >= window[0]) & (f["open_ms"] < window[1])
     with np.errstate(invalid="ignore"):
         body, size = f["body_ratio"], f["range_atr"]
         sized = pop & (size >= RANGE_ATR_MIN)
-        return {"event": sized & (body <= BODY_EVENT_MAX),
-                "near_miss": sized & (body > BODY_EVENT_MAX) & (body <= BODY_NEAR_MAX),
-                "control": sized & (body > BODY_NEAR_MAX)}
+        masks = {"event": sized & (body <= BODY_EVENT_MAX),
+                 "near_miss": sized & (body > BODY_EVENT_MAX) & (body <= BODY_NEAR_MAX),
+                 "control": sized & (body > BODY_NEAR_MAX)}
+        if variant is not None:
+            soft = pe.variant_tiers(f, variant)[1] & pop
+            masks["near_miss"] = masks["near_miss"] & ~soft
+            masks["control"] = sized & (body > pe._control_body_min(variant))
+            masks["soft"] = soft
+        return masks
 
 
 def tercile_edges(f: dict, masks: dict) -> tuple:
@@ -102,7 +114,7 @@ def _generator(seed: int, tf: int, cls: str, stratum: str) -> np.random.Generato
 
 
 def sample_frame(f: dict, tf: int, *, per_stratum: int, seed: int, window=None, scope=None,
-                 stratify: bool = True) -> dict:
+                 stratify: bool = True, variant: str | None = None) -> dict:
     """Seeded stratified sample of one timeframe's frame.
 
     Returns {"samples": [{row, class, stratum}], "counts": [{class, stratum, requested, available, sampled}]}.
@@ -110,17 +122,17 @@ def sample_frame(f: dict, tf: int, *, per_stratum: int, seed: int, window=None, 
     stratum "all" (a slice pack)."""
     if per_stratum < 1:
         raise PilotError("per_stratum must be at least 1")
-    masks = class_masks(f, window)
+    masks = class_masks(f, window, variant)
     if scope is not None:
         masks["event"] = masks["event"] & scope
     edges = tercile_edges(f, masks)
     samples, counts = [], []
-    for cls in CLASSES:
+    for cls in CLASSES if variant is None else (*CLASSES, "soft"):
         groups = {}
         for row in np.flatnonzero(masks[cls]):
             label = "all" if cls == "event" and not stratify else stratum_label(f, int(row), cls, edges)
             groups.setdefault(label, []).append(int(row))
-        factor = {"event": 1, "control": CONTROL_FACTOR, "near_miss": NEAR_MISS_FACTOR}[cls]
+        factor = {"event": 1, "control": CONTROL_FACTOR, "near_miss": NEAR_MISS_FACTOR, "soft": NEAR_MISS_FACTOR}[cls]
         wanted = per_stratum * factor if (stratify or cls != "event") else per_stratum
         for label in sorted(groups):
             pool = groups[label]
@@ -238,14 +250,15 @@ def check_window(timeframes, from_month: str, to_month: str, segments_for) -> tu
     return first, end
 
 
-def build_pilot(frames: dict, *, symbol: str, window: tuple, per_stratum: int, seed: int, mode: str) -> dict:
+def build_pilot(frames: dict, *, symbol: str, window: tuple, per_stratum: int, seed: int, mode: str,
+                variant: str | None = None) -> dict:
     """{"files": {name: text}, "counts": [...], "ids": n} for ``frames`` = {tf: frame} (one symbol)."""
     if mode not in MODES:
         raise PilotError(f"mode must be one of {MODES}")
     files, counts, keys, annotations = {}, [], [], []
     for tf in sorted(frames):
         f = frames[tf]
-        picked = sample_frame(f, tf, per_stratum=per_stratum, seed=seed, window=window)
+        picked = sample_frame(f, tf, per_stratum=per_stratum, seed=seed, window=window, variant=variant)
         ids = opaque_ids(f, tf, picked["samples"], seed)
         files[f"pilot_{tf}.html"] = contact_sheet(f, tf, picked["samples"], ids, mode,
                                                   f"Doji pilot {symbol} {tf}m ({mode})")
@@ -259,7 +272,8 @@ def build_pilot(frames: dict, *, symbol: str, window: tuple, per_stratum: int, s
 
 
 def manifest(*, symbol: str, table_report: str, table_hash: str, window: tuple, per_stratum: int, seed: int,
-             mode: str, counts: list, files: dict, code_commit: str, created_utc: str) -> dict:
+             mode: str, counts: list, files: dict, code_commit: str, created_utc: str,
+             variant: str | None = None) -> dict:
     body = {"schema": SCHEMA, "symbol": symbol, "table_report": table_report, "table_hash": table_hash,
             "window_ms": list(window), "per_stratum": per_stratum, "seed": seed, "mode": mode,
             "control_factor": CONTROL_FACTOR, "near_miss_factor": NEAR_MISS_FACTOR,
@@ -269,6 +283,12 @@ def manifest(*, symbol: str, table_report: str, table_hash: str, window: tuple, 
             "counts": counts, "files": sorted(files),
             "file_sha256": {name: hashlib.sha256(text.encode("utf-8")).hexdigest()
                             for name, text in sorted(files.items())}}
+    if variant is not None:  # keys added only for a variant run: a default pilot's manifest bytes are unchanged
+        body["variant"] = variant
+        body["definition_hash"] = pe.geo_v3_hash()
+        rules = pe.geo_v3_rules()[variant]
+        body["classes"] = {**body["classes"], "soft": f"soft tier of {variant}: {rules['event']} minus the core",
+                           "control": f"{rules['control']} (guard band)"}
     body["pilot_hash"] = content_hash(body)
     return {**body, "code_commit": code_commit, "created_utc": created_utc}
 
@@ -338,7 +358,8 @@ def read_annotations(text: str, key: dict) -> list:
     return out
 
 
-RATE_KIND = {"event": "false_positive", "near_miss": "missed_doji", "control": "missed_doji"}
+RATE_KIND = {"event": "false_positive", "soft": "false_positive", "near_miss": "missed_doji",
+             "control": "missed_doji"}
 
 
 def _rate(rows: list, cls: str) -> dict:
@@ -407,7 +428,8 @@ def _fmt(rate: dict) -> str:
 
 def defect_markdown(tables: dict) -> list:
     lines = [f"Annotated {tables['annotated']} of {tables['key_ids']} ids. detector_ok is the reviewer's visual call "
-             "(y = would call it a doji, n = not a doji). Events: false_positive rate = n / (y + n). Near-misses and "
+             "(y = would call it a doji, n = not a doji). Events and soft-tier candles (both called doji by the "
+             "detector): false_positive rate = n / (y + n). Near-misses and "
              "controls: missed_doji rate = y / (y + n). 'unsure' counted apart and excluded; Wilson 95% intervals. "
              "No threshold is applied.", ""]
     for name, title in (("by_class", "class"), ("by_class_timeframe", "class|tf"),

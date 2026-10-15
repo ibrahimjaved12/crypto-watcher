@@ -174,6 +174,94 @@ def control_mask(f: dict) -> np.ndarray:
         return population(f) & (f["body_ratio"] > CONTROL_BODY_MIN) & (f["range_atr"] >= CONTROL_RANGE_MIN)
 
 
+# ---------------------------------------------------------------- doji-geo-v3 (provisional soft body tier)
+
+GEO_V3_VERSION = "doji-geo-v3"
+GEO_V3_SCHEMA = "pattern-explore-geo-v3"
+GEO_V3_GUARD = 0.05            # a control must have body_ratio > variant upper bound + guard
+GEO_V3_GROUPS = ("all", "core", "soft")
+# Frozen variants, chosen before any outcome was looked at and never tuned afterwards. "core" is doji-geo-v2
+# exactly. soft_body_max: upper body_ratio of the soft tier (None: no soft tier); soft_body_atr_max: extra cap on
+# body_ratio * range_atr (the body in ATR; point-in-time because range_atr is).
+GEO_V3 = {
+    "core": {"body_max": 0.10, "range_atr_min": 0.5, "soft_body_max": None, "soft_body_atr_max": None},
+    "soft15": {"body_max": 0.10, "range_atr_min": 0.5, "soft_body_max": 0.15, "soft_body_atr_max": None},
+    "softatr": {"body_max": 0.10, "range_atr_min": 0.5, "soft_body_max": 0.15, "soft_body_atr_max": 0.12}}
+
+
+def _upper_bound(variant: str) -> float:
+    d = GEO_V3[variant]
+    return d["body_max"] if d["soft_body_max"] is None else d["soft_body_max"]
+
+
+def _control_body_min(variant: str) -> float:
+    return round(_upper_bound(variant) + GEO_V3_GUARD, 10)
+
+
+def geo_v3_rules() -> dict:
+    """The definitions as fixed-format text (floats are not canonical); this is what the hash covers."""
+    out = {}
+    for name, d in GEO_V3.items():
+        size = f"range_atr >= {d['range_atr_min']:.2f}"
+        event = f"body_ratio <= {d['body_max']:.2f} and {size}"
+        if d["soft_body_max"] is not None:
+            soft = f"{d['body_max']:.2f} < body_ratio <= {d['soft_body_max']:.2f} and {size}"
+            if d["soft_body_atr_max"] is not None:
+                soft += f" and body_ratio*range_atr <= {d['soft_body_atr_max']:.2f}"
+            event += f" OR ({soft})"
+        out[name] = {"event": event, "control": f"body_ratio > {_control_body_min(name):.2f} and {size}"}
+    return out
+
+
+def geo_v3_definition() -> dict:
+    return {"version": GEO_V3_VERSION, "guard_band": f"{GEO_V3_GUARD:.2f}", "variants": geo_v3_rules()}
+
+
+def geo_v3_hash() -> str:
+    return content_hash(geo_v3_definition())
+
+
+def check_variant(variant: str) -> dict:
+    if variant not in GEO_V3:
+        raise ExploreError(f"variant must be one of {tuple(GEO_V3)}")
+    return GEO_V3[variant]
+
+
+def variant_tiers(f: dict, variant: str) -> tuple[np.ndarray, np.ndarray]:
+    """(core, soft) event masks of a variant. core is exactly ``event_mask(f)`` (doji-geo-v2); soft is the extra
+    candles the variant admits (disjoint from core; all False for the core variant)."""
+    d = check_variant(variant)
+    with np.errstate(invalid="ignore"):
+        sized = population(f) & (f["range_atr"] >= d["range_atr_min"])
+        body = f["body_ratio"]
+        core = sized & (body <= d["body_max"])
+        soft = np.zeros(len(core), bool)
+        if d["soft_body_max"] is not None:
+            soft = sized & (body > d["body_max"]) & (body <= d["soft_body_max"])
+            if d["soft_body_atr_max"] is not None:
+                soft = soft & (body * f["range_atr"] <= d["soft_body_atr_max"])
+    return core, soft
+
+
+def variant_event_mask(f: dict, variant: str) -> np.ndarray:
+    core, soft = variant_tiers(f, variant)
+    return core | soft
+
+
+def variant_tier(f: dict, variant: str) -> np.ndarray:
+    """The tier column over the frame rows: 'core' | 'soft' on a variant's event rows, '' elsewhere."""
+    core, soft = variant_tiers(f, variant)
+    return np.where(core, "core", np.where(soft, "soft", "")).astype(object)
+
+
+def variant_control_mask(f: dict, variant: str) -> np.ndarray:
+    """Same-size non-doji candles with a guard band: body_ratio > the variant's upper bound + GEO_V3_GUARD, so
+    near-boundary candles contaminate neither side. (doji-geo-v2 controls: body_ratio > 0.10, no guard band.)"""
+    d = check_variant(variant)
+    with np.errstate(invalid="ignore"):
+        return population(f) & (f["body_ratio"] > _control_body_min(variant)) & (f["range_atr"] >= d["range_atr_min"])
+
+
 def hours(f: dict) -> np.ndarray:
     return (np.floor_divide(f["open_ms"], 3_600_000) % 24).astype(np.int64)
 
@@ -515,8 +603,12 @@ class Unit:
     half: np.ndarray       # 0 first half of the segment, 1 second
 
 
-def build_unit(f: dict, tf: int, *, intraday: bool, event: str = "doji", with_session: bool = False) -> Unit:
-    events, controls = event_mask(f, event), control_mask(f)
+def build_unit(f: dict, tf: int, *, intraday: bool, event: str = "doji", with_session: bool = False,
+               event_rows: np.ndarray | None = None, control_rows: np.ndarray | None = None) -> Unit:
+    """``event_rows`` / ``control_rows``: explicit masks over the frame replacing the doji-geo-v2 rules (doji-geo-v3);
+    left None, nothing changes."""
+    events = event_mask(f, event) if event_rows is None else event_rows
+    controls = control_mask(f) if control_rows is None else control_rows
     base = baseline_mask(f, events)
     rows = np.flatnonzero(events | controls | base)
     paths = build_paths(f, rows, PATH_N[tf] + PATH_EXTRA)
@@ -1465,8 +1557,214 @@ def experiment_records(report: dict, *, run_id: str, data_snapshot_id: str) -> l
     return records
 
 
+# ---------------------------------------------------------------- doji-geo-v3 run (all variants, tiers split)
+
+GEO_V3_COMPACT_METRICS = ("range_atr", "drift_sigma", "resolution_1atr")
+
+
+def _variant_groups(f: dict, variant: str) -> dict:
+    """{group: event mask}: 'all' (the variant), and for variants with a soft tier its 'core' and 'soft' members."""
+    core, soft = variant_tiers(f, variant)
+    groups = {"all": core | soft}
+    if GEO_V3[variant]["soft_body_max"] is not None:
+        groups |= {"core": core, "soft": soft}
+    return groups
+
+
+def run_variants(frames: dict, *, tier: str, segment: str, table_report: str, table_hash: str, code_commit: str,
+                 created_utc: str, plan_id: str = "", B: int = BOOTSTRAP_B, absent: list | None = None
+                 ) -> tuple[dict, dict]:
+    """(report, extra files): every doji-geo-v3 variant on the five slice-engine families, per timeframe, with the
+    variant's events as a whole and its core and soft members separately, each against the variant's guard-banded
+    controls. Development segments only (check_explore_segment); no stops, no outcome required, no PASS. The
+    doji-geo-v2 run (``run_explore``) is untouched."""
+    check_explore_segment(segment, plan_id)
+    timeframes = check_tier(tier)
+    intraday = tier == "intraday"
+    report = {"schema": GEO_V3_SCHEMA, "version": GEO_V3_VERSION, "question_id": QUESTION_ID, "tier": tier,
+              "segment": segment, "plan_id": plan_id or None, "table_report": table_report, "table_hash": table_hash,
+              "absent_columns": sorted(absent or []), "definition": geo_v3_definition(),
+              "definition_hash": geo_v3_hash(), "by_tf": {}, "slices": [], "skipped_slices": []}
+    event_rows = []
+    for tf in timeframes:
+        f = frames.get(tf)
+        if f is None or not population(f).any():
+            report["by_tf"][str(tf)] = {"status": "no rows"}
+            continue
+        block = {}
+        tiers = {name: variant_tier(f, name) for name in GEO_V3}
+        union = np.zeros(len(f["tf"]), bool)
+        for name in GEO_V3:
+            union |= tiers[name] != ""
+        for row in np.flatnonzero(union):
+            event_rows.append({"symbol": f["symbol"][row], "tf": tf, "open_ms": int(f["open_ms"][row]),
+                               "decision_ms": int(f["decision_ms"][row]), "body_ratio": float(f["body_ratio"][row]),
+                               "range_atr": float(f["range_atr"][row]), "subtype": f["doji_subtype"][row] or "",
+                               **{f"tier_{name}": tiers[name][row] for name in GEO_V3}})
+        for name in GEO_V3:
+            controls = variant_control_mask(f, name)
+            block[name] = {}
+            for group, events in _variant_groups(f, name).items():
+                if not events.any():
+                    block[name][group] = {"status": "no events"}
+                    continue
+                unit = build_unit(f, tf, intraday=intraday, event_rows=events, control_rows=controls)
+                results, skipped = run_slices(unit)
+                tag = {"variant": name, "group": group}
+                report["slices"] += [{**tag, **row} for row in results]
+                report["skipped_slices"] += [{**tag, **row} for row in skipped]
+                block[name][group] = {
+                    "counts": path_counts(unit),
+                    "direction_free": [row for row in direction_free_table(unit, B)
+                                       if row["metric"] in GEO_V3_COMPACT_METRICS]}
+        report["by_tf"][str(tf)] = block
+    report["tests_evaluated"] = add_qvalues(report["slices"])
+    report["leads"] = [{**row} for name in GEO_V3 for group in GEO_V3_GROUPS
+                       for row in top_leads([r for r in report["slices"]
+                                             if r["variant"] == name and r["group"] == group])]
+    report["parameters"] = {
+        "definition": geo_v3_definition(), "guard_band": f"{GEO_V3_GUARD:.2f}", "families": list(FAMILIES),
+        "lead_horizons": {str(k): list(v) for k, v in LEAD_HORIZONS.items()}, "bootstrap_B": B,
+        "baseline_seed": BASELINE_SEED, "baseline_multiple": BASELINE_MULTIPLE,
+        "lead_rule": {"min_abs_t": LEAD_MIN_T, "min_events": LEAD_MIN_N, "halves_agree": True,
+                      "min_symbols_agree": LEAD_MIN_SYMBOLS}, "slices": [s.id for s in SLICES]}
+    report["notes"] = [
+        "PROVISIONAL hypothesis from one blind visual review (BTC, single rater): the 0.10 body cutoff may be slightly "
+        "strict, and a flat ratio too lenient for big-range candles. The variants are frozen, not tuned.",
+        "Exploration: descriptive, no stops, no required outcome; nothing here is a trade or a PASS.",
+        "Each variant is tested against its own guard-banded controls; 'core' and 'soft' are the variant's members "
+        "split by tier. Every variant x group x timeframe x slice x family counts as a test (BH over all).",
+        "Leads are |t| >= 2 with n >= 100 whose sign agrees in both halves and in >= 4 symbols; candidates for a "
+        "validation plan, not results."]
+    report["code_commit"], report["created_utc"] = code_commit, created_utc
+    report = _render(report)
+    report["report_hash"] = content_hash({k: v for k, v in report.items() if k not in HASH_EXCLUDED})
+    fields = ["symbol", "tf", "open_ms", "decision_ms", "body_ratio", "range_atr", "subtype",
+              *[f"tier_{name}" for name in GEO_V3]]
+    return report, {"events.csv": _csv([_render(r) for r in event_rows], fields)}
+
+
+def check_variants_report(report: dict) -> None:
+    if report.get("schema") != GEO_V3_SCHEMA:
+        raise ExploreError("not a pattern-explore-geo-v3 report")
+    missing = [k for k in (*REQUIRED_KEYS, "definition", "definition_hash") if k not in report]
+    if missing:
+        raise ExploreError("report lacks required fields: " + ", ".join(missing))
+    if report["definition_hash"] != geo_v3_hash():
+        raise ExploreError("the report was made under a different doji-geo-v3 definition")
+    if report["report_hash"] != content_hash({k: v for k, v in report.items() if k not in HASH_EXCLUDED}):
+        raise ExploreError("report_hash mismatch")
+
+
+def variants_report_dir(report: dict) -> str:
+    check_variants_report(report)
+    return f"{REPORT_ROOT}/doji-geo-v3-{report['segment']}__{report['report_hash'][:16]}"
+
+
+def variants_public_lines(report: dict) -> list:
+    """Counts only (events and controls per variant, group and timeframe), the private path and the hashes."""
+    check_variants_report(report)
+    lines = [f"doji exploration {report['version']} tier {report['tier']} segment {report['segment']}: "
+             f"{report['tests_evaluated']} slice tests (BH over all); definition {report['definition_hash'][:16]}"]
+    for tf, block in report["by_tf"].items():
+        if "status" in block:
+            lines.append(f"tf={int(tf)} no rows")
+            continue
+        for name, groups in block.items():
+            for group, item in groups.items():
+                if "counts" not in item:
+                    lines.append(f"tf={int(tf)} variant={name} group={group} events=0")
+                    continue
+                c = item["counts"]
+                lines.append(f"tf={int(tf)} variant={name} group={group} events={int(c['event']['rows'])} "
+                             f"controls={int(c['control_matched']['rows'])} baseline={int(c['baseline']['rows'])}")
+    return lines + [f"private path {variants_report_dir(report)}/", f"report hash {report['report_hash']}"]
+
+
+def variants_csv_files(report: dict, extra: dict) -> dict:
+    check_variants_report(report)
+    direction_free = []
+    for block in report["by_tf"].values():
+        if "status" in block:
+            continue
+        for name, groups in block.items():
+            for group, item in groups.items():
+                direction_free += [_flatten_compare({"variant": name, "group": group, **r},
+                                                    ("variant", "group", "tf", "h", "metric"))
+                                   for r in item.get("direction_free", [])]
+    slice_fields = ["variant", "group", "tf", "slice", "bucket", "family", "h", "n_events", "n_events_matched",
+                    "n_controls", "mean_events", "difference", "se", "t", "p", "q_bh", "baseline_mean", "half_signs",
+                    "agree_halves", "symbol_signs", "agree_symbols", "lead"]
+    return {"direction_free.csv": _csv(direction_free, ["variant", "group", "tf", "h", "metric", *_COMPARE_FIELDS]),
+            "slices.csv": _csv(report["slices"], slice_fields), "leads.csv": _csv(report["leads"], slice_fields),
+            **extra}
+
+
+def variants_markdown(report: dict) -> str:
+    check_variants_report(report)
+    lines = [f"# Doji exploration doji-geo-v3 ({report['tier']}, {report['segment']})", "",
+             f"Report `{report['report_hash']}`; definition `{report['definition_hash']}`; table "
+             f"{report['table_report']}. Slice tests evaluated: {report['tests_evaluated']} (BH over all).", ""]
+    lines += [f"- {note}" for note in report["notes"]]
+    lines += ["", "## Definitions", "", "| variant | event | control |", "|---|---|---|"]
+    lines += [f"| {name} | {rule['event']} | {rule['control']} |"
+              for name, rule in report["definition"]["variants"].items()]
+    for tf, block in report["by_tf"].items():
+        lines += ["", f"## {tf}-minute"]
+        if "status" in block:
+            lines.append("No rows.")
+            continue
+        lines += ["", "| variant | group | events | matched controls | baseline |", "|---|---|---:|---:|---:|"]
+        for name, groups in block.items():
+            for group, item in groups.items():
+                c = item.get("counts")
+                lines.append(f"| {name} | {group} | " + (f"{c['event']['rows']} | {c['control_matched']['rows']} | "
+                                                          f"{c['baseline']['rows']} |" if c else "0 | | |"))
+    lines += ["", "## Leads (top per family, per variant and group; candidates for a plan, not results)", "",
+              "| variant | group | tf | slice | bucket | family | h | n | difference | t | q (BH) |",
+              "|" + " --- |" * 11]
+    for row in report["leads"]:
+        lines.append(f"| {row['variant']} | {row['group']} | {row['tf']} | {row['slice']} | {row['bucket']} | "
+                     f"{row['family']} | {row['h']} | {row['n_events']} | {_f(row['difference'])} | {_f(row['t'])} | "
+                     f"{_f(row['q_bh'])} |")
+    lines += ["", "Full tables: direction_free.csv, slices.csv, leads.csv, events.csv (tier column per variant), "
+              "summary.json."]
+    return "\n".join(lines) + "\n"
+
+
+def variants_experiment_records(report: dict, *, run_id: str, data_snapshot_id: str) -> list:
+    """One TrialRecord per variant x group x timeframe x slice bucket x family (horizons folded in the config), each
+    carrying the variant name and the definition hash, so the multiple-testing count rises by every variant
+    actually evaluated."""
+    from ..benchmark.experiment_log import TrialRecord, TrialStatus
+
+    check_variants_report(report)
+    groups = {}
+    for row in report["slices"]:
+        groups.setdefault((row["variant"], row["group"], row["tf"], row["slice"], row["bucket"], row["family"]),
+                          []).append(row)
+    rules = report["definition"]["variants"]
+    records = []
+    for (variant, group, tf, slice_id, bucket, family), rows in sorted(groups.items()):
+        config = {"tf": tf, "slice": slice_id, "bucket": bucket, "family": family,
+                  "horizons": sorted(r["h"] for r in rows), "event": f"{GEO_V3_VERSION}:{variant}", "tier_group": group,
+                  "definition_hash": report["definition_hash"], "event_rule": rules[variant]["event"],
+                  "control_rule": rules[variant]["control"], "tier": report["tier"]}
+        records.append(TrialRecord(
+            question_id=QUESTION_ID, family_id="doji-explore", strategy_id=family, strategy_version=GEO_V3_VERSION,
+            config=config, split_id=report["segment"], data_snapshot_id=data_snapshot_id,
+            code_commit=report["code_commit"], status=TrialStatus.OK, counts_toward_n=True,
+            count_reason="exploration variant x tier group x slice x metric family", result_hash=report["report_hash"],
+            result_summary={"n": int(max(r["n_events"] for r in rows)), "run_id": run_id, "tests": len(rows),
+                            "slice_id": f"{variant}|{group}|{tf}|{slice_id}|{bucket}",
+                            "private_report": variants_report_dir(report) + "/report.md"},
+            created_utc=report["created_utc"]))
+    return records
+
+
 __all__ = ["SCHEMA", "QUESTION_ID", "check_explore_segment", "read_frame", "build_paths", "direction_free",
            "barrier_outcomes", "break_rule", "follow_through", "subtype_direction", "excursion_map", "describe",
            "difference", "bh_qvalues", "strata_codes", "match_weights", "baseline_mask", "SLICES",
            "run_slices", "top_leads", "review_sample", "run_explore", "check_report", "report_dir", "public_lines",
-           "csv_files", "markdown", "load_tier", "experiment_records"]
+           "csv_files", "markdown", "load_tier", "experiment_records", "GEO_V3", "geo_v3_hash",
+           "variant_tiers", "variant_tier", "variant_control_mask", "run_variants", "variants_experiment_records"]

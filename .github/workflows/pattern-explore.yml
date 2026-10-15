@@ -30,6 +30,11 @@ on:
         type: choice
         options: [intraday, daily_weekly]
         default: intraday
+      definition:
+        description: "geo-v2 (default, the frozen doji events) or geo-v3 (all soft-tier variants; review options are ignored)"
+        type: choice
+        options: [geo-v2, geo-v3]
+        default: geo-v2
       review_mode:
         description: "blind (default: stratified blind packs, key in a separate file) or open (the old hit/miss packs)"
         type: choice
@@ -78,6 +83,7 @@ jobs:
           TIER: ${{ inputs.tier }}
           REVIEW_SLICE: ${{ inputs.review_slice }}
           REVIEW_MODE: ${{ inputs.review_mode }}
+          DEFINITION: ${{ inputs.definition }}
           EXPLORE_SUMMARY: ${{ runner.temp }}/pattern-explore-summary.md
           RESEARCH_DATA_REPOSITORY: ${{ vars.RESEARCH_DATA_REPOSITORY }}
           RESEARCH_DATA_TOKEN: ${{ secrets.RESEARCH_DATA_TOKEN }}
@@ -85,7 +91,7 @@ jobs:
           python/.venv/bin/python scripts/research/pattern_explore.py --workdir pattern-explore-work \
             --summary "$EXPLORE_SUMMARY" --segment "$SEGMENT" --plan-id "$PLAN_ID" \
             --table-report "$TABLE_REPORT" --tier "$TIER" --review-slice "$REVIEW_SLICE" \
-            --review-mode "$REVIEW_MODE"
+            --review-mode "$REVIEW_MODE" --definition "$DEFINITION"
       - name: Delete working files
         if: always()
         run: rm -rf pattern-explore-work
