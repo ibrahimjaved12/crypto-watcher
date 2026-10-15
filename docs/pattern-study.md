@@ -709,16 +709,33 @@ reveal the class. `pilot_key.csv` (id, symbol, tf, open_ms, decision_ms, class, 
 range_atr, subtype) is a separate file. **Open mode** shows 12 candles after the signal and the class,
 stratum and detector fields in the title.
 
+**Annotation semantics.** In blind mode the reviewer sees only the highlighted last candle, so
+`detector_ok` is the REVIEWER'S visual call on that candle, not a guess about the detector:
+`y` = "I would call this candle a doji", `n` = "not a doji", `unsure`. The sheet asks "Would you call
+it a doji?" (it does not name a kind in blind mode; open mode shows the detector's subtype and fields
+but the call is still the reviewer's own). The meaning is also written to `annotations_README.txt`
+next to `annotations.csv` (a comment row would break the CSV). `defect_type` (not_doji | wrong_subtype
+| tiny_range | data_artifact | gap_artifact | other) is optional and used for events judged n;
+`visual_strength` (strong | ok | weak) says how clear a doji it looks.
+
 **Output** (`reports/pattern-pilot/<hash16>/`, private repo): `pilot_<tf>.html`, `annotations.csv`
-(template: `id,detector_ok,defect_type,visual_strength,notes`; detector_ok y|n|unsure; defect_type
-not_doji|wrong_subtype|tiny_range|data_artifact|gap_artifact|other; visual_strength strong|ok|weak),
+(template: `id,detector_ok,defect_type,visual_strength,notes`), `annotations_README.txt`,
 `pilot_key.csv` and `manifest.json`. The public log and job summary carry counts per timeframe and
 class, the private path and the hash only.
 
-**Defect statistics.** `python scripts/research/pattern_pilot_defects.py --annotations annotations.csv
---key pilot_key.csv` (run on the private files) prints the defect rate (n / (y + n); 'unsure' counted
-apart) by class, timeframe, class x timeframe and stratum with n and Wilson 95% intervals, the defect
-types, and the defect rate by class x visual_strength. It only reports: it sets no pass threshold.
+**Statistics.** `python scripts/research/pattern_pilot_defects.py --annotations annotations.csv
+--key pilot_key.csv` (run on the private files) reports, per class, class x timeframe and stratum,
+with n and Wilson 95% intervals ('unsure' counted apart and excluded):
+
+- events (the detector said doji): the **false-positive rate** = n / (y + n), the events the
+  reviewer does not call a doji;
+- near-misses and controls (the detector said not a doji): the **missed-doji rate** = y / (y + n),
+  the candles the reviewer calls a doji although the detector excluded them.
+
+It also tallies the defect types of the events judged n, and the agreement of `visual_strength` with
+the detector's strength bucket (body <= 0.05 vs 0.05-0.10): per bucket, how many events the reviewer
+rates strong / ok / weak / unrated and the strong share of the rated ones. It only reports: it sets no
+pass threshold.
 
 ## Adding a group (location, derivatives, advanced levels, ...)
 
