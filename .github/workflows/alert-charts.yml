@@ -44,3 +44,14 @@ jobs:
         env:
           ALERT_CHARTS_REQUIRE_MATPLOTLIB: "1"
         run: .venv/bin/python -m unittest tests.test_alert_charts -v
+      - name: Render the SYNTHETIC fixture charts
+        if: always()
+        run: .venv/bin/python -m market_analysis_tools.fixtures "$RUNNER_TEMP/alert-chart-fixtures"
+      - name: Upload the fixture charts (synthetic, for the owner to look at)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alert-chart-fixtures
+          path: ${{ runner.temp }}/alert-chart-fixtures/*.png
+          retention-days: 14
+          if-no-files-found: error

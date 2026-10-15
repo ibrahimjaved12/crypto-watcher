@@ -28,7 +28,20 @@ export type AlertChartDiagnostics = {
   expired_rows: number;
   oldest_pending_at: string | null;
   newest_created_at: string | null;
+  capture_failures_24h: number;
+  capture_failures_total: number;
 };
+
+export type CaptureFailure = {
+  eventKind: "movement_alert" | "pattern";
+  eventId: string;
+  symbol: string;
+  timeframeMinutes: number;
+  eventCandleAt: string;
+  error: string;
+};
+
+export type RequeueOutcome = { chartId: string; outcome: "requeued" | "rendering"; leaseExpiresAt: string | null };
 
 export interface AlertChartStore {
   enqueue(capture: ChartCapture): Promise<{ chartId: string; created: boolean }>;
@@ -36,7 +49,10 @@ export interface AlertChartStore {
   finish(chartId: string, workerId: string, result:
     | { ok: true; path: string; sha256: string; bytes: number }
     | { ok: false; error: string }): Promise<boolean>;
-  requeue(eventId: string): Promise<string[]>;
+  /** Sweep stale leases, then requeue every non-rendering chart of the event id (alert id, signal id or any mapped signal id). */
+  requeue(eventId: string): Promise<RequeueOutcome[]>;
+  /** Record a capture that failed or was abandoned (idempotent on the event identity). */
+  recordFailure(failure: CaptureFailure): Promise<void>;
   diagnostics(): Promise<AlertChartDiagnostics>;
 }
 
@@ -89,10 +105,17 @@ export function createAlertChartStore(client: RpcClient, config: AlertChartsConf
       });
     },
     async requeue(eventId) {
-      const rows = await call<Array<string | { requeue_alert_chart: string }>>("requeue_alert_chart", {
-        p_event_id: eventId,
+      const rows = await call<Array<{ chart_id: string; outcome: "requeued" | "rendering"; lease_expires_at: string | null }>>(
+        "requeue_alert_chart", { p_event_id: eventId });
+      return (rows ?? []).map((row) => ({ chartId: row.chart_id, outcome: row.outcome,
+        leaseExpiresAt: row.lease_expires_at }));
+    },
+    async recordFailure(failure) {
+      await call<boolean>("record_alert_chart_capture_failure", {
+        p_event_kind: failure.eventKind, p_event_id: failure.eventId, p_symbol: failure.symbol,
+        p_timeframe_minutes: failure.timeframeMinutes, p_event_candle_at: failure.eventCandleAt,
+        p_error: failure.error.slice(0, 500),
       });
-      return (rows ?? []).map((row) => (typeof row === "string" ? row : row.requeue_alert_chart));
     },
     async diagnostics() {
       const rows = await call<AlertChartDiagnostics[]>("get_alert_chart_diagnostics");
@@ -104,6 +127,8 @@ export function createAlertChartStore(client: RpcClient, config: AlertChartsConf
         png_bytes: Number(row.png_bytes), pending_rows: Number(row.pending_rows),
         rendering_rows: Number(row.rendering_rows), rendered_rows: Number(row.rendered_rows),
         failed_rows: Number(row.failed_rows), expired_rows: Number(row.expired_rows),
+        capture_failures_24h: Number(row.capture_failures_24h),
+        capture_failures_total: Number(row.capture_failures_total),
       };
     },
   };

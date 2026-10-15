@@ -16,72 +16,16 @@ import tempfile
 import unittest
 
 from market_analysis_tools import alert_charts as ac
+from market_analysis_tools import fixtures as fx
 
 PYTHON_DIR = Path(__file__).resolve().parents[1]
 HAS_MPL = importlib.util.find_spec("matplotlib") is not None
 REQUIRE_MPL = os.environ.get("ALERT_CHARTS_REQUIRE_MATPLOTLIB") == "1"
 needs_mpl = unittest.skipUnless(HAS_MPL or REQUIRE_MPL, "matplotlib is a machine-side requirement")
 PNG = b"\x89PNG\r\n\x1a\n"
-START = 1_767_225_600_000  # 2026-01-01 00:00 UTC
-
-
-def synthetic_candles(n=60, timeframe=15, seed=7, doji_at=None):
-    """SYNTHETIC seeded random-walk candles [open_ms, o, h, l, c, v]; not market data."""
-    rng = random.Random(seed)
-    price, rows = 100.0, []
-    for i in range(n):
-        o = price
-        c = o + rng.gauss(0.02, 0.7)
-        if i == doji_at:
-            c = o + 0.02
-        h = max(o, c) + abs(rng.gauss(0.18, 0.08)) + 0.01 + (0.5 if i == doji_at else 0)
-        l = min(o, c) - abs(rng.gauss(0.18, 0.08)) - 0.01 - (0.5 if i == doji_at else 0)
-        rows.append([START + i * timeframe * 60_000, round(o, 4), round(h, 4), round(l, 4), round(c, 4),
-                     round(abs(rng.gauss(100, 35)), 2)])
-        price = c
-    return rows
-
-
-def ema(values, period):
-    out = [None] * len(values)
-    if len(values) >= period:
-        prev = sum(values[:period]) / period
-        out[period - 1] = prev
-        for i in range(period, len(values)):
-            prev = (values[i] - prev) * 2 / (period + 1) + prev
-            out[i] = prev
-    return out
-
-
-def pattern_window(n=60):
-    candles = synthetic_candles(n, 60, doji_at=n - 1)
-    closes = [c[4] for c in candles]
-    return {"version": ac.WINDOW_VERSION, "kind": "pattern", "synthetic": True, "symbol": "BTCUSDT",
-            "source": "binance-usdm", "timeframe_minutes": 60, "event_candle_ms": candles[-1][0],
-            "patterns": ["doji"], "rule_version": "ta-v2", "candles": candles,
-            "indicators": {"ema20": ema(closes, 20), "ema50": ema(closes, 50),
-                           "rsi14": [None] * 14 + [50.0] * (n - 14)}}
-
-
-def movement_window(n=96):
-    candles = synthetic_candles(n, 15)
-    last = candles[-1]
-    alert_ms = last[0] + 15 * 60_000 + 3 * 60_000
-    baseline = candles[40][4]
-    price = round(baseline * 1.021, 4)
-    return {"version": ac.WINDOW_VERSION, "kind": "movement_alert", "synthetic": True, "symbol": "ETHUSDT",
-            "source": "binance-usdm", "timeframe_minutes": 15, "event_candle_ms": last[0], "candles": candles,
-            "indicators": {"ema20": [None] * n, "ema50": [None] * n, "rsi14": [None] * n},
-            "alert": {"alert_id": "00000000-0000-4000-8000-000000000001", "rule_version": "cumulative-baseline-v1",
-                      "direction": "up", "threshold_pct": 2, "change_pct": 2.1, "baseline_price": baseline,
-                      "baseline_ms": candles[40][0], "alert_price": price, "alert_ms": alert_ms,
-                      "alert_candle_ms": alert_ms - 60_000,
-                      "alert_minute": [alert_ms - 60_000, last[4], max(last[4], price) + 0.1,
-                                       min(last[4], price) - 0.1, price, 12.0]},
-            "breadth": {"status": "LIVE", "window_minutes": 5, "evaluation_boundary_ms": alert_ms,
-                        "direction_state": "RISING", "denominator": 6, "rising": 5, "falling": 0, "flat": 1,
-                        "material_rising": 4, "material_falling": 0},
-            "breadth_unavailable_reason": None}
+START = fx.START
+synthetic_candles, pattern_window, movement_window, trade_fixture = (
+    fx.synthetic_candles, fx.pattern_window, fx.movement_window, fx.trade_fixture)
 
 
 class ValidationTests(unittest.TestCase):
@@ -114,6 +58,56 @@ class ValidationTests(unittest.TestCase):
         offenders = [p.name for p in core.rglob("*.py") if "matplotlib" in p.read_text(encoding="utf-8")
                      or "market_analysis_tools" in p.read_text(encoding="utf-8")]
         self.assertEqual(offenders, [])
+
+
+class LayoutTests(unittest.TestCase):
+    """The label layout is pure (no matplotlib): anchors are never closer than the minimum gap."""
+
+    def gaps(self, ys):
+        values = sorted(ys.values())
+        return [b - a for a, b in zip(values, values[1:])]
+
+    def test_spread_labels_keeps_order_range_and_gap(self):
+        ys = ac.spread_labels({"a": 100.0, "b": 100.001, "c": 100.002, "d": 90.0}, 80.0, 101.0, 2.0)
+        self.assertEqual(sorted(ys, key=ys.get), ["d", "a", "b", "c"])
+        self.assertTrue(all(g >= 2.0 - 1e-9 for g in self.gaps(ys)))
+        self.assertTrue(all(80.0 <= y <= 101.0 for y in ys.values()))
+        far = ac.spread_labels({"a": 1.0, "b": 9.0}, 0.0, 10.0, 2.0)
+        self.assertEqual(far, {"a": 1.0, "b": 9.0})  # already apart: unchanged
+        with self.assertRaises(ac.WindowError):
+            ac.spread_labels({"a": 1, "b": 2, "c": 3}, 0.0, 1.0, 2.0)
+
+    def test_movement_labels_with_close_baseline_and_alert_never_collide(self):
+        for close in (True, False):
+            layout = ac.movement_layout(movement_window(close=close))
+            gap = layout["min_gap"]
+            lo, hi = layout["ylim"]
+            self.assertAlmostEqual(gap, ac.MIN_LABEL_GAP * (hi - lo))
+            self.assertGreaterEqual(abs(layout["label_y"]["alert"] - layout["label_y"]["baseline"]), gap - 1e-9)
+            self.assertTrue(lo <= min(layout["label_y"].values()) and max(layout["label_y"].values()) <= hi)
+        close = ac.movement_layout(movement_window(close=True))
+        self.assertLess(abs(close["anchors"]["alert"] - close["anchors"]["baseline"]), close["min_gap"])  # the real case
+        self.assertIn("threshold 1.5%", close["alert_text"])  # one merged label; no separate threshold label
+        self.assertNotIn("Threshold", close["alert_text"] + close["baseline_text"])
+
+    def test_the_timing_note_is_computed_and_never_claims_adjacency(self):
+        window = movement_window(minutes_after=7)
+        self.assertEqual(ac.alert_gap_minutes(window), 7)
+        note = ac.movement_layout(window)["gap_note"]
+        self.assertIn("7 min after the last completed 15m candle closed", note)
+        self.assertIn("not adjacent", note)
+        self.assertEqual(ac.alert_gap_minutes(movement_window(minutes_after=0)), 0)
+
+    def test_trade_labels_with_close_levels_never_collide(self):
+        window = pattern_window(50)
+        layout = ac.trade_layout(window, trade_fixture(window, close_levels=True))
+        values = sorted(layout["label_y"].values())
+        self.assertEqual(len(values), 4)
+        self.assertTrue(all(b - a >= layout["min_gap"] - 1e-9 for a, b in zip(values, values[1:])))
+        lo, hi = layout["ylim"]
+        self.assertTrue(lo <= values[0] and values[-1] <= hi)
+        with self.assertRaises(ac.WindowError):
+            ac.trade_layout(window, {**trade_fixture(window), "side": "long"})
 
 
 @needs_mpl

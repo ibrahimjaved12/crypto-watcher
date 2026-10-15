@@ -51,13 +51,18 @@ if (eventId !== null) {
     console.error("--event-id must be the alerts.id or ta_signals.id of the event");
     process.exit(2);
   }
-  const charts = await store.requeue(eventId);
-  if (!charts.length) {
-    console.error("No alert chart for this event id (or it is rendering right now).");
+  const outcomes = await store.requeue(eventId);
+  if (!outcomes.length) {
+    console.error("No chart for this event id.");
     process.exit(1);
   }
   let failed = 0;
-  for (const chartId of charts) {
+  for (const item of outcomes.filter((o) => o.outcome === "rendering")) {
+    const until = item.leaseExpiresAt ? new Date(item.leaseExpiresAt).toISOString().slice(11, 16) : "?";
+    console.error(`Chart ${item.chartId} is rendering right now (lease until ${until} UTC); try again after that.`);
+    failed += 1;
+  }
+  for (const { chartId } of outcomes.filter((o) => o.outcome === "requeued")) {
     const job = await store.claim(workerId, chartId);
     if (!job) { failed += 1; continue; }
     const status = await renderClaimedJob(job, { store, workerId, directory, render });

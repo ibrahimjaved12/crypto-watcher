@@ -25,7 +25,7 @@ gateway and jobs runner, each with a log prefix and its own restart policy:
 | `collector-universe-sync` | `node scripts/collector-universe-sync.mjs --mode production` (`npm run collector-universe-sync`; collector/operational DB enabled and hosted/operational credentials required; non-essential) |
 | `runner-gateway` | `node scripts/runner-gateway.mjs --mode production` (only when `RUNNER_GATEWAY_ENABLED=true`; non-essential) |
 | `runner-jobs` | `node scripts/runner-jobs.mjs --mode production` (`npm run runner:jobs`; only when `RUNNER_JOBS_ENABLED=true`; non-essential) |
-| `alert-charts` | `node scripts/alert-charts.mjs --mode production` (`npm run alert-charts`; only when `ALERT_CHART_DIR` is set and `ALERT_CHARTS_ENABLED` is not `false`; non-essential; needs `python/requirements-machine.txt`, see [alert charts](alert-charts.md)) |
+| `alert-charts` | `node scripts/alert-charts.mjs --mode production` (`npm run alert-charts`; only when `ALERT_CHART_DIR` is set and `ALERT_CHARTS_ENABLED` is not `false`; non-essential; needs `python/requirements-machine.txt`; pending jobs wait up to 7 days, unlike the 15-minute `runner_jobs` rule, because the window is stored; see [alert charts](alert-charts.md)) |
 
 The jobs are launched with `node` directly rather than through `npm`, so the supervisor owns the real
 process (no wrapper to signal through). `--workers 1` is explicit because uvicorn otherwise takes its

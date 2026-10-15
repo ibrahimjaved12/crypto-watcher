@@ -226,11 +226,12 @@ def render_pattern_snapshot(window: dict, markers: dict | None, path) -> None:
     lows = min(l for _, _, _, l, _, _ in candles)
     span = max(h for _, _, h, _, _, _ in candles) - lows or 1.0
     label = (markers or {}).get("label") or "\n".join(PATTERN_LABELS.get(p, p) for p in patterns) or "Event"
-    a1.annotate(label, xy=(event, high), xytext=(max(event - 17, 0), high + 0.18 * span), color=WARN,
-                fontsize=10, arrowprops={"arrowstyle": "->", "color": WARN})
+    lines = label.count("\n") + 1
+    a1.annotate(label, xy=(event, high), xytext=(max(event - 17, 0.3 * n), high + 0.08 * span), color=WARN,
+                fontsize=10, va="bottom", arrowprops={"arrowstyle": "->", "color": WARN})
     a1.legend(loc="upper left", facecolor=PANEL, edgecolor=GRID, labelcolor=TXT, fontsize=9)
     a1.set_xlim(-1, n + 1)
-    a1.set_ylim(lows - 0.05 * span, max(h for _, _, h, _, _, _ in candles) + 0.32 * span)
+    a1.set_ylim(lows - 0.10 * span, max(h for _, _, h, _, _, _ in candles) + (0.16 + 0.07 * lines) * span)
     a1.set_xticklabels([])
     title = (f"{window.get('symbol', '')} {timeframe}m · {', '.join(patterns) or 'pattern'} · "
              f"{_label_time(window['event_candle_ms'])}")
@@ -251,10 +252,39 @@ def _breadth_text(window: dict) -> str:
             f"falling {part('falling')} · flat {part('flat')} · {breadth.get('direction_state')}")
 
 
-def render_alert_chart(window: dict, markers: dict | None, path) -> None:
-    """Movement alert: 24 h of completed 15m candles ending before the alert, EMA 20/50, volume and
-    RSI, baseline and alert price lines, the threshold band, the completed 1m alert candle drawn
-    after the window, and the market breadth reading at alert time."""
+# ---------------------------------------------------------------- label layout (pure, no matplotlib)
+
+MIN_LABEL_GAP = 0.04  # minimum vertical distance between two label anchors, as a share of the visible span
+RIGHT_MARGIN = 0.74   # right edge of the axes (figure fraction): labels live in the reserved margin
+
+
+def spread_labels(anchors: dict, lo: float, hi: float, min_gap: float) -> dict:
+    """{key: y} -> {key: y'}: y' keeps the order of the anchors, lies within [lo, hi] and no two values are
+    closer than ``min_gap``. Anchors already far enough apart are unchanged (deterministic)."""
+    items = sorted(anchors.items(), key=lambda kv: (kv[1], kv[0]))
+    if len(items) > 1 and (len(items) - 1) * min_gap > hi - lo:
+        raise WindowError("label gap does not fit in the visible range")
+    pos = [min(max(y, lo), hi) for _, y in items]
+    for i in range(1, len(pos)):
+        pos[i] = max(pos[i], pos[i - 1] + min_gap)
+    if pos and pos[-1] > hi:
+        pos[-1] = hi
+        for i in range(len(pos) - 2, -1, -1):
+            pos[i] = min(pos[i], pos[i + 1] - min_gap)
+    return {key: y for (key, _), y in zip(items, pos)}
+
+
+def alert_gap_minutes(window: dict, timeframe: int | None = None) -> int:
+    """Minutes between the close of the last completed candle of the window and the alert time."""
+    candles = validate_candles(window)
+    alert = window.get("alert") or {}
+    tf = int(timeframe if timeframe is not None else window.get("timeframe_minutes", 15))
+    return max(0, round((int(alert["alert_ms"]) - (candles[-1][0] + tf * 60_000)) / 60_000))
+
+
+def movement_layout(window: dict) -> dict:
+    """Pure layout of the movement chart's price panel: y limits, the label positions (baseline and the merged
+    alert/threshold label, separated by at least MIN_LABEL_GAP of the visible span) and the timing note."""
     candles = validate_candles(window)
     alert = window.get("alert")
     if not isinstance(alert, dict):
@@ -264,94 +294,146 @@ def render_alert_chart(window: dict, markers: dict | None, path) -> None:
     threshold = _number(alert.get("threshold_pct"), "threshold_pct")
     change = _number(alert.get("change_pct"), "change_pct")
     up = alert.get("direction") == "up"
+    lows = min([l for _, _, _, l, _, _ in candles] + [baseline, price])
+    highs = max([h for _, _, h, _, _, _ in candles] + [baseline, price])
+    span = highs - lows or 1.0
+    lo, hi = lows - 0.12 * span, highs + 0.30 * span
+    gap = MIN_LABEL_GAP * (hi - lo)
+    ys = spread_labels({"baseline": baseline, "alert": price}, lo + gap / 2, hi - gap / 2, gap)
+    band = baseline * (1 + (threshold if up else -threshold) / 100)
+    minutes = alert_gap_minutes(window)
+    return {"ylim": (lo, hi), "min_gap": gap, "anchors": {"baseline": baseline, "alert": price},
+            "label_y": ys, "band": band, "up": up, "price": price, "baseline": baseline,
+            "baseline_text": f"Baseline {_fmt_price(baseline)}",
+            "alert_text": f"Alert {_fmt_price(price)} ({change:+.2f}%, threshold {threshold:g}%)",
+            "gap_minutes": minutes,
+            "gap_note": f"alert {minutes} min after the last completed {int(window.get('timeframe_minutes', 15))}m "
+                        "candle closed (candles are not adjacent)"}
+
+
+def trade_layout(window: dict, trade: dict) -> dict:
+    """Pure layout of the trade overlay: level labels (entry, stop, target, liquidation) separated by at least
+    MIN_LABEL_GAP of the visible span, and the y limits."""
+    candles = validate_candles(window)
+    side = trade.get("side")
+    entry, stop, target = (_number(trade.get(k), k) for k in ("entry", "stop", "target"))
+    if side not in ("long", "short"):
+        raise WindowError("trade side must be long or short")
+    if (side == "long" and not stop < entry < target) or (side == "short" and not target < entry < stop):
+        raise WindowError("stop and target are on the wrong side of the entry")
+    anchors = {"Entry": entry, "Stop": stop, "Target": target}
+    if trade.get("liquidation") is not None:
+        anchors["Liquidation"] = _number(trade["liquidation"], "liquidation")
+    values = [l for _, _, _, l, _, _ in candles] + [h for _, _, h, _, _, _ in candles] + list(anchors.values())
+    span = max(values) - min(values) or 1.0
+    lo, hi = min(values) - 0.08 * span, max(values) + 0.12 * span
+    gap = MIN_LABEL_GAP * (hi - lo)
+    return {"ylim": (lo, hi), "min_gap": gap, "anchors": anchors,
+            "label_y": spread_labels(anchors, lo + gap / 2, hi - gap / 2, gap)}
+
+
+def _side_label(ax, y_true: float, y_label: float, text: str, color: str) -> None:
+    """A label in the reserved right margin (axes coordinates in x, data in y) with a short leader line."""
+    transform = ax.get_yaxis_transform()
+    ax.plot([1.0, 1.012], [y_true, y_label], color=color, lw=0.8, transform=transform, clip_on=False)
+    ax.text(1.016, y_label, text, color=color, fontsize=8.5, va="center", ha="left", transform=transform,
+            clip_on=False)
+
+
+def render_alert_chart(window: dict, markers: dict | None, path) -> None:
+    """Movement alert: 24 h of completed 15m candles ending before the alert, EMA 20/50, volume and RSI,
+    the baseline line, the threshold band (unlabelled line), the alert price line with one merged label, the
+    completed 1m alert candle drawn one slot after the window behind a dotted break (it can lie up to 14 minutes
+    after the last completed 15m candle), and the market breadth reading under the title."""
+    candles = validate_candles(window)
+    layout = movement_layout(window)
+    alert = window["alert"]
+    up, baseline, price = layout["up"], layout["baseline"], layout["price"]
     n, timeframe = len(candles), int(window.get("timeframe_minutes", 15))
     ema20, ema50, rsi = (_series(window, k, n) for k in ("ema20", "ema50", "rsi14"))
     minute = alert.get("alert_minute")
+    extra = 3  # slot n is the visible break, slot n + 1 holds the alert minute candle
     plt = _pyplot()
     fig, (a1, a2, a3) = _three_panels(plt)
     _draw_candles(a1, candles)
     a1.plot(range(n), ema20, color=PRI, lw=1.4, label="EMA 20")
     a1.plot(range(n), ema50, color=WARN, lw=1.4, label="EMA 50")
+    a1.axvline(n, color=MUT, lw=1.0, ls=":")  # gap marker: the minute candle is not adjacent
     if isinstance(minute, list) and len(minute) == 6:
         if minute[0] < candles[-1][0]:
             raise WindowError("the alert minute must not precede the window's last candle")
-        _draw_candles(a1, [tuple(minute)], offset=n)
-        a1.axvspan(n - 0.6, n + 0.6, color=WARN, alpha=0.18)
-    lows = min([l for _, _, _, l, _, _ in candles] + [baseline, price])
-    highs = max([h for _, _, h, _, _, _ in candles] + [baseline, price])
-    span = highs - lows or 1.0
-    band = baseline * (1 + (threshold if up else -threshold) / 100)
+        _draw_candles(a1, [tuple(minute)], offset=n + 1)
+        a1.axvspan(n + 0.4, n + 1.6, color=WARN, alpha=0.18)
     a1.axhline(baseline, color=MUT, lw=1.1, ls="--")
-    a1.axhline(band, color=WARN, lw=0.8, ls=":")
+    a1.axhline(layout["band"], color=WARN, lw=0.8, ls=":")
     a1.axhline(price, color=BULL if up else BEAR, lw=1.2)
-    a1.text(n + 1.6, baseline, f"Baseline {_fmt_price(baseline)}", color=MUT, fontsize=9, va="center")
-    a1.text(n + 1.6, band, f"Threshold {'+' if up else '−'}{threshold:g}%", color=WARN, fontsize=9, va="center")
-    a1.text(n + 1.6, price, f"Alert {_fmt_price(price)} ({change:+.2f}%)", color=BULL if up else BEAR,
-            fontsize=9, va="center")
+    _side_label(a1, baseline, layout["label_y"]["baseline"], layout["baseline_text"], MUT)
+    _side_label(a1, price, layout["label_y"]["alert"], layout["alert_text"], BULL if up else BEAR)
+    lo, hi = layout["ylim"]
+    span = (hi - lo) / 1.42
     baseline_ms = alert.get("baseline_ms")
+    top = hi - 0.18 * span
     if isinstance(baseline_ms, int) and candles[0][0] <= baseline_ms:
         x = max(i for i, row in enumerate(candles) if row[0] <= baseline_ms)
         a1.axvline(x, color=MUT, lw=0.8, ls=":")
-        a1.text(x, highs + 0.12 * span, f"baseline set\n{_short_time(baseline_ms, timeframe)}", color=MUT,
-                fontsize=8, ha="center")
+        a1.text(x, top, f"baseline set\n{_short_time(baseline_ms, timeframe)}", color=MUT, fontsize=8, ha="center")
     elif isinstance(baseline_ms, int):
-        a1.text(0, highs + 0.12 * span, f"baseline set {_label_time(baseline_ms)} (before window)", color=MUT,
-                fontsize=8)
-    a1.annotate("Alert 1m candle" if minute else "Alert", xy=(n, price),
+        a1.text(0, top, f"baseline set {_label_time(baseline_ms)} (before window)", color=MUT, fontsize=8)
+    a1.annotate("Alert 1m candle" if minute else "Alert", xy=(n + 1, price),
                 xytext=(n - 14, price + (0.2 if up else -0.2) * span), color=WARN, fontsize=10,
                 arrowprops={"arrowstyle": "->", "color": WARN})
-    a1.text(0.005, 0.02, _breadth_text(window), transform=a1.transAxes, color=TXT, fontsize=8)
     a1.legend(loc="upper left", facecolor=PANEL, edgecolor=GRID, labelcolor=TXT, fontsize=9)
-    a1.set_xlim(-1, n + 8)
-    a1.set_ylim(lows - 0.12 * span, highs + 0.3 * span)
+    a1.set_xlim(-1, n + extra)
+    a1.set_ylim(lo, hi)
     a1.set_xticklabels([])
+    threshold = _number(alert.get("threshold_pct"), "threshold_pct")
     a1.set_title(f"{window.get('symbol', '')} movement alert {'up' if up else 'down'} ≥ {threshold:g}% · "
-                 f"{_label_time(int(alert.get('alert_ms', 0)))}", color=TXT, loc="left", fontsize=13)
+                 f"{_label_time(int(alert.get('alert_ms', 0)))}", color=TXT, loc="left", fontsize=13, pad=36)
+    a1.text(0.0, 1.045, _breadth_text(window), transform=a1.transAxes, color=TXT, fontsize=8.5, va="bottom")
+    a1.text(0.0, 1.012, layout["gap_note"], transform=a1.transAxes, color=MUT, fontsize=8.5, va="bottom")
     _footnote(a1, window, f"{window.get('source', '')} · {alert.get('rule_version', '')} · {timeframe}m candles "
                           "completed by the alert time")
-    _lower_panels(a2, a3, candles, rsi, timeframe, 8)
+    _lower_panels(a2, a3, candles, rsi, timeframe, extra)
+    fig.subplots_adjust(right=RIGHT_MARGIN)
     _save(fig, path)
 
 
 def render_trade_overlay(window: dict, trade: dict, path) -> None:
-    """A position against the candles: entry, stop, target and (optional) liquidation from the entry
-    candle to the right edge, with the risk and reward zones shaded."""
+    """A position against the candles: entry, stop, target and (optional) liquidation from the entry candle to
+    the right edge, risk and reward zones shaded, labels in the right margin kept apart by MIN_LABEL_GAP."""
     candles = validate_candles(window)
     n = len(candles)
-    side = trade.get("side")
-    if side not in ("long", "short"):
-        raise WindowError("trade side must be long or short")
+    layout = trade_layout(window, trade)
     entry_ms = trade.get("entry_ms")
     index = {row[0]: i for i, row in enumerate(candles)}
     if entry_ms not in index:
         raise WindowError("trade entry_ms must be a candle of the window")
-    start = index[entry_ms]
-    entry, stop, target = (_number(trade.get(k), k) for k in ("entry", "stop", "target"))
-    if (side == "long" and not stop < entry < target) or (side == "short" and not target < entry < stop):
-        raise WindowError("stop and target are on the wrong side of the entry")
-    levels = [(entry, TXT, "Entry"), (stop, BEAR, "Stop"), (target, BULL, "Target")]
-    if trade.get("liquidation") is not None:
-        levels.append((_number(trade["liquidation"], "liquidation"), LIQ, "Liquidation"))
+    start, side = index[entry_ms], trade["side"]
+    entry, stop, target = (float(trade[k]) for k in ("entry", "stop", "target"))
+    colors = {"Entry": TXT, "Stop": BEAR, "Target": BULL, "Liquidation": LIQ}
     plt = _pyplot()
     fig, ax = plt.subplots(figsize=(11, 5.2), facecolor=BG)
     _style(ax)
     _draw_candles(ax, candles)
     right = n - 1
     ax.axvspan(start - 0.5, right, color=PRI, alpha=0.06)
-    for y, color, text in levels:
-        ax.hlines(y, start - 0.5, right, color=color, lw=1.2, ls="-" if text == "Entry" else "--")
-        ax.text(right + 0.3, y, text, color=color, fontsize=9, va="center")
+    for text, y in layout["anchors"].items():
+        ax.hlines(y, start - 0.5, right, color=colors[text], lw=1.2, ls="-" if text == "Entry" else "--")
+        _side_label(ax, y, layout["label_y"][text], f"{text} {_fmt_price(y)}", colors[text])
     ax.fill_between([start - 0.5, right], entry, stop, color=BEAR, alpha=0.10)
     ax.fill_between([start - 0.5, right], entry, target, color=BULL, alpha=0.10)
-    span = max(y for y, _, _ in levels) - min(y for y, _, _ in levels) or 1.0
+    lo, hi = layout["ylim"]
+    span = (hi - lo) / 1.2
     ax.annotate(f"{side.capitalize()} opened", xy=(start, entry),
-                xytext=(max(start - 10, 0), entry + (0.35 if side == "short" else -0.35) * span), color=TXT,
+                xytext=(max(start - 10, 0), entry + (0.25 if side == "short" else -0.25) * span), color=TXT,
                 fontsize=9, arrowprops={"arrowstyle": "->", "color": TXT})
-    ax.set_xlim(-1, right + 6)
-    _time_ticks(ax, candles, int(window.get("timeframe_minutes", 15)), 6)
+    ax.set_xlim(-1, right + 2)
+    ax.set_ylim(lo, hi)
+    _time_ticks(ax, candles, int(window.get("timeframe_minutes", 15)), 2)
     ax.set_title(trade.get("title") or "Trade overlay: where the position sits against the candles",
                  color=TXT, loc="left", fontsize=13)
     _footnote(ax, window, trade.get("note") or f"{window.get('symbol', '')} · levels as recorded at entry")
+    fig.subplots_adjust(right=0.84)
     _save(fig, path)
 
 
@@ -394,7 +476,7 @@ def render_equity(series: dict, path) -> None:
         b3.set_ylabel("Indicator score", color=MUT, fontsize=8)
     axes[-1].set_xlabel(series.get("x_label") or "time →", color=MUT, fontsize=8)
     note = "SYNTHETIC data for illustration, not results" if series.get("synthetic") else series.get("note", "")
-    b1.text(0.995, 0.03, note, transform=b1.transAxes, ha="right", color=MUT, fontsize=8)
+    b1.text(1.0, 1.02, note, transform=b1.transAxes, ha="right", va="bottom", color=MUT, fontsize=8)
     _save(fig, path)
 
 

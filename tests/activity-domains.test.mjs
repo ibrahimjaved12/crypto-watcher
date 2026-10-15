@@ -22,7 +22,14 @@ const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toSt
 const { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser, runMonitorForUser } = await import(
   await moduleUrl("../src/lib/monitor/engine.server.ts", {
     "../alert-charts/capture.server": stub(`
-      export async function captureMovementAlertChart() { return { status: "skipped" }; }
+      export function startMovementCapture(deps) {
+        const hook = globalThis.__captureHook;
+        return hook ? hook(deps) : { symbol: deps.symbol, promise: Promise.resolve({ status: "skipped" }) };
+      }
+      export async function settleMovementCaptures(pending) {
+        globalThis.__settled = pending.map((item) => item.symbol);
+        return { settled: pending.length, abandoned: [] };
+      }
     `),
     "@/lib/market/providers.server": stub(`
       export async function loadCandles(symbol) {
@@ -310,5 +317,35 @@ test("completed-candle TA stays application-owned while the collector owns marke
   } finally {
     if (previous === undefined) delete process.env.BINANCE_COLLECTOR_ENABLED;
     else process.env.BINANCE_COLLECTOR_ENABLED = previous;
+  }
+});
+
+test("a slow chart capture never delays the next symbols' alerts and is settled after the loop (#299)", async () => {
+  const order = [];
+  globalThis.__settled = null;
+  // A capture that never finishes: if the loop awaited it, the second symbol would never be processed.
+  globalThis.__captureHook = (deps) => {
+    order.push(`capture:${deps.symbol}`);
+    return { symbol: deps.symbol, promise: new Promise(() => {}) };
+  };
+  globalThis.__domains = { reads: 0, market: [], checkpoints: 0, operational: 0, rpc: 0, ta: [] };
+  const db = database();
+  const rpc = db.rpc;
+  db.rpc = async (name, args) => {
+    if (name !== "process_cumulative_observation") return rpc(name, args);
+    order.push(`rpc:${args.p_symbol}`);
+    return { data: { status: "alerted", alert_id: `alert-${args.p_symbol}` }, error: null };
+  };
+  try {
+    const finished = await Promise.race([
+      runMonitorForUser(db, "user", settings({ completed_candle_ta_enabled: false })),
+      new Promise((resolve) => setTimeout(() => resolve("timeout"), 2_000)),
+    ]);
+    assert.notEqual(finished, "timeout");
+    assert.equal(finished.alertsCreated, 2);
+    assert.deepEqual(order, ["rpc:BTCUSDT", "capture:BTCUSDT", "rpc:ETHUSDT", "capture:ETHUSDT"]);
+    assert.deepEqual(globalThis.__settled, ["BTCUSDT", "ETHUSDT"]); // awaited together after the loop
+  } finally {
+    delete globalThis.__captureHook;
   }
 });

@@ -245,6 +245,14 @@ line re-run by event id) and `get_alert_chart_diagnostics` (the `alert charts` l
 Users and anon have no access. Apply it with `npx supabase migration up --local --workdir
 operational-db`; it is additive and needs no reset. See [alert charts](alert-charts.md).
 
+`20261016120000_alert_chart_followups.sql` adds `alert_chart_capture_failures` (a failed or abandoned
+capture, idempotent on kind, symbol, timeframe and event candle; reported by `mvp:check`), the side
+table `alert_chart_event_ids` (every signal/alert id that produced or repeated a chart, so the
+market-wide pattern chart is found by any account's id), `record_alert_chart_capture_failure`, a
+`requeue_alert_chart` that sweeps expired leases first and reports rows still rendering, and capture
+failure counts in `get_alert_chart_diagnostics`. The pending expiry is an application setting passed to
+`claim_alert_chart` (default 7 days).
+
 ## Cutover and rollback
 
 Deploy the operational baseline and credentials first, then start the collector worker and switch

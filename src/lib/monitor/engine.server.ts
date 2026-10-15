@@ -17,7 +17,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getOperationalStore, operationalNativeSymbol } from "../operational/repository.server";
 import type { OperationalStore } from "../operational/types";
-import { captureMovementAlertChart } from "../alert-charts/capture.server";
+import {
+  settleMovementCaptures,
+  startMovementCapture,
+  type DeferredCapture,
+} from "../alert-charts/capture.server";
 
 export type MonitorSettings = {
   user_id: string;
@@ -113,6 +117,7 @@ export async function runMonitorForUser(
   if (symbols.length === 0) return finish({ ...base, status: "skipped" });
 
   const failures: string[] = [];
+  const pendingCaptures: DeferredCapture[] = [];
   const checkedSymbols = new Set<string>();
   let alertsCreated = 0;
   let source: string | null = null;
@@ -201,14 +206,16 @@ export async function runMonitorForUser(
         }
         if (status === "alerted") {
           alertsCreated += 1;
-          // Setup chart window (#299), copied now because the candle store keeps ~8 days. Best
-          // effort: a capture failure is logged inside and never fails the saved alert.
+          // Setup chart window (#299), copied now because the candle store keeps ~8 days. Started
+          // without awaiting so later symbols are not delayed; settled after every alert is saved.
+          // Best effort: it never throws, and a failure is recorded (alert_chart_capture_failures).
           const alertId = (data as { alert_id?: string } | null)?.alert_id;
           if (alertId) {
-            await captureMovementAlertChart({
+            pendingCaptures.push(startMovementCapture({
               db: supabaseAdmin, operationalStore, context, userId, symbol, alertId,
-              minute: outcome.result.minute, collectorOwnsMarketData: sharedCollectorOwnsMarketData,
-            });
+              observedAt: observation.observedAt, minute: outcome.result.minute,
+              collectorOwnsMarketData: sharedCollectorOwnsMarketData,
+            }));
           }
         }
       }
@@ -237,6 +244,10 @@ export async function runMonitorForUser(
       if (symbolErrors.length < 3) checkedSymbols.add(symbol);
     }
   }
+
+  // The alerts are saved; give the deferred chart captures at most 10 s (they ran during TA), then abandon
+  // and record the rest. Never throws.
+  await settleMovementCaptures(pendingCaptures);
 
   const collectionPathFailed = failures.length >= symbols.length;
   const taFailed = settings.completed_candle_ta_enabled && taErrors.length >= symbols.length * 3;
