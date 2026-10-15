@@ -148,9 +148,9 @@ class InsufficientCountsTests(unittest.TestCase):
         ctx = ct.TableContext("BTCUSDT", 15, candles, [0.01] * n, "test", ct.table_segments(15), None)
         counts = {}
         written = ct.write_table(io.BytesIO(), ct.build_rows(ctx), counts=counts)
-        self.assertEqual(sum(counts["insufficient_by_month"].values()), sum(
+        self.assertEqual(sum(counts["insufficient_month"].values()), sum(
             n for key, n in counts["rows"].items() if "|insufficient|" in key))
-        self.assertEqual(sum(counts["insufficient_reason"].values()), sum(counts["insufficient_by_month"].values()))
+        self.assertEqual(sum(counts["insufficient_reason"].values()), sum(counts["insufficient_month"].values()))
         self.assertEqual(written, 30)
 
 
