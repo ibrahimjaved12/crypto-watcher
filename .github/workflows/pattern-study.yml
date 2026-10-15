@@ -16,7 +16,7 @@ on:
         options: [development, validation]
         default: development
       table_report:
-        description: "candle-table report hash (ct1__<hash16>) or reports/candle-table/... path"
+        description: "candle-table report: a bare hash (16-64 hex) or a reports/candle-table/... path"
         type: string
         required: true
       universe:
@@ -25,7 +25,7 @@ on:
         options: [core, core+extra]
         default: core
       reference_report:
-        description: "optional development doji report hash or path (validation runs only)"
+        description: "optional development doji report: a bare hash or a reports/pattern-study/... path (validation only)"
         type: string
         default: ""
 

@@ -46,6 +46,7 @@ This study supersedes it.
   - row counts per (symbol, tf, status, segment) and `fwd_status` counts;
   - `insufficient_reason_counts` (symbol|tf|segment|`reasons` value) and `insufficient_by_month`
     (symbol|tf|YYYY-MM of the decision time), so clusters show without opening the files;
+  - `touch_sig_share` per timeframe and `touch_sig_outside_range` (lv3-v1, see Levels 3);
   - input release tags and sha256s, the git sha and `through_month`;
   - the dk1-vs-1m `daily_parity` per symbol;
   - `universe`, `bar_source_counts` (symbol|tf|source) and `first_ok_decision_ms`
@@ -93,7 +94,11 @@ This study supersedes it.
 | levels2 | lv2-v1 | liquidity pools (distance, touches, touch, swept), anchored VWAP from the last swing low/high, intraday day VWAP, 30d/90d volume profile POC/VAH/VAL |
 | derivatives | deriv-v1 | funding (last, 90-day percentile, clamp flag, last-3 sum), premium/basis, open interest (end, start, change, z, OI/turnover), positioning (global, top-trader account/position, taker, global z) |
 | flush | flush-v1 | flush_down, flush_up, flush_dir (price beyond 3 sigma with an OI collapse) |
+| prev | prev-v1 | candle i-1: body_ratio, range_atr, doji_b10, doji_subtype, high, low; confirm_dir, confirm_excess_atr; flush_prev_dir |
+| ctx2 | ctx2-v1 | trend_px20/px50_prev, trend_agree, swing_trend_dir, htf_trend_dir (dk1 daily), prior20_reclaim_dir, climax_vol_max6, climax_age6, climax_ret_sigma6 |
+| lv3 | lv3-v1 | day_open/week_open/month_open: touch, dist_up/dist_dn (ATR units), level_side; touch_sig, sig_nearest_level_dist_atr, sig_nearest_set |
 | outcomes | fwd-v1 | for m in 1, 2, 4: ret_m_bp, ret_m_sigma, mfe/mae_long_m_sigma, fwd_ok_m; range1_sigma, absret1_sigma, ln_range1_sigma, fwd_status |
+| sigma_seas | ss-v1 | intraday: sigma_seas_factor (slot of candle i+1), ret_1_sigma_seas, ln_range1_sigma_seas |
 
 **Sigma:**
 
@@ -323,6 +328,81 @@ features and are not counted):
 
 Real liquidation prints join in a later PR (#349). Neither group changes `status`.
 
+### Previous candle (prev-v1)
+
+Known at the end of candle i; never changes `status`. Empty when candle i-1 is invalid.
+
+- `prev_body_ratio`, `prev_doji_b10`, `prev_doji_subtype`, `prev_high`, `prev_low`: candle i-1 with
+  the geometry rules (exact integers; the subtype only when `prev_doji_b10`).
+- `prev_range_atr`: range of i-1 / its own `atr_prev` (Wilder ATR14 through i-2), i.e. the
+  `range_atr` of row i-1.
+- `confirm_dir`: +1 if `close_i > high_(i-1)`, -1 if `close_i < low_(i-1)`, else 0.
+  `confirm_excess_atr`: the distance of `close_i` beyond that extreme / `atr_prev` (positive),
+  only when `confirm_dir != 0`.
+- `flush_prev_dir`: `flush_dir` of candle i-1 (flush-v1 rule unchanged; known at the end of i-1).
+
+### Context 2 (ctx2-v1)
+
+Point in time through candle i-1 unless stated; never changes `status`.
+
+- `trend_px20_prev = sign(close_(i-1) - ema20_prev)`, `trend_px50_prev` likewise with EMA50.
+  `trend_agree`: `trend_dir`, `trend_px20_prev` and `trend_px50_prev` all equal and non-zero. (The
+  EMA20-vs-EMA50 label alone puts the close on the other side of EMA20 on about a quarter of the
+  dojis.)
+- `swing_trend_dir`: from the last two same-tf fractal swings (n = 5, all 11 candles valid, the
+  candle_levels2 confirmation lag: confirmed at the end of j + 5 <= i - 1). +1 if the last two swing
+  highs AND the last two swing lows are rising, -1 if both are falling, else 0; empty while fewer
+  than two of either exist.
+- `htf_trend_dir`: `sign(EMA20 - EMA50)` of the dk1 daily closes, on the last day that ended at or
+  before the row candle's open (the open-time rule). Empty without dk1 days or before EMA50 exists.
+- `prior20_reclaim_dir`: +1 if candle i-1 traded below the low of candles i-21..i-2 (strictly) and
+  closed above it; -1 for the high mirror; 0 for neither or both. Empty unless i-21..i-1 are valid.
+- `climax_vol_max6`: max relative volume over candles i-6..i-1 (intraday `rel_volume_slot`,
+  daily/weekly `rel_volume_prior20`); empty if any of the six is missing. `climax_age6`: k in 1..6
+  of that candle (ties: the most recent). `climax_ret_sigma6`: `ln(close/open)` of the candle in
+  i-6..i-1 with the largest |return| (ties: the most recent), in the one-candle sigma at that
+  candle's own end; empty unless all six are valid with a sigma.
+
+### Seasonal sigma (ss-v1)
+
+Intraday only (empty, not applicable, on daily/weekly rows); never changes `status`; the
+`ewma-3d-5m-v1` sigma is unchanged.
+
+- Observations: `|ret_1_sigma|` of rows k <= i-1, i.e. `|ln(close_(k+1)/open_(k+1))| / sigma_tf(k)`
+  with both candles valid, keyed by the UTC time-of-day slot of the outcome candle k+1, kept while
+  that candle ended in `(end_i - 60 days, end_i]`. Everything is known at the end of candle i.
+- `sigma_seas_factor`: mean of the observations of the slot of candle i+1 (at least 30) divided by
+  the mean of all observations in the window (so the average factor is about 1). Empty otherwise.
+- `ret_1_sigma_seas = ret_1_sigma / factor`, `ln_range1_sigma_seas = ln(range1_sigma / factor)`:
+  outcome columns, present exactly when `ret_1_sigma` is (same segment rule).
+
+### Levels 3 (lv3-v1)
+
+Additive to loc-v1 (unchanged); same open-time rule, touch band and ATR units; never changes `status`.
+
+- **Period opens.** `day_open` (UTC day), `week_open` (Monday 00:00 UTC), `month_open` (UTC
+  month): the open of the period's first candle (the row's own candles; weekly rows read the dk1
+  days for `month_open`). The level is usable from the SECOND row candle of its period
+  (`valid_from = period start + one row candle`) to the period end, so the first candle never
+  touches its own open trivially. No level if that first candle is invalid. Not applicable:
+  `day_open` on 1d/1w rows, `week_open` on 1w rows; and every column of a set on the period's first
+  candle (empty, not missing).
+- Per set: `touch_<set>`, `dist_up_<set>_atr`, `dist_dn_<set>_atr` exactly like loc-v1, and
+  `level_side_<set>`: -1 if the level lies above close (the `dist_up` side), +1 at or below.
+  (loc-v1's `approach_side_*` uses close_(i-1) and the opposite sign; the name differs on purpose.)
+- **Significant sets** (tie order): prev_week, prev_month, week_open, month_open, swing1w,
+  `round_sig` = multiples of 5 x the symbol's round-grid spacing (BTC 5000, ETH 500, BNB 250, SOL
+  50, XRP 0.5, DOGE 0.05 USDT; for BTC this is `round_tier >= 5000`; `round_tier` gives every other
+  symbol tier 1, so "tier >= 2" alone would select nothing for five symbols and the whole BTC grid),
+  and `pool3` = lv2 liquidity pools (`liquidity_pools`, whose `tier` is the member-swing count) with
+  at least 3 member swings. Sets that loc-v1 does not apply to the timeframe are skipped.
+- `touch_sig`: any significant level in `[low - 0.25 atr_prev, high + 0.25 atr_prev]`; empty when no
+  significant set is available. `sig_nearest_level_dist_atr` / `sig_nearest_set`: the nearest usable
+  significant level to close (|distance| / `atr_prev`) and its set.
+- The manifest reports `touch_sig_share` per timeframe (rows with `touch_sig` filled, touched,
+  share) and lists timeframes outside 3-25 % in `touch_sig_outside_range`. The design target is
+  about 5-15 %; nothing is tuned silently.
+
 ## Doji event study
 
 A pre-registered screen on the candle table (`patterns/study_cells.py`, `patterns/pattern_study.py`,
@@ -415,7 +495,7 @@ Unsigned cells have no bp, hit-rate or cost line.
 - Touch base rates per level set (and `any_touch`) and timeframe: rows evaluated (non-invalid rows
   whose touch flag is not empty) and the share with the flag set. For round levels the median
   round step (price units) over the median candle range, per symbol and as the median over
-  symbols. A set whose touch share is above 90% or below 1% is labelled **degenerate: not
+  symbols. A set whose touch share is above 80% or below 1% is labelled **degenerate: not
   interpretable**: it stays in the output and is never counted as a null result. Cells C1 and C4 use
   `any_touch`, so a degenerate `any_touch` makes them not interpretable at that timeframe. The
   `touch_round` column and its definition are not changed by the study.
@@ -427,8 +507,9 @@ Unsigned cells have no bp, hit-rate or cost line.
 - Sensitivity runs with `body_ratio <= 0.05` and with `range_atr >= 1.0`.
 - A subtype split.
 - Dose-response within E for cell A: quintiles of `body_ratio`, `range_atr`,
-  `rel_volume_prior20` and `nearest_level_dist_atr`, with Spearman(quintile, mean) and a
-  day-bootstrap CI.
+  `rel_volume_prior20` and `nearest_level_dist_atr` (bucket means, descriptive), with the row-level
+  Spearman of the variable and the outcome within E and a day-cluster bootstrap CI (a Spearman over
+  five bucket means had only five points and was replaced).
 - Sessions (exploratory): per cell × intraday timeframe × session, with the session taken from the
   hour of the decision time (the candle's `end_ms`, UTC): asia 00-08, europe 08-13, us 13-21,
   late 21-24 (daily and weekly rows have the session "all"). Each session reports the event and
@@ -488,6 +569,98 @@ listed controls.
 A null result is informative only when its MDE is well below the hurdle: compare the MDE at 2.8 SE
 and at the Holm alpha with the hurdle. If the Holm MDE exceeds the hurdle, the study could not
 have detected a tradable effect in that cell.
+
+## Doji exploration (doji-explore-v1)
+
+Free, descriptive discovery after the doji study found no standalone directional edge (owner
+decision 2026-10-15). `python/market_analysis/patterns/pattern_explore.py`,
+`scripts/research/pattern_explore.py`, `.github/workflows/pattern-explore.yml`. **No stops in
+discovery and no required outcome**: the tool describes what follows a doji; strategies are built
+later from what it finds. The doji study and its cells are unchanged.
+
+**Hygiene.** Development only (intraday `development`, daily/weekly `development-ext`). Validation
+needs the plan id of a plan committed as `plans/doji-explore__<id16>.plan.json` (verified with
+`read_plan`); the hidden stretch is always refused by `check_segment`. Paths never cross the
+segment boundary. Every slice x metric family evaluated is appended to
+`experiments/doji-explore.jsonl` (one line each: timeframe, slice, bucket, family, horizons, code
+version, n, report hash, run id), and a rerun of the same table and code is a REPLAY, not a new
+variant. BH q-values are over every test of the run, and the count is in the report.
+
+**Per timeframe.** Every analysis runs per timeframe; nothing is pooled across timeframes (pooling
+let 15m dominate the doji study). Tiers: `intraday` (15/60/240) or `daily_weekly` (1440/10080).
+
+**Groups.**
+
+- Event E = doji-geo-v2 (`body_ratio <= 0.10`, `range_atr >= 0.5`); descriptive variants
+  `body_ratio <= 0.05` and `range_atr >= 1.0` (direction-free headline metrics only).
+- Matched controls: `range_atr >= 0.5`, `body_ratio > 0.10`, reweighted to the events over strata
+  symbol x tf x 6-hour bucket x `atr_pct_prev` tercile x `range_atr` bin x `rel_volume_prior20`
+  tercile (a control's weight = events / controls of its stratum). Events in strata without
+  controls are counted (`events_unmatched`) and left out of the differences. Intraday runs also
+  report the strata with the decision-time session added.
+- Random baseline: population rows sampled without replacement (seed 20261017) per symbol x UTC
+  hour of the open, 2 x the events of that cell (all rows when fewer), so the hour mix matches.
+
+**Paths.** For row i, the consecutive table rows i+1..i+N (N = 24 intraday, 20 daily, 13 weekly;
+built to N + 5 so the break rule keeps N candles after a break). A step must exist, open exactly k
+candles later, not be invalid and lie in the same segment; the path stops at the first failure.
+Incomplete paths are counted per horizon and excluded there, never filled. Entry = open of i+1.
+Units: one-candle sigma of row i (`sigma_tf`; multi-candle values are NOT divided by sqrt(h)), ATR
+(`atr_prev`, price distance / ATR) and bp; `sigma_seas_factor` gives an h = 1 seasonal drift where
+the table has it.
+
+**Direction-free (per h in 1, 2, 3, 4, 6, 8, 12, 24; daily 1..12, 20; weekly 1..8, 13).** Up and
+down excursion (max high / min low vs the entry), total range, net drift, and for +/-k ATR with k
+in 0.5, 1, 1.5, 2, 3: up-first / down-first / AMBIGUOUS (both inside one candle) / neither within
+h, the resolution share (a barrier reached within h) and the time to the first touch.
+
+**Directional rules (no stop).** (a) Break: the first close beyond the event candle's high (long)
+or low (short) within K in 1, 2, 3, 5 candles (K = 3 primary); entry at that close; returns h
+candles after the break with the side's MFE/MAE; the fade is the negative and is reported too.
+(b) Subtype: dragonfly long, gravestone short, entry at the next open; controls use the same wick
+rule without the body rule (lower >= 0.6 and upper <= 0.1 long, the mirror short); baseline rows
+get a seeded random side with the events' long share. (c) The break split into with-trend /
+counter-trend / no trend under `trend_dir`, `trend_agree` (trend_dir where it agrees, else no
+trend), `swing_trend_dir` and `htf_trend_dir`. Each reports n, mean, median, 10/25/50/75/90
+quantiles, share > 0, MFE/MAE, bp, a day-clustered SE and a day-cluster bootstrap CI, for events,
+matched controls and baseline, plus event - control and event - baseline with their CIs.
+
+**Excursion map (a map, not a recommendation).** For rules (a) K = 3 and (b): stop in 1, 1.5, 2, 3
+ATR x target in 1, 2, 3, 4 ATR within N candles (else a time exit at the close), and stop-only time
+exits at every h. First passage over candle highs/lows after the entry; a candle opening beyond
+the stop exits at its open. Both barriers inside one candle = AMBIGUOUS: reported as a share,
+excluded from one mean and counted as a stop in the other (never resolved optimistically). Gross
+and net of `cost_bp` (default 11) per cell, with n.
+
+**Slices.** A registry (`SLICES`, each with the columns it reads; a slice whose columns are absent
+from the table is skipped and listed, so the prev/ctx2/lv3 slices of #358 apply once the table has
+those groups): all, symbol, session, relative-volume quintile (slot volume
+intraday when present), range_atr, body_ratio, subtype, adx, extension, each trend definition, each
+touch set separately (all loc-v1/lv2/lv3 sets and `touch_sig`), significant-level distance, six
+regime labels, `doi_z`, `fund_pct90`, `prem_z`, prev-doji x `confirm_dir`, `climax_age6`,
+`climax_vol_max6`, `flush_prev_dir`, and volume x `touch_sig`, volume x `trend_agree`, subtype x
+`touch_sig`. Controls are matched again inside each bucket (body and subtype buckets, which define
+the event, compare with all matched controls). Families tested per bucket at two lead horizons
+(4 and 12 candles intraday, 3 and 12 daily, 2 and 8 weekly): `expansion` (range in ATR),
+`resolution` (+/-1 ATR within h), `drift` (sigma), `break_follow` (rule (a) K = 3, sigma) and
+`subtype_dir` (rule (b), sigma); events vs matched controls with a day-clustered t.
+
+**Leads.** |t| >= 2, n >= 100 events, the same sign in both halves of the segment (split at the
+middle of its time range) and in at least 4 of the 6 symbols. Output is never gated on
+significance; `leads.csv` lists the top 30 leads per family, and every test is in `slices.csv` with
+raw p and BH q. A lead is a candidate for a validation plan, not a result.
+
+**Review packs.** `review/review_<tf>_all.html` (and an optional `--review-slice slice=bucket`
+pack): seeded random events (any outcome), seeded random controls, and a balanced pack of random
+hits and misses of rule (a) K = 3 at the first lead horizon. Every chart states its sampling rule.
+A balanced pack with no hits (or no misses) is withheld: no pack contains only misses. (The repo
+has no earlier doji chart generator; `doji_report.sample_events` is the time-spread sampler of the
+frozen doji-v1 report and is not changed.)
+
+**Output.** `reports/pattern-explore/doji-<segment>__<hash16>/`: `summary.json`,
+`direction_free.csv`, `directional.csv`, `excursion_map.csv`, `slices.csv`, `leads.csv`, `report.md`
+and `review/*.html`. The public log carries counts, the number of tests, the private path and the
+hash only.
 
 ## Adding a group (location, derivatives, advanced levels, ...)
 
