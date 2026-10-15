@@ -727,6 +727,10 @@ class, the private path and the hash only.
 --key pilot_key.csv` (run on the private files) reports, per class, class x timeframe and stratum,
 with n and Wilson 95% intervals ('unsure' counted apart and excluded):
 
+Any annotations path is accepted. `--rater LABEL` names the file at the same position (default
+`reviewer` for a single file); repeat `--annotations`/`--rater` to report several raters in one run, each
+tabulated from its own file only, never mixed.
+
 - events (the detector said doji): the **false-positive rate** = n / (y + n), the events the
   reviewer does not call a doji;
 - near-misses and controls (the detector said not a doji): the **missed-doji rate** = y / (y + n),
