@@ -333,7 +333,7 @@ class DiagnosticsTests(unittest.TestCase):
                     touch_round=[1.0] * 190 + [0.0] * 10,           # 95 %: above the upper limit
                     touch_prev_day=[1.0] + [0.0] * 199,             # 0.5 %: below the lower limit
                     touch_prev_week=[1.0] * 100 + [0.0] * 100,      # 50 %: interpretable
-                    any_touch=[1.0] * 180 + [0.0] * 20)             # 90 %: not above 90 %
+                    any_touch=[1.0] * 160 + [0.0] * 40)             # 80 %: not above 80 %
         out = ps.level_diagnostics({15: frame}, "intraday")["by_tf"]["15"]
         self.assertEqual(out["round"]["evaluated"], n)
         self.assertAlmostEqual(out["round"]["touch_share"], 0.95)

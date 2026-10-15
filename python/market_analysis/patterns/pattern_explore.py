@@ -265,7 +265,7 @@ def barrier_outcomes(p: Paths, f: dict, k: float, h: int) -> dict:
     the path is shorter than h and no barrier was reached before it ended (unknown)."""
     first_up, first_down = first_passage(p, f, k)
     first = np.minimum(first_up, first_down)
-    reached = first < h
+    reached = first < np.minimum(h, p.length)  # first == the path width means "never reached"
     known = reached | (p.length >= h)
     code = np.full(len(first), np.nan)  # 1 up first, -1 down first, 0 ambiguous, 2 neither
     code[known & ~reached] = 2
