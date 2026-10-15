@@ -102,10 +102,6 @@ symbol, and recorded as a failure.
   `render_equity(series, path)`: the other two #299 reference charts, ready for paper-trading use; not
   wired to any job yet.
 
-The workflow `alert-charts.yml` renders three SYNTHETIC fixture charts (movement alert with a close
-baseline and alert, pattern snapshot, trade overlay with close levels) and uploads them as the artifact
-`alert-chart-fixtures` so the layout can be looked at.
-
 The look is the owner-approved #299 reference (dark palette, same panel layout). The output is
 deterministic for the same input on the same matplotlib/FreeType build (no time metadata in the PNG).
 PNG files: `ALERT_CHART_DIR/<kind>/<SYMBOL>/<YYYY-MM-DD>/<chart_id>.png`, written to a temporary name

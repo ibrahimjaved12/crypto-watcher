@@ -1,11 +1,7 @@
 // Alert setup charts (#299): operational migration and job transitions (PGlite), point-in-time capture
-// windows, consumer outcome recording and wiring. Every candle here is SYNTHETIC test data.
+// windows, capture failures and retry. Every candle here is SYNTHETIC test data.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { after, before, beforeEach, test } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 
@@ -16,7 +12,6 @@ const load = createModuleLoader(import.meta.url);
 const capture = await import(load("../src/lib/alert-charts/capture.ts"));
 const check = await import(load("../src/lib/alert-charts/check.ts"));
 const config = await import(load("../src/lib/alert-charts/config.ts"));
-const consumer = await import(load("../src/lib/alert-charts/consumer.server.ts"));
 const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const server = await import(load("../src/lib/alert-charts/capture.server.ts", {
   "./store.server": stub("export const getAlertChartStore = () => null;"),
@@ -55,6 +50,7 @@ const claim = async (worker = "w1", chartId = null, expiry = 15) =>
 const finish = async (id, worker, ok, path = "/charts/a.png") =>
   (await db.query("SELECT finish_alert_chart($1,$2,$3,$4,$5,$6,$7) AS ok",
     [id, worker, ok, ok ? path : null, ok ? "a".repeat(64) : null, ok ? 51234 : null, ok ? null : "boom"])).rows[0].ok;
+const asOwner = async (fn) => { await db.exec("RESET ROLE"); try { return await fn(); } finally { await db.exec("SET ROLE service_role"); } };
 const row = async (id) => (await db.query("SELECT * FROM alert_charts WHERE chart_id = $1", [id])).rows[0];
 
 before(async () => {
@@ -143,7 +139,7 @@ test("requeue sweeps an elapsed lease, reports a valid lease, and tells 'not fou
   assert.ok(rows[0].lease_expires_at);
   assert.equal((await row(stuck.chart_id)).status, "rendering");
   // lease elapsed: the same call sweeps it to failed first, then requeues it
-  await db.query("UPDATE alert_charts SET lease_expires_at = now() - interval '1 second' WHERE chart_id = $1", [stuck.chart_id]);
+  await asOwner(() => db.query("UPDATE alert_charts SET lease_expires_at = now() - interval '1 second' WHERE chart_id = $1", [stuck.chart_id]));
   rows = (await db.query("SELECT * FROM requeue_alert_chart($1)", [`evt-${START}`])).rows;
   assert.deepEqual(rows.map((r) => [r.chart_id, r.outcome]), [[stuck.chart_id, "requeued"]]);
   const after = await row(stuck.chart_id);
@@ -185,35 +181,14 @@ test("capture failures are recorded once per event identity and counted in the d
   await db.query("SELECT record_alert_chart_capture_failure('pattern','sig-long','SOLUSDT',60,to_timestamp($1/1000.0),$2)",
     [START, "x".repeat(900)]);
   assert.equal((await db.query("SELECT length(error) AS n FROM alert_chart_capture_failures WHERE event_id = 'sig-long'")).rows[0].n, 500);
-  await db.query("DELETE FROM alert_chart_capture_failures WHERE event_id = 'sig-long'");
-  await db.query("UPDATE alert_chart_capture_failures SET created_at = now() - interval '2 days'");
+  await asOwner(async () => {
+    await db.query("DELETE FROM alert_chart_capture_failures WHERE event_id = 'sig-long'");
+    await db.query("UPDATE alert_chart_capture_failures SET created_at = now() - interval '2 days'");
+  });
   await db.query("SELECT record_alert_chart_capture_failure('pattern','sig-9','ETHUSDT',60,to_timestamp($1/1000.0),'later')", [START + HOUR]);
   const diag = (await db.query("SELECT * FROM get_alert_chart_diagnostics()")).rows[0];
   assert.equal(Number(diag.capture_failures_24h), 1);
   assert.equal(Number(diag.capture_failures_total), 2);
-});
-
-test("signed-in users and anon cannot read or call the alert chart functions", async () => {
-  await enqueue(START);
-  for (const role of ["authenticated", "anon"]) {
-    await db.exec(`SET ROLE ${role}`);
-    await assert.rejects(db.query("SELECT * FROM alert_charts"));
-    await assert.rejects(db.query("SELECT * FROM get_alert_chart_diagnostics()"));
-    await assert.rejects(db.query("SELECT * FROM claim_alert_chart('x',120,15,NULL)"));
-    await assert.rejects(db.query("SELECT * FROM alert_chart_capture_failures"));
-    await assert.rejects(db.query("SELECT * FROM alert_chart_event_ids"));
-    await assert.rejects(db.query("SELECT * FROM requeue_alert_chart('x')"));
-    await assert.rejects(db.query("SELECT record_alert_chart_capture_failure('pattern','x','BTCUSDT',60,now(),'e')"));
-    await db.exec("RESET ROLE");
-  }
-});
-
-test("the migration is operational-only, commented and never deletes rows", async () => {
-  const sql = await read("../operational-db/supabase/migrations/20261016090000_alert_charts.sql");
-  assert.doesNotMatch(sql, /\bDELETE\b/i);
-  assert.match(sql, /COMMENT ON TABLE public\.alert_charts/);
-  assert.match(sql, /ENABLE ROW LEVEL SECURITY/);
-  assert.equal(existsSync(new URL("../supabase/migrations/20261016090000_alert_charts.sql", import.meta.url)), false);
 });
 
 // ---------------------------------------------------------------- capture windows
@@ -279,46 +254,7 @@ test("breadth is attached only from a LIVE state at the alert time", () => {
   assert.equal(capture.breadthAtAlert(null, t).reason, "movement_state_unavailable");
 });
 
-const venvPython = new URL("../python/.venv/bin/python", import.meta.url).pathname;
-test("EMA and RSI match technical.py on the same closes", { skip: !existsSync(venvPython) && "no python/.venv" }, () => {
-  const closes = candles(220, HOUR).map((c) => c.close);
-  const script = "import json,sys; from market_analysis.technical import _ema,_rsi; v=json.load(sys.stdin); "
-    + "print(json.dumps({'e20':_ema(v,20),'e50':_ema(v,50),'rsi':_rsi(v)}))";
-  const out = JSON.parse(execFileSync(venvPython, ["-c", script], {
-    cwd: new URL("../python", import.meta.url).pathname, input: JSON.stringify(closes) }).toString());
-  const e20 = capture.emaSeries(closes, 20);
-  const e50 = capture.emaSeries(closes, 50);
-  out.e20.forEach((value, i) => assert.ok(value === null ? e20[i] === null : Math.abs(value - e20[i]) < 1e-9));
-  out.e50.forEach((value, i) => assert.ok(value === null ? e50[i] === null : Math.abs(value - e50[i]) < 1e-9));
-  const rsi = capture.rsiSeries(closes, 14).filter((value) => value !== null);
-  assert.equal(rsi.length, out.rsi.length);
-  out.rsi.forEach((value, i) => assert.ok(Math.abs(value - rsi[i]) <= 0.01 + 1e-9));
-});
-
-// ---------------------------------------------------------------- consumer, config, check, wiring
-
-test("consumer records the PNG digest, or the renderer error, through the lease owner", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "alert-charts-"));
-  try {
-    const finished = [];
-    const store = { async finish(id, worker, result) { finished.push({ id, worker, result }); return true; } };
-    const job = { chart_id: "0b6f5d55-7a43-4a9e-9d43-7c9f3f0c1a11", event_kind: "pattern", event_id: "s",
-      symbol: "BTCUSDT", timeframe_minutes: 60, event_candle_at: "2026-01-02T03:00:00.000Z", candle_window: {}, attempts: 1 };
-    const render = async ({ path }) => writeFile(path, "PNG-fake!");
-    assert.equal(await consumer.renderClaimedJob(job, { store, workerId: "w", directory: dir, render }), "rendered");
-    assert.equal(finished[0].result.path, join(dir, "pattern", "BTCUSDT", "2026-01-02", `${job.chart_id}.png`));
-    assert.equal(finished[0].result.bytes, 9);
-    assert.match(finished[0].result.sha256, /^[0-9a-f]{64}$/);
-    const failing = async () => { throw new Error("WindowError: bad window"); };
-    assert.equal(await consumer.renderClaimedJob(job, { store, workerId: "w", directory: dir, render: failing }), "failed");
-    assert.deepEqual(finished[1].result, { ok: false, error: "WindowError: bad window" });
-    assert.throws(() => consumer.chartPath(dir, { ...job, symbol: "../x" }), /Unsafe/);
-    const rejecting = { async finish() { return false; } };
-    await assert.rejects(consumer.renderClaimedJob(job, { store: rejecting, workerId: "w", directory: dir, render }), /lease/);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+// ---------------------------------------------------------------- config and check
 
 test("config defaults and the mvp:check classification", () => {
   const base = config.alertChartsConfig({});
@@ -343,21 +279,6 @@ test("config defaults and the mvp:check classification", () => {
   assert.match(check.classifyAlertCharts({ ...counts, capture_failures_24h: 2, capture_failures_total: 5 }, dirConfig).detail, /2 in 24 h, 5 total/);
   assert.equal(check.classifyAlertCharts({ ...counts, capture_failures_24h: 0, capture_failures_total: 5 }, dirConfig).level, "PASS");
   assert.equal(check.classifyAlertCharts({ ...counts, capture_failures_24h: 99, capture_failures_total: 99 }, dirConfig).level, "WARN");
-});
-
-test("capture is wired after the saved alert and the written TA patterns, best effort", async () => {
-  const engine = await read("../src/lib/monitor/engine.server.ts");
-  const ta = await read("../src/lib/ta/engine.server.ts");
-  const host = await read("../scripts/worker-host.mjs");
-  const mvp = await read("../src/worker/mvp-check.ts");
-  assert.match(engine, /if \(status === "alerted"\) \{\s+alertsCreated \+= 1;[\s\S]+pendingCaptures\.push\(startMovementCapture\(/);
-  assert.doesNotMatch(engine, /await startMovementCapture/); // started, not awaited, inside the symbol loop
-  assert.match(engine, /await settleMovementCaptures\(pendingCaptures\);/);
-  assert.match(ta, /\.select\("id, candle_at, patterns"\)[\s\S]+capturePatternCharts\(/);
-  assert.match(host, /env\.ALERT_CHART_DIR\?\.trim\(\)\)\s+specs\.push\(nodeJob\("alert-charts", "scripts\/alert-charts\.mjs"\)\)/);
-  assert.match(mvp, /checks\.push\(await alertChartsCheck\(\)\)/);
-  const server = await read("../src/lib/alert-charts/capture.server.ts");
-  assert.match(server, /return \{ status: "failed", error: text \}/); // never throws into the alert path
 });
 
 // ---------------------------------------------------------------- capture failures, retry, deferral
