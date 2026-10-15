@@ -125,7 +125,7 @@ class TouchSigTests(unittest.TestCase):
         self.assertEqual(counts["touch_sig_rows"], {"240": len(filled)})
         self.assertEqual(counts.get("touch_sig_true", {}).get("240", 0), sum(filled))
         share = ct.touch_sig_share(counts)["240"]
-        self.assertAlmostEqual(share["share"], sum(filled) / len(filled))
+        self.assertEqual(share["share"], f"{sum(filled) / len(filled):.6f}")
         manifest = ct.build_manifest(files=[], counts=counts, inputs={}, through_month="2025-12", parity={},
                                      symbols=["BTCUSDT"], timeframes=[240], code_commit="a", created_utc="b")
         self.assertEqual(manifest["touch_sig_share"]["240"]["rows"], len(filled))
@@ -136,7 +136,7 @@ class TouchSigTests(unittest.TestCase):
         counts = {"touch_sig_rows": {"15": 1000, "60": 100, "240": 50}, "touch_sig_true": {"15": 100, "60": 30}}
         shares = ct.touch_sig_share(counts)
         self.assertEqual(list(shares), ["15", "60", "240"])
-        self.assertEqual(shares["240"], {"rows": 50, "touched": 0, "share": 0.0})
+        self.assertEqual(shares["240"], {"rows": 50, "touched": 0, "share": "0.000000"})
         manifest = ct.build_manifest(files=[], counts=counts, inputs={}, through_month="2025-12", parity={},
                                      symbols=["BTCUSDT"], timeframes=[15, 60, 240], code_commit="a", created_utc="b")
         self.assertEqual(manifest["touch_sig_outside_range"], ["240", "60"])

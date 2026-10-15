@@ -155,7 +155,7 @@ class Ctx2Tests(unittest.TestCase):
     def test_htf_trend_dir_uses_days_closed_before_the_open(self):
         o, h, l, c = self.rising(80)
         days = series(1440, DAILY_START, o, h, l, c)
-        weeks_start = DAILY_START + 4 * DAY  # 2021-01-04, a Monday
+        weeks_start = DAILY_START + 3 * DAY  # 2021-01-04, a Monday (2021-01-01 is a Friday)
         week = walk(8, 2, minutes=10080, start=weeks_start)
         ctx = context(week, [0.03] * len(week), history_days=days)
         table = rows(ctx)

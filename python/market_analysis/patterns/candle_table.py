@@ -817,9 +817,12 @@ TOUCH_SIG_RANGE = (0.03, 0.25)
 
 
 def touch_sig_share(counts: dict) -> dict:
-    """{tf: {"rows", "touched", "share"}} of the rows whose touch_sig is filled (keys sorted as integers)."""
+    """{tf: {"rows", "touched", "share"}} of the rows whose touch_sig is filled (keys sorted as integers).
+
+    ``share`` is a 6-decimal string: manifests are canonical JSON, which has no floats."""
     rows, touched = counts.get("touch_sig_rows", {}), counts.get("touch_sig_true", {})
-    return {tf: {"rows": rows[tf], "touched": touched.get(tf, 0), "share": touched.get(tf, 0) / rows[tf]}
+    return {tf: {"rows": rows[tf], "touched": touched.get(tf, 0),
+                 "share": f"{touched.get(tf, 0) / rows[tf]:.6f}"}
             for tf in sorted(rows, key=int) if rows[tf]}
 
 
@@ -845,7 +848,7 @@ def build_manifest(*, files: list, counts: dict, inputs: dict, through_month: st
                                   f"target is about 5-15 %, timeframes outside {TOUCH_SIG_RANGE} are listed in "
                                   "touch_sig_outside_range (reported, never tuned silently)",
                 "touch_sig_outside_range": sorted(tf for tf, item in touch_sig_share(counts).items()
-                                                  if not TOUCH_SIG_RANGE[0] <= item["share"] <= TOUCH_SIG_RANGE[1]),
+                                                  if not TOUCH_SIG_RANGE[0] <= item["touched"] / item["rows"] <= TOUCH_SIG_RANGE[1]),
                 "oi_missing_counts": dict(sorted(counts.get("oi_missing", {}).items())),
                 "oi_missing_counts_note": "per symbol|timeframe: non-invalid rows whose oi_value_end is empty "
                                           "(outside published mx months or in a metrics gap)",
