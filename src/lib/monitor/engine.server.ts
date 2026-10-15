@@ -17,6 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getOperationalStore, operationalNativeSymbol } from "../operational/repository.server";
 import type { OperationalStore } from "../operational/types";
+import { captureMovementAlertChart } from "../alert-charts/capture.server";
 
 export type MonitorSettings = {
   user_id: string;
@@ -198,7 +199,18 @@ export async function runMonitorForUser(
         if (["already_processed", "not_watched", "disabled"].includes(status)) {
           context.metrics.databaseNoOps += 1;
         }
-        if (status === "alerted") alertsCreated += 1;
+        if (status === "alerted") {
+          alertsCreated += 1;
+          // Setup chart window (#299), copied now because the candle store keeps ~8 days. Best
+          // effort: a capture failure is logged inside and never fails the saved alert.
+          const alertId = (data as { alert_id?: string } | null)?.alert_id;
+          if (alertId) {
+            await captureMovementAlertChart({
+              db: supabaseAdmin, operationalStore, context, userId, symbol, alertId,
+              minute: outcome.result.minute, collectorOwnsMarketData: sharedCollectorOwnsMarketData,
+            });
+          }
+        }
       }
       if (settings.movement_alerts_enabled || !settings.completed_candle_ta_enabled) {
         checkedSymbols.add(symbol);

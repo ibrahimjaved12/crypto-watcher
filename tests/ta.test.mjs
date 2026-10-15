@@ -526,6 +526,7 @@ test("TA due gating skips completed work and bounds catch-up batches", async () 
   `)}`;
   const { latestCompletedCandleAt, runTA, TA_CATCH_UP_LIMIT } = await import(
     await moduleUrl("../src/lib/ta/engine.server.ts", {
+      "../alert-charts/capture.server": "data:text/javascript,export async function capturePatternCharts(){return [];}",
       "../activity-controls": await moduleUrl("../src/lib/activity-controls.ts"),
       "./python-client.server": "data:text/javascript,export const calculateTechnicalBatch=()=>{};",
       "./python-contract": await moduleUrl("../src/lib/ta/python-contract.ts", {
@@ -638,6 +639,7 @@ test("TA due gating skips completed work and bounds catch-up batches", async () 
 test("TA runner isolates frame failures and settles on the recorded futures source", async () => {
   const { runTA } = await import(
     await moduleUrl("../src/lib/ta/engine.server.ts", {
+      "../alert-charts/capture.server": "data:text/javascript,export async function capturePatternCharts(){return [];}",
       "../activity-controls": await moduleUrl("../src/lib/activity-controls.ts"),
       "./python-client.server": "data:text/javascript,export const calculateTechnicalBatch=()=>{};",
       "./python-contract": await moduleUrl("../src/lib/ta/python-contract.ts", {
@@ -751,6 +753,7 @@ test("collector mode reads canonical completed candles and never a second live s
   const contextModule = `data:text/javascript,export const createMonitorRunContext=()=>{throw Error('explicit context required')};`;
   const { runTA } = await import(
     await moduleUrl("../src/lib/ta/engine.server.ts", {
+      "../alert-charts/capture.server": "data:text/javascript,export async function capturePatternCharts(){return [];}",
       "../activity-controls": await moduleUrl("../src/lib/activity-controls.ts"),
       "./python-client.server": "data:text/javascript,export const calculateTechnicalBatch=()=>{};",
       "./python-contract": await moduleUrl("../src/lib/ta/python-contract.ts", {

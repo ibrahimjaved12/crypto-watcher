@@ -31,7 +31,7 @@ type RpcClient = Pick<SupabaseClient, "from" | "rpc">;
 /** Existing newest-N read default; callers may explicitly request up to 1000. */
 const COLLECTOR_COMPLETED_LIMIT = 260;
 
-function createOperationalFetch(serviceRoleKey: string): typeof fetch {
+export function createOperationalFetch(serviceRoleKey: string): typeof fetch {
   return (input, init) => {
     const headers = new Headers(
       typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined,

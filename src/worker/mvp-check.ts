@@ -34,6 +34,9 @@ import { collectorLogMessage } from "../lib/market/collector-logging";
 import { getOperationalStore } from "../lib/operational/repository.server";
 import { STATUS_FILE_NAME, classifyWorkerHost } from "../lib/worker-host";
 import { hostedDatabaseSizeCheck } from "./hosted-db-size";
+import { classifyAlertCharts } from "../lib/alert-charts/check";
+import { alertChartsConfig } from "../lib/alert-charts/config";
+import { getAlertChartStore } from "../lib/alert-charts/store.server";
 
 // `npm run mvp:check` (#239 P21): READ-ONLY health table for the local MVP. It reads the operational
 // and application databases and GET <python>/health; it writes nothing. Exit code 1 on any FAIL;
@@ -202,6 +205,19 @@ async function collectorUniverseCheck(): Promise<Check> {
   }
 }
 
+// #299: stored alert chart windows and PNG sizes against the configured caps (read-only).
+async function alertChartsCheck(): Promise<Check> {
+  const name = "alert charts";
+  try {
+    const config = alertChartsConfig();
+    const store = getAlertChartStore(config);
+    if (!store) return { name, level: "WARN", detail: "operational store disabled; no alert charts are captured" };
+    return { name, ...classifyAlertCharts(await store.diagnostics(), config) };
+  } catch (error) {
+    return { name, level: "WARN", detail: `cannot read alert charts: ${collectorLogMessage(error).slice(0, 200)}` };
+  }
+}
+
 async function publishedQuoteChecks(): Promise<Check[]> {
   const { data, error } = await db.from("market_quotes").select("symbol, published_at");
   if (error) return [{ name: "published quotes", level: "FAIL", detail: `market_quotes read failed: ${error.message}` }];
@@ -218,6 +234,7 @@ async function main() {
     checks.push(await collectorUniverseCheck());
   }
   checks.push(...(await collectorChecks()));
+  checks.push(await alertChartsCheck());
   const users = await listForwardUsers(db, process.env["FORWARD_USER_ID"]);
   const [counts, ledgers, strategies, missingApp] = await Promise.all([
     rpc<CountRow>("forward_state_counts"),

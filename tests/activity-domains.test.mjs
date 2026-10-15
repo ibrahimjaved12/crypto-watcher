@@ -21,6 +21,9 @@ const stub = (source) => `data:text/javascript;base64,${Buffer.from(source).toSt
 
 const { DEFAULT_SETTINGS, recordRun, runLeasedMonitorForUser, runMonitorForUser } = await import(
   await moduleUrl("../src/lib/monitor/engine.server.ts", {
+    "../alert-charts/capture.server": stub(`
+      export async function captureMovementAlertChart() { return { status: "skipped" }; }
+    `),
     "@/lib/market/providers.server": stub(`
       export async function loadCandles(symbol) {
         globalThis.__domains.market.push(symbol);

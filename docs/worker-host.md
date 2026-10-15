@@ -25,6 +25,7 @@ gateway and jobs runner, each with a log prefix and its own restart policy:
 | `collector-universe-sync` | `node scripts/collector-universe-sync.mjs --mode production` (`npm run collector-universe-sync`; collector/operational DB enabled and hosted/operational credentials required; non-essential) |
 | `runner-gateway` | `node scripts/runner-gateway.mjs --mode production` (only when `RUNNER_GATEWAY_ENABLED=true`; non-essential) |
 | `runner-jobs` | `node scripts/runner-jobs.mjs --mode production` (`npm run runner:jobs`; only when `RUNNER_JOBS_ENABLED=true`; non-essential) |
+| `alert-charts` | `node scripts/alert-charts.mjs --mode production` (`npm run alert-charts`; only when `ALERT_CHART_DIR` is set and `ALERT_CHARTS_ENABLED` is not `false`; non-essential; needs `python/requirements-machine.txt`, see [alert charts](alert-charts.md)) |
 
 The jobs are launched with `node` directly rather than through `npm`, so the supervisor owns the real
 process (no wrapper to signal through). `--workers 1` is explicit because uvicorn otherwise takes its
@@ -80,6 +81,8 @@ environment; an empty value counts as defined and is then caught by the value ch
 - Universe sync: `COLLECTOR_UNIVERSE_SYNC_ENABLED=false` disables only that child;
   `COLLECTOR_UNIVERSE_SYNC_INTERVAL_MS` defaults to 60000, minimum 10000. See
   [collector response and latency](binance-futures-collector.md#machine-side-collector-universe-sync-329).
+- Alert charts: `ALERT_CHART_DIR` (absolute) starts `alert-charts`; install matplotlib once with
+  `python/.venv/bin/python -m pip install -r python/requirements-machine.txt`. See [alert charts](alert-charts.md).
 - Durable jobs: `RUNNER_JOBS_ENABLED=true` enables `runner-jobs`; it uses the existing
   `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. No new secrets or publishable key are required on the
   host. `FORWARD_USER_ID` narrows the scheduled jobs only; durable jobs use the user on each queued row.
