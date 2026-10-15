@@ -124,3 +124,93 @@ def read_premium_csv(fileobj, symbol: str, month: str) -> PremiumSeries:
     if line != expected:
         raise ValueError(f"{symbol} {month} bars: expected {expected} data lines, got {line}")
     return PremiumSeries(symbol, start, expected, flags=flags, **columns)
+
+
+# ---------------------------------------------------------------- basis inputs (candle-table deriv-v1, additive)
+
+
+@dataclass(frozen=True)
+class BasisSeries:
+    """1-minute premium-index close and price-index close (scale 10**8) with the lake flags.
+
+    ``premium_close`` is MISSING where ``FLAG_PREMIUM_MISSING`` is set and ``index_close`` where
+    ``FLAG_INDEX_MISSING`` is set; the mark close comes from ``BarSeries.mark_close``.
+    """
+
+    symbol: str
+    start_ms: int
+    minutes: int
+    premium_close: array
+    index_close: array
+    flags: array
+
+    def __post_init__(self):
+        for name in ("premium_close", "index_close", "flags"):
+            column = getattr(self, name)
+            if not isinstance(column, array) or column.typecode != ("H" if name == "flags" else "q"):
+                raise ValueError(f"column {name} must be an array('{'H' if name == 'flags' else 'q'}')")
+            if len(column) != self.minutes:
+                raise ValueError(f"column {name} has {len(column)} values for {self.minutes} minutes")
+
+    @property
+    def end_ms(self) -> int:
+        return self.start_ms + self.minutes * data_lake.MINUTE_MS
+
+    @staticmethod
+    def concat(parts) -> "BasisSeries":
+        parts = list(parts)
+        if not parts:
+            raise ValueError("concat needs at least one basis series")
+        for previous, part in zip(parts, parts[1:]):
+            if part.symbol != parts[0].symbol or part.start_ms != previous.end_ms:
+                raise ValueError("basis series are not one contiguous symbol")
+        columns = {}
+        for name in ("premium_close", "index_close", "flags"):
+            joined = array("H" if name == "flags" else "q")
+            for part in parts:
+                joined.extend(getattr(part, name))
+            columns[name] = joined
+        return BasisSeries(parts[0].symbol, parts[0].start_ms, sum(part.minutes for part in parts), **columns)
+
+
+def read_basis_csv(fileobj, symbol: str, month: str) -> BasisSeries:
+    """One complete month of premium_close and index_close (+ flags) from data-lake bars, one pass."""
+    data_lake.validate_symbol(symbol)
+    start, _, days = data_lake.month_bounds_ms(month)
+    expected = days * 1440
+    reader = csv.reader(_text(fileobj))
+    header = next(reader, None)
+    if header is None or ",".join(header) != ",".join(data_lake.COLUMNS):
+        raise ValueError(f"{symbol} {month} bars: header differs from the data lake schema "
+                         f"{data_lake.LAKE_SCHEMA_VERSION}")
+    columns = {"premium_close": array("q"), "index_close": array("q")}
+    missing_bit = {"premium_close": data_lake.FLAG_PREMIUM_MISSING, "index_close": data_lake.FLAG_INDEX_MISSING}
+    flags = array("H")
+    line = 0
+    for row in reader:
+        line += 1
+        where = f"{symbol} {month} bars line {line}"
+        if len(row) != len(data_lake.COLUMNS):
+            raise ValueError(f"{where}: expected {len(data_lake.COLUMNS)} columns, got {len(row)}")
+        if line > expected:
+            raise ValueError(f"{where}: more than the {expected} minutes of {month}")
+        field = "open_time_ms"
+        try:
+            if _integer(row[_COLUMN[field]]) != start + (line - 1) * data_lake.MINUTE_MS:
+                raise ValueError("gap or duplicate minute")
+            field = "flags"
+            value = _integer(row[_COLUMN[field]])
+            if not 0 <= value <= 0xFFFF:
+                raise ValueError(f"flags out of range: {value}")
+            flags.append(value)
+            for field, column in columns.items():
+                text = row[_COLUMN[field]]
+                missing = value & missing_bit[field]
+                if bool(text) == bool(missing):
+                    raise ValueError("value and its MISSING flag disagree")
+                column.append(MISSING if missing else data_lake.parse_published_scaled(text))
+        except (ValueError, OverflowError) as error:
+            raise ValueError(f"{where} column {field}: {error}") from None
+    if line != expected:
+        raise ValueError(f"{symbol} {month} bars: expected {expected} data lines, got {line}")
+    return BasisSeries(symbol, start, expected, flags=flags, **columns)

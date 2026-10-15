@@ -418,3 +418,35 @@ def load_symbol_metrics_range(metrics_dir, symbol: str, first_month: str, last_m
             if text != "":
                 columns[name][index] = float(data_lake.exact_decimal(text))
     return MetricsSeries(symbol, start, periods, columns)
+
+
+def load_symbol_metrics_months(metrics_dir, symbol: str, months, first_month: str, last_month: str, *,
+                               token=None, gate=None) -> MetricsSeries:
+    """``load_symbol_metrics_range``'s grid over ``first_month..last_month`` reading only ``months``
+    (the months published as mx releases). Every other period stays NaN: never filled."""
+    import numpy as np
+
+    data_lake.validate_symbol(symbol)
+    window = data_lake.months_between(first_month, last_month)
+    wanted = sorted(set(months))
+    if any(month not in window for month in wanted):
+        raise ValueError("metrics months must lie inside first_month..last_month")
+    require_months(window, token, gate)  # the whole window, before any file is opened
+    start = data_lake.month_bounds_ms(first_month)[0] + POINT_IN_TIME_LAG_PERIODS * PERIOD_MS
+    end = data_lake.month_bounds_ms(last_month)[1] + POINT_IN_TIME_LAG_PERIODS * PERIOD_MS
+    periods = (end - start) // PERIOD_MS + 1
+    columns = {name: np.full(periods, np.nan) for name in VALUE_COLUMNS}
+    for month in wanted:
+        with (Path(metrics_dir) / csv_asset_name(symbol, month)).open("rb") as stream:
+            rows = read_metrics_csv(stream, symbol, month)
+        for row in rows:
+            offset = usable_from_ms(row.create_time_ms) - start
+            if offset % PERIOD_MS:
+                raise MetricsFormatError(f"{symbol} metrics row at {row.create_time_ms} is off the 5-minute grid")
+            index = offset // PERIOD_MS
+            if not 0 <= index < periods:
+                continue
+            for name, text in zip(VALUE_COLUMNS, row.values):
+                if text != "":
+                    columns[name][index] = float(data_lake.exact_decimal(text))
+    return MetricsSeries(symbol, start, periods, columns)

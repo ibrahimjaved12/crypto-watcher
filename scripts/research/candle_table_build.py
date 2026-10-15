@@ -31,8 +31,12 @@ from data_lake_build import GitHubError, ResearchDataRepo  # noqa: E402
 from market_analysis import data_lake as lake  # noqa: E402
 from market_analysis.benchmark.candles import build_candles  # noqa: E402
 from market_analysis.benchmark.canonical import canonical_bytes  # noqa: E402
-from market_analysis.benchmark.market_data import load_symbol_bars  # noqa: E402
+from market_analysis import metrics_lake as mx  # noqa: E402
+from market_analysis.benchmark.market_data import load_symbol_bars, load_symbol_basis, load_symbol_funding  # noqa: E402
+from market_analysis.benchmark.positioning import METRICS_REVISION  # noqa: E402
+from market_analysis.daily_lake import load_symbol_funding_range  # noqa: E402
 from market_analysis.benchmark.volatility import build_variance  # noqa: E402
+from market_analysis.patterns import candle_derivatives as dv  # noqa: E402
 from market_analysis.patterns import candle_levels2 as lv2  # noqa: E402
 from market_analysis.patterns import candle_location as loc  # noqa: E402
 from market_analysis.patterns import candle_table as ct  # noqa: E402
@@ -41,7 +45,7 @@ from market_analysis.patterns.daily_candles import candles_from_daily, daily_par
 NOW_UTC = xr.NOW_UTC  # the only wall-clock read (at import of experiment_run)
 PublicError, GitError, Checkout, emit, _quiet = xr.PublicError, xr.GitError, xr.Checkout, xr.emit, xr._quiet
 
-PHASES = frozenset({"checkout", "daily download", "bars download", "load", "regime", "table", "report write",
+PHASES = frozenset({"checkout", "daily download", "bars download", "metrics download", "load", "regime", "table", "report write",
                     "push"})
 COUNT_KEYS = xr.COUNT_KEYS
 
@@ -75,14 +79,28 @@ def _bars_provenance(repo, symbol: str, months: list[str], data_revision: int, b
             for month, item in sorted(provenance.items())}
 
 
+def _metrics_months(repo, symbol: str, months: list[str], dest: Path) -> dict:
+    """{month: sha256} of the months published as mx releases (others are absent: their OI/positioning
+    columns stay empty and are counted in the manifest)."""
+    out = {}
+    for month in months:
+        tag = mx.release_tag(symbol, month, METRICS_REVISION)
+        if repo.published_release(tag) is None:
+            continue
+        out[month] = xr.download_metrics_month(repo, symbol, month, METRICS_REVISION, dest)
+    return out
+
+
 def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progress) -> list[str]:
     symbols, timeframes, through = args.symbols, args.timeframes, args.through_month
     ct.guard_months(through)  # hidden guard and through_month limit before anything is downloaded
     daily_dir, bars_dir, out_dir = workdir / "daily", workdir / "bars", workdir / "out"
-    for path in (daily_dir, bars_dir, out_dir):
+    metrics_dir = workdir / "metrics"
+    for path in (daily_dir, bars_dir, out_dir, metrics_dir):
         path.mkdir(parents=True)
     daily_symbols = [symbol for symbol in lake.SYMBOLS if symbol in set(symbols) | {"BTCUSDT"}]
-    inputs = {"daily_revision": args.daily_revision, "data_revision": args.data_revision, "dk1": {}, "rd": {}}
+    inputs = {"daily_revision": args.daily_revision, "data_revision": args.data_revision, "dk1": {}, "rd": {}, "mx": {},
+              "metrics_revision": METRICS_REVISION}
     with progress.stage("daily download", total=len(daily_symbols)) as set_symbol:
         for index, symbol in enumerate(daily_symbols, 1):
             set_symbol(index)
@@ -95,6 +113,13 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
             set_symbol(index)
             inputs["rd"][symbol] = _quiet(_bars_provenance, repo, symbol, months, args.data_revision, bars_dir)
             progress.phase("bars download", symbol_index=index, symbols=len(symbols), months=len(months))
+    metric_months = lake.months_between(ct.DAILY_WARMUP_MONTH, through)
+    with progress.stage("metrics download", total=len(symbols)) as set_symbol:
+        for index, symbol in enumerate(symbols, 1):
+            set_symbol(index)
+            inputs["mx"][symbol] = _quiet(_metrics_months, repo, symbol, metric_months, metrics_dir)
+            progress.phase("metrics download", symbol_index=index, symbols=len(symbols),
+                           months=len(inputs["mx"][symbol]))
     progress.phase("load", symbols=len(daily_symbols))
     daily, funding = _quiet(ct.load_daily_inputs, daily_dir, symbols, through)
     progress.phase("regime", symbols=len(daily_symbols))
@@ -105,6 +130,17 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
         bars = _quiet(load_symbol_bars, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through)
         parity[symbol] = daily_parity(daily[symbol], bars)
         profiles = lv2.daily_profiles(bars)  # volume profiles per UTC day, from the 1m bars (2024+)
+        published = sorted(inputs["mx"][symbol])
+        metrics = (_quiet(mx.load_symbol_metrics_months, metrics_dir, symbol, published, published[0], through)
+                   if published else None)
+        basis = _quiet(load_symbol_basis, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through)
+        ls_z = dv.hourly_ls_global_z(metrics)
+        derivs_intraday = dv.DerivInputs(
+            funding=_quiet(load_symbol_funding, bars_dir, symbol, ct.INTRADAY_FIRST_MONTH, through),
+            metrics=metrics, basis=basis, mark_close=bars.mark_close, ls_global_z=ls_z)
+        derivs_daily = dv.DerivInputs(
+            funding=_quiet(load_symbol_funding_range, daily_dir, symbol, ct.DAILY_WARMUP_MONTH, through),
+            metrics=metrics, basis=basis, mark_close=bars.mark_close, ls_global_z=ls_z)
         contexts = {}
         intraday = [m for m in timeframes if m in ct.INTRADAY_TIMEFRAMES]
         if intraday:
@@ -119,11 +155,12 @@ def run(args, checkout: Checkout, repo: ResearchDataRepo, workdir: Path, progres
                     symbol, minutes, bars, candles[minutes], variance, regime, through,
                     levels=loc.context_levels(minutes, candles[minutes], shared),
                     htf=loc.htf_sources(minutes, candles, days, weeks), history_days=days,
-                    profiles=profiles)
+                    profiles=profiles, derivs=derivs_intraday)
             del candles, shared
         daily_tfs = [m for m in timeframes if m in ct.DAILY_TIMEFRAMES]
         if daily_tfs:
-            contexts.update(ct.daily_contexts(symbol, daily[symbol], regime, daily_tfs, through, profiles=profiles))
+            contexts.update(ct.daily_contexts(symbol, daily[symbol], regime, daily_tfs, through, profiles=profiles,
+                                            derivs=derivs_daily))
         del bars
         for minutes in timeframes:
             name = ct.file_name(symbol, minutes, through)

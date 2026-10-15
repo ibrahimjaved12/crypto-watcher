@@ -71,6 +71,8 @@ This study supersedes it.
 | sweep | sweep-v1 | per reference (prior20, swing_tf, prev_day, prev_week, prev_month): sweep_up/sweep_dn; any, both, direction, depth |
 | htf | htf-v1 | per higher timeframe (1h, 4h, 1d, 1w): trend_dir, adx, extension_atr, ema_gap_atr of the last closed higher candle |
 | levels2 | lv2-v1 | liquidity pools (distance, touches, touch, swept), anchored VWAP from the last swing low/high, intraday day VWAP, 30d/90d volume profile POC/VAH/VAL |
+| derivatives | deriv-v1 | funding (last, 90-day percentile, clamp flag, last-3 sum), premium/basis, open interest (end, start, change, z, OI/turnover), positioning (global, top-trader account/position, taker, global z) |
+| flush | flush-v1 | flush_down, flush_up, flush_dir (price beyond 3 sigma with an OI collapse) |
 | outcomes | fwd-v1 | for m in 1, 2, 4: ret_m_bp, ret_m_sigma, mfe/mae_long_m_sigma, fwd_ok_m; range1_sigma, absret1_sigma, ln_range1_sigma, fwd_status |
 
 **Sigma:**
@@ -243,6 +245,55 @@ which first happens in 2024-02.
   `in_value_area_*`, `touch_poc_*`.
 
 Like location, sweep and htf, levels2 never changes `status`.
+
+### Derivatives (deriv-v1) and flush (flush-v1)
+
+Every value is the one known at the decision time. A missing input leaves the column empty; nothing
+is filled from an older row.
+
+**Funding.** Intraday rows use the rd funding (2024+); daily and weekly rows use the dk1 funding
+from 2020. A settlement counts once its time, floored to the minute, is at or before the decision.
+
+- `fund_last`: the last settled rate.
+- `fund_pct90`: the fraction of the rates settled in the previous 90 days (including the last one)
+  that are <= `fund_last`. Empty when the 90-day window starts before the loaded funding.
+- `fund_clamped`: `fund_last == 0.0001`, the clamp value most settlements sit at.
+- `fund_cum_24h`: the sum of the last 3 settlements.
+
+**Premium and basis** (only where 1m data exist, i.e. 2024+; empty for earlier daily/weekly rows):
+
+- `prem_last`: the premium-index close at the candle's last minute.
+- `prem_z`: the candle's mean premium (all its minutes present) against the mean and standard
+  deviation of earlier same-tf candle means in the trailing 30 days; needs at least 100 values. In
+  practice this is empty for daily and weekly rows.
+- `basis_bp`: `1e4 * (mark close - index close) / index close` at the candle's last minute.
+
+**Open interest and positioning** (only months published as mx releases; other rows are empty and
+the manifest counts them per symbol and timeframe in `oi_missing_counts`):
+
+- A metrics row stamped `T` is usable from `T + 5 min` (`metrics_lake.usable_from_ms`). A value at
+  time `t` is the latest 5-minute period usable at `t`; a NaN period stays empty.
+- `oi_value_end` / `oi_value_start`: the open-interest value usable at the decision / at the
+  candle's open. `doi_pct = end / start - 1` needs both.
+- `doi_z`: the screen's robust z (median and 1.4826 × MAD) of `doi_pct` against earlier same-tf
+  candles in a trailing window: 30 days with at least 500 / 300 / 100 values for 15m / 1h / 4h,
+  365 days with at least 90 for 1d, 730 days with at least 52 for 1w.
+- `oi_vol_ratio`: `oi_value_end` divided by the sum of close × base volume over the 24 hours
+  ending at the decision (intraday: the row's own candles; daily/weekly: the dk1 day ending at the
+  decision).
+- `ls_global`, `ls_top_acct`, `ls_top_pos`, `taker_ls`: the global account, top-trader account,
+  top-trader position and taker volume ratios usable at the decision.
+- `ls_global_z`: the screen's global-ls z (30-day history, at least 500 values, hourly decisions)
+  at the latest hourly decision at or before the row's decision.
+
+**Flush proxy (flush-v1).** With `ret = ln(close / open)` of the candle:
+
+- `flush_down`: `ret <= -3 sigma_tf` and `doi_z <= -3` (price fell and OI collapsed: a long
+  liquidation proxy).
+- `flush_up`: `ret >= +3 sigma_tf` and `doi_z <= -3` (a short squeeze proxy).
+- `flush_dir`: -1 for flush_down, +1 for flush_up, 0 for neither.
+
+Real liquidation prints join in a later PR (#349). Neither group changes `status`.
 
 ## Adding a group (location, derivatives, advanced levels, ...)
 
