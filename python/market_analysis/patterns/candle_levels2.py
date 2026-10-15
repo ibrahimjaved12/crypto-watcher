@@ -17,7 +17,7 @@ candle_location, this module reads a ``TableContext`` duck-typed and is wired in
   (h + l + c) / 3. Empty if any of those candles is invalid or lacks volume. Intraday rows also
   get the UTC-day VWAP from the day start through i-1 (empty for the day's first candle).
 - Volume profile: at every UTC day open, from the previous 30 / 90 complete days of 1m bars
-  (2024+ only), on log-price bins of 10 bp: bin = floor(ln(close) / 0.001). Each minute's whole
+  (rd bars from 2024-01, rk- kline bars before), on log-price bins of 10 bp: bin = floor(ln(close) / 0.001). Each minute's whole
   volume goes to the bin of its close (an approximation: the minute's range is ignored);
   minutes with a missing/compromised price or missing volume are skipped. POC = the
   max-volume bin (ties: the lower bin), reported at the bin centre. Value area: start at the
@@ -315,7 +315,8 @@ LEVELS2_COLUMNS = (
     ("vwap_day_dist_atr", "intraday: signed (UTC-day VWAP from the day start through i-1 - close) / atr_prev"),
 ) + tuple(
     item for window in PROFILE_WINDOWS for tag in (f"{window}d",) for item in (
-        (f"dist_poc_{tag}_atr", f"signed ({window}-day volume-profile POC - close) / atr_prev (1m bars, 2024+)"),
+        (f"dist_poc_{tag}_atr", f"signed ({window}-day volume-profile POC - close) / atr_prev (1m bars: rd from "
+                                f"2024-01, rk- kline bars before when the extension is built)"),
         (f"dist_vah_{tag}_atr", f"signed ({window}-day value-area high - close) / atr_prev"),
         (f"dist_val_{tag}_atr", f"signed ({window}-day value-area low - close) / atr_prev"),
         (f"in_value_area_{tag}", f"VAL <= close <= VAH of the {window}-day profile"),

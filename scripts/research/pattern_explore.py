@@ -93,7 +93,7 @@ def run(args, checkout: Checkout, progress) -> list[str]:
                                  table_report=str(table_dir.relative_to(root)), table_hash=manifest["content_hash"],
                                  code_commit=os.environ.get("GITHUB_SHA", "local"), created_utc=NOW_UTC,
                                  plan_id=args.plan_id, cost_bp=args.cost_bp, absent=absent,
-                                 review=parse_review(args.review_slice))
+                                 review=parse_review(args.review_slice), review_mode=args.review_mode)
     directory = pe.report_dir(report)
     if (root / directory).exists():
         return [*pe.public_lines(report), "skipped: a report with this hash already exists"]
@@ -130,6 +130,8 @@ def parse_args(argv=None):
     parser.add_argument("--table-report", required=True, help="candle-table report hash or reports/ path")
     parser.add_argument("--tier", required=True, help="intraday | daily_weekly")
     parser.add_argument("--review-slice", default="", help="optional '<slice id>=<bucket>' review pack")
+    parser.add_argument("--review-mode", default="blind", choices=pe.REVIEW_MODES,
+                        help="blind (stratified, no outcome, opaque ids) or open (the old hit/miss packs)")
     parser.add_argument("--cost-bp", type=float, default=pe.COST_BP, help="round-trip cost for the excursion map")
     parser.add_argument("--record-trials", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args(argv)

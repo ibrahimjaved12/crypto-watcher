@@ -41,8 +41,11 @@ EXPLORE_VERSION = "doji-explore-v1"
 QUESTION_ID = "doji-explore"
 REPORT_ROOT = "reports/pattern-explore"
 TIERS = {"intraday": (15, 60, 240), "daily_weekly": (1440, 10080)}
-STUDY_SEGMENTS = {"development": {"intraday": "development", "daily_weekly": "development-ext"},
-                  "validation": {"intraday": "validation", "daily_weekly": "validation"}}
+# Table segments a study segment reads (owner decision 2026-10-15): intraday development = development-ext
+# (2021-01..2023-12, kline bars) + development (2024-01..2025-06). A table built without the extension has no
+# development-ext intraday rows, so the set then selects exactly the old rows.
+STUDY_SEGMENTS = {"development": {"intraday": ("development-ext", "development"), "daily_weekly": ("development-ext",)},
+                  "validation": {"intraday": ("validation",), "daily_weekly": ("validation",)}}
 PATH_N = {15: 24, 60: 24, 240: 24, 1440: 20, 10080: 13}
 HORIZONS = {15: (1, 2, 3, 4, 6, 8, 12, 24), 60: (1, 2, 3, 4, 6, 8, 12, 24), 240: (1, 2, 3, 4, 6, 8, 12, 24),
             1440: (1, 2, 3, 4, 6, 8, 12, 20), 10080: (1, 2, 3, 4, 6, 8, 13)}
@@ -61,6 +64,9 @@ BOOTSTRAP_SEED = 20261016
 BASELINE_SEED = 20261017
 BASELINE_MULTIPLE = 2
 REVIEW_SEED = 20261018
+REVIEW_MODES = ("blind", "open")
+BLIND_PER_STRATUM = 2          # blind review packs: per event stratum (controls / near-misses scale with it)
+BLIND_SLICE_N = 10             # blind slice pack: events (and the same number of each other class)
 LEAD_MIN_N = 100
 LEAD_MIN_T = 2.0
 LEAD_MIN_SYMBOLS = 4
@@ -115,11 +121,13 @@ def check_tier(tier: str) -> tuple:
 # ---------------------------------------------------------------- table input
 
 
-def read_frame(paths, segment_name: str) -> tuple[dict, list]:
+def read_frame(paths, segment_names) -> tuple[dict, list]:
     """(frame, absent optional columns). Every row of the files is kept (paths need neighbours); ``in_segment``
-    marks the rows of the requested segment. Files are one symbol x timeframe each, sorted by open time."""
+    marks the rows whose segment is one of ``segment_names`` (a name or a tuple of names). Files are one symbol x
+    timeframe each, sorted by open time. ``bar_source`` (kline | aggtrade) is read when present, else "" for every
+    row (one source); its absence is not listed in the absent columns."""
     numeric = {name: [] for name in (*REQUIRED_NUMERIC, *OPTIONAL_NUMERIC)}
-    text = {name: [] for name in (*REQUIRED_TEXT, *OPTIONAL_TEXT)}
+    text = {name: [] for name in (*REQUIRED_TEXT, *OPTIONAL_TEXT, "bar_source")}
     absent = set()
     for path in paths:
         with io.TextIOWrapper(gzip.open(path, "rb"), encoding="ascii", newline="") as stream:
@@ -129,7 +137,7 @@ def read_frame(paths, segment_name: str) -> tuple[dict, list]:
             if missing:
                 raise ExploreError(f"{Path(path).name}: table lacks columns {', '.join(missing)}")
             where = {name: header.index(name) for name in (*numeric, *text) if name in header}
-            absent |= {name for name in (*numeric, *text) if name not in where}
+            absent |= {name for name in (*numeric, *text) if name not in where and name != "bar_source"}
             for row in reader:
                 for name in numeric:
                     k = where.get(name)
@@ -140,7 +148,8 @@ def read_frame(paths, segment_name: str) -> tuple[dict, list]:
                     text[name].append(row[k] if k is not None else "")
     frame = {name: np.asarray(values, dtype=float) for name, values in numeric.items()}
     frame.update({name: np.asarray(values, dtype=object) for name, values in text.items()})
-    frame["in_segment"] = frame["segment"] == segment_name
+    names = (segment_names,) if isinstance(segment_names, str) else tuple(segment_names)
+    frame["in_segment"] = np.isin(frame["segment"], names)
     return frame, sorted(absent)
 
 
@@ -211,9 +220,12 @@ class Paths:
 
 def build_paths(f: dict, rows, steps: int) -> Paths:
     """A step k is usable iff row i+k exists, belongs to the same symbol and timeframe, opens exactly k candles
-    later, is not invalid and lies in the same segment as row i; the path stops at the first unusable step."""
+    later, is not invalid, lies in the same segment as row i and has the same bar source (kline | aggtrade): a path
+    never crosses the 2024-01 boundary between kline and aggTrades bars. A frame without ``bar_source`` is one
+    source. The path stops at the first unusable step."""
     rows = np.asarray(rows, np.int64)
     n, total = rows.size, len(f["tf"])
+    source = f.get("bar_source")
     out = {name: np.full((n, steps), np.nan) for name in ("open", "high", "low", "close")}
     alive = np.ones(n, bool)
     length = np.zeros(n, np.int64)
@@ -225,6 +237,8 @@ def build_paths(f: dict, rows, steps: int) -> Paths:
         ok = (alive & inside & (f["symbol"][jj] == f["symbol"][rows]) & (f["tf"][jj] == f["tf"][rows])
               & (f["open_ms"][jj] - f["open_ms"][rows] == k * step_ms) & (f["status"][jj] != "invalid")
               & (f["segment"][jj] == f["segment"][rows]))
+        if source is not None:
+            ok &= source[jj] == source[rows]
         for name in out:
             out[name][ok, k - 1] = f[name][jj[ok]]
         length += ok
@@ -1018,7 +1032,9 @@ def top_leads(results: list, per_family: int = LEADS_PER_FAMILY) -> list:
 
 def review_sample(unit: Unit, *, n: int = 10, seed: int = REVIEW_SEED, slice_item: Slice | None = None,
                   bucket: str | None = None) -> dict:
-    """Seeded RANDOM samples: events split into hits / misses of rule (a) (K = 3, return at the first lead
+    """OPEN MODE (kept so old reports reproduce; new runs use the blind sampler, ``pattern_pilot``).
+
+    Seeded RANDOM samples: events split into hits / misses of rule (a) (K = 3, return at the first lead
     horizon > 0 is a hit), balanced (min of n/2, hits, misses each), plus random events regardless of outcome and
     random controls. A pack with no hits is withheld (never a misses-only pack). Rows are frame indices."""
     rng = np.random.default_rng(seed + unit.tf)
@@ -1122,9 +1138,14 @@ def review_html(unit: Unit, sample: dict) -> str:
 
 def run_explore(frames: dict, *, tier: str, segment: str, table_report: str, table_hash: str, code_commit: str,
                 created_utc: str, plan_id: str = "", B: int = BOOTSTRAP_B, cost_bp: float = COST_BP,
-                absent: list | None = None, review: tuple | None = None) -> tuple[dict, dict]:
-    """(report, review html per name). ``frames``: {tf: frame} of the tier (all rows; ``in_segment`` marks the
-    segment). ``review``: optional (slice id, bucket) for an extra slice pack."""
+                absent: list | None = None, review: tuple | None = None,
+                review_mode: str = "blind") -> tuple[dict, dict]:
+    """(report, review files per name). ``frames``: {tf: frame} of the tier (all rows; ``in_segment`` marks the
+    segment). ``review``: optional (slice id, bucket) for an extra slice pack. ``review_mode``: "blind" (default;
+    pattern_pilot's stratified sampler: context ending at the signal candle, no outcome, opaque ids, the key in a
+    separate file) or "open" (the old hit/miss packs, so old reports reproduce)."""
+    if review_mode not in REVIEW_MODES:
+        raise ExploreError(f"review_mode must be one of {REVIEW_MODES}")
     check_explore_segment(segment, plan_id)
     timeframes = check_tier(tier)
     intraday = tier == "intraday"
@@ -1159,15 +1180,18 @@ def run_explore(frames: dict, *, tier: str, segment: str, table_report: str, tab
         results, skipped = run_slices(unit)
         report["slices"] += results
         report["skipped_slices"] += skipped
-        sample = review_sample(unit)
-        reviews[f"review_{tf}_all.html"] = review_html(unit, sample)
-        block["review"] = {name: {k: v for k, v in pack.items() if k != "rows"} | {"count": len(pack["rows"])}
-                           for name, pack in sample["packs"].items()}
-        if review:
-            item = next((s for s in SLICES if s.id == review[0]), None)
-            if item is not None and _slice_available(f, item, unit.rows):
-                extra = review_sample(unit, slice_item=item, bucket=review[1])
-                reviews[f"review_{tf}_{_safe(review[0])}_{_safe(review[1])}.html"] = review_html(unit, extra)
+        if review_mode == "open":
+            sample = review_sample(unit)
+            reviews[f"review_{tf}_all.html"] = review_html(unit, sample)
+            block["review"] = {name: {k: v for k, v in pack.items() if k != "rows"} | {"count": len(pack["rows"])}
+                               for name, pack in sample["packs"].items()}
+            if review:
+                item = next((s for s in SLICES if s.id == review[0]), None)
+                if item is not None and _slice_available(f, item, unit.rows):
+                    extra = review_sample(unit, slice_item=item, bucket=review[1])
+                    reviews[f"review_{tf}_{_safe(review[0])}_{_safe(review[1])}.html"] = review_html(unit, extra)
+        else:
+            block["review"] = _blind_reviews(f, unit, tf, review, reviews)
         report["by_tf"][str(tf)] = block
     report["tests_evaluated"] = add_qvalues(report["slices"])
     report["leads"] = top_leads(report["slices"])
@@ -1182,6 +1206,9 @@ def run_explore(frames: dict, *, tier: str, segment: str, table_report: str, tab
         "review_seed": REVIEW_SEED, "lead_rule": {"min_abs_t": LEAD_MIN_T, "min_events": LEAD_MIN_N,
                                                   "halves_agree": True, "min_symbols_agree": LEAD_MIN_SYMBOLS},
         "families": list(FAMILIES), "slices": [s.id for s in SLICES]}
+    if review_mode == "blind":  # an open-mode report keeps its old parameters (and so its old hash)
+        report["parameters"]["review"] = {"mode": "blind", "per_stratum": BLIND_PER_STRATUM,
+                                          "slice_n": BLIND_SLICE_N}
     report["notes"] = [
         "Exploration: descriptive, no stops in discovery, no required outcome; nothing here is a trade or a PASS.",
         "Every timeframe is analysed on its own; pooled numbers are never the headline.",
@@ -1195,6 +1222,30 @@ def run_explore(frames: dict, *, tier: str, segment: str, table_report: str, tab
     report = _render(report)
     report["report_hash"] = content_hash({k: v for k, v in report.items() if k not in HASH_EXCLUDED})
     return report, reviews
+
+
+def _blind_reviews(f: dict, unit: Unit, tf: int, review: tuple | None, reviews: dict) -> dict:
+    """Blind packs of one timeframe (pattern_pilot sampler): files into ``reviews``; returns the counts block
+    (classes and strata sampled / available; no ids, no row values)."""
+    from . import pattern_pilot as pp
+
+    picked = pp.sample_frame(f, tf, per_stratum=BLIND_PER_STRATUM, seed=REVIEW_SEED)
+    reviews.update(pp.pack_files(f, tf, picked, REVIEW_SEED, "blind", f"Doji review {tf}m (blind)",
+                                 f"review_{tf}_blind"))
+    info = {"mode": "blind", "rule": f"seeded stratified sample (seed {REVIEW_SEED}) per subtype x strength x "
+                                     "range_atr tercile, size-matched controls and near-misses; 40 candles ending at "
+                                     "the signal candle, no outcome", "counts": picked["counts"]}
+    if review:
+        item = next((s for s in SLICES if s.id == review[0]), None)
+        if item is not None and _slice_available(f, item, unit.rows):
+            scope = np.zeros(len(f["tf"]), bool)
+            scope[unit.rows[item.labels(f, unit.rows) == review[1]]] = True
+            extra = pp.sample_frame(f, tf, per_stratum=BLIND_SLICE_N, seed=REVIEW_SEED, scope=scope, stratify=False)
+            name = f"review_{tf}_{_safe(review[0])}_{_safe(review[1])}_blind"
+            reviews.update(pp.pack_files(f, tf, extra, REVIEW_SEED, "blind",
+                                         f"Doji review {tf}m slice {review[0]}={review[1]} (blind)", name))
+            info["slice"] = {"slice": review[0], "bucket": review[1], "counts": extra["counts"]}
+    return info
 
 
 def _safe(text: str) -> str:
@@ -1341,8 +1392,17 @@ def markdown(report: dict, review_files=()) -> str:
                          f"{_f(row['event']['share_positive'])} | {_f(row['control_matched']['mean'])} | "
                          f"{_f(row['baseline']['mean'])} | {_f(d['difference'])} ({_f(d['ci95'][0])} .. "
                          f"{_f(d['ci95'][1])}) |")
-        lines += ["", "Review packs: " + ", ".join(f"{name} ({pack['count']}: {pack['rule']})"
-                                                     for name, pack in block["review"].items())]
+        review_block = block["review"]
+        if review_block.get("mode") == "blind":
+            sampled = {}
+            for row in review_block["counts"]:
+                sampled[row["class"]] = sampled.get(row["class"], 0) + row["sampled"]
+            lines += ["", f"Blind review pack: {review_block['rule']}. Sampled "
+                      + ", ".join(f"{cls}={n}" for cls, n in sorted(sampled.items())) + " (counts per stratum in "
+                      "summary.json; the id -> row key is a separate file)."]
+        else:
+            lines += ["", "Review packs (open mode): " + ", ".join(f"{name} ({pack['count']}: {pack['rule']})"
+                                                                   for name, pack in review_block.items())]
     lines += ["", "## Leads (top per family; candidates for a plan, not results)", "",
               "| tf | slice | bucket | family | h | n | difference | t | q (BH) |", "|" + " --- |" * 9]
     for row in report["leads"]:
