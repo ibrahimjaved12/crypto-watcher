@@ -40,8 +40,10 @@ from ..benchmark import regime as regime_v1
 from ..benchmark.segments import daily_segment_bounds_ms, segment_bounds_ms
 from ..benchmark.volatility import BLOCK_MINUTES, VAR_SCALE, build_variance, horizon_sigma
 from ..daily_lake import DAY_MS, load_symbol_daily, load_symbol_funding_range
+from . import candle_context as cx
 from . import candle_derivatives as dv
 from . import candle_levels2 as lv2
+from . import candle_levels3 as lv3
 from . import candle_location as loc
 from .daily_candles import candles_from_daily
 from .features import CandleFeatureHistory
@@ -296,6 +298,11 @@ class TableContext:
     oi_start: list = field(init=False)
     doi: list = field(init=False)
     doi_z: list = field(init=False)
+    swing_pairs: tuple = field(init=False)
+    daily_state: object = field(init=False)
+    climax_volume: list = field(init=False)
+    seas_factor: list | None = field(init=False)
+    open_index: dict = field(init=False)
 
     def __post_init__(self):
         candles = self.candles
@@ -340,6 +347,8 @@ class TableContext:
         loc.prepare(self)
         lv2.prepare(self)
         dv.prepare(self)
+        cx.prepare(self, [_rel_volume(self, j) for j in range(count)])
+        lv3.prepare(self)
 
     @property
     def intraday(self) -> bool:
@@ -379,14 +388,7 @@ def _geometry(ctx: TableContext, i: int) -> dict:
         out.update(body_ratio=body / span, upper_ratio=upper / span, lower_ratio=lower / span,
                    doji_b05=100 * body <= 5 * span, doji_b10=10 * body <= span)
         if out["doji_b10"]:  # exact integer thresholds; empty (not applicable) on other candles
-            if 10 * lower >= 6 * span and 10 * upper <= span:
-                out["doji_subtype"] = "dragonfly"
-            elif 10 * upper >= 6 * span and 10 * lower <= span:
-                out["doji_subtype"] = "gravestone"
-            elif 10 * upper >= 3 * span and 10 * lower >= 3 * span:
-                out["doji_subtype"] = "long_legged"
-            else:
-                out["doji_subtype"] = "standard"
+            out["doji_subtype"] = cx.doji_subtype(o, h, l, cl)
     range_atr = _ratio(_f(span), atr)
     out.update(range_atr=range_atr, body_atr=_ratio(_f(body), atr),
                size_ge_05=None if range_atr is None else range_atr >= 0.5,
@@ -419,18 +421,33 @@ def _trend_vol(ctx: TableContext, i: int) -> dict:
             "squeeze_bars_prev": ctx.squeeze_count[i - 1] if i else None}
 
 
+def _rel_volume_slot(ctx: TableContext, i: int):
+    """Intraday: volume_i / median volume of the same UTC slot over the previous 20 days (>= 10 values)."""
+    c = ctx.candles
+    volume = c.volume[i]
+    per_day = 1440 // ctx.minutes
+    values = [c.volume[j] for j in (i - k * per_day for k in range(1, SLOT_DAYS + 1))
+              if j >= 0 and c.valid[j] and c.volume[j] != MISSING]
+    reference = median(values) if len(values) >= SLOT_MIN_VALUES else None
+    return volume / reference if volume != MISSING and reference and reference > 0 else None
+
+
+def _rel_volume(ctx: TableContext, i: int):
+    """The climax volume of candle i (ctx2): rel_volume_slot intraday, rel_volume_prior20 daily/weekly."""
+    if not ctx.candles.valid[i]:
+        return None
+    if ctx.intraday:
+        return _rel_volume_slot(ctx, i)
+    return ctx.history.at(i, include_adx=False).rel_volume
+
+
 def _volume(ctx: TableContext, i: int) -> dict:
     c = ctx.candles
     volume = c.volume[i]
     out = {"volume": None if volume == MISSING else _f(volume),
            "rel_volume_prior20": ctx.history.at(i, include_adx=False).rel_volume}
     if ctx.intraday:
-        per_day = 1440 // ctx.minutes
-        values = [c.volume[j] for j in (i - k * per_day for k in range(1, SLOT_DAYS + 1))
-                  if j >= 0 and c.valid[j] and c.volume[j] != MISSING]
-        reference = median(values) if len(values) >= SLOT_MIN_VALUES else None
-        out["rel_volume_slot"] = (volume / reference if volume != MISSING and reference and reference > 0
-                                  else None)
+        out["rel_volume_slot"] = _rel_volume_slot(ctx, i)
     ratio = ctx.taker_ratio[i]
     prior = ctx.taker_ratio[i - LOOKBACK:i] if i >= LOOKBACK else []
     out.update(taker_buy_ratio=ratio,
@@ -494,6 +511,23 @@ def _outcomes(ctx: TableContext, i: int) -> dict:
     out.update(range1_sigma=range1,
                absret1_sigma=abs(log(c.close[i + 1] / c.open[i + 1])) / sigma if one else None,
                ln_range1_sigma=log(range1) if range1 else None, fwd_status=first_status)
+    return out
+
+
+def _sigma_seas(ctx: TableContext, i: int) -> dict:
+    """ss-v1 (intraday only): the next candle's slot factor and the deseasonalised one-candle outcomes."""
+    if not ctx.intraday:
+        return {}
+    factor = ctx.seas_factor[i]
+    out = {"sigma_seas_factor": factor}
+    c, sigma = ctx.candles, ctx.sigma[i]
+    one = _forward_window(ctx, i, 1) == "ok" and bool(sigma)
+    if one and factor:  # the outcome columns are empty (not missing) exactly when ret_1_sigma is
+        out["ret_1_sigma_seas"] = log(c.close[i + 1] / c.open[i + 1]) / sigma / factor
+        range1 = log(c.high[i + 1] / c.low[i + 1]) / sigma
+        out["ln_range1_sigma_seas"] = log(range1 / factor) if range1 > 0 else None
+    elif one:
+        out["ret_1_sigma_seas"] = out["ln_range1_sigma_seas"] = None
     return out
 
 
@@ -573,7 +607,8 @@ GROUP_VERSIONS = {"keys": "keys-v1", "geometry": "geo-v1", "trend_vol": "tv-v2",
                   "calendar": "cal-v1", "regime": "regime-v1", "location": "loc-v1", "sweep": "sweep-v1",
                   "htf": "htf-v1", "levels2": "lv2-v1",
                   "derivatives": "deriv-v1", "flush": "flush-v1",
-                  "outcomes": "fwd-v1"}
+                  "prev": "prev-v1", "ctx2": "ctx2-v1", "lv3": "lv3-v1",
+                  "outcomes": "fwd-v1", "sigma_seas": "ss-v1"}
 FEATURE_GROUPS_FOR_STATUS = ("geometry", "trend_vol", "volume", "calendar", "regime")
 
 
@@ -591,7 +626,11 @@ def default_registry() -> GroupRegistry:
                                      ("levels2", lv2.LEVELS2_COLUMNS, lv2.levels2),
                                      ("derivatives", dv.DERIVATIVES_COLUMNS, dv.derivatives),
                                      ("flush", dv.FLUSH_COLUMNS, dv.flush),
-                                     ("outcomes", OUTCOME_COLUMNS, _outcomes)):
+                                     ("prev", cx.PREV_COLUMNS, cx.prev),
+                                     ("ctx2", cx.CTX2_COLUMNS, cx.ctx2),
+                                     ("lv3", lv3.LEVELS3_COLUMNS, lv3.levels3),
+                                     ("outcomes", OUTCOME_COLUMNS, _outcomes),
+                                     ("sigma_seas", cx.SIGMA_SEAS_COLUMNS, _sigma_seas)):
         registry.register(Group(group_id, GROUP_VERSIONS[group_id], columns, build))
     return registry
 
@@ -656,7 +695,8 @@ def write_table(fileobj, rows, columns=None, counts: dict | None = None) -> int:
     """Deterministic csv.gz (header first). ``counts`` (optional) accumulates status/segment/fwd_status counts."""
     columns = tuple(columns or REGISTRY.columns())
     where = {name: columns.index(name) for name in ("symbol", "tf", "status", "segment", "fwd_status",
-                                                    "oi_value_end", "reasons", "decision_ms") if name in columns}
+                                                    "oi_value_end", "reasons", "decision_ms", "touch_sig")
+             if name in columns}
 
     def lines():
         yield ",".join(columns) + "\n"
@@ -682,6 +722,11 @@ def count_row(counts: dict, row, where: dict) -> None:
             moment = gmtime(row[where["decision_ms"]] // 1000)
             month = f"{prefix}|{moment.tm_year:04d}-{moment.tm_mon:02d}"
             counts.setdefault("insufficient_month", {})[month] = counts.get("insufficient_month", {}).get(month, 0) + 1
+    if "touch_sig" in where and row[where["touch_sig"]] is not None:
+        tf = str(row[where["tf"]])
+        counts.setdefault("touch_sig_rows", {})[tf] = counts.get("touch_sig_rows", {}).get(tf, 0) + 1
+        if row[where["touch_sig"]]:
+            counts.setdefault("touch_sig_true", {})[tf] = counts.get("touch_sig_true", {}).get(tf, 0) + 1
     # Rows outside published mx months, or in a metrics gap; invalid candles carry no features and are not counted.
     if "oi_value_end" in where and row[where["oi_value_end"]] is None and row[where["status"]] != "invalid":
         counts.setdefault("oi_missing", {})[prefix] = counts.get("oi_missing", {}).get(prefix, 0) + 1
@@ -768,6 +813,16 @@ def intraday_context(symbol: str, minutes: int, bars: BarSeries, candles: Candle
                         history_days=history_days, profiles=profiles, derivs=derivs)
 
 
+TOUCH_SIG_RANGE = (0.03, 0.25)
+
+
+def touch_sig_share(counts: dict) -> dict:
+    """{tf: {"rows", "touched", "share"}} of the rows whose touch_sig is filled (keys sorted as integers)."""
+    rows, touched = counts.get("touch_sig_rows", {}), counts.get("touch_sig_true", {})
+    return {tf: {"rows": rows[tf], "touched": touched.get(tf, 0), "share": touched.get(tf, 0) / rows[tf]}
+            for tf in sorted(rows, key=int) if rows[tf]}
+
+
 HASH_EXCLUDED = ("content_hash", "code_commit", "created_utc")
 
 
@@ -785,6 +840,12 @@ def build_manifest(*, files: list, counts: dict, inputs: dict, through_month: st
                 "insufficient_by_month": dict(sorted(counts.get("insufficient_month", {}).items())),
                 "insufficient_note": "insufficient rows per symbol|timeframe|segment|reasons (the reasons column "
                                      "value) and per symbol|timeframe|YYYY-MM of decision_ms (UTC)",
+                "touch_sig_share": touch_sig_share(counts),
+                "touch_sig_note": f"per timeframe: rows with touch_sig filled, rows touched, share; the design "
+                                  f"target is about 5-15 %, timeframes outside {TOUCH_SIG_RANGE} are listed in "
+                                  "touch_sig_outside_range (reported, never tuned silently)",
+                "touch_sig_outside_range": sorted(tf for tf, item in touch_sig_share(counts).items()
+                                                  if not TOUCH_SIG_RANGE[0] <= item["share"] <= TOUCH_SIG_RANGE[1]),
                 "oi_missing_counts": dict(sorted(counts.get("oi_missing", {}).items())),
                 "oi_missing_counts_note": "per symbol|timeframe: non-invalid rows whose oi_value_end is empty "
                                           "(outside published mx months or in a metrics gap)",
@@ -822,9 +883,14 @@ def public_lines(manifest: dict) -> list:
     for key, value in manifest["row_counts"].items():
         status = key.split("|")[2]
         by_status[status] = by_status.get(status, 0) + int(value)
+    shares = manifest.get("touch_sig_share", {})
     return [f"candle table {SCHEMA} files={len(manifest['files'])} "
             f"rows={sum(int(v) for v in manifest['row_counts'].values())} "
             + " ".join(f"{name}={by_status[name]}" for name in sorted(by_status)),
+            *([("touch_sig touched/rows " + " ".join(f"tf{tf}={item['touched']}/{item['rows']}"
+                                                     for tf, item in shares.items())
+                + (f" outside {TOUCH_SIG_RANGE}: {','.join(manifest['touch_sig_outside_range'])}"
+                   if manifest.get("touch_sig_outside_range") else ""))] if shares else []),
             f"report hash {manifest['content_hash']}"]
 
 

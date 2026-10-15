@@ -30,6 +30,7 @@ This study supersedes it.
   - row counts per (symbol, tf, status, segment) and `fwd_status` counts;
   - `insufficient_reason_counts` (symbol|tf|segment|`reasons` value) and `insufficient_by_month`
     (symbol|tf|YYYY-MM of the decision time), so clusters show without opening the files;
+  - `touch_sig_share` per timeframe and `touch_sig_outside_range` (lv3-v1, see Levels 3);
   - input release tags and sha256s, the git sha and `through_month`;
   - the dk1-vs-1m `daily_parity` per symbol;
   - a content hash that leaves out the commit and creation time.
@@ -75,7 +76,11 @@ This study supersedes it.
 | levels2 | lv2-v1 | liquidity pools (distance, touches, touch, swept), anchored VWAP from the last swing low/high, intraday day VWAP, 30d/90d volume profile POC/VAH/VAL |
 | derivatives | deriv-v1 | funding (last, 90-day percentile, clamp flag, last-3 sum), premium/basis, open interest (end, start, change, z, OI/turnover), positioning (global, top-trader account/position, taker, global z) |
 | flush | flush-v1 | flush_down, flush_up, flush_dir (price beyond 3 sigma with an OI collapse) |
+| prev | prev-v1 | candle i-1: body_ratio, range_atr, doji_b10, doji_subtype, high, low; confirm_dir, confirm_excess_atr; flush_prev_dir |
+| ctx2 | ctx2-v1 | trend_px20/px50_prev, trend_agree, swing_trend_dir, htf_trend_dir (dk1 daily), prior20_reclaim_dir, climax_vol_max6, climax_age6, climax_ret_sigma6 |
+| lv3 | lv3-v1 | day_open/week_open/month_open: touch, dist_up/dist_dn (ATR units), level_side; touch_sig, sig_nearest_level_dist_atr, sig_nearest_set |
 | outcomes | fwd-v1 | for m in 1, 2, 4: ret_m_bp, ret_m_sigma, mfe/mae_long_m_sigma, fwd_ok_m; range1_sigma, absret1_sigma, ln_range1_sigma, fwd_status |
+| sigma_seas | ss-v1 | intraday: sigma_seas_factor (slot of candle i+1), ret_1_sigma_seas, ln_range1_sigma_seas |
 
 **Sigma:**
 
@@ -304,6 +309,81 @@ features and are not counted):
 - `flush_dir`: -1 for flush_down, +1 for flush_up, 0 for neither.
 
 Real liquidation prints join in a later PR (#349). Neither group changes `status`.
+
+### Previous candle (prev-v1)
+
+Known at the end of candle i; never changes `status`. Empty when candle i-1 is invalid.
+
+- `prev_body_ratio`, `prev_doji_b10`, `prev_doji_subtype`, `prev_high`, `prev_low`: candle i-1 with
+  the geometry rules (exact integers; the subtype only when `prev_doji_b10`).
+- `prev_range_atr`: range of i-1 / its own `atr_prev` (Wilder ATR14 through i-2), i.e. the
+  `range_atr` of row i-1.
+- `confirm_dir`: +1 if `close_i > high_(i-1)`, -1 if `close_i < low_(i-1)`, else 0.
+  `confirm_excess_atr`: the distance of `close_i` beyond that extreme / `atr_prev` (positive),
+  only when `confirm_dir != 0`.
+- `flush_prev_dir`: `flush_dir` of candle i-1 (flush-v1 rule unchanged; known at the end of i-1).
+
+### Context 2 (ctx2-v1)
+
+Point in time through candle i-1 unless stated; never changes `status`.
+
+- `trend_px20_prev = sign(close_(i-1) - ema20_prev)`, `trend_px50_prev` likewise with EMA50.
+  `trend_agree`: `trend_dir`, `trend_px20_prev` and `trend_px50_prev` all equal and non-zero. (The
+  EMA20-vs-EMA50 label alone puts the close on the other side of EMA20 on about a quarter of the
+  dojis.)
+- `swing_trend_dir`: from the last two same-tf fractal swings (n = 5, all 11 candles valid, the
+  candle_levels2 confirmation lag: confirmed at the end of j + 5 <= i - 1). +1 if the last two swing
+  highs AND the last two swing lows are rising, -1 if both are falling, else 0; empty while fewer
+  than two of either exist.
+- `htf_trend_dir`: `sign(EMA20 - EMA50)` of the dk1 daily closes, on the last day that ended at or
+  before the row candle's open (the open-time rule). Empty without dk1 days or before EMA50 exists.
+- `prior20_reclaim_dir`: +1 if candle i-1 traded below the low of candles i-21..i-2 (strictly) and
+  closed above it; -1 for the high mirror; 0 for neither or both. Empty unless i-21..i-1 are valid.
+- `climax_vol_max6`: max relative volume over candles i-6..i-1 (intraday `rel_volume_slot`,
+  daily/weekly `rel_volume_prior20`); empty if any of the six is missing. `climax_age6`: k in 1..6
+  of that candle (ties: the most recent). `climax_ret_sigma6`: `ln(close/open)` of the candle in
+  i-6..i-1 with the largest |return| (ties: the most recent), in the one-candle sigma at that
+  candle's own end; empty unless all six are valid with a sigma.
+
+### Seasonal sigma (ss-v1)
+
+Intraday only (empty, not applicable, on daily/weekly rows); never changes `status`; the
+`ewma-3d-5m-v1` sigma is unchanged.
+
+- Observations: `|ret_1_sigma|` of rows k <= i-1, i.e. `|ln(close_(k+1)/open_(k+1))| / sigma_tf(k)`
+  with both candles valid, keyed by the UTC time-of-day slot of the outcome candle k+1, kept while
+  that candle ended in `(end_i - 60 days, end_i]`. Everything is known at the end of candle i.
+- `sigma_seas_factor`: mean of the observations of the slot of candle i+1 (at least 30) divided by
+  the mean of all observations in the window (so the average factor is about 1). Empty otherwise.
+- `ret_1_sigma_seas = ret_1_sigma / factor`, `ln_range1_sigma_seas = ln(range1_sigma / factor)`:
+  outcome columns, present exactly when `ret_1_sigma` is (same segment rule).
+
+### Levels 3 (lv3-v1)
+
+Additive to loc-v1 (unchanged); same open-time rule, touch band and ATR units; never changes `status`.
+
+- **Period opens.** `day_open` (UTC day), `week_open` (Monday 00:00 UTC), `month_open` (UTC
+  month): the open of the period's first candle (the row's own candles; weekly rows read the dk1
+  days for `month_open`). The level is usable from the SECOND row candle of its period
+  (`valid_from = period start + one row candle`) to the period end, so the first candle never
+  touches its own open trivially. No level if that first candle is invalid. Not applicable:
+  `day_open` on 1d/1w rows, `week_open` on 1w rows; and every column of a set on the period's first
+  candle (empty, not missing).
+- Per set: `touch_<set>`, `dist_up_<set>_atr`, `dist_dn_<set>_atr` exactly like loc-v1, and
+  `level_side_<set>`: -1 if the level lies above close (the `dist_up` side), +1 at or below.
+  (loc-v1's `approach_side_*` uses close_(i-1) and the opposite sign; the name differs on purpose.)
+- **Significant sets** (tie order): prev_week, prev_month, week_open, month_open, swing1w,
+  `round_sig` = multiples of 5 x the symbol's round-grid spacing (BTC 5000, ETH 500, BNB 250, SOL
+  50, XRP 0.5, DOGE 0.05 USDT; for BTC this is `round_tier >= 5000`; `round_tier` gives every other
+  symbol tier 1, so "tier >= 2" alone would select nothing for five symbols and the whole BTC grid),
+  and `pool3` = lv2 liquidity pools (`liquidity_pools`, whose `tier` is the member-swing count) with
+  at least 3 member swings. Sets that loc-v1 does not apply to the timeframe are skipped.
+- `touch_sig`: any significant level in `[low - 0.25 atr_prev, high + 0.25 atr_prev]`; empty when no
+  significant set is available. `sig_nearest_level_dist_atr` / `sig_nearest_set`: the nearest usable
+  significant level to close (|distance| / `atr_prev`) and its set.
+- The manifest reports `touch_sig_share` per timeframe (rows with `touch_sig` filled, touched,
+  share) and lists timeframes outside 3-25 % in `touch_sig_outside_range`. The design target is
+  about 5-15 %; nothing is tuned silently.
 
 ## Doji event study
 
