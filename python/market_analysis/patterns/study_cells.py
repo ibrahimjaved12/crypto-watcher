@@ -33,7 +33,7 @@ RET3_SHOCK_SIGMA = 2.0
 RET3_SHOCK_THRESHOLD = RET3_SHOCK_SIGMA * sqrt(3)
 # Descriptive diagnostics (no hypothesis tests; K stays 9).
 MIN_EVENTS_DESCRIPTIVE = 30  # fewer events in a descriptive cell (e.g. a session) is "too few", not zero
-TOUCH_SHARE_MAX = 0.90       # a level set whose touch flag is set on more than 90 % of evaluated rows ...
+TOUCH_SHARE_MAX = 0.80       # a level set whose touch flag is set on more than 80 % of evaluated rows ...
 TOUCH_SHARE_MIN = 0.01       # ... or on fewer than 1 % is degenerate for that timeframe: "not interpretable"
 # Sessions from the decision time (hour of the candle's end_ms, UTC): asia 00-08, europe 08-13, us 13-21,
 # late 21-24. Daily and weekly rows have the single session "all".

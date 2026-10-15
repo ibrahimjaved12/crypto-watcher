@@ -397,7 +397,7 @@ Unsigned cells have no bp, hit-rate or cost line.
 - Touch base rates per level set (and `any_touch`) and timeframe: rows evaluated (non-invalid rows
   whose touch flag is not empty) and the share with the flag set. For round levels the median
   round step (price units) over the median candle range, per symbol and as the median over
-  symbols. A set whose touch share is above 90% or below 1% is labelled **degenerate: not
+  symbols. A set whose touch share is above 80% or below 1% is labelled **degenerate: not
   interpretable**: it stays in the output and is never counted as a null result. Cells C1 and C4 use
   `any_touch`, so a degenerate `any_touch` makes them not interpretable at that timeframe. The
   `touch_round` column and its definition are not changed by the study.
@@ -409,8 +409,9 @@ Unsigned cells have no bp, hit-rate or cost line.
 - Sensitivity runs with `body_ratio <= 0.05` and with `range_atr >= 1.0`.
 - A subtype split.
 - Dose-response within E for cell A: quintiles of `body_ratio`, `range_atr`,
-  `rel_volume_prior20` and `nearest_level_dist_atr`, with Spearman(quintile, mean) and a
-  day-bootstrap CI.
+  `rel_volume_prior20` and `nearest_level_dist_atr` (bucket means, descriptive), with the row-level
+  Spearman of the variable and the outcome within E and a day-cluster bootstrap CI (a Spearman over
+  five bucket means had only five points and was replaced).
 - Sessions (exploratory): per cell × intraday timeframe × session, with the session taken from the
   hour of the decision time (the candle's `end_ms`, UTC): asia 00-08, europe 08-13, us 13-21,
   late 21-24 (daily and weekly rows have the session "all"). Each session reports the event and
