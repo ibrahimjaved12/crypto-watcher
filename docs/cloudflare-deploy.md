@@ -87,6 +87,11 @@ The non-secret runtime variables are committed in the `vars` block of
 | `SCHEDULED_MONITOR_ENABLED` | `false` |
 | `SUPABASE_URL` | `https://xshzjhocpcenuumdrhdh.supabase.co` |
 
+`SCHEDULED_MONITOR_ENABLED` stays `false` and the Worker cron for `/api/public/hooks/monitor-prices`
+stays off: the Worker has no operational database. Scheduled checks (movement alerts and completed-candle
+TA) run on the owner's machine in the worker-host child `monitor-scheduler`, about once a minute; see
+[worker host](worker-host.md#scheduled-checks-monitor-scheduler).
+
 Set `SUPABASE_PUBLISHABLE_KEY` in the Worker's **Settings > Variables and Secrets**
 to match the public key used by the build. Keys and secrets stay in the dashboard;
 none belongs in the committed `vars` block. `keep_vars: true` preserves dashboard

@@ -36,11 +36,18 @@ export const MOVEMENT_ENGINE_STALE_AFTER_MS = 60_000;
 export const MOVEMENT_PUBLISH_INTERVAL_MS = 30_000;
 
 /**
- * A published copy whose `published_at` is older than this means the machine stopped reporting ("machine
- * offline"). It is derived, not a market threshold: the engine's own persisted-state staleness window
- * (60 s) plus one publish interval (30 s), so a healthy machine never trips it.
+ * The dashboard polls the movement state this often (the engine writes and the machine publishes every 30 s, so a
+ * slower poll would add up to a whole extra interval of browser-side age for nothing).
  */
-export const PUBLISHED_COPY_OFFLINE_AFTER_MS = MOVEMENT_ENGINE_STALE_AFTER_MS + MOVEMENT_PUBLISH_INTERVAL_MS;
+export const MOVEMENT_POLL_INTERVAL_MS = 30_000;
+
+/**
+ * The machine stopped reporting ("machine offline") when the browser has heard nothing newer than this: one publish
+ * interval (30 s) plus one page poll (30 s) plus 30 s of margin for request latency and timer jitter, so a healthy
+ * machine never trips it. It is derived from cadences, not a market threshold. Whether the engine itself is late is
+ * judged on the machine's own clock (published or saved time minus the evaluation boundary), never by this window.
+ */
+export const PUBLISHED_COPY_OFFLINE_AFTER_MS = MOVEMENT_PUBLISH_INTERVAL_MS + MOVEMENT_POLL_INTERVAL_MS + 30_000;
 
 export type MovementEngineStatus = "LIVE" | "WARMING" | "STALE" | "UNAVAILABLE";
 

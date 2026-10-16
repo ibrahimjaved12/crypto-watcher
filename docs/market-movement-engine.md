@@ -178,7 +178,7 @@ engine's own constant or a named freshness window.
 
 | Shown | Fed by |
 | --- | --- |
-| Engine status chip (Live / Warming up / Stale / Unavailable, distinct; stale numbers carry an "as of" caption and are dimmed) | `status` (`deriveMovementEngineStatus`), `timestamps.evaluationBoundaryTime` |
+| One status line (Live · updated N ago / Updating… / Warming up / machine not reporting / delayed / refresh failed / unavailable); a reading that is not fresh is dimmed with "as of 5:43 PM" | `status` (`deriveMovementEngineStatus` on the machine's clock), `timestamps.evaluationBoundaryTime`, `publishedAt` / `timestamps.engineUpdatedAt` |
 | Primary 5m direction and pace | `primary.directionState`, `primary.evidence.pace` |
 | 1m / 5m / 15m: "4 of 6 pairs fell materially in 15 min", rising/falling counts | `context[w].breadth` (`rising`, `falling`, `materialRising`, `materialFalling`, `denominator`) |
 | What "material" means, with its value | `DEFAULT_MARKET_MOVEMENT_CONFIG.materialZ` / `flatZ`, only when the evidence's `movementConfigVersion` equals that config's version; for any other saved version the page says it does not know the value and shows no number |
@@ -186,22 +186,40 @@ engine's own constant or a named freshness window.
 | Universe, exclusions with reasons, boundary / latest receive / exchange event / state-saved times | `universe`, `timestamps` |
 | Per pair: normalized move for 1m / 5m / 15m with a label, volume, outlier badge | `context[w].movementSnapshot.symbols[]` (`normalizedZ`, `materialRising/Falling`, `rvol`, `outlierCandidate`, `exclusionReasons`); label bands are the engine's `flatZ` and `materialZ` |
 | Per pair: TA lean, score, RSI, trend, volatility, patterns, snapshot age for 15m / 1h / 4h | the latest `ta_signals` row per pair and timeframe (RLS client query, three queries for all pairs) |
-| Freshness lines: market stream, movement evaluation, completed candles, TA snapshots | `sourceTimeEvidence[].lastReceivedAtMs` (stale after the engine's 60 s), the evaluation boundary (60 s), quote `lastCandleAt`/`stale` (10 min, `QUOTE_STALE_MS`), TA candle close (stale after one timeframe plus 10 minutes, `TA_RUN_ALLOWANCE_MS`) |
+| Freshness (in Diagnostics, and behind the grades): market stream, movement evaluation, completed candles, TA snapshots | `sourceTimeEvidence[].lastReceivedAtMs` measured back from the evaluation boundary (60 s), machine-side lateness = published or saved time minus the evaluation boundary (60 s), quote `lastCandleAt`/`stale` against now (10 min, `QUOTE_STALE_MS`), TA candle close against now (one timeframe plus 10 minutes, `TA_RUN_ALLOWANCE_MS`); each limit has a 3 s display grace (`FRESH_DISPLAY_GRACE_MS`) |
 
-Fewer than 5 watched contracts shows UNAVAILABLE with the reason; per-pair rows still render. The 60-second
-refresh follows the market refresh flag and is never faster than the engine's 30-second write cadence. A status
-that was LIVE when read but whose evaluation has since aged past the engine's 60 s is shown as STALE (the page
-re-checks it against the clock), so an old render is never shown as live. Not shown, by design:
+Fewer than 5 watched contracts shows UNAVAILABLE with the reason; per-pair rows still render. The movement state
+is polled every 30 s (`MOVEMENT_POLL_INTERVAL_MS`, the engine's and the publisher's own cadence) behind the market
+refresh flag; prices and TA keep the shared 60 s.
+
+**Freshness rules (stale is a fault report, never the normal state).**
+
+- *Late engine* is judged on the machine's clock only: published time (copy) or saved time (direct read) minus the
+  evaluation boundary, against the engine's 60 s. The poll and publish delays never count. The published read maps
+  the engine status at `published_at` for the same reason.
+- *Machine not reporting*: the browser has heard nothing newer than `PUBLISHED_COPY_OFFLINE_AFTER_MS` = publish
+  interval (30 s) + poll (30 s) + 30 s margin = **90 s** (`publishedAt`, or `engineUpdatedAt` on a direct read).
+- *Grades* (`gradeFreshness`): an item within its limit (+3 s grace) is **fresh**; past it, it is **catching up**
+  while a refresh is in flight, until a refresh after the crossing has landed, for 15 s after that refresh, while a
+  self-heal check runs or while a resumed tab settles; it is **stale** only when a refresh after the crossing still
+  left it past its limit, when the refresh failed, or when the machine is offline.
+- *Pre-emptive refetch*: the page arms one refetch for the moment the soonest datum crosses its limit.
+- *Resume*: a tab hidden for more than 5 s refetches the movement, price and TA queries on return and holds its clock
+  (`useNow(…, { hold })`) until they land (at most 8 s), so throttled background timers never flash a false stale.
+- *Self-heal*: TA or movement stale for 20 s in a visible tab with monitoring on runs one silent monitor check (error
+  toast only), at most every 3 minutes, never while a manual check is pending or the machine is offline.
+
+Not shown, by design:
 support/resistance levels, news and scheduled events, setups, scores, entries or any forecast (#31 and later).
 
 **Latest TA per pair.** The page asks the hosted SQL function `latest_ta_signals(timeframe, symbols)` once per
 timeframe (`DISTINCT ON (symbol)`, newest `candle_at`, at most 10 symbols, `SECURITY INVOKER` so RLS scopes it to
 the caller), so a pair that fell behind the others still returns its own newest snapshot.
 
-**Collapsed pair block.** Each pair's block collapses to one line (15m movement label, 1h TA lean, snapshot age;
-stale, missing, failed, not loaded and unavailable are each worded). Default expanded; the choice is remembered
-per viewer and per pair in `localStorage`, with try/catch around every read and write, and the block works when
-storage is unavailable.
+**Pair block.** Always visible: the 15m movement chip and three TA pills (15m, 1h, 4h; muted when not fresh). A
+"Details" button (closed by default on every card) opens the z-scores, volume, score, RSI, trend, volatility,
+patterns and snapshot age. A TA lag shows "Updating…", and only after a self-heal check did not clear it "Technical
+analysis last updated N ago"; never a red badge.
 
 ### Published copy for the deployed site (`market_state_published`)
 
@@ -226,11 +244,11 @@ persisted current state and the Worker reads that copy.
   When it is disabled it reads the published row with the caller's own session (RLS: signed-in users read, only the
   service role writes). `readStatus` is `ok` (operational), `published` (copy, with `publishedAt`),
   `published_none` (no copy yet), `read_failed`, or `store_disabled`.
-- **States:** the engine's own STALE rule applies to the evaluation time. **Machine offline** is shown when
-  `published_at` is older than `PUBLISHED_COPY_OFFLINE_AFTER_MS` = the engine's stale window (60 s) plus one publish
-  interval (30 s) = **90 s**: derived from existing constants, not a market threshold. The strip names the source
-  ("Published copy from your machine, last reported N ago"), captions an old copy "As of hh:mm, not live: machine
-  offline", and the movement-freshness line says whether the machine is reporting. An old copy is never shown as live.
+- **States:** the engine's own STALE rule applies to the evaluation time as of `published_at` (machine-side
+  lateness). **Machine not reporting** is shown when `published_at` is older than `PUBLISHED_COPY_OFFLINE_AFTER_MS`
+  = publish interval (30 s) + poll (30 s) + 30 s margin = **90 s**: derived from cadences, not a market threshold.
+  The status line then reads "Your machine isn't reporting. Showing the last reading from 5:43 PM." with a "Check
+  now" button; the source and per-item details are in the strip's Diagnostics. An old copy is never shown as live.
 - **Settings (machine):** `MOVEMENT_STATE_HOSTED_URL` (site origin; falls back to `ALERT_CHART_HOSTED_URL`) with
   `RUNNER_GATEWAY_SECRET`; `MOVEMENT_STATE_PUBLISH_ENABLED=false` turns it off. Apply the hosted migration
   `20261016170000_market_state_published.sql` and restart the host.

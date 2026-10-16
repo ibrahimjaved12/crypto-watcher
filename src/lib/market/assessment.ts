@@ -8,6 +8,7 @@ import type { ClassifierMetric, MarketClassificationWindow } from "./market-stat
 import {
   MINIMUM_MARKET_UNIVERSE_SIZE,
   MOVEMENT_ENGINE_STALE_AFTER_MS,
+  MOVEMENT_POLL_INTERVAL_MS,
   MOVEMENT_PUBLISH_INTERVAL_MS,
   PUBLISHED_COPY_OFFLINE_AFTER_MS,
   type MarketMovementCurrentState,
@@ -20,10 +21,19 @@ import { humanizeToken } from "../labels";
 export const ASSESSMENT_WINDOWS = [1, 5, 15] as const;
 export const TA_ASSESSMENT_FRAMES = [15, 60, 240] as const;
 /**
- * A TA snapshot is stale when its candle closed more than one timeframe plus this allowance ago: by then the
- * next candle has closed and the scheduled TA run (every few minutes) should have saved a newer snapshot.
+ * A TA snapshot is past its limit when its candle closed more than one timeframe plus this allowance ago: by then
+ * the next candle has closed and the machine's monitor scheduler (about once a minute) should have saved a newer one.
  */
 export const TA_RUN_ALLOWANCE_MS = 10 * 60_000;
+
+export { MOVEMENT_POLL_INTERVAL_MS };
+/** An age within this much past its limit is still graded fresh (timer jitter, a request in flight). */
+export const FRESH_DISPLAY_GRACE_MS = 3_000;
+/** After a refetch finishes, an item still past its limit reads "catching up" for this long before "stale". */
+export const CATCH_UP_WINDOW_MS = 15_000;
+
+/** Past a limit, after the display grace. */
+export const pastLimit = (ageMs: number, limitMs: number) => ageMs > limitMs + FRESH_DISPLAY_GRACE_MS;
 
 /**
  * Where the engine state came from, or why it is missing; separate from the engine's own status.
@@ -92,6 +102,8 @@ export type WindowSummary = {
   materialFalling: number | null;
   /** "4 of 6 pairs fell materially in 15 min" (or the plain breadth when no material move). */
   sentence: string;
+  /** The tile's muted line: "4 of 6 falling" in the direction of the median move. */
+  short: string;
   /** What "material" means, with the engine's value when it is known for the saved config. */
   materialNote: string;
   medianMovePct: number | null;
@@ -101,10 +113,19 @@ export type WindowSummary = {
 };
 
 export type MarketStripView = {
-  /** The engine's status, recomputed against `now` (a LIVE state older than the engine's stale window is STALE). */
+  /** Where the state came from (see MovementReadStatus). */
+  read: MovementReadStatus;
+  /**
+   * The engine's status, judged on the machine's own clock: STALE when the machine saved or published an
+   * evaluation more than the engine's stale window after its boundary. Browser-side age never makes it STALE.
+   */
   status: MovementEngineStatus;
-  /** The machine stopped reporting: the published copy is older than PUBLISHED_COPY_OFFLINE_AFTER_MS. */
+  /** The machine stopped reporting: nothing newer than PUBLISHED_COPY_OFFLINE_AFTER_MS reached the browser. */
   machineOffline: boolean;
+  /** Machine-side lateness of the evaluation (published or saved time minus boundary), ms; null when unknown. */
+  machineLateMs: number | null;
+  /** When the machine last published (published copy) or saved (direct read) the state, ms. */
+  reportedAt: number | null;
   /** Where the numbers come from, in plain words (always filled). */
   source: string;
   /** "As of hh:mm, not live" for everything that is not LIVE and current; null when the numbers are current. */
@@ -159,6 +180,10 @@ function windowSummary(window: MarketClassificationWindow, thresholds: ReturnTyp
     ? `Material means the pair's ${m}-minute move is at least ${thresholds.materialZ} usual-sized moves (robust z-score) away from its normal; flat is under ${thresholds.flatZ}. These are the engine's own values (${window.movementConfigVersion}).`
     : `Material uses the engine's own threshold from config ${window.movementConfigVersion}, which this page does not know the value of.`;
   const median = metricValue(window.medianRawReturn);
+  const leanFalling = median !== null ? median < 0 : (falling ?? 0) > (rising ?? 0);
+  const short = !available
+    ? "No count"
+    : leanFalling ? `${falling ?? "?"} of ${denominator} falling` : `${rising ?? "?"} of ${denominator} rising`;
   return {
     minutes: m,
     available,
@@ -169,6 +194,7 @@ function windowSummary(window: MarketClassificationWindow, thresholds: ReturnTyp
     materialRising,
     materialFalling,
     sentence,
+    short,
     materialNote,
     medianMovePct: median === null ? null : pct(median),
     medianNormalized: metricValue(window.medianNormalizedMovement),
@@ -204,6 +230,44 @@ function unavailableReason(state: MarketMovementCurrentState, read: MovementRead
 }
 
 const clock = (ms: number) => new Date(ms).toLocaleTimeString();
+/** "5:43 PM": the short clock used in user-facing sentences. */
+export const shortClock = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+/** When the machine last published (published copy) or saved (direct read) this state. */
+export function machineReportedAt(
+  state: MarketMovementCurrentState,
+  read: MovementReadStatus,
+  publishedAt: number | null,
+): number | null {
+  if (read === "published") return publishedAt;
+  if (read === "ok") return state.timestamps?.engineUpdatedAt ?? null;
+  return null;
+}
+
+/** Machine-side lateness of the evaluation: reported time minus evaluation boundary. The browser clock plays no part. */
+export function machineLatenessMs(
+  state: MarketMovementCurrentState,
+  read: MovementReadStatus,
+  publishedAt: number | null,
+): number | null {
+  const boundary = state.timestamps?.evaluationBoundaryTime ?? null;
+  const reported = machineReportedAt(state, read, publishedAt);
+  return boundary === null || reported === null ? null : Math.max(0, reported - boundary);
+}
+
+/**
+ * The machine has gone silent: nothing it published or saved reached the browser within one publish interval,
+ * one poll and a margin (PUBLISHED_COPY_OFFLINE_AFTER_MS).
+ */
+export function machineSilent(
+  state: MarketMovementCurrentState,
+  read: MovementReadStatus,
+  publishedAt: number | null,
+  now: number,
+): boolean {
+  const reported = machineReportedAt(state, read, publishedAt);
+  return reported !== null && now - reported > PUBLISHED_COPY_OFFLINE_AFTER_MS;
+}
 
 /**
  * @param read where the state came from (see MovementReadStatus)
@@ -217,11 +281,19 @@ export function buildMarketStrip(
 ): MarketStripView {
   const boundary = state.timestamps?.evaluationBoundaryTime ?? null;
   const published = read === "published";
-  const machineOffline = published && publishedAt !== null && now - publishedAt > PUBLISHED_COPY_OFFLINE_AFTER_MS;
-  // The engine's own status, recomputed against `now`: a state that was LIVE when read but whose evaluation has
-  // aged past the engine's stale window is STALE, so an old render or copy is never shown as live.
-  const engineStatus: MovementEngineStatus =
-    state.status === "LIVE" && boundary !== null && now - boundary > MOVEMENT_ENGINE_STALE_AFTER_MS ? "STALE" : state.status;
+  const machineOffline = readable(read) && machineSilent(state, read, publishedAt, now);
+  const machineLateMs = readable(read) ? machineLatenessMs(state, read, publishedAt) : null;
+  // The engine's status on the machine's own clock: late only when the machine published or saved the evaluation
+  // more than the engine's stale window after its boundary. The poll and publish delays never count; a machine
+  // that went silent is reported as offline instead.
+  let engineStatus: MovementEngineStatus = state.status;
+  if (machineLateMs !== null && state.status !== "UNAVAILABLE") {
+    if (pastLimit(machineLateMs, MOVEMENT_ENGINE_STALE_AFTER_MS)) engineStatus = "STALE";
+    else if (state.status === "STALE") {
+      const d = state.primary?.directionState;
+      engineStatus = d === "WARMING" ? "WARMING" : d === "UNAVAILABLE" ? "UNAVAILABLE" : "LIVE";
+    }
+  }
   const status: MovementEngineStatus = readable(read) ? engineStatus : "UNAVAILABLE";
   const age = boundary === null ? null : formatAge(now - boundary);
   const source = published
@@ -230,8 +302,11 @@ export function buildMarketStrip(
       ? "Read live from the market engine's database"
       : "No data source";
   const base = {
+    read,
     status,
     machineOffline,
+    machineLateMs,
+    reportedAt: readable(read) ? machineReportedAt(state, read, publishedAt) : null,
     source,
     times: {
       evaluationBoundary: boundary,
@@ -268,12 +343,12 @@ export function buildMarketStrip(
   if (machineOffline) {
     return { ...base, tone: "offline", statusLabel: "Machine offline", current: false,
       notLiveNote: `${asOf}, not live: machine offline`,
-      explanation: `Your machine has not reported for ${formatAge(now - publishedAt!)} (it reports every ${formatAge(MOVEMENT_PUBLISH_INTERVAL_MS)}; offline after ${formatAge(PUBLISHED_COPY_OFFLINE_AFTER_MS)}). This is the last published copy, not live.`,
+      explanation: `Your machine has not reported for ${formatAge(now - (base.reportedAt ?? now))} (it reports every ${formatAge(MOVEMENT_PUBLISH_INTERVAL_MS)}; offline after ${formatAge(PUBLISHED_COPY_OFFLINE_AFTER_MS)}). This is the last ${published ? "published copy" : "saved state"}, not live.`,
       direction, pace, windows, universe };
   }
   if (status === "STALE") {
     return { ...base, tone: "stale", statusLabel: "Stale", current: false, notLiveNote: `${asOf}, not live`,
-      explanation: `Not live: the last evaluation is ${age} old (older than ${formatAge(MOVEMENT_ENGINE_STALE_AFTER_MS)}). The numbers below are as of then.`,
+      explanation: `Not live: the last evaluation was ${formatAge(machineLateMs ?? 0)} old when your machine ${published ? "published" : "saved"} it (limit ${formatAge(MOVEMENT_ENGINE_STALE_AFTER_MS)}). The numbers below are as of then.`,
       direction, pace, windows, universe };
   }
   if (status === "WARMING") {
@@ -284,6 +359,49 @@ export function buildMarketStrip(
   return { ...base, tone: "live", statusLabel: "Live", current: true, notLiveNote: null,
     explanation: `Evaluated ${age} ago on ${universe?.included.length ?? 0} of ${universe?.configured.length ?? 0} watched pairs.`,
     direction, pace, windows, universe };
+}
+
+/** What the strip's single status line says. */
+export type StripStatusKind = "live" | "updating" | "warming" | "offline" | "late" | "failed" | "unavailable" | "loading";
+
+/**
+ * One status for the strip from the view and the graded movement/stream freshness. A short lag (a refresh in
+ * flight, a tab just resumed) reads "updating", never a fault; "late" and "failed" only follow a refresh attempt.
+ */
+export function stripStatus(view: MarketStripView, grade: FreshnessGrade, settling: boolean, lastAttemptFailed: boolean): StripStatusKind {
+  if (view.read === "not_loaded") return "loading";
+  if (view.machineOffline) return "offline";
+  if (settling) return "updating";
+  if (view.read === "read_failed" || (lastAttemptFailed && grade === "stale")) return "failed";
+  if (view.tone === "unavailable") return "unavailable";
+  if (grade === "catching_up") return "updating";
+  if (grade === "stale") return "late";
+  if (view.tone === "warming") return "warming";
+  return "live";
+}
+
+/** A short plain sentence for an unavailable strip; the full reason stays in Diagnostics. */
+export function unavailableShort(view: MarketStripView): string {
+  if (view.read === "store_disabled") return "The market reading isn't available on this site.";
+  if (view.read === "published_none") return "Your machine hasn't sent a market reading yet.";
+  if (view.read === "read_failed") return "The market reading couldn't be loaded.";
+  return "The market reading isn't ready yet.";
+}
+
+/** "Broad rise, speeding up" with its tone (green only for a confirmed rise, red only for a confirmed drop). */
+export function stripHeadline(view: MarketStripView): { text: string; tone: "up" | "down" | "neutral" } | null {
+  if (!view.direction) return null;
+  const tone = view.direction.state === "BROAD_RISE" ? "up" : view.direction.state === "BROAD_DROP" ? "down" : "neutral";
+  return { text: `${view.direction.label}${view.pace ? `, ${view.pace}` : ""}`, tone };
+}
+
+/** "7 of 9 pairs rose in the last 15 min" from the 15-minute window; null when it has no count. */
+export function stripHeadlineDetail(view: MarketStripView): string | null {
+  const w = view.windows.find((x) => x.minutes === 15);
+  if (!w || !w.available || w.materialRising === null || w.materialFalling === null) return null;
+  if (w.materialFalling >= w.materialRising && w.materialFalling > 0) return `${w.materialFalling} of ${w.denominator} pairs fell in the last ${w.minutes} min`;
+  if (w.materialRising > 0) return `${w.materialRising} of ${w.denominator} pairs rose in the last ${w.minutes} min`;
+  return `No pair moved much in the last ${w.minutes} min`;
 }
 
 // ---------------------------------------------------------------- per-pair movement
@@ -414,6 +532,8 @@ export type TaFrameView = {
 const record = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 export const taFrameLabel = (timeframe: number) => (timeframe === 15 ? "15m" : `${timeframe / 60}h`);
+/** How long after its candle closed a TA snapshot stays current: one timeframe plus the run allowance. */
+export const taLimitMs = (timeframe: number) => timeframe * 60_000 + TA_RUN_ALLOWANCE_MS;
 
 export function buildTaFrame(
   row: TaRowInput | undefined,
@@ -434,7 +554,7 @@ export function buildTaFrame(
   const closedAt = Date.parse(row.candle_at) + timeframe * 60_000;
   const savedAt = row.detected_at ? Date.parse(row.detected_at) : null;
   const behind = now - closedAt;
-  const stale = behind > timeframe * 60_000 + TA_RUN_ALLOWANCE_MS;
+  const stale = pastLimit(behind, taLimitMs(timeframe));
   const lean = row.classification === "bullish" ? "bullish" : row.classification === "bearish" ? "bearish" : row.classification === "neutral" ? "neutral" : "unknown";
   const indicators = record(row.indicators);
   const rsi = indicators["rsi14"];
@@ -453,7 +573,7 @@ export function buildTaFrame(
     candleClosedAt: closedAt,
     savedAt: Number.isFinite(savedAt ?? NaN) ? savedAt : null,
     note: stale
-      ? `Stale: the candle closed ${formatAge(behind)} ago, so a newer candle exists that has no snapshot yet.`
+      ? `Waiting for a newer snapshot: the candle closed ${formatAge(behind)} ago and a newer one has closed since.`
       : `Candle closed ${formatAge(Math.max(0, behind))} ago${savedAt ? `, snapshot saved ${formatAge(Math.max(0, now - savedAt))} ago` : ""}.`,
   };
 }
@@ -474,9 +594,19 @@ export function latestTaBySymbol(rows: readonly TaRowInput[]): Map<string, TaRow
 export type FreshnessItem = {
   id: "stream" | "movement" | "candles" | "ta";
   label: string;
+  /**
+   * The raw state of the data alone: "stale" means past its limit (after FRESH_DISPLAY_GRACE_MS) or the machine
+   * is offline. What the page shows is the grade from `gradeFreshness`, which also weighs the refresh state.
+   */
   status: "fresh" | "stale" | "unavailable";
   detail: string;
   asOf: number | null;
+  /** How far past its limit the item is measured, its limit, and when it crossed (null when not applicable). */
+  ageMs: number | null;
+  limitMs: number | null;
+  crossedAt: number | null;
+  /** The machine stopped reporting (movement and stream only). */
+  offline: boolean;
 };
 
 export type FreshnessInput = {
@@ -490,58 +620,80 @@ export type FreshnessInput = {
   publishedAt?: number | null;
 };
 
-/** Four separate source lines. A fresh page render never hides one of them being old. */
+const unmeasured = { ageMs: null, limitMs: null, crossedAt: null, offline: false } as const;
+
+/**
+ * Four separate source lines. The stream and the movement evaluation are judged on the machine's own timestamps
+ * (evaluation boundary, saved/published time), so the publish and poll cadence alone never makes them stale;
+ * completed candles and TA snapshots are judged against `now`, with limits far longer than that cadence.
+ */
 export function buildFreshness(input: FreshnessInput, now: number): FreshnessItem[] {
   const { state, read, symbols, quotes, ta, publishedAt = null } = input;
   const items: FreshnessItem[] = [];
   const engineLimit = formatAge(MOVEMENT_ENGINE_STALE_AFTER_MS);
+  const boundary = state.timestamps?.evaluationBoundaryTime ?? null;
+  const offline = readable(read) && machineSilent(state, read, publishedAt, now);
 
-  // Market stream: the engine's per-symbol source-time evidence at its last evaluation.
+  // Market stream: the engine's per-symbol receive times, measured back from its own evaluation boundary.
   const primary = state.context.find((w) => w.windowMinutes === 5);
-  if (!readable(read) || !primary) {
-    items.push({ id: "stream", label: "Market stream", status: "unavailable",
+  if (!readable(read) || !primary || boundary === null) {
+    items.push({ id: "stream", label: "Market stream", status: "unavailable", ...unmeasured,
       detail: read === "store_disabled" ? "Not readable from this site." : read === "published_none" ? "No published copy yet." : "No stream evidence from the engine.", asOf: null });
   } else {
     const evidence = primary.sourceTimeEvidence ?? [];
     const watched = symbols.length ? symbols : evidence.map((e) => e.symbol);
     const lagging: string[] = [];
     let newest: number | null = null;
+    let oldest: number | null = null;
+    let missingAny = false;
     for (const symbol of watched) {
       const at = evidence.find((e) => e.symbol === symbol)?.lastReceivedAtMs ?? null;
-      if (at === null || now - at > MOVEMENT_ENGINE_STALE_AFTER_MS) lagging.push(symbol.replace(/USDT$/, ""));
+      if (at === null || pastLimit(boundary - at, MOVEMENT_ENGINE_STALE_AFTER_MS)) lagging.push(symbol.replace(/USDT$/, ""));
+      if (at === null) missingAny = true;
       if (at !== null && (newest === null || at > newest)) newest = at;
+      if (at !== null && (oldest === null || at < oldest)) oldest = at;
     }
+    const unknown = missingAny || oldest === null;
     items.push({ id: "stream", label: "Market stream", asOf: newest,
-      status: newest === null || lagging.length > 0 ? "stale" : "fresh",
+      status: newest === null || lagging.length > 0 || offline ? "stale" : "fresh",
+      ageMs: unknown ? Number.POSITIVE_INFINITY : Math.max(0, boundary - oldest!),
+      limitMs: MOVEMENT_ENGINE_STALE_AFTER_MS,
+      crossedAt: unknown ? boundary : oldest! + MOVEMENT_ENGINE_STALE_AFTER_MS,
+      offline,
       detail: lagging.length
-        ? `No trade data within ${engineLimit} for ${lagging.join(", ")}${newest === null ? "" : `; newest ${formatAge(now - newest)} ago`}.`
-        : `Every watched pair received data within ${engineLimit} (newest ${formatAge(now - (newest ?? now))} ago).` });
+        ? `No trade data within ${engineLimit} of the evaluation for ${lagging.join(", ")}${newest === null ? "" : `; newest ${formatAge(now - newest)} ago`}.`
+        : `Every watched pair received data within ${engineLimit} of the evaluation (newest ${formatAge(now - (newest ?? now))} ago).` });
   }
 
   // Movement evaluation.
-  const boundary = state.timestamps?.evaluationBoundaryTime ?? null;
   if (!readable(read) || boundary === null) {
-    items.push({ id: "movement", label: "Movement evaluation", status: "unavailable",
+    items.push({ id: "movement", label: "Movement evaluation", status: "unavailable", ...unmeasured,
       detail: read === "store_disabled" ? "Not readable from this site." : read === "published_none" ? "No published copy yet." : "No evaluation saved yet.", asOf: null });
   } else {
-    const old = now - boundary > MOVEMENT_ENGINE_STALE_AFTER_MS;
-    const offline = read === "published" && publishedAt !== null && now - publishedAt > PUBLISHED_COPY_OFFLINE_AFTER_MS;
+    const lateness = machineLatenessMs(state, read, publishedAt);
+    const old = lateness !== null && pastLimit(lateness, MOVEMENT_ENGINE_STALE_AFTER_MS);
+    const reported = machineReportedAt(state, read, publishedAt);
     const copy = read === "published"
-      ? `; published copy, machine ${offline ? `OFFLINE (last reported ${formatAge(now - (publishedAt ?? now))} ago)` : `reported ${formatAge(now - (publishedAt ?? now))} ago`}`
+      ? `; published copy, machine ${offline ? `OFFLINE (last reported ${formatAge(now - (reported ?? now))} ago)` : `reported ${formatAge(now - (reported ?? now))} ago`}`
       : "";
     items.push({ id: "movement", label: "Movement evaluation", asOf: boundary, status: old || offline ? "stale" : "fresh",
-      detail: `Last evaluation ${formatAge(now - boundary)} ago (stale after ${engineLimit}); engine status ${(old && state.status === "LIVE" ? "STALE" : state.status).toLowerCase()}${copy}.` });
+      ageMs: lateness, limitMs: MOVEMENT_ENGINE_STALE_AFTER_MS, crossedAt: boundary + MOVEMENT_ENGINE_STALE_AFTER_MS, offline,
+      detail: `Last evaluation ${formatAge(now - boundary)} ago, ${formatAge(lateness ?? 0)} old when ${read === "published" ? "published" : "saved"} (stale after ${engineLimit}); engine status ${(old && state.status === "LIVE" ? "STALE" : state.status).toLowerCase()}${copy}.` });
   }
 
-  // Completed candles behind the price cards.
+  // Completed candles behind the price cards: against now (QUOTE_STALE_MS is far longer than the poll).
   const candleQuotes = quotes.filter((q) => symbols.length === 0 || symbols.includes(q.symbol));
   if (candleQuotes.length === 0) {
-    items.push({ id: "candles", label: "Completed candles", status: "unavailable", detail: "No quotes loaded yet.", asOf: null });
+    items.push({ id: "candles", label: "Completed candles", status: "unavailable", ...unmeasured, detail: "No quotes loaded yet.", asOf: null });
   } else {
-    const stale = candleQuotes.filter((q) => !q.ok || q.stale || q.lastCandleAt === null || now - q.lastCandleAt > QUOTE_STALE_MS);
+    const stale = candleQuotes.filter((q) => !q.ok || q.stale || q.lastCandleAt === null || pastLimit(now - q.lastCandleAt, QUOTE_STALE_MS));
     const times = candleQuotes.flatMap((q) => (q.lastCandleAt === null ? [] : [q.lastCandleAt]));
     const oldest = times.length ? Math.min(...times) : null;
+    // A quote the server already flagged counts as past its limit at once.
+    const flagged = candleQuotes.some((q) => !q.ok || q.stale || q.lastCandleAt === null);
     items.push({ id: "candles", label: "Completed candles", asOf: oldest, status: stale.length ? "stale" : "fresh",
+      ageMs: flagged || oldest === null ? Number.POSITIVE_INFINITY : now - oldest, limitMs: QUOTE_STALE_MS,
+      crossedAt: flagged || oldest === null ? null : oldest + QUOTE_STALE_MS, offline: false,
       detail: stale.length
         ? `Old or missing for ${stale.map((q) => q.symbol.replace(/USDT$/, "")).join(", ")} (older than ${formatAge(QUOTE_STALE_MS)}).`
         : `Newest candle at most ${oldest === null ? "?" : formatAge(now - oldest)} old on every pair.` });
@@ -549,12 +701,14 @@ export function buildFreshness(input: FreshnessInput, now: number): FreshnessIte
 
   // TA snapshots.
   if (ta === undefined) {
-    items.push({ id: "ta", label: "Technical analysis", status: "unavailable", detail: "Not loaded yet.", asOf: null });
+    items.push({ id: "ta", label: "Technical analysis", status: "unavailable", ...unmeasured, detail: "Not loaded yet.", asOf: null });
   } else {
     const latest = latestTaBySymbol(ta);
     const stale: string[] = [];
     const missing: string[] = [];
     let oldestClose: number | null = null;
+    // The frame closest to (or furthest past) its limit decides the item's age and crossing.
+    let worst: { over: number; ageMs: number; limitMs: number; crossedAt: number } | null = null;
     for (const symbol of symbols) {
       for (const timeframe of TA_ASSESSMENT_FRAMES) {
         const row = latest.get(`${symbol}|${timeframe}`);
@@ -562,7 +716,12 @@ export function buildFreshness(input: FreshnessInput, now: number): FreshnessIte
         const name = `${symbol.replace(/USDT$/, "")} ${view.label}`;
         if (view.status === "missing") missing.push(name);
         else if (view.status === "stale") stale.push(name);
-        if (view.candleClosedAt !== null && (oldestClose === null || view.candleClosedAt < oldestClose)) oldestClose = view.candleClosedAt;
+        if (view.candleClosedAt !== null) {
+          if (oldestClose === null || view.candleClosedAt < oldestClose) oldestClose = view.candleClosedAt;
+          const limitMs = taLimitMs(timeframe);
+          const ageMs = now - view.candleClosedAt;
+          if (!worst || ageMs - limitMs > worst.over) worst = { over: ageMs - limitMs, ageMs, limitMs, crossedAt: view.candleClosedAt + limitMs };
+        }
       }
     }
     const problems = [
@@ -571,62 +730,90 @@ export function buildFreshness(input: FreshnessInput, now: number): FreshnessIte
     ];
     items.push({ id: "ta", label: "Technical analysis", asOf: oldestClose,
       status: problems.length ? (symbols.length && missing.length === symbols.length * TA_ASSESSMENT_FRAMES.length ? "unavailable" : "stale") : "fresh",
+      ageMs: worst?.ageMs ?? null, limitMs: worst?.limitMs ?? null, crossedAt: worst?.crossedAt ?? null, offline: false,
       detail: problems.length ? problems.join("; ") : "Every pair has a current snapshot for 15m, 1h and 4h." });
   }
   return items;
 }
 
-// ---------------------------------------------------------------- collapsed per-pair summary and remembered choice
+// ---------------------------------------------------------------- grades: fresh, catching up, stale
+
+export type FreshnessGrade = "fresh" | "catching_up" | "stale";
+
+export type GradeInput = {
+  /** How old the datum is, measured the way its limit is (see FreshnessItem). Infinity = known to be past. */
+  ageMs: number;
+  limitMs: number;
+  /** A refetch of this datum is in flight. */
+  refreshing: boolean;
+  /** When the last refetch of this datum finished (success or error), ms; null when none yet. */
+  lastRefreshAt: number | null;
+  /** The last refetch failed. */
+  lastAttemptFailed: boolean;
+  now: number;
+  /** When the datum crossed its limit; defaults to now - ageMs + limitMs (an age that grows with now). */
+  crossedAt?: number | null;
+  /** The machine stopped reporting. */
+  offline?: boolean;
+  /** A self-heal check is running, or the tab just resumed and its refetch has not landed. */
+  healing?: boolean;
+  /** False when nothing will refresh the datum on its own (automatic refresh paused). */
+  canRefresh?: boolean;
+};
 
 /**
- * The one line shown when a pair's assessment is collapsed: the 15m movement label, the 1h TA lean and the
- * snapshot age. Every state is worded (stale, missing, failed, not loaded, unavailable); nothing is left out.
+ * Stale is a fault report, never the normal state. A datum past its limit is "catching up" while a refresh is in
+ * flight or about to be (none attempted since it crossed), during CATCH_UP_WINDOW_MS after a refetch, or while a
+ * self-heal or resume refetch runs. It is "stale" only when a refresh after the crossing still left it past its
+ * limit, when the refresh failed, or when the machine is offline.
  */
-export function summarizePair(movement: PairMovementView, ta: readonly TaFrameView[], now: number): string {
-  let move: string;
-  if (movement.kind === "unavailable") move = "15m move: no engine data";
-  else if (movement.kind === "excluded") move = "15m move: left out of the engine";
-  else {
-    const w = movement.windows.find((x) => x.minutes === 15);
-    move = w && w.available ? `15m move: ${w.label}` : "15m move: unavailable";
-    if (movement.notLive) move += " (not live)";
-  }
-  const frame = ta.find((f) => f.timeframe === 60);
-  let lean: string;
-  let snapshot = "";
-  if (!frame || frame.status === "missing") lean = "1h TA: no snapshot";
-  else if (frame.status === "error") lean = "1h TA: could not load";
-  else if (frame.status === "not_loaded") lean = "1h TA: not loaded";
-  else {
-    lean = `1h TA: ${frame.leanText.toLowerCase()}${frame.status === "stale" ? " (stale)" : ""}`;
-    const at = frame.savedAt ?? frame.candleClosedAt;
-    if (at !== null) snapshot = ` · snapshot ${formatAge(Math.max(0, now - at))} old`;
-  }
-  return `${move} · ${lean}${snapshot}`;
+export function gradeFreshness(input: GradeInput): FreshnessGrade {
+  const { ageMs, limitMs, refreshing, lastRefreshAt, lastAttemptFailed, now, offline = false, healing = false, canRefresh = true } = input;
+  if (offline) return "stale";
+  const past = pastLimit(ageMs, limitMs);
+  if (!past && !lastAttemptFailed) return "fresh";
+  if (refreshing || healing) return "catching_up";
+  if (lastAttemptFailed) return "stale";
+  if (!canRefresh) return "stale";
+  const crossedAt = input.crossedAt ?? (Number.isFinite(ageMs) ? now - ageMs + limitMs : null);
+  if (lastRefreshAt === null || (crossedAt !== null && lastRefreshAt <= crossedAt)) return "catching_up";
+  if (now - lastRefreshAt < CATCH_UP_WINDOW_MS) return "catching_up";
+  return "stale";
 }
 
-export type KeyValueStorage = { getItem(key: string): string | null; setItem(key: string, value: string): void };
-/** The choice is per viewer (this browser), one flag for every pair card. */
-export const PAIR_COLLAPSED_KEY = "crypto-watch:pair-assessment-collapsed";
-
-/** Reads a remembered boolean. `getStorage` is a thunk because merely touching localStorage can throw. */
-export function readStoredFlag(getStorage: () => KeyValueStorage | null | undefined, key: string, fallback: boolean): boolean {
-  try {
-    const value = getStorage()?.getItem(key);
-    return value === "1" ? true : value === "0" ? false : fallback;
-  } catch {
-    return fallback;
+/**
+ * The soonest moment one of the data crosses its limit (each `asOf + limitMs`), when it is in the future; else
+ * null. The page arms one refetch for that moment, so a datum is refreshed as it crosses instead of waiting for the
+ * next interval poll (which could leave it past its limit for up to a whole interval).
+ */
+export function nextLimitCrossing(
+  data: ReadonlyArray<{ asOf: number | null; limitMs: number }>,
+  now: number,
+): number | null {
+  let soonest: number | null = null;
+  for (const { asOf, limitMs } of data) {
+    if (asOf === null) continue;
+    const crossing = asOf + limitMs + FRESH_DISPLAY_GRACE_MS;
+    if (crossing > now && (soonest === null || crossing < soonest)) soonest = crossing;
   }
+  return soonest;
 }
 
-/** Remembers a boolean; returns false (and does nothing else) when storage is unavailable. */
-export function writeStoredFlag(getStorage: () => KeyValueStorage | null | undefined, key: string, value: boolean): boolean {
-  try {
-    const storage = getStorage();
-    if (!storage) return false;
-    storage.setItem(key, value ? "1" : "0");
-    return true;
-  } catch {
-    return false;
-  }
+// ---------------------------------------------------------------- per-pair summary
+
+/** The movement chip on a pair card: the 15m label, capitalised, with its tone. */
+export function pairMovementChip(movement: PairMovementView): { text: string; tone: PairWindowView["tone"] } {
+  if (movement.kind === "unavailable") return { text: "No market reading", tone: "unknown" };
+  if (movement.kind === "excluded") return { text: "Left out of the market reading", tone: "unknown" };
+  const w = movement.windows.find((x) => x.minutes === 15);
+  if (!w || !w.available) return { text: "15m move unavailable", tone: "unknown" };
+  return { text: `${w.label.charAt(0).toUpperCase()}${w.label.slice(1)}`, tone: w.tone };
+}
+
+/** "Bullish", "Neutral", "Bearish", or why there is no reading, for a TA pill. */
+export function taPillText(frame: TaFrameView): string {
+  if (frame.status === "missing") return "No reading";
+  if (frame.status === "error") return "Couldn't load";
+  if (frame.status === "not_loaded") return "Loading";
+  return frame.lean === "bullish" ? "Bullish" : frame.lean === "bearish" ? "Bearish" : frame.lean === "neutral" ? "Neutral" : "Unknown";
 }

@@ -7,7 +7,8 @@ import { createRunnerHealthReporter } from "./runner-health.mjs";
 
 // Worker-host supervisor (#270). Runs the forward-test workers on the owner's machine in production
 // mode against the hosted main Supabase and the local operational Supabase: two FastAPI services,
-// the collector, the hourly forward job and the daily trend job. Pure logic (preflight, backoff,
+// the collector, the hourly forward job, the daily trend job and the non-essential siblings (quote and
+// movement-state publishers, alert charts, the monitor scheduler). Pure logic (preflight, backoff,
 // crash-loop accounting, status file) lives in src/lib/worker-host.ts; this file only spawns and
 // wires. See docs/worker-host.md.
 const root = resolve(import.meta.dirname, "..");
@@ -458,6 +459,10 @@ async function main() {
   if (env.MOVEMENT_STATE_PUBLISH_ENABLED !== "false" && env.OPERATIONAL_DB_ENABLED === "true"
       && (env.MOVEMENT_STATE_HOSTED_URL?.trim() || env.ALERT_CHART_HOSTED_URL?.trim()))
     specs.push(nodeJob("movement-state-publisher", "scripts/movement-state-publisher.mjs"));
+  // Monitor scheduler (#30): non-essential; runs the scheduled monitoring pass (movement alerts and completed-candle
+  // TA) about once a minute. The Worker cron stays off, so without this child checks only run on a manual click.
+  if (lib.monitorSchedulerConfigured(env))
+    specs.push(nodeJob("monitor-scheduler", "scripts/monitor-scheduler.mjs"));
   for (const spec of specs) {
     records.set(spec.name, {
       ...spec,
@@ -493,6 +498,8 @@ async function main() {
   void startAfterPython(records.get("forward-hourly"), urls, pythonNames);
   void startAfterPython(records.get("forward-trend"), urls, pythonNames);
   if (records.has("runner-jobs")) void startAfterPython(records.get("runner-jobs"), urls, pythonNames);
+  // TA calls the analysis service, so the scheduler also waits for both health endpoints.
+  if (records.has("monitor-scheduler")) void startAfterPython(records.get("monitor-scheduler"), urls, pythonNames);
 }
 
 // SIGHUP is what a closed terminal sends; without it the children would outlive the host.

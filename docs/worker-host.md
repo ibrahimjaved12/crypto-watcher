@@ -12,7 +12,7 @@ Cloudflare keeps this server-only capability off. The committed Worker config ha
 For stale hosted results and restart/catch-up steps, see the [forward outage runbook](forward-outage-runbook.md).
 
 It supervises five core children, plus the quote publisher, collector universe sync, optional
-gateway and jobs runner, each with a log prefix and its own restart policy:
+gateway and jobs runner, the movement-state publisher, alert charts and the monitor scheduler, each with a log prefix and its own restart policy:
 
 | Child             | Command (same as the npm script / `dev-local.mjs`)                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -27,12 +27,13 @@ gateway and jobs runner, each with a log prefix and its own restart policy:
 | `runner-jobs` | `node scripts/runner-jobs.mjs --mode production` (`npm run runner:jobs`; only when `RUNNER_JOBS_ENABLED=true`; non-essential) |
 | `movement-state-publisher` | `node scripts/movement-state-publisher.mjs --mode production` (`npm run movement-state-publisher`; only when the operational DB is enabled and `MOVEMENT_STATE_HOSTED_URL` or `ALERT_CHART_HOSTED_URL` is set, and `MOVEMENT_STATE_PUBLISH_ENABLED` is not `false`; non-essential; publishes the engine's persisted state to the hosted copy through the site hook every 30 s at most, using `RUNNER_GATEWAY_SECRET`; see [market movement engine](market-movement-engine.md#published-copy-for-the-deployed-site-market_state_published)) |
 | `alert-charts` | `node scripts/alert-charts.mjs --mode production` (`npm run alert-charts`; only when `ALERT_CHART_DIR` is set and `ALERT_CHARTS_ENABLED` is not `false`; non-essential; needs `python/requirements-machine.txt`; pending jobs wait up to 7 days, unlike the 15-minute `runner_jobs` rule, because the window is stored; see [alert charts](alert-charts.md)) |
+| `monitor-scheduler` | `node scripts/monitor-scheduler.mjs --mode production` (`npm run monitor-scheduler`; only when the hosted credentials are set, `OPERATIONAL_DB_ENABLED=true` and `MONITOR_SCHEDULER_ENABLED` is not `false`; non-essential; starts after both Python `/health` endpoints answer because TA calls Python; runs the scheduled monitoring pass (movement alerts and completed-candle TA for every watching user) at each interval boundary plus 8 s, default every 60 s (`MONITOR_SCHEDULER_INTERVAL_SECONDS`, 30–3600; intervals over 60 s round up to whole minutes); passes never overlap; logs only a failed pass or a pass that saved alerts or TA; finishes the current pass on SIGTERM) |
 
 The jobs are launched with `node` directly rather than through `npm`, so the supervisor owns the real
 process (no wrapper to signal through). `--workers 1` is explicit because uvicorn otherwise takes its
 worker count from `WEB_CONCURRENCY`, and movement sessions are process-local: the analysis service must
 stay one process. The FastAPI children do not receive the Supabase or operational credentials, only
-their token. The forward jobs and `runner-jobs` start only after **both** `/health` endpoints answer.
+their token. The forward jobs, `runner-jobs` and `monitor-scheduler` start only after **both** `/health` endpoints answer.
 The collector starts immediately so the 1m history does not gap while Python warms up. History is
 never seeded by the host.
 
@@ -46,6 +47,22 @@ saved after a successful new market-stage commit. Hosted checkpoints are written
 24 hours per symbol, with failed attempts retried the next hour; checksum conflicts trigger a hosted
 restore on the next run. The 120-day TA window still goes to local Python. See
 [P28b/P29](forward-harness.md#p28b-persistence-and-hourly-wiring) for cache and measurement details.
+
+### Scheduled checks (`monitor-scheduler`)
+
+The machine owns scheduled monitoring: the Worker cron hook `/api/public/hooks/monitor-prices` stays off
+(`SCHEDULED_MONITOR_ENABLED=false`, and the Worker has no operational database). Without this child, movement
+alerts and TA snapshots only update when someone clicks "Check for alerts now". Both paths call the same
+`runScheduledMonitorPass` (`src/lib/monitor/scheduled-pass.server.ts`), and the per-user monitor lease keeps a
+pass and a manual click from double-running (the loser is `skipped`, which logs nothing). TA catch-up stays at
+`TA_CATCH_UP_LIMIT` (8 candles per frame per run), so a long backlog after a restart clears within minutes.
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `MONITOR_SCHEDULER_ENABLED` | on | `false` turns the child off; any value other than `true`/`false`/empty fails preflight. |
+| `MONITOR_SCHEDULER_INTERVAL_SECONDS` | `60` | Seconds between passes, whole number 30–3600; validated by preflight. |
+
+A thrown pass error is logged (single line, at most 300 characters) and retried after 30 s.
 
 ## Setup
 

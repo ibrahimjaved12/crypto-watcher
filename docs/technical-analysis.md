@@ -125,6 +125,13 @@ idempotently using the recorded provider source. A missing target outside the
 available provider history becomes `unavailable`; a provider failure stays pending
 for retry.
 
+**Trigger.** Completed-candle TA runs inside every monitor pass. In production the
+worker-host child `monitor-scheduler` runs that pass for every watching user about
+once a minute (at the minute boundary plus 8 s); "Check for alerts now" runs the
+same pass for one user on demand. The Worker cron hook stays off. Each run catches
+up at most `TA_CATCH_UP_LIMIT` (8) closed candles per frame, so a backlog after the
+machine was off clears within minutes. See [worker host](worker-host.md#scheduled-checks-monitor-scheduler).
+
 `completed_candle_ta_enabled`, `TA_GENERATION_ENABLED`, and
 `TA_OUTCOME_EVALUATION_ENABLED` control scheduled work. `PYTHON_ANALYSIS_ENABLED`,
 `PYTHON_ANALYSIS_URL`, and `PYTHON_ANALYSIS_TOKEN` must be configured for TA

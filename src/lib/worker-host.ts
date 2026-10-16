@@ -175,7 +175,74 @@ export function preflight(input: { env: Env; envFileText: string | null }): stri
     else if (analysis && forward.port === analysis.port)
       problems.push("PYTHON_FORWARD_URL needs a different port from PYTHON_ANALYSIS_URL.");
   }
+  problems.push(...monitorSchedulerProblems(env));
   return problems;
+}
+
+// ── Monitor scheduler (#30) ────────────────────────────────────────────────────────────────────
+
+export const MONITOR_SCHEDULER_DEFAULT_INTERVAL_SECONDS = 60;
+export const MONITOR_SCHEDULER_MIN_INTERVAL_SECONDS = 30;
+export const MONITOR_SCHEDULER_MAX_INTERVAL_SECONDS = 3600;
+/** A pass starts this long after the boundary, so the 1m candle that just closed has settled. */
+export const MONITOR_SCHEDULER_SETTLE_MS = 8_000;
+/** Wait after a failed pass before the next attempt. */
+export const MONITOR_SCHEDULER_ERROR_BACKOFF_MS = 30_000;
+
+function monitorSchedulerIntervalSeconds(env: Env): number | null {
+  const raw = env["MONITOR_SCHEDULER_INTERVAL_SECONDS"];
+  const value = raw === undefined || raw.trim() === "" ? MONITOR_SCHEDULER_DEFAULT_INTERVAL_SECONDS : Number(raw);
+  return Number.isSafeInteger(value) &&
+    value >= MONITOR_SCHEDULER_MIN_INTERVAL_SECONDS &&
+    value <= MONITOR_SCHEDULER_MAX_INTERVAL_SECONDS
+    ? value
+    : null;
+}
+
+function monitorSchedulerProblems(env: Env): string[] {
+  const problems: string[] = [];
+  const enabled = env["MONITOR_SCHEDULER_ENABLED"];
+  if (enabled !== undefined && enabled !== "" && enabled !== "true" && enabled !== "false")
+    problems.push("MONITOR_SCHEDULER_ENABLED must be true or false.");
+  if (monitorSchedulerIntervalSeconds(env) === null)
+    problems.push(
+      `MONITOR_SCHEDULER_INTERVAL_SECONDS must be a whole number from ${MONITOR_SCHEDULER_MIN_INTERVAL_SECONDS} to ${MONITOR_SCHEDULER_MAX_INTERVAL_SECONDS}.`,
+    );
+  return problems;
+}
+
+/**
+ * Whether the host starts `monitor-scheduler`: hosted main credentials, the operational database, and
+ * MONITOR_SCHEDULER_ENABLED not "false". Scheduled checks belong to the machine; the Worker cron stays off.
+ */
+export function monitorSchedulerConfigured(env: Env): boolean {
+  return (
+    env["MONITOR_SCHEDULER_ENABLED"] !== "false" &&
+    env["OPERATIONAL_DB_ENABLED"] === "true" &&
+    !!env["SUPABASE_URL"]?.trim() &&
+    !!env["SUPABASE_SERVICE_ROLE_KEY"]?.trim()
+  );
+}
+
+/** The pass interval in milliseconds; throws with the variable name only when it is invalid. */
+export function monitorSchedulerIntervalMs(env: Env): number {
+  const seconds = monitorSchedulerIntervalSeconds(env);
+  if (seconds === null) throw new Error(monitorSchedulerProblems(env).join(" "));
+  return seconds * 1000;
+}
+
+/**
+ * When the next pass starts. Passes sit on a grid of `step + settle` instants, where the step is the
+ * interval for sub-minute intervals and one minute otherwise (longer intervals round up to whole
+ * minutes, so every pass still follows a fresh 1m close). `previousTargetMs` is the grid instant the
+ * last pass was scheduled for (null before the first pass); a pass that overran is followed by the next
+ * grid instant, never by an immediate catch-up burst.
+ */
+export function nextMonitorPassAt(nowMs: number, previousTargetMs: number | null, intervalMs: number): number {
+  const step = intervalMs >= 60_000 ? 60_000 : intervalMs;
+  const earliest = previousTargetMs === null ? nowMs : Math.max(nowMs, previousTargetMs + intervalMs);
+  const k = Math.ceil((earliest - MONITOR_SCHEDULER_SETTLE_MS) / step);
+  return k * step + MONITOR_SCHEDULER_SETTLE_MS;
 }
 
 export type PythonEndpoint = { origin: string; host: string; port: string };

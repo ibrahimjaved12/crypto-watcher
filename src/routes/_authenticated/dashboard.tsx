@@ -1,16 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { automaticQueryOptions, logActivity } from "@/lib/activity-controls";
 import { Plus, RefreshCw, PlayCircle, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
-import { QuoteCard } from "@/components/market/quote-card";
+import { QuoteCard, QuoteCardSkeleton } from "@/components/market/quote-card";
 import { MarketRead } from "@/components/market/market-read";
 import { MarketStrip } from "@/components/market/market-strip";
-import { PairAssessment } from "@/components/market/pair-assessment";
+import { PairAssessment, type TaFrameState } from "@/components/market/pair-assessment";
 import { TechnicalAnalysis } from "@/components/market/technical-analysis";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,9 +20,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Hint } from "@/components/hint";
-import { EmptyState, PageHeader, TimeAgo } from "@/components/plain";
-import { humanizeReason, relativeTime, sourceLabel } from "@/lib/labels";
+import { EmptyState, PageHeader } from "@/components/plain";
+import { humanizeReason, sourceLabel } from "@/lib/labels";
 import { useRunnerStatus } from "@/lib/runner/use-runner-status";
 import { addSymbol, fetchSettings, fetchWatchlist, removeSymbol } from "@/lib/db";
 import { getMarketSnapshot, type MarketSnapshot } from "@/lib/market.functions";
@@ -31,18 +30,32 @@ import { runMyMonitorCheck } from "@/lib/monitor.functions";
 import { describeAlertCheck } from "@/lib/monitor/check-message";
 import { getOperationalState } from "@/lib/operational.functions";
 import { getMarketMovementCurrentState } from "@/lib/market-movement.functions";
-import { toMarketMovementCurrentState } from "@/lib/market/market-movement-state";
 import {
+  PUBLISHED_COPY_OFFLINE_AFTER_MS,
+  toMarketMovementCurrentState,
+} from "@/lib/market/market-movement-state";
+import {
+  MOVEMENT_POLL_INTERVAL_MS,
   TA_ASSESSMENT_FRAMES,
   buildFreshness,
   buildMarketStrip,
   buildPairMovement,
   buildTaFrame,
+  formatAge,
+  gradeFreshness,
   latestTaBySymbol,
+  nextLimitCrossing,
+  stripStatus,
+  taLimitMs,
+  type FreshnessGrade,
+  type FreshnessItem,
   type MovementReadStatus,
 } from "@/lib/market/assessment";
+import { QUOTE_STALE_MS } from "@/lib/market/quote-calc";
 import { loadLatestTa } from "@/lib/market/ta-latest";
 import { useNow } from "@/lib/use-now";
+import { useResumeSettle } from "@/lib/use-resume-settle";
+import { useStaleSelfHeal } from "@/lib/use-stale-self-heal";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
@@ -63,10 +76,10 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
 });
 
 /**
- * Quote errors and failed exchange attempts for every pair, including unavailable quotes.
+ * Quote errors and failed exchange attempts for every pair, including unavailable quotes, as Diagnostics rows.
  * Each reason is listed once, with the pairs it applied to.
  */
-function quoteDetailLines(quotes: MarketSnapshot["quotes"]): string[] {
+function quoteDetailRows(quotes: MarketSnapshot["quotes"]): Array<[string, string]> {
   const pairsByReason = new Map<string, Set<string>>();
   const addReason = (reason: string, symbol: string) => {
     const pairs = pairsByReason.get(reason) ?? new Set<string>();
@@ -82,11 +95,45 @@ function quoteDetailLines(quotes: MarketSnapshot["quotes"]): string[] {
       addReason(reason, quote.symbol);
     }
   }
-  if (pairsByReason.size === 0) return [];
-  return [
-    "Price diagnostics:",
-    ...Array.from(pairsByReason, ([reason, pairs]) => `${reason} (${[...pairs].join(", ")})`),
-  ];
+  return Array.from(pairsByReason, ([reason, pairs]): [string, string] => ["Price diagnostics", `${reason} (${[...pairs].join(", ")})`]);
+}
+
+type RefreshState = { refreshing: boolean; lastRefreshAt: number | null; lastAttemptFailed: boolean };
+const refreshOf = (query: { isFetching: boolean; dataUpdatedAt: number; errorUpdatedAt: number; isError: boolean }): RefreshState => ({
+  refreshing: query.isFetching,
+  lastRefreshAt: Math.max(query.dataUpdatedAt, query.errorUpdatedAt) || null,
+  lastAttemptFailed: query.isError,
+});
+const GRADE_ORDER: Record<FreshnessGrade, number> = { fresh: 0, catching_up: 1, stale: 2 };
+const worse = (...grades: FreshnessGrade[]): FreshnessGrade =>
+  grades.reduce((a, b) => (GRADE_ORDER[b] > GRADE_ORDER[a] ? b : a), "fresh");
+
+/**
+ * Arms one refetch for the moment the soonest datum crosses its limit, so it is refreshed as it crosses instead of
+ * up to a whole poll interval later. Visible tabs only; nothing repeats when the refetch brings no newer data.
+ */
+function usePreEmptiveRefresh(
+  targets: Array<{ key: string; asOf: number | null; limitMs: number; refetch: () => unknown }>,
+  now: number,
+  enabled: boolean,
+) {
+  const latest = useRef(targets);
+  latest.current = targets;
+  let soonest: { at: number; key: string } | null = null;
+  for (const target of targets) {
+    const at = nextLimitCrossing([target], now);
+    if (at !== null && (soonest === null || at < soonest.at)) soonest = { at, key: target.key };
+  }
+  const at = soonest?.at ?? null;
+  const key = soonest?.key ?? null;
+  useEffect(() => {
+    if (!enabled || at === null || key === null) return;
+    const timer = setTimeout(() => {
+      if (document.visibilityState !== "visible") return;
+      void latest.current.find((target) => target.key === key)?.refetch();
+    }, Math.max(0, at - Date.now()));
+    return () => clearTimeout(timer);
+  }, [enabled, at, key]);
 }
 
 function Dashboard() {
@@ -102,7 +149,6 @@ function Dashboard() {
   const loadMarket = useServerFn(getMarketSnapshot);
   const loadOperationalState = useServerFn(getOperationalState);
   const loadMovement = useServerFn(getMarketMovementCurrentState);
-  const now = useNow(15_000);
 
   const watchlist = useQuery({ queryKey: ["watchlist"], queryFn: fetchWatchlist });
   const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
@@ -112,6 +158,13 @@ function Dashboard() {
     (!settings.data.monitoring_enabled || !settings.data.market_data_collection_enabled);
 
   const marketKey = marketQueryKey(symbols);
+  const movementKey = ["market-movement"] as const;
+  const taKeys = TA_ASSESSMENT_FRAMES.map((timeframe) => ["ta", timeframe, "dashboard-latest", symbols.join(",")] as const);
+  // A tab that comes back after a while refetches first and holds the clock meanwhile, so no age jumps past its
+  // limit in the moment before the fresh data lands. `now` is the only clock of the assessment path.
+  const settling = useResumeSettle([marketKey, movementKey, ...taKeys]);
+  const now = useNow(15_000, { hold: settling });
+
   const market = useQuery({
     queryKey: marketKey,
     placeholderData: keepPreviousData,
@@ -125,18 +178,19 @@ function Dashboard() {
   const { retrying, down } = useMarketSelfHeal(symbols, marketKey);
 
   // "Current assessment" (#30): the engine's persisted state (read through the existing server function, which
-  // is cheap on the Worker) and the latest saved TA snapshots. Same refresh gates as the data they sit beside;
-  // the engine writes every 30 s, so a 60 s refresh is never faster than its own cadence.
+  // is cheap on the Worker) and the latest saved TA snapshots. The movement state is polled every 30 s, the
+  // engine's and the publisher's own cadence; prices and TA keep the shared 60 s interval.
   const taAutomatic = automaticQueryOptions(import.meta.env["VITE_TA_HISTORY_AUTO_REFRESH_ENABLED"]);
   const movement = useQuery({
-    queryKey: ["market-movement"],
+    queryKey: movementKey,
     queryFn: () => loadMovement(),
     ...automatic,
+    refetchInterval: automatic.enabled ? MOVEMENT_POLL_INTERVAL_MS : false,
     enabled: automatic.enabled && symbols.length > 0,
   });
   const taQueries = useQueries({
-    queries: TA_ASSESSMENT_FRAMES.map((timeframe) => ({
-      queryKey: ["ta", timeframe, "dashboard-latest", symbols.join(",")],
+    queries: TA_ASSESSMENT_FRAMES.map((timeframe, index) => ({
+      queryKey: taKeys[index]!,
       queryFn: () => loadLatestTa(timeframe, symbols),
       ...taAutomatic,
       enabled: taAutomatic.enabled && symbols.length > 0,
@@ -190,6 +244,12 @@ function Dashboard() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const invalidateAfterCheck = () => {
+    queryClient.invalidateQueries({ queryKey: ["operational-state"] });
+    queryClient.invalidateQueries({ queryKey: ["alerts"] });
+    queryClient.invalidateQueries({ queryKey: ["ta"] });
+    queryClient.invalidateQueries({ queryKey: movementKey });
+  };
   const check = useMutation({
     mutationFn: () => runCheck({ data: undefined }),
     onSuccess: (result) => {
@@ -201,12 +261,104 @@ function Dashboard() {
       } else {
         toast.error(title, { description });
       }
-      queryClient.invalidateQueries({ queryKey: ["operational-state"] });
-      queryClient.invalidateQueries({ queryKey: ["alerts"] });
-      queryClient.invalidateQueries({ queryKey: ["ta"] });
+      invalidateAfterCheck();
     },
     onError: (e: Error) => toast.error(e.message),
   });
+
+  // ── Grades: fresh, catching up, stale ─────────────────────────────────────────────────────────
+  const movementRefresh = refreshOf(movement);
+  const itemOf = (id: FreshnessItem["id"]) => freshness.find((item) => item.id === id)!;
+  const gradeItem = (item: FreshnessItem, refresh: RefreshState, canRefresh: boolean, healing: boolean): FreshnessGrade =>
+    item.ageMs === null || item.limitMs === null
+      ? item.offline ? "stale" : "fresh"
+      : gradeFreshness({ ageMs: item.ageMs, limitMs: item.limitMs, crossedAt: item.crossedAt, offline: item.offline,
+          now, canRefresh, healing, ...refresh });
+  const taFrames = (symbol: string, healing: boolean): TaFrameState[] =>
+    TA_ASSESSMENT_FRAMES.map((timeframe, index) => {
+      const query = taQueries[index]!;
+      const frame = buildTaFrame(
+        latestTa.get(`${symbol}|${timeframe}`),
+        timeframe,
+        now,
+        query.isError ? "failed" : query.data === undefined ? "not_loaded" : "loaded",
+      );
+      const grade: FreshnessGrade =
+        frame.candleClosedAt === null
+          ? "fresh"
+          : gradeFreshness({ ageMs: now - frame.candleClosedAt, limitMs: taLimitMs(timeframe), now,
+              canRefresh: taAutomatic.enabled, healing, ...refreshOf(query) });
+      return { frame, grade };
+    });
+  // Without the self-heal override: what the self-heal watches.
+  const rawMovementGrade = worse(
+    gradeItem(itemOf("movement"), movementRefresh, automatic.enabled, false),
+    gradeItem(itemOf("stream"), movementRefresh, automatic.enabled, false),
+  );
+  const rawTaStale = symbols.some((symbol) => taFrames(symbol, false).some((t) => t.grade === "stale"));
+
+  const healCheck = async () => {
+    try {
+      const result = await runCheck({ data: undefined });
+      const { kind, title, description } = describeAlertCheck(result);
+      if (kind === "error") toast.error(title, { description });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "The automatic check failed.");
+    } finally {
+      invalidateAfterCheck();
+    }
+  };
+  const heal = useStaleSelfHeal({
+    stale: rawTaStale || rawMovementGrade === "stale",
+    allowed:
+      !settling &&
+      runner.canCheckAlerts &&
+      settings.data !== undefined &&
+      !monitoringPaused &&
+      !check.isPending &&
+      !strip.machineOffline,
+    run: healCheck,
+  });
+  const catchingUp = settling || heal.healing;
+  const movementGrade = worse(
+    gradeItem(itemOf("movement"), movementRefresh, automatic.enabled, catchingUp),
+    gradeItem(itemOf("stream"), movementRefresh, automatic.enabled, catchingUp),
+  );
+  const status = stripStatus(strip, movementGrade, settling, movementRefresh.lastAttemptFailed);
+  const movementCurrent = status === "live" || status === "updating";
+  const framesBySymbol = new Map(symbols.map((symbol) => [symbol, taFrames(symbol, catchingUp)]));
+  const staleFrames = [...framesBySymbol.values()].flat().filter((t) => t.grade === "stale");
+  const oldestStaleAt = staleFrames.reduce<number | null>((min, t) => {
+    const at = t.frame.savedAt ?? t.frame.candleClosedAt;
+    return at === null ? min : min === null ? at : Math.min(min, at);
+  }, null);
+  const taNotice =
+    heal.attempted && staleFrames.length && oldestStaleAt !== null
+      ? `Technical analysis is catching up (last updated ${formatAge(Math.max(0, now - oldestStaleAt))} ago).`
+      : null;
+
+  // Refresh each datum the moment it would cross its limit, not up to an interval later.
+  const quoteTimes = (market.data?.quotes ?? []).flatMap((q) => (q.lastCandleAt === null ? [] : [q.lastCandleAt]));
+  usePreEmptiveRefresh(
+    [
+      { key: "market", asOf: quoteTimes.length ? Math.min(...quoteTimes) : null, limitMs: QUOTE_STALE_MS, refetch: () => market.refetch() },
+      { key: "movement", asOf: strip.reportedAt, limitMs: PUBLISHED_COPY_OFFLINE_AFTER_MS, refetch: () => movement.refetch() },
+      ...TA_ASSESSMENT_FRAMES.map((timeframe, index) => {
+        const closes = [...framesBySymbol.values()].flatMap((frames) => {
+          const at = frames[index]?.frame.candleClosedAt ?? null;
+          return at === null ? [] : [at];
+        });
+        return {
+          key: `ta-${timeframe}`,
+          asOf: closes.length ? Math.min(...closes) : null,
+          limitMs: taLimitMs(timeframe),
+          refetch: () => taQueries[index]?.refetch(),
+        };
+      }),
+    ],
+    now,
+    automatic.enabled && !settling,
+  );
 
   const available = SUPPORTED_SYMBOLS.filter((s) => !symbols.includes(s));
   const quotes = market.data?.quotes ?? [];
@@ -217,16 +369,31 @@ function Dashboard() {
     .map(sourceLabel)
     .join(", ");
   const runStatus = lastRun ? humanizeReason(lastRun.status) : null;
-  const stripDetails = [
-    `Data source: ${sourcesDown ? "prices unavailable" : sourceNames || "waiting for the first price load"}`,
-    ...quoteDetailLines(quotes),
-    `Last refresh: ${market.data ? new Date(market.data.fetchedAt).toLocaleString() : "not loaded yet"}`,
+  const diagnostics: Array<[string, string]> = [
+    ["Price source", sourcesDown ? "prices unavailable" : sourceNames || "waiting for the first price load"],
+    ...quoteDetailRows(quotes),
+    ["Last price refresh", market.data ? new Date(market.data.fetchedAt).toLocaleString() : "not loaded yet"],
     ...(runner.canCheckAlerts
       ? [
-          `Last monitoring check: ${lastRun ? `${new Date(lastRun.ran_at).toLocaleString()} (${runStatus!.short})` : "none yet"}`,
+          [
+            "Last monitoring check",
+            lastRun ? `${new Date(lastRun.ran_at).toLocaleString()} (${runStatus!.short})` : "none yet",
+          ] as [string, string],
         ]
       : []),
-  ].join("\n");
+    ["Pairs watched", `${symbols.length} of ${MAX_WATCHLIST_SIZE}`],
+  ];
+  const checkDisabled = !runner.canCheckAlerts || settings.isPending || settings.isError || monitoringPaused;
+  const checkTitle = !runner.canCheckAlerts
+    ? undefined
+    : monitoringPaused
+      ? "Turn on monitoring and market-data collection in the Control room"
+      : "Check every watched pair against your alert rule right now";
+  const refreshAll = () => {
+    void market.refetch();
+    void movement.refetch();
+    for (const query of taQueries) void query.refetch();
+  };
 
   return (
     <AppShell>
@@ -234,22 +401,16 @@ function Dashboard() {
         eyebrow="Live market"
         title="Market"
         subtitle={
-          <>
-            Your watched futures pairs and their recent moves.{" "}
-            <span className="num">
-              {symbols.length}/{MAX_WATCHLIST_SIZE}
-            </span>{" "}
-            pairs ·{" "}
-            {automatic.enabled
-              ? "prices refresh every minute while this page is open."
-              : "automatic refresh is paused; press Refresh."}
-          </>
+          automatic.enabled
+            ? "Your watched pairs and their latest moves. Updates every minute."
+            : "Your watched pairs and their latest moves. Automatic refresh is paused; press Refresh."
         }
+        actionsClassName="w-full sm:w-auto"
         actions={
           <>
             <Select value={pending} onValueChange={(v) => add.mutate(v)}>
               <SelectTrigger
-                className="h-9 w-[160px]"
+                className="h-11 flex-1 sm:h-9 sm:w-[160px] sm:flex-none"
                 disabled={add.isPending || available.length === 0}
                 aria-label="Add a pair"
               >
@@ -265,37 +426,23 @@ function Dashboard() {
             </Select>
             <Button
               variant="secondary"
-              onClick={() => {
-                void market.refetch();
-                void movement.refetch();
-                for (const query of taQueries) void query.refetch();
-              }}
+              className="h-11 flex-1 sm:h-9 sm:flex-none"
+              onClick={refreshAll}
               disabled={market.isFetching || symbols.length === 0}
             >
               <RefreshCw
-                className={`size-4 ${market.isFetching ? "animate-spin" : ""}`}
+                className={`size-4 ${market.isFetching ? "animate-spin motion-reduce:animate-none" : ""}`}
                 aria-hidden
               />
               Refresh
             </Button>
             <Button
+              className="h-11 w-full sm:h-9 sm:w-auto"
               onClick={() => {
                 if (runner.canCheckAlerts) check.mutate();
               }}
-              disabled={
-                !runner.canCheckAlerts ||
-                check.isPending ||
-                settings.isPending ||
-                settings.isError ||
-                monitoringPaused
-              }
-              title={
-                !runner.canCheckAlerts
-                  ? undefined
-                  : monitoringPaused
-                    ? "Turn on monitoring and market-data collection in the Control room"
-                    : "Check every watched pair against your alert rule right now"
-              }
+              disabled={checkDisabled || check.isPending}
+              title={checkTitle}
             >
               {check.isPending ? (
                 <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden />
@@ -312,62 +459,40 @@ function Dashboard() {
         }
       />
 
-      <div
-        className="panel mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-sm"
-        title={stripDetails}
-      >
-        <span className="text-muted-foreground">
-          {sourcesDown ? (
-            "Prices unavailable"
-          ) : (
-            <>
-              Prices from <span className="text-foreground">{sourceNames || "…"}</span>
-            </>
-          )}
-          {" · "}refreshed{" "}
-          <span className="num text-foreground">
-            {market.data ? new Date(market.data.fetchedAt).toLocaleTimeString() : "—"}
-          </span>
-          {runner.canCheckAlerts && lastRun ? (
-            <>
-              {" · "}last check <TimeAgo at={lastRun.ran_at} text={relativeTime(lastRun.ran_at)} />{" "}
-              <span className="text-foreground">({runStatus!.short.toLowerCase()})</span>
-            </>
-          ) : null}
-        </span>
-        <Hint text={stripDetails}>
-          <span className="text-xs">Details</span>
-        </Hint>
-      </div>
+      {symbols.length > 0 ? (
+        <MarketStrip
+          view={strip}
+          status={status}
+          freshness={freshness}
+          now={now}
+          taNotice={taNotice}
+          diagnostics={diagnostics}
+          checkNow={
+            runner.canCheckAlerts
+              ? { run: () => check.mutate(), pending: check.isPending, disabled: checkDisabled, title: checkTitle }
+              : null
+          }
+        />
+      ) : null}
 
-      {symbols.length > 0 ? <MarketStrip view={strip} freshness={freshness} now={now} /> : null}
-
-      <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="mt-5 grid items-start gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {watchlist.isLoading
-          ? symbols.map((s) => (
-              <div key={s} className="panel h-64 animate-pulse p-5">
-                <span className="num text-sm text-muted-foreground">{s}</span>
-              </div>
-            ))
+          ? [0, 1, 2].map((i) => <QuoteCardSkeleton key={i} symbol="pair" />)
           : symbols.map((symbol) => {
               const quote = quotes.find((q) => q.symbol === symbol);
               return quote ? (
                 <QuoteCard
                   key={symbol}
                   quote={quote}
+                  now={now}
+                  onRetry={() => void market.refetch()}
                   assessment={
                     <PairAssessment
-                      symbol={symbol}
                       now={now}
                       movement={buildPairMovement(symbol, movementState, movementRead, strip.notLiveNote)}
-                      ta={TA_ASSESSMENT_FRAMES.map((timeframe, index) =>
-                        buildTaFrame(
-                          latestTa.get(`${symbol}|${timeframe}`),
-                          timeframe,
-                          now,
-                          taQueries[index]?.isError ? "failed" : taQueries[index]?.data === undefined ? "not_loaded" : "loaded",
-                        ),
-                      )}
+                      movementCurrent={movementCurrent}
+                      ta={framesBySymbol.get(symbol) ?? []}
+                      healAttempted={heal.attempted}
                     />
                   }
                   retrying={automatic.enabled && retrying && down.includes(symbol)}
@@ -376,22 +501,20 @@ function Dashboard() {
                     if (item) remove.mutate({ id: item.id, symbol: item.symbol });
                   }}
                 />
-              ) : market.isFetching ? (
-                <div key={symbol} className="panel h-64 animate-pulse p-5">
-                  <span className="num text-sm text-muted-foreground">{symbol}</span>
-                </div>
-              ) : market.isError ? (
-                <div key={symbol} className="panel h-64 p-5">
-                  <span className="num text-sm text-muted-foreground">{symbol}</span>
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    Could not load. Press Refresh.
-                  </p>
-                </div>
+              ) : market.isFetching || (!market.data && !market.isError) ? (
+                <QuoteCardSkeleton key={symbol} symbol={symbol} />
               ) : (
-                <div key={symbol} className="panel h-64 p-5">
-                  <span className="num text-sm text-muted-foreground">{symbol}</span>
+                <div key={symbol} className="panel p-4 sm:p-5">
+                  <h3 className="font-display text-base font-semibold">{baseAsset(symbol)}</h3>
                   <p className="mt-2 text-sm text-muted-foreground">
-                    No data for this pair right now.
+                    Price unavailable{" "}
+                    <button
+                      type="button"
+                      className="inline-flex min-h-11 items-center text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-0"
+                      onClick={() => void market.refetch()}
+                    >
+                      Retry
+                    </button>
                   </p>
                 </div>
               );
