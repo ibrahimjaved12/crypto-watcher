@@ -8,11 +8,10 @@ so later market work (forex, #374) fits without a new job.
 
 ## Tiers (since #374)
 
-- **`core`** (implicit: every module not listed in `shards.json`): the foundation and the live
-  product: bars, candles, costs, labels, evaluation, hidden-stretch guard, data lake, canonical
-  identity, instruments, every `test_forward_*`, movement, API,
-  analysis, slow movement and the CI selector tests. It runs on every PR as at most `--jobs` bins
-  (greedy longest-processing-time on `WEIGHTS` in `run_shard.py`); each bin is one
+- **`core`** (implicit: every module not listed in `shards.json`): a small essential set: costs,
+  labels, hidden-stretch guard, paper wallet (v2/v3), API, instruments and the CI selector tests.
+  Everything else runs in `study` when its imports change and weekly. Core runs on every PR as at
+  most `--jobs` bins (greedy longest-processing-time on `WEIGHTS` in `run_shard.py`); each bin is one
   `python -m unittest <module> ...` subprocess, so interpreter and import start-up is paid once per
   bin. CI uses `--jobs 2`.
 - **`study`**: research machinery: the #123/EXP-75 cluster, doji/pattern research (paused),
@@ -49,7 +48,7 @@ One job `Python tests, Node tests and builds` in workflow `Tests`, three lanes s
 
 ## What runs when
 
-- **Pull request:** core Python tier, the Node tests (which also build and run the collector worker) + `tsc` + the app build, and only the study-tier
+- **Pull request:** core Python tier, the Node tests + `tsc` + both builds, and only the study-tier
   modules whose imports reach a changed file (`python/tests/select_tests.py`). Python and Node run
   concurrently on the two vCPUs; one failing lane never hides the other.
 - **Weekly (Monday 04:41 UTC) and manual dispatch:** everything, including the whole study tier and

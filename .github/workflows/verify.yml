@@ -85,8 +85,8 @@ jobs:
             local start=$SECONDS status=0
             { npm test --prefix tests \
               && npx --no-install tsc --noEmit \
-              && npm run build; } || status=1
-            # tests/collector-worker.test.mjs already builds and runs the collector worker artifact.
+              && npm run build \
+              && npm run collector:worker:build; } || status=1
             echo "$((SECONDS - start))" > node.seconds
             return "$status"
           }
