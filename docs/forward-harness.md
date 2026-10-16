@@ -127,8 +127,10 @@ taker fees on both sides, so its PnL is not the label's micro-R.
    strategies cannot run live yet.
 3. **Funding** is applied only when the caller supplies funding events (`symbols[].funding`).
    Without them the funding amounts are zero.
-4. **Flat maintenance-margin tier:** no symbol has a tier table in the code yet, so a flat
-   `COST_MODEL_V1.mmr` (1%) is used. Every ledger line carries `flat-tier`.
+4. **Flat maintenance-margin tier:** wallet-v2 (the hourly path) has no tier table, so a flat
+   `COST_MODEL_V1.mmr` (1%) is used. Every ledger line carries `flat-tier`. Wallet-v3 (#36) can use the
+   versioned per-symbol contract inputs instead (owner-supplied BTCUSDT tier 1 and liquidation fees, labelled
+   placeholders elsewhere); see [futures-simulation.md](futures-simulation.md#contract-inputs-tiers-and-liquidation-v3-36-part-2).
 5. **Program-chosen leverage:** the largest integer leverage (cap 20) whose liquidation price is
    at least 2x the stop distance beyond the entry. The labels use 3x for their own leverage.
 6. **Wallet costs:** taker fee and a 1 bp slippage floor on both entry and exit, including
@@ -323,8 +325,12 @@ as `/v1/forward/evaluate`, with no movement-process dispatch:
 
 Persisted events contain `stage_run_id`, `symbol`, `sequence`, `ms`, and `type`
 (`open`, `close`, or `funding`), plus their event payload. The wallet endpoint also accepts `mark` and `fill`
-events, but only under `config.wallet_version = "wallet-v3"` (#36); the shared market stage still produces and
-stores only the three persisted kinds, so wallet-v2 and the parity runs are unaffected. Duplicate
+events (and, in Part 2, `order`, `cancel` and `tape`), but only under `config.wallet_version = "wallet-v3"` (#36);
+the shared market stage still produces and stores only the three persisted kinds, so wallet-v2 and the parity runs
+are unaffected. A v3 run is a new run: the account's configuration selects it (`forward_wallet_accounts.config`
+keeps `wallet_version`, which the stage replay does not strip), and a state of the other version is refused. The
+schema has one wallet account per user, so switching the live hourly account to v3 means a new account; that is not
+done here. Duplicate
 `(stage_run_id, symbol, sequence)` keys are rejected. Transport merging uses
 `(ms, symbol, sequence)`; wallet execution order is unchanged: timestamp, then
 liquidation before close before funding before open, with the existing setup-ID/stable ties.

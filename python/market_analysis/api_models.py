@@ -489,8 +489,34 @@ class ForwardWalletConfig(InputModel):
     sizing_basis: Literal["balance", "equity"] = "balance"
     ledger_links: bool = False
     run_id: Annotated[str, Field(max_length=128)] = ""
+    # Part 2: ``contract_inputs`` loads the versioned data file (its hash is recorded); the limits are optional
+    # exact fractions of the balance, and ``portfolio_limits`` switches on both at their defaults (5 % total open
+    # risk; the cluster cap is a labelled placeholder). Explicit values win over ``portfolio_limits``.
+    contract_inputs: bool = False
+    # A stored run configuration pins the data file it ran with; a different file is a new run, never a silent swap.
+    contract_inputs_version: str | None = None
+    contract_inputs_hash: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
+    portfolio_limits: bool = False
+    max_open_risk_fraction: str | None = None
+    cluster_risk_fraction: str | None = None
 
-    V3_ONLY: ClassVar[frozenset] = frozenset({"maker_rate", "sizing_basis", "ledger_links", "run_id"})
+    V3_ONLY: ClassVar[frozenset] = frozenset({
+        "maker_rate", "sizing_basis", "ledger_links", "run_id", "contract_inputs", "contract_inputs_version",
+        "contract_inputs_hash", "portfolio_limits", "max_open_risk_fraction", "cluster_risk_fraction"})
+
+    @field_validator("max_open_risk_fraction", "cluster_risk_fraction")
+    @classmethod
+    def exact_fraction_of_balance(cls, value):
+        from fractions import Fraction
+        if value is None:
+            return value
+        try:
+            number = Fraction(value)
+        except (ValueError, ZeroDivisionError):
+            raise ValueError("expected an exact fraction in (0, 1]") from None
+        if not 0 < number <= 1:
+            raise ValueError("expected an exact fraction in (0, 1]")
+        return value
 
     @field_validator("risk_fraction", "max_exposure_multiple", "taker_rate", "slip_floor_bps", "mmr", "maker_rate")
     @classmethod
@@ -521,7 +547,20 @@ class ForwardWalletConfig(InputModel):
             for key in self.V3_ONLY:
                 values.pop(key)
             return WalletConfig(**values)
-        from .forward.wallet_v3 import WalletV3Config
+        from .forward import contract_inputs
+        from .forward.wallet_v3 import DEFAULT_MAX_OPEN_RISK, PLACEHOLDER_CLUSTER_RISK, WalletV3Config
+        pinned = (values.pop("contract_inputs_version"), values.pop("contract_inputs_hash"))
+        values["contract_inputs"] = contract_inputs.load() if values["contract_inputs"] else None
+        loaded = values["contract_inputs"]
+        if loaded is not None and any(pin is not None for pin in pinned) and pinned not in (
+                (loaded.version, loaded.sha256), (None, loaded.sha256), (loaded.version, None)):
+            raise ValueError("contract inputs differ from the stored run configuration (a new run is needed)")
+        limits = values.pop("portfolio_limits")
+        total, cluster = values["max_open_risk_fraction"], values["cluster_risk_fraction"]
+        values["max_open_risk_fraction"] = Fraction(total) if total is not None else (
+            DEFAULT_MAX_OPEN_RISK if limits else None)
+        values["cluster_risk_fraction"] = Fraction(cluster) if cluster is not None else (
+            PLACEHOLDER_CLUSTER_RISK if limits else None)
         return WalletV3Config(**values)
 
 
@@ -555,7 +594,7 @@ class ForwardMarketRequest(ForwardSymbolInput):
 
 
 class ForwardWalletEvent(InputModel):
-    type: Literal["open", "close", "funding", "mark", "fill"]
+    type: Literal["open", "close", "funding", "mark", "fill", "order", "tape", "cancel"]
     ms: Timestamp
     symbol: str = Field(min_length=5, max_length=16, pattern=r"^[A-Z0-9]+$")
     sequence: Annotated[int, Field(strict=True, ge=0)]
@@ -572,6 +611,15 @@ class ForwardWalletEvent(InputModel):
     qty: str | None = None
     price: Annotated[int, Field(strict=True, gt=0)] | None = None
     liquidity: Literal["taker", "maker"] | None = None
+    # wallet-v3 orders (``order``, ``cancel``) and one completed minute of trades (``tape``, stamped at its close)
+    order_id: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    order_type: Literal["market", "limit"] | None = None
+    limit_price: Annotated[int, Field(strict=True, gt=0)] | None = None
+    expires_ms: Timestamp | None = None
+    low: Annotated[int, Field(strict=True, gt=0)] | None = None
+    high: Annotated[int, Field(strict=True, gt=0)] | None = None
+    close: Annotated[int, Field(strict=True, gt=0)] | None = None
+    through_qty: str | None = None
 
     @model_validator(mode="after")
     def required_payload(self):
@@ -599,6 +647,22 @@ class ForwardWalletEvent(InputModel):
                     raise ValueError
             except (ValueError, ZeroDivisionError):
                 raise ValueError("invalid fill quantity") from None
+        if self.type == "order":
+            if not (self.order_id and self.order_type and self.setup and self.setup.get("symbol") == self.symbol):
+                raise ValueError("order requires order_id, order_type and a setup for the event symbol")
+            if self.order_type == "limit" and self.limit_price is None:
+                raise ValueError("a limit order requires limit_price")
+        if self.type == "cancel" and not self.order_id:
+            raise ValueError("cancel requires order_id")
+        if self.type == "tape":
+            if None in (self.low, self.high, self.close) or not self.low <= self.close <= self.high:
+                raise ValueError("tape requires low <= close <= high")
+            if self.through_qty is not None:
+                try:
+                    if Fraction(self.through_qty) < 0:
+                        raise ValueError
+                except (ValueError, ZeroDivisionError):
+                    raise ValueError("invalid through_qty") from None
         return self
 
 

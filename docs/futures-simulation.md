@@ -424,6 +424,94 @@ v3, and `full_reconciliation` whenever the request carries `reconcile: {initial_
 prints **counts only** (PASS, FAIL on any mismatch, WARN when the Python service is not configured or the ledger
 could not be read).
 
+### Contract inputs, tiers and liquidation (v3, #36 Part 2)
+
+`python/market_analysis/forward/data/contract_inputs_v1.json` (loader: `contract_inputs.py`) holds, for the six
+frozen symbols, the maintenance-margin tiers (notional bracket, rate, maintenance amount, max leverage), the
+taker/maker fees, the liquidation fee rate and the tick/step/minimum-notional filters, each with its source. The
+SHA-256 of its canonical JSON is recorded in the run configuration (`contract_inputs_hash`) and on every ledger
+line; selecting it is `contract_inputs: true`. A stored configuration may carry `contract_inputs_version` and
+`contract_inputs_hash` (the run record does); a different file is refused, since changing the inputs is a new
+run. The signed Binance leverage-bracket endpoint is not used.
+
+- **Owner-supplied (#36, used exactly):** liquidation fee 1.25% of notional for BTC, ETH, BNB, XRP and 1.5% for
+  DOGE, SOL; BTCUSDT tier 1: 0.40% maintenance margin up to 300,000 USDT, max leverage 150x.
+- **Placeholders (conservative, labelled `placeholder-tier` on the ledger line):** every other tier value: 1%
+  maintenance margin, 20x, one bracket up to 10,000,000 USDT (BTCUSDT above 300,000 USDT likewise, its maintenance
+  amount chosen so `notional * mmr - cum` is continuous at the edge). A notional above the last bracket is
+  *unavailable* and the setup is rejected (`notional_above_tier_table`); nothing is extrapolated. Without
+  contract inputs the old flat 1% tier applies and lines carry `flat-tier`. Owner-supplied tier lines carry
+  `owner-tier`.
+- **Not supplied:** the filters. `null` means "not enforced" (never an invented number); when set, the quantity is
+  floored to the step (`below_step_size`), a notional under the minimum is rejected (`below_min_notional`) and a limit
+  price must sit on the tick grid (`price_off_tick`).
+- **Bracket of the position's notional.** The quantity is sized first (risk / stop distance), then the bracket of
+  that notional is looked up. Liquidation price (one-way, isolated):
+  `LP = (WB + cum - s*Q*EP) / (Q*MMR - s*Q)` with `WB` the isolated margin, `cum` the bracket's maintenance
+  amount, `s = +1` long and `-1` short; at the liquidation price equity equals `Q*LP*MMR - cum`. For
+  tier 1 (`cum = 0`) a long's `LP = EP (1 - 1/L) / (1 - MMR)`. The leverage selector takes the largest integer
+  leverage, at most the configured cap and the bracket's maximum, whose liquidation price is at least
+  `liquidation_buffer` x the stop distance from the entry: `1/L >= MMR + (need*Q*(1 - s*MMR) - cum) / N`.
+  A scale-in re-looks-up the bracket and is rejected if the position's leverage exceeds the new bracket's maximum.
+- **Reproducing the ticket's example.** BTC at 73,000 with MMR 0.40% (before fees): 7x, 10x and 20x longs liquidate
+  13.94%, 9.64% and 4.62% below entry (the ticket's "about 13.9 / 9.6 / 4.6"), asserted by
+  `test_the_ticket_example_distances_are_reproduced`. The wallet's own liquidation price is slightly *closer*
+  (about 0.045 percentage points at 10x), because, as in v2, its maintenance rate also reserves the closing taker
+  fee (`MMR + taker`, 0.40% + 0.05%); the ticket's numbers exclude fees.
+- **Liquidation charge** uses the symbol's liquidation fee (capped, as before, at the isolated margin). Liquidation
+  is still checked on mark-price extremes before last-price stops (the adverse-path mechanism is unchanged); the
+  mark is the trade-price proxy until the collector stores a mark.
+- Not changed: the leverage rule stays "largest leverage inside the buffer". The later #36 idea of the *lowest*
+  leverage that fits a margin budget, funding moving the liquidation price (funding is debited from the wallet
+  balance, as in v2) and the fractional-Kelly risk fraction are not implemented.
+
+### Portfolio limits (v3)
+
+Run-configuration options, off by default (`max_open_risk_fraction`, `cluster_risk_fraction`; or
+`portfolio_limits: true` for the defaults). Open risk of a position or working order is `qty * |entry - stop|`
+(its loss at the initial stop, before costs).
+
+- **Total open risk** at most 5% of the sizing base (owner default of #36; `DEFAULT_MAX_OPEN_RISK`):
+  rejection `cap:total_open_risk`.
+- **Cluster:** same-direction positions across the six coins count as one cluster; the open risk of one
+  direction is capped (`cap:cluster_risk`). The default (3%) is a **placeholder**, not an owner decision.
+- The existing caps (`cap:max_positions`, `cap:total_exposure`, `insufficient_margin`) keep their names and
+  order; working limit orders count in every limit. Every rejection is a `rejected` ledger line with its reason.
+
+### Orders (v3)
+
+`order` events (`order_type` market or limit) write a lifecycle in the ledger: `order_submitted`, then
+`order_accepted` or `order_rejected` (with the reason), then `order_filled` / `order_partially_filled`,
+`order_cancelled` (`cancel` event), `order_expired` (`expires_ms`, applied by the next event after it), and
+`order_ambiguous`. Money is only ever on the fee/P&L lines; lifecycle lines have amount 0. An order id is spent
+for good: replays do nothing, and a second order for a setup that already has a position or a working order is
+rejected (`setup_already_used`). A market order fills at once like an `open` (taker fee, slippage floor).
+
+A limit order is passive only (a buy below, a sell above the decision price; otherwise `limit_not_passive`). It
+reserves its margin and maker fee (`reserved_e8`, so concurrent setups cannot spend it twice) until it is filled,
+cancelled or expired. **Fill rule (conservative; ambiguity is marked, never resolved in the order's favour):**
+
+1. Evidence is a `tape` event: one *completed* minute of trades for a symbol, stamped at its close. The minute
+   must have begun at or after the order's submission: no data from before the decision, and nothing after the
+   event's own time is ever used (events are processed in time order and the wallet reads nothing else).
+2. The traded price must **cross** the limit: `low < limit` for a buy, `high > limit` for a sell. Touching it does
+   not fill the order (equality proves no queue position).
+3. With `through_qty` (the quantity traded strictly through the limit, e.g. from aggTrades) the fill is
+   `min(remaining, through_qty)`, possibly partial; the orders of one symbol share that quantity in order-id order.
+   With bars only there is no quantity: the whole remainder fills only when the minute *closed* strictly beyond
+   the limit. If the price crossed but closed back (or `through_qty` is 0) the order stays working and one
+   `order_ambiguous` line records it.
+4. Fills are at the limit price (no slippage, no price improvement) with the **maker** fee. Each minute is
+   considered once per order, so replaying a tape is a no-op.
+5. If the fill minute's range also reached the order's stop, the fill line carries
+   `ambiguity: "stop_touched_in_fill_minute"`; the position's clock starts at the fill minute's open, so that
+   minute's mark extremes are inside the liquidation scan (conservative).
+
+The forward harness does not emit limit intents yet; `order`/`tape` events are for the wallet service and the
+research runs. The ledger kinds `stop_moved` and `target_moved` are reserved for #221 (trailing and break-even
+exits): they exist in the Python, SQL (`20261016180000_paper_ledger_order_kinds.sql`) and TypeScript lists
+(checked equal by a test) but nothing emits them.
+
 ## Outcome vocabulary and stop definition
 
 For benchmark-equivalent setups ([analysis and evaluation](analysis-evaluation.md#setup-definition-the-benchmark-barrier-event)),
