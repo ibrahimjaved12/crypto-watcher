@@ -103,6 +103,12 @@ test("publisher: once per boundary, 20 s after it, 3 attempts 30 s apart, failur
   assert.deepEqual(await publisher.publishSlowOnce(deps, state), { kind: "published", boundary: B + STEP });
   now = B + STEP + 300_000;
   assert.equal((await publisher.publishSlowOnce(deps, state)).kind, "idle");
+  // An empty universe (no V1 state yet) is retried, not marked done.
+  const empty = publisher.newSlowPublisherState();
+  const emptyDeps = { ...deps, compute: async () => null };
+  now = B + 2 * STEP + 20_000;
+  assert.equal((await publisher.publishSlowOnce(emptyDeps, empty)).kind, "retrying");
+  assert.equal(empty.doneBoundary, null);
   assert.equal(publisher.slowMovementEnabled({ SLOW_MOVEMENT_ENABLED: "false" }), false);
   assert.equal(publisher.slowMovementEnabled({}), true);
 });

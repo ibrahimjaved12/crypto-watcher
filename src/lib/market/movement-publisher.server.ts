@@ -129,7 +129,6 @@ export type SlowPublisherState = {
 export type SlowPublishOutcome =
   | { kind: "idle" }
   | { kind: "published"; boundary: number }
-  | { kind: "no_universe"; boundary: number }
   | { kind: "retrying"; boundary: number; error: string }
   | { kind: "failed"; boundary: number; error: string };
 
@@ -160,10 +159,8 @@ export async function publishSlowOnce(deps: SlowPublisherDeps, state: SlowPublis
   state.nextAttemptAt = now + SLOW_RETRY_SPACING_MS;
   try {
     const payload = await deps.compute(boundary);
-    if (!payload) {
-      state.doneBoundary = boundary;
-      return { kind: "no_universe", boundary };
-    }
+    // No V1 state yet (e.g. right after a restart): retry within the attempt budget instead of skipping the boundary.
+    if (!payload) throw new Error("no movement universe yet");
     const reply = await deps.send({ op: "publish_slow", universeId: SLOW_UNIVERSE_ID, evaluationBoundaryMs: boundary, payload });
     if (reply.status !== 200 || reply.json["ok"] !== true) throw new Error(`site answered ${reply.status}`);
     state.doneBoundary = boundary;

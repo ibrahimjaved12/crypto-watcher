@@ -58,6 +58,11 @@ fewer than 576 independent pieces of information, and z is not a calibrated prob
 
 The 2 / 0.70 / 5 thresholds are **provisional and unvalidated**. Changing any value means a new config version.
 
+**How often "Unusual" fires.** The scale is 1.4826 × MAD of overlapping windows with no time-of-day adjustment, and
+crypto returns have fat tails, so |z| ≥ 2 will occur more often than a normal distribution suggests (about 5 %).
+That is fine for a descriptor. Before anything alerts on it (#373), measure the firing rate per horizon on
+development data (2021-01..2025-06) and choose thresholds from that, as a new config version.
+
 ## Why V1 is unchanged
 
 V1 (windows, classifier, lifecycle, constants, `market_state_current`) is untouched. "Longer moves" is a separate
