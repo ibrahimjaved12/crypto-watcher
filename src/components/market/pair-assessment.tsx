@@ -171,7 +171,7 @@ function Details({ movement, ta, now, slowRows }: { movement: PairMovementView; 
             <ul className="mt-2 flex flex-col gap-3">
               {movement.windows.map((w) => (
                 <li key={w.minutes} className="grid grid-cols-[2.5rem_1fr] items-center gap-x-3 gap-y-1 sm:grid-cols-[2.5rem_1fr_11rem]">
-                  <span className="num text-xs text-muted-foreground">{`${w.minutes}m`.padStart(3, " ")}</span>
+                  <span className="num text-xs text-muted-foreground">{`${w.minutes}m`}</span>
                   <DivergingBar
                     value={w.available ? w.z : null}
                     min={-3}

@@ -118,7 +118,7 @@ export function QuoteCard({
               const value = quote.changes[w];
               return (
                 <div key={w} className="min-w-0">
-                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                  <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {WINDOW_LABELS[w]}
                   </dt>
                   <dd className={`num text-[13px] font-semibold ${changeClass(value)}`}>

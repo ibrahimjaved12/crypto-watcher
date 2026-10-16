@@ -162,6 +162,14 @@ const shortCount = (w: WindowSummary) => {
  * One window tile. Ready = solid tile with the median move, a breadth bar and the count; warm-up = dashed outline
  * with an hourglass; no reading = dashed outline with a slash. The full sentence is the tile's label and tooltip.
  */
+/** Phone caption for a Longer moves tile, same shape as the V1 tiles: "6/9 down". */
+const slowShortCount = (h: { medianReturnPct: number | null; symbols: Array<{ status: string; returnPct: number | null }> }) => {
+  const ok = h.symbols.filter((row) => row.status === "ok" && row.returnPct !== null);
+  if (!ok.length) return "—";
+  const falling = (h.medianReturnPct ?? 0) < 0;
+  return `${ok.filter((row) => (falling ? row.returnPct! < 0 : row.returnPct! > 0)).length}/${ok.length} ${falling ? "down" : "up"}`;
+};
+
 function WindowTile({ w, fresh }: { w: WindowSummary; fresh: boolean }) {
   if (!w.available) {
     return (
@@ -170,7 +178,7 @@ function WindowTile({ w, fresh }: { w: WindowSummary; fresh: boolean }) {
         aria-label={`${w.minutes} min: ${w.warming ? "warming up" : w.sentence}`}
         title={w.warming ? "Needs a little more live data after a restart" : w.sentence}
       >
-        <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
           <span className="sm:hidden">{w.minutes}m</span>
           <span className="hidden sm:inline">{w.minutes} min</span>
         </p>
@@ -188,7 +196,7 @@ function WindowTile({ w, fresh }: { w: WindowSummary; fresh: boolean }) {
       aria-label={w.sentence}
       title={w.sentence}
     >
-      <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+      <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
         <span className="sm:hidden">{w.minutes}m</span>
         <span className="hidden sm:inline">{w.minutes} min</span>
       </p>
@@ -346,13 +354,14 @@ function LongerMoves({ read, status, now }: { read: SlowMovementRead | undefined
                 title={breadth}
                 aria-label={`${label?.long ?? h.horizonMin}: median move ${h.medianReturnPct === null ? "unavailable" : signedPct(h.medianReturnPct)}, ${breadth}${word ? `, ${word.toLowerCase()}` : ""}`}
               >
-                <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                   <span className="sm:hidden">{label?.short ?? h.horizonMin}</span>
                   <span className="hidden sm:inline">{label?.tile ?? `${h.horizonMin} MIN`}</span>
                 </p>
                 <p className={cn("font-display text-lg font-semibold tabular-nums sm:text-2xl", fresh ? directionClass(h.medianReturnPct) : "text-muted-foreground")}>
                   {h.medianReturnPct === null ? "—" : signedPct(h.medianReturnPct)}
                 </p>
+                <p className="num text-xs text-muted-foreground sm:hidden">{slowShortCount(h)}</p>
                 <p className="hidden text-sm text-muted-foreground sm:block">{breadth}</p>
                 {word ? <p className="mt-auto text-xs font-medium text-muted-foreground">{word}</p> : null}
               </li>
