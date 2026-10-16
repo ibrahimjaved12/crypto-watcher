@@ -1,6 +1,6 @@
 """Versioned server-to-server input. Never accepts DB credentials or a user JWT."""
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -470,7 +470,11 @@ class ForwardEvaluateRequest(InputModel):
 
 
 class ForwardWalletConfig(InputModel):
-    """Exact wallet configuration shared by the two split endpoints."""
+    """Exact wallet configuration shared by the two split endpoints.
+
+    ``wallet_version`` selects the run configuration: wallet-v2 (default, unchanged) or wallet-v3 (#36), whose
+    extra options are refused under wallet-v2 so a v2 run can never be changed by a stray field.
+    """
     initial_balance_e8: Annotated[int, Field(strict=True, gt=0)] = 100 * 10**8
     risk_fraction: str = "1/100"
     max_positions: Annotated[int, Field(strict=True, ge=1, le=2000)] = 6
@@ -480,8 +484,15 @@ class ForwardWalletConfig(InputModel):
     taker_rate: str = "0.0005"
     slip_floor_bps: str = "1"
     mmr: str = "0.01"
+    wallet_version: Literal["wallet-v2", "wallet-v3"] = "wallet-v2"
+    maker_rate: str = "0.0002"
+    sizing_basis: Literal["balance", "equity"] = "balance"
+    ledger_links: bool = False
+    run_id: Annotated[str, Field(max_length=128)] = ""
 
-    @field_validator("risk_fraction", "max_exposure_multiple", "taker_rate", "slip_floor_bps", "mmr")
+    V3_ONLY: ClassVar[frozenset] = frozenset({"maker_rate", "sizing_basis", "ledger_links", "run_id"})
+
+    @field_validator("risk_fraction", "max_exposure_multiple", "taker_rate", "slip_floor_bps", "mmr", "maker_rate")
     @classmethod
     def exact_nonnegative(cls, value):
         from fractions import Fraction
@@ -493,13 +504,25 @@ class ForwardWalletConfig(InputModel):
             raise ValueError("expected an exact nonnegative fraction")
         return value
 
+    @model_validator(mode="after")
+    def v3_options_need_v3(self):
+        if self.wallet_version == "wallet-v2" and self.model_fields_set & self.V3_ONLY:
+            raise ValueError("option requires wallet_version wallet-v3")
+        return self
+
     def config(self):
         from fractions import Fraction
         from .forward.wallet import WalletConfig
         values = self.model_dump()
-        for key in ("risk_fraction", "max_exposure_multiple", "taker_rate", "slip_floor_bps", "mmr"):
+        for key in ("risk_fraction", "max_exposure_multiple", "taker_rate", "slip_floor_bps", "mmr", "maker_rate"):
             values[key] = Fraction(values[key])
-        return WalletConfig(**values)
+        version = values.pop("wallet_version")
+        if version == "wallet-v2":
+            for key in self.V3_ONLY:
+                values.pop(key)
+            return WalletConfig(**values)
+        from .forward.wallet_v3 import WalletV3Config
+        return WalletV3Config(**values)
 
 
 class ForwardMarketRequest(ForwardSymbolInput):
@@ -532,7 +555,7 @@ class ForwardMarketRequest(ForwardSymbolInput):
 
 
 class ForwardWalletEvent(InputModel):
-    type: Literal["open", "close", "funding"]
+    type: Literal["open", "close", "funding", "mark", "fill"]
     ms: Timestamp
     symbol: str = Field(min_length=5, max_length=16, pattern=r"^[A-Z0-9]+$")
     sequence: Annotated[int, Field(strict=True, ge=0)]
@@ -543,6 +566,12 @@ class ForwardWalletEvent(InputModel):
     exit_ref_price: Annotated[int, Field(strict=True, gt=0)] | None = None
     rate: str | None = None
     mark: Annotated[int, Field(strict=True, gt=0)] | None = None
+    # wallet-v3 only: a scale-in or partial exit (``fill``) at a reference ``price``
+    fill_id: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    direction: Literal["increase", "reduce"] | None = None
+    qty: str | None = None
+    price: Annotated[int, Field(strict=True, gt=0)] | None = None
+    liquidity: Literal["taker", "maker"] | None = None
 
     @model_validator(mode="after")
     def required_payload(self):
@@ -560,6 +589,16 @@ class ForwardWalletEvent(InputModel):
                 raise ValueError("invalid funding rate") from None
             if abs(rate) > 1:
                 raise ValueError("invalid funding rate")
+        if self.type == "mark" and self.mark is None:
+            raise ValueError("mark requires a mark price")
+        if self.type == "fill":
+            if not (self.setup_id and self.fill_id and self.direction and self.qty and self.price):
+                raise ValueError("fill requires setup_id, fill_id, direction, qty and price")
+            try:
+                if Fraction(self.qty) <= 0:
+                    raise ValueError
+            except (ValueError, ZeroDivisionError):
+                raise ValueError("invalid fill quantity") from None
         return self
 
 
@@ -577,12 +616,19 @@ class ForwardAdversePath(InputModel):
         return self
 
 
+class ForwardReconcileInput(InputModel):
+    """A whole ledger (lines carry ``seq``, ``type``, ``amount_e8``, ``balance_e8``) to reconcile with the state."""
+    initial_balance_e8: Annotated[int, Field(strict=True)]
+    ledger: Annotated[tuple[dict[str, Any], ...], Field(max_length=1_000_000)]
+
+
 class ForwardWalletRequest(InputModel):
     schema_version: Literal[1]
     state: dict[str, Any] | None = None
     events: Annotated[tuple[ForwardWalletEvent, ...], Field(max_length=200_000)]
     config: ForwardWalletConfig | None = None
     adverse_paths: Annotated[tuple[ForwardAdversePath, ...], Field(max_length=200_000)] = ()
+    reconcile: ForwardReconcileInput | None = None
 
 
 class ForwardDailyBar(InputModel):

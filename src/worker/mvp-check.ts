@@ -14,6 +14,7 @@ import {
   HOUR_MS,
   THRESHOLDS,
   checkLatestRun,
+  classifyReconciliation,
   classifyHistoryDays,
   classifyMissing120,
   classifyMissingRecent,
@@ -26,8 +27,10 @@ import {
   strategiesWithoutPlacebo,
   type Check,
   type LedgerSummary,
+  type ReconcileReport,
   type RunRow,
 } from "../lib/forward/mvp-check";
+import { pythonServiceConfig } from "../lib/python-service.server";
 import { publishFreshnessChecks } from "../lib/market/published-quotes";
 import { readCollectorUniverse } from "../lib/market/collector-subscriptions.server";
 import { collectorLogMessage } from "../lib/market/collector-logging";
@@ -149,7 +152,51 @@ async function accountChecks(userId: string, label: string, all: { counts: Count
     last_balance_e8: Number(ledger.last_balance_e8),
   });
   checks.push({ name: `${p}paper ledger`, level: result.ok ? "PASS" : "FAIL", detail: result.detail });
+  if (account?.account_id) {
+    const reconciliation = await walletReconciliation(userId, String(account.account_id), initial);
+    checks.push({ ...reconciliation, name: `${p}${reconciliation.name}` });
+  }
   return checks;
+}
+
+// #36: the whole ledger of an account against its stored wallet state, by the wallet service's pure `reconcile`
+// (events: [] changes nothing). Read-only; the result line carries counts only.
+const RECONCILE_MAX_LINES = 200_000;
+async function walletReconciliation(userId: string, accountId: string, initialE8: number): Promise<Check> {
+  const { data: runs, error } = await db.from("paper_runs").select("wallet_state")
+    .eq("user_id", userId).eq("paper_account", accountId).eq("status", "ok")
+    .order("boundary_ms", { ascending: false }).order("created_at", { ascending: false }).limit(1);
+  if (error) return classifyReconciliation(null, `wallet state read failed: ${error.message}`);
+  const state = (runs?.[0] as { wallet_state?: { version?: string } | null } | undefined)?.wallet_state;
+  if (!state) return classifyReconciliation(null);
+  const ledger: Record<string, unknown>[] = [];
+  for (let from = 0; from < RECONCILE_MAX_LINES; from += 1000) {
+    const { data, error: pageError } = await db.from("paper_ledger")
+      .select("seq,type,amount_e8,balance_e8,fill_id:payload->>fill_id,order_id:payload->>order_id")
+      .eq("user_id", userId).eq("paper_account", accountId).order("seq", { ascending: true }).range(from, from + 999);
+    if (pageError) return classifyReconciliation(null, `ledger read failed: ${pageError.message}`);
+    ledger.push(...((data ?? []) as Record<string, unknown>[]));
+    if ((data ?? []).length < 1000) break;
+    if (from + 1000 >= RECONCILE_MAX_LINES) return classifyReconciliation(null, `ledger longer than ${RECONCILE_MAX_LINES} lines`);
+  }
+  let service;
+  try {
+    service = pythonServiceConfig("/v1/forward/wallet_step");
+  } catch {
+    return classifyReconciliation(null, "python wallet service is not configured");
+  }
+  try {
+    const response = await fetch(service.url, { method: "POST", signal: AbortSignal.timeout(60_000),
+      headers: { Authorization: `Bearer ${service.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ schema_version: 1, state, events: [],
+        ...(state.version === "wallet-v3" ? { config: { wallet_version: "wallet-v3" } } : {}),
+        reconcile: { initial_balance_e8: initialE8, ledger } }) });
+    if (!response.ok) return classifyReconciliation(null, `wallet service answered HTTP ${response.status}`);
+    const body = (await response.json()) as { full_reconciliation?: ReconcileReport };
+    return classifyReconciliation(body.full_reconciliation ?? null, "no reconciliation in the response");
+  } catch (reason) {
+    return classifyReconciliation(null, `wallet service unreachable: ${collectorLogMessage(reason).slice(0, 120)}`);
+  }
 }
 
 async function pythonCheck(): Promise<Check> {

@@ -137,6 +137,9 @@ taker fees on both sides, so its PnL is not the label's micro-R.
    Only fees are charged.
 8. **Sizing and caps use the realized balance;** open positions are not marked to market.
    Defaults: 100 USDT, 1% risk, at most 6 positions, total notional at most 5x the balance.
+   (wallet-v3, #36, can mark positions to market from `mark` events and optionally size from equity; it is a
+   separate run configuration, see [futures-simulation.md](futures-simulation.md#paper-wallet-implementation-36).
+   The hourly production path still runs wallet-v2 and does not emit `mark` events.)
 9. **Placebo rates** are the trailing-30-day point-in-time rates until frozen constants are set.
 10. **Registry size:** it holds the six explicit `ta-v1` strategies in `ta_strategies.BASELINE_STRATEGIES`. The
     MVP prompt said five; the code has six, so six are registered.
@@ -319,7 +322,9 @@ as `/v1/forward/evaluate`, with no movement-process dispatch:
   e.g. `risk_fraction: "1/100"`.
 
 Persisted events contain `stage_run_id`, `symbol`, `sequence`, `ms`, and `type`
-(`open`, `close`, or `funding`), plus their event payload. Duplicate
+(`open`, `close`, or `funding`), plus their event payload. The wallet endpoint also accepts `mark` and `fill`
+events, but only under `config.wallet_version = "wallet-v3"` (#36); the shared market stage still produces and
+stores only the three persisted kinds, so wallet-v2 and the parity runs are unaffected. Duplicate
 `(stage_run_id, symbol, sequence)` keys are rejected. Transport merging uses
 `(ms, symbol, sequence)`; wallet execution order is unchanged: timestamp, then
 liquidation before close before funding before open, with the existing setup-ID/stable ties.
@@ -353,6 +358,15 @@ replay and `/evaluate` with the former opens-only plus full mark-series liquidat
 covering liquidation, stop, target, rejected entry, funding, and simultaneous multi-symbol events.
 The independent full-series scan remains in `liquidation_events` for that oracle.
 These regressions were not run locally.
+
+### #36 wallet-v3: reconciliation in the status path
+
+`/v1/forward/wallet_step` accepts `config.wallet_version` (`wallet-v2` default, or `wallet-v3`) and an optional
+`reconcile: {initial_balance_e8, ledger}`. Wallet-v3 responses add `account` (the account summary) and
+`reconciliation` (this call's lines against its starting state); any response adds `full_reconciliation` when a
+ledger was supplied. `npm run mvp:check` reads each account's whole ledger and latest wallet state, asks the
+service to reconcile them (`events: []`, nothing changes) and prints `paper wallet reconciliation` as PASS, FAIL
+(counts per mismatch kind) or WARN (not checked). The check never corrects anything.
 
 ### P28a: exact sigma state
 

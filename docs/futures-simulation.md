@@ -353,6 +353,77 @@ Wallet balance, margin reservation, position/order persistence and the ledger
 remain #36 responsibilities. These fill policies do not reconstruct Binance
 order books, bid/ask history, hidden queue depth or matching-engine queue state.
 
+## Paper wallet implementation (#36)
+
+Code: `python/market_analysis/forward/wallet.py` (**wallet-v2**, frozen: its ledger is stored and the
+forward-parity runs depend on it) and `wallet_v3.py` (**wallet-v3**, this section). Both are pure: no clock, no
+I/O, amounts are integers in 10^-8 USDT rounded half-even once per ledger line, quantities and prices exact
+fractions. Nothing here can place an order: there is no credential, no signed endpoint and no real-order adapter.
+
+### Versions and run configuration
+
+The wallet version is part of the run configuration (`wallet_version` in the wallet service request, stored in
+`paper_runs.wallet_config`). A state of one version is refused by the other (`wallet-v3` state under a v2
+configuration, or the reverse), so a material change is a new run, never a conversion of history. Every v3 option
+defaults to the wallet-v2 behaviour: with all options at their defaults `wallet_v3.step` reproduces
+`wallet.step` ledger lines bit for bit (`python/tests/test_forward_wallet_v3.py`, "golden" tests, including the
+three-configuration portfolio composition). The v3-only request fields are refused under a v2 configuration.
+
+### Account quantities (v3)
+
+`account_summary(state, config, as_of_ms, max_mark_age_ms)` reports, separately (e8 integers):
+wallet balance; used (initial) margin; reserved margin (working orders, Part 2); available balance
+(`balance - used - reserved`); maintenance margin; notional exposure; realized P&L; fees; funding; liquidation
+losses; slippage (informational: it is inside fill prices, not a ledger line); unrealized P&L; equity
+(`balance + unrealized`). Per position: signed quantity, weighted entry, mark, unrealized P&L, margin,
+maintenance margin, leverage, liquidation price and distance, stop and target.
+
+- **Mark price carried by the event stream.** A `mark` event `{type, ms, symbol, mark}` sets the symbol's mark
+  (an older mark never replaces a newer one; replay is a no-op). A position with no mark has no unrealized P&L
+  (None, not zero); its notional and liquidation distance use the entry. Staleness is explicit
+  (`mark_stale`), never assumed. The collector stores no mark price (see the forward harness assumptions), so a
+  mark is the trade-price proxy until the hourly stage supplies one; the hourly stage does **not** emit `mark`
+  events yet.
+- **Sizing basis.** Risk fraction and the exposure cap use the realized balance (default) or, with
+  `sizing_basis: "equity"`, the equity above. The margin check always uses the realized, available balance.
+- **Liquidation reserve.** As in v2, the liquidation price reserves maintenance margin plus the closing taker fee.
+
+### Fills: scale-in and partial exit
+
+A `fill` event `{setup_id, fill_id, direction: increase|reduce, qty, price, liquidity?}` is quantity-exact:
+
+- **increase**: weighted average entry `(Q0*E0 + q*P) / (Q0 + q)`, margin `q*P / leverage` added (rounded up like
+  the open), taker fee on the fill, the same exposure and margin checks as an open (a rejection is a
+  `rejected` line with the cap's reason and does not change the position). The liquidation price is recomputed
+  from the new quantity, entry and isolated margin.
+- **reduce**: realized P&L `side * q * (P - E)` on the reduced part only (the average entry never moves),
+  one fee for the fill, margin released pro rata (`floor(margin * q / Q)`, the whole remainder on the last
+  reduction), liquidation price recomputed. Reducing the whole quantity closes the position.
+- A reduction larger than the open quantity, a quantity <= 0 or a fill for no open position is a `rejected`
+  ledger line with a reason (`over_close`, `invalid_fill_quantity`, `no_open_position`) and moves no money.
+- **Idempotent by `fill_id`**: any outcome, even a rejection, spends the id; replaying it adds nothing.
+- Market-style fills (`liquidity` taker, the default) pay the taker fee and the slippage floor against the
+  position; `maker` fills pay the maker fee and no slippage.
+
+Every v3 ledger line can also link its run, position and source event (`ledger_links: true`): `run_id`
+(configuration), `position_id` (one position per setup in one-way mode) and `source_event`
+(`{stage_run_id, symbol, sequence}` of the market event, or `{type, ms}` for derived events such as a
+path liquidation or a direct fill).
+
+### Reconciliation
+
+`reconcile(initial, ledger, state)` (`wallet_reconcile.py`) is pure and **reports; it never corrects**:
+consecutive `seq`, running balance of every line, state balance and seq against the ledger, used margin equal
+to the sum over open positions, no negative available margin, no negative (or empty) open quantity, reserved
+margin equal to the working orders, no duplicated fill or order line, and the totals
+(`initial + realized + fees + funding + liquidation = balance`). It works for v2 and v3 ledgers.
+
+The wallet service endpoint returns `reconciliation` (this call's lines against the state it started from) for
+v3, and `full_reconciliation` whenever the request carries `reconcile: {initial_balance_e8, ledger}` (send
+`events: []` to check a stored state). `npm run mvp:check` runs the whole-ledger check for every account and
+prints **counts only** (PASS, FAIL on any mismatch, WARN when the Python service is not configured or the ledger
+could not be read).
+
 ## Outcome vocabulary and stop definition
 
 For benchmark-equivalent setups ([analysis and evaluation](analysis-evaluation.md#setup-definition-the-benchmark-barrier-event)),

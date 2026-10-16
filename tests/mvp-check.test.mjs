@@ -54,3 +54,17 @@ test("the latest run decides PASS, WARN or FAIL and shows the request size and a
   assert.equal(m.exitCodeFor(fine), 0);
   assert.equal(m.exitCodeFor([{ name: "x", level: "WARN", detail: "" }]), 0, "a WARN never fails the check");
 });
+
+test("wallet reconciliation reports counts only: PASS, FAIL on any mismatch, WARN when it could not run", () => {
+  const pass = m.classifyReconciliation({ ok: true, lines: 12, positions: 2, counts: {} });
+  assert.deepEqual([pass.level, pass.name], ["PASS", "paper wallet reconciliation"]);
+  assert.match(pass.detail, /12 ledger lines, 2 open positions, 0 mismatches/);
+  const fail = m.classifyReconciliation({ ok: false, lines: 12, positions: 1, counts: { used_margin: 1, line_balance: 2 } });
+  assert.equal(fail.level, "FAIL");
+  assert.match(fail.detail, /3 mismatch\(es\): line_balance 2, used_margin 1/);
+  assert.doesNotMatch(fail.detail, /e8|amount|balance_e8/, "no money values in the check line");
+  assert.deepEqual([m.classifyReconciliation(null, "python service not configured").level], ["WARN"]);
+  assert.match(m.classifyReconciliation(null).detail, /no wallet state yet/);
+  assert.equal(m.exitCodeFor([fail]), 1);
+  assert.equal(m.exitCodeFor([m.classifyReconciliation(null, "x")]), 0, "a WARN never fails the check");
+});

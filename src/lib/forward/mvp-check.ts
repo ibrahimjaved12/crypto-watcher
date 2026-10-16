@@ -77,6 +77,21 @@ export function ledgerInvariant(initialE8: number, ledger: LedgerSummary | null)
   return { ok: true, detail: `${ledger.n} lines, balance reconciles` };
 }
 
+/** The `reconcile` report of the wallet service (`python/market_analysis/forward/wallet_reconcile.py`). */
+export type ReconcileReport = { ok: boolean; lines: number; positions: number; counts: Record<string, number> };
+
+/** Counts only, never amounts: FAIL on any mismatch, WARN when the check could not run. */
+export function classifyReconciliation(report: ReconcileReport | null, skipped?: string): Check {
+  const name = "paper wallet reconciliation";
+  if (!report) return { name, level: "WARN", detail: `not checked: ${skipped ?? "no wallet state yet"}` };
+  if (report.ok) {
+    return { name, level: "PASS", detail: `${report.lines} ledger lines, ${report.positions} open positions, 0 mismatches` };
+  }
+  const total = Object.values(report.counts).reduce((sum, n) => sum + n, 0);
+  const parts = Object.entries(report.counts).sort(([a], [b]) => (a < b ? -1 : 1)).map(([check, n]) => `${check} ${n}`);
+  return { name, level: "FAIL", detail: `${total} mismatch(es): ${parts.join(", ")} (${report.lines} ledger lines)` };
+}
+
 /** Sum of the signals reported as `no_sigma: N signal(s) ...` in a run's per-symbol `reasons`. */
 export function noSigmaSignals(reasons: unknown): number {
   if (!reasons || typeof reasons !== "object") return 0;

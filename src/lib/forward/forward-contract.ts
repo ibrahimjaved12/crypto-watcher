@@ -77,6 +77,7 @@ export const ledgerEntrySchema = z
   })
   .passthrough();
 
+// passthrough: wallet-v3 states carry more (marks, orders, totals, reserved margin); wallet-v2 states have none.
 export const walletStateSchema = z.object({
   version: z.string(),
   balance_e8: z.number().int(),
@@ -84,7 +85,7 @@ export const walletStateSchema = z.object({
   seq: z.number().int().nonnegative(),
   positions: z.record(z.string(), z.record(z.string(), z.unknown())),
   done: z.array(z.string()),
-});
+}).passthrough();
 
 export const forwardEvaluateResponseSchema = z.object({
   schema_version: z.literal(1),
