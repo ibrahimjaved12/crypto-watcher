@@ -437,6 +437,107 @@ class OrderTests(unittest.TestCase):
         self.assertEqual(kinds(with_path)[-1], "liquidation")      # a limit-filled position can be liquidated
 
 
+class LifecycleRegressionTests(unittest.TestCase):
+    def compose(self, state, events, cfg, paths=()):
+        enveloped = [{**event, "symbol": event.get("symbol", "BTCUSDT"),
+                      "sequence": i, "stage_run_id": STAGE} for i, event in enumerate(events)]
+        return v3.wallet_step(state, enveloped, cfg, adverse_paths=paths)
+
+    def test_limits_at_or_beyond_stop_reject_without_spending_or_aborting_batch(self):
+        for side in (1, -1):
+            for aware in (False, True):
+                for inputs in (None, INPUTS):
+                    for distance in (2, 3):
+                        with self.subTest(side=side, aware=aware, inputs=bool(inputs), distance=distance):
+                            cfg = config(cost_aware_sizing=aware, contract_inputs=inputs)
+                            bad = limit_order(limit=(100 - side * distance) * E8, side=side)
+                            good = limit_order("good", limit=(100 - side) * E8, side=side, setup_id="good")
+                            state, lines = v3.step(v3.initial_state(cfg), [bad], cfg)
+                            self.assertEqual(lines[-1]["reason"], "limit_at_or_beyond_stop")
+                            self.assertEqual((state["reserved_e8"], state["used_margin_e8"]), (0, 0))
+                            self.assertEqual(state["balance_e8"], cfg.initial_balance_e8)
+                            state, lines = v3.step(v3.initial_state(cfg), [bad, good], cfg)
+                            self.assertEqual(state["orders"]["good"]["status"], "working")
+                            self.assertGreater(exact_from_str(state["orders"]["good"]["qty"]), 0)
+                            self.assertGreater(state["reserved_e8"], 0)
+
+    def test_nonpositive_sizing_is_rejected(self):
+        cfg = config(risk_fraction=Fraction(0))
+        state, lines = v3.step(v3.initial_state(cfg), [limit_order()], cfg)
+        self.assertEqual(lines[-1]["reason"], "invalid_quantity")
+        self.assertEqual(state["reserved_e8"], 0)
+        cfg = config(slip_floor_bps=Fraction(0))
+        trade = setup(stop_distance=0)
+        state, lines = v3.step(v3.initial_state(cfg), opens(trade), cfg)
+        self.assertEqual(lines[-1]["reason"], "invalid_loss_per_unit")
+        self.assertEqual(state["positions"], {})
+
+    def test_scale_in_uses_new_terms_only_after_the_fill(self):
+        for side in (1, -1):
+            cfg = config(max_exposure_multiple=Fraction(50))
+            state, opening = v3.step(v3.initial_state(cfg), opens(setup(side=side)), cfg)
+            position = state["positions"]["s1"]
+            increase = {"type": "fill", "ms": START + 2 * MINUTE, "setup_id": "s1", "fill_id": "scale",
+                        "direction": "increase", "qty": position["qty"], "price": (100 + side * 10) * E8}
+            changed, _ = v3.step(state, [increase], cfg)
+            old_lp = exact_from_str(position["liquidation_price"])
+            new_lp = exact_from_str(changed["positions"]["s1"]["liquidation_price"])
+            price = int((old_lp + new_lp) / 2)
+            path = {"setup_id": "s1", "symbol": "BTCUSDT", "side": side,
+                    "points": [[START + MINUTE, price], [START + 3 * MINUTE, price]]}
+            final, lines = self.compose(state, [increase], cfg, [path])
+            self.assertEqual(kinds(lines), ["open_fee", "liquidation"])
+            self.assertEqual(lines[-1]["ms"], START + 3 * MINUTE)
+            self.assertEqual((final["positions"], final["used_margin_e8"]), ({}, 0))
+            self.assertTrue(reconcile(cfg.initial_balance_e8, opening + lines, final)["ok"])
+            intermediate, first = self.compose(state, [increase], cfg,
+                [{**path, "points": path["points"][:1]}])
+            split, second = self.compose(intermediate, [], cfg,
+                [{**path, "points": path["points"][1:]}])
+            self.assertEqual((split, first + second), (final, lines))
+            # An earlier adverse point must never be tested against a future scale-in's terms.
+            path["points"] = path["points"][:1]
+            final, lines = self.compose(state, [increase], cfg, [path])
+            self.assertIn("s1", final["positions"])
+            self.assertNotIn("liquidation", kinds(lines))
+
+    def test_fill_minute_liquidation_runs_after_limit_fill_and_cancels_remainder(self):
+        for side in (1, -1):
+            for through in ("1/4", "10"):
+                cfg = config(max_exposure_multiple=Fraction(50))
+                events = [limit_order(limit=(100 - side) * E8, side=side),
+                          tape(START + MINUTE, 90 * E8, 110 * E8, 100 * E8, through_qty=through)]
+                path = {"setup_id": "s1", "symbol": "BTCUSDT", "side": side,
+                        "points": [[START, 1 if side == 1 else 200 * E8]]}
+                final, lines = self.compose(v3.initial_state(cfg), events, cfg, [path])
+                self.assertEqual(kinds(lines).count("liquidation"), 1)
+                self.assertLess(kinds(lines).index("open_fee"), kinds(lines).index("liquidation"))
+                self.assertEqual(next(line["ms"] for line in lines if line["type"] == "liquidation"), START + MINUTE)
+                self.assertEqual((final["positions"], final["reserved_e8"], final["used_margin_e8"]), ({}, 0, 0))
+                self.assertEqual(final["orders"]["o1"]["status"], "cancelled" if through == "1/4" else "filled")
+                self.assertTrue(reconcile(cfg.initial_balance_e8, lines, final)["ok"])
+
+    def test_every_position_exit_cancels_remainder_and_later_tapes_cannot_reopen(self):
+        for kind in ("close", "liquidation", "fill"):
+            cfg = config()
+            state, first = v3.step(v3.initial_state(cfg), [limit_order(),
+                tape(START + MINUTE, 98 * E8, 100 * E8, 99 * E8, through_qty="1/4")], cfg)
+            event = {"type": kind, "ms": START + 2 * MINUTE, "setup_id": "s1"}
+            if kind == "fill":
+                event.update(direction="reduce", qty="1/4", price=98 * E8, fill_id="exit")
+            state, lines = v3.step(state, [event], cfg)
+            self.assertEqual(lines[-1]["type"], "order_cancelled")
+            self.assertEqual(lines[-1]["reason"], "setup_completed")
+            self.assertEqual((state["orders"]["o1"]["status"], state["reserved_e8"]), ("cancelled", 0))
+            final, later = v3.step(state, [tape(START + 3 * MINUTE, 90 * E8, 100 * E8, 90 * E8)], cfg)
+            self.assertEqual((later, final["positions"], final["done"]), ([], {}, ["s1"]))
+            self.assertTrue(reconcile(cfg.initial_balance_e8, first + lines, final)["ok"])
+            # Defensive handling of an older persisted state with a stale working remainder.
+            state["orders"]["o1"]["status"] = "working"
+            final, later = v3.step(state, [tape(START + 3 * MINUTE, 90 * E8, 100 * E8, 90 * E8)], cfg)
+            self.assertEqual((final["positions"], final["orders"]["o1"]["status"]), ({}, "cancelled"))
+
+
 class CostAwareSizingTests(unittest.TestCase):
     def test_the_loss_at_the_stop_equals_the_risk_budget_only_when_costs_are_inside_it(self):
         for side in (1, -1):

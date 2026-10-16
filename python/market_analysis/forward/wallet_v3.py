@@ -28,6 +28,7 @@ Amounts are integers in 10**-8 USDT (``*_e8``) rounded half-even once per ledger
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from math import ceil, floor
@@ -48,7 +49,6 @@ PLACEHOLDER_CLUSTER_RISK = Fraction(3, 100)
 # Same relative order as wallet-v2 (liquidation < close < funding < open); the new kinds slot in around it.
 _ORDER = {"liquidation": 0, "close": 1, "funding": 2, "cancel": 3, "tape": 4, "mark": 5, "fill": 6,
           "order": 7, "open": 8}
-_PRE_OPEN = ("open", "order", "tape", "cancel")
 ORDER_KINDS = ("order_submitted", "order_accepted", "order_rejected", "order_cancelled", "order_expired",
                "order_filled", "order_partially_filled", "order_ambiguous")
 # Ledger kinds reserved for the exit-management work of #221 (trailing, break-even): nothing emits them yet.
@@ -390,7 +390,14 @@ def _plan(state: dict, config: WalletV3Config, setup: dict, *, limit_price: int 
     rate = maker_rate_of(config, symbol) if limit_price is not None else taker
     fill = Fraction(limit_price) if limit_price is not None else _slipped(setup["p0"], side, config, True)
     base = sizing_base(state, config)
-    qty = base * config.risk_fraction / _loss_per_unit(config, fill, stop, side, rate, taker)
+    if limit_price is not None and side * (fill - stop) <= 0:
+        return None, "limit_at_or_beyond_stop"
+    loss_per_unit = _loss_per_unit(config, fill, stop, side, rate, taker)
+    if loss_per_unit <= 0:
+        return None, "invalid_loss_per_unit"
+    qty = base * config.risk_fraction / loss_per_unit
+    if qty <= 0:
+        return None, "invalid_quantity"
     bracket = None
     if inputs is None:
         terms = _flat_terms(side, fill, stop, config)
@@ -450,8 +457,12 @@ class _Ctx:
     seen_fills: set
 
 
-def step(state: dict, events, config: WalletV3Config = WalletV3Config()) -> tuple[dict, list]:
-    """Apply events in (ms, liquidation < close < funding < cancel < tape < mark < fill < order < open) order."""
+def step(state: dict, events, config: WalletV3Config = WalletV3Config(), *, adverse_paths=()) -> tuple[dict, list]:
+    """Apply events in (ms, liquidation < close < funding < cancel < tape < mark < fill < order < open) order.
+
+    Adverse points use the terms effective at their timestamp. A fill also checks its minute after execution;
+    this conservatively includes extremes that may have preceded the fill within that minute.
+    """
     state = _copy_state(state)
     done, seen_fills = set(state["done"]), set(state["fill_ids"])
     ledger: list = []
@@ -489,16 +500,40 @@ def step(state: dict, events, config: WalletV3Config = WalletV3Config()) -> tupl
     def finish(setup_id: str) -> None:
         done.add(setup_id)
         state["done"].append(setup_id)
+        for order in _working(state):
+            if order["setup_id"] == setup_id:
+                _cancel(ctx, {"type": "cancel", "ms": event["ms"], "order_id": order["order_id"]},
+                        reason="setup_completed")
 
     def slippage(reference, price: Fraction, qty: Fraction) -> None:
         state["totals"]["slippage_e8"] += _round(abs(price - reference) * qty)
 
     ctx = _Ctx(state, config, entry, finish, slippage, done, seen_fills)
-    ordered = sorted(events, key=lambda ev: (ev["ms"], _ORDER[ev["type"]],
+    paths_at = {}
+    for path in adverse_paths:
+        for point_ms, price in path["points"]:
+            paths_at.setdefault(point_ms, []).append({**path, "points": [[point_ms, price]]})
+    events = [*events, *({"type": "_adverse", "ms": ms} for ms in paths_at)]
+    ordered = deque(sorted(events, key=lambda ev: (ev["ms"], -1 if ev["type"] == "_adverse" else _ORDER[ev["type"]],
                                              ev.get("setup_id") or ev.get("symbol", "") or ev.get("order_id", ""),
-                                             ev.get("fill_id", "")))
-    for event in ordered:
+                                             ev.get("fill_id", ""))))
+
+    def check_paths(ms: int, point_ms: int, setup_ids=None) -> None:
+        positions = state["positions"]
+        if setup_ids is not None:
+            positions = {sid: positions[sid] for sid in setup_ids if sid in positions}
+        liquidations = sorted(path_liquidations(positions, paths_at.get(point_ms, ())),
+                              key=lambda item: item["setup_id"])
+        # A tape creates its position at minute-close; debit liquidation only after that fill exists.
+        ordered.extendleft(reversed([{**item, "ms": ms} for item in liquidations]))
+
+    while ordered:
+        event = ordered.popleft()
         kind, ms = event["type"], event["ms"]
+        ledger_start = len(ledger)
+        if kind == "_adverse":
+            check_paths(ms, ms)
+            continue
         _expire(ctx, ms)
         if kind == "open":
             setup = event["setup"]
@@ -559,6 +594,12 @@ def step(state: dict, events, config: WalletV3Config = WalletV3Config()) -> tupl
             _cancel(ctx, event)
         else:
             raise ValueError(f"unknown wallet event {kind!r}")
+        if kind in ("open", "order", "fill", "tape"):
+            check_paths(ms, ms)
+        if kind == "tape":
+            filled_setups = {line["setup_id"] for line in ledger[ledger_start:]
+                             if line["type"] in ("order_filled", "order_partially_filled")}
+            check_paths(ms, ms - MINUTE_MS, filled_setups)
     return state, ledger
 
 
@@ -761,14 +802,14 @@ def _order(ctx: _Ctx, event: dict) -> None:
     _open_position(ctx, event, setup, plan, ms, fill_id=fill_id, order_id=order_id, liquidity="taker")
 
 
-def _cancel(ctx: _Ctx, event: dict) -> None:
+def _cancel(ctx: _Ctx, event: dict, *, reason: str | None = None) -> None:
     order = ctx.state["orders"].get(event["order_id"])
     if order is None or order["status"] != "working":
         return
     order["status"] = "cancelled"
     _release(ctx, order, order["reserved_e8"])
     _order_line(ctx, "order_cancelled", event["ms"], event, order, order["label"],
-                remaining=exact_to_str(_remaining(order)))
+                remaining=exact_to_str(_remaining(order)), **({"reason": reason} if reason else {}))
 
 
 def crossed(side: int, limit: int, low: int, high: int) -> bool:
@@ -793,6 +834,10 @@ def _tape(ctx: _Ctx, event: dict) -> None:
     low, high, close = event["low"], event["high"], event["close"]
     through = None if event.get("through_qty") is None else exact_from_str(event["through_qty"])
     for order in _working(state):
+        if order["setup_id"] in ctx.done:
+            _cancel(ctx, {"type": "cancel", "ms": ms, "order_id": order["order_id"]},
+                    reason="setup_completed")
+            continue
         if order["symbol"] != event["symbol"] or order["order_type"] != "limit":
             continue
         if order["last_tape_ms"] is not None and ms <= order["last_tape_ms"]:
@@ -823,6 +868,8 @@ def _tape(ctx: _Ctx, event: dict) -> None:
 def _limit_fill(ctx: _Ctx, event: dict, order: dict, qty: Fraction, ms: int) -> None:
     state, config = ctx.state, ctx.config
     symbol, side, setup_id = order["symbol"], order["side"], order["setup_id"]
+    if setup_id in ctx.done:
+        return
     price = Fraction(order["limit_price"])
     notional = qty * price
     fee_e8 = _round(notional * maker_rate_of(config, symbol))
@@ -872,8 +919,8 @@ def wallet_step(state: dict, events, config: WalletV3Config = WalletV3Config(), 
                 compatibility: bool = False) -> tuple[dict, list]:
     """Portfolio composition of ordered per-symbol market events, as ``wallet.wallet_step`` but with v3 ``step``.
 
-    Liquidation eligibility comes from a preflight of the position-creating events (caps, margin and fills apply),
-    then the full ordered step runs. A liquidation is derived from the terms a position had when it opened.
+    Adverse points are checked chronologically against the current position terms, including scale-ins and
+    reductions. Limit fills also check their fill-minute point after the position has been created.
     """
     merged = sorted(events, key=lambda event: (event["ms"], event["symbol"], event["sequence"]))
     identities = [(event["stage_run_id"], event["symbol"], event["sequence"]) for event in merged]
@@ -886,9 +933,4 @@ def wallet_step(state: dict, events, config: WalletV3Config = WalletV3Config(), 
         merged.sort(key=lambda event: event["compatibility_order"])
     execution = [{key: value for key, value in event.items()
                   if not (event["type"] in ("open", "order") and key == "symbol")} for event in merged]
-    opened, _ = step(state, [event for event in execution if event["type"] in _PRE_OPEN], config)
-    eligible = state["positions"].keys() | opened["positions"].keys()
-    execution += path_liquidations(opened["positions"], adverse_paths)
-    execution = [event for event in execution
-                 if event["type"] != "liquidation" or event["setup_id"] in eligible]
-    return step(state, execution, config)
+    return step(state, execution, config, adverse_paths=adverse_paths)
