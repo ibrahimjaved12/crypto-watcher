@@ -95,6 +95,8 @@ export type WindowSummary = {
   available: boolean;
   /** Why the breadth is missing, when it is. */
   reason: string | null;
+  /** Missing only because the window still needs live history after a restart (warm-up, not a fault). */
+  warming: boolean;
   denominator: number;
   rising: number | null;
   falling: number | null;
@@ -188,6 +190,11 @@ function windowSummary(window: MarketClassificationWindow, thresholds: ReturnTyp
     minutes: m,
     available,
     reason: available ? null : (b?.unavailableReason ?? window.availabilityReasons?.[0] ?? "unavailable"),
+    warming: !available && [
+      b?.unavailableReason,
+      ...(window.availabilityReasons ?? []),
+      ...(window.movementSnapshot?.symbols ?? []).flatMap((m) => [...(m.exclusionReasons ?? []), m.normalizedZ && !m.normalizedZ.available ? m.normalizedZ.reason : null]),
+    ].some((r) => isWarmingReason(r)),
     denominator,
     rising,
     falling,
@@ -429,6 +436,8 @@ export type PairMovementView =
       outlier: { direction: "rising" | "falling"; window: number; text: string } | null;
       /** Some window excludes the pair (its reasons are named), though others may show. */
       partialReasons: string[];
+      /** The engine's flat band for the saved config (|z| below it is "about normal"); 0.5 when unknown. */
+      flatZ: number;
       /** "As of hh:mm, not live" when the engine state is stale, warming or a copy of an offline machine; else null. */
       notLive: string | null;
     };
@@ -493,7 +502,9 @@ export function buildPairMovement(
   if (excluded && windows.every((w) => !w.available)) {
     return { kind: "excluded", reasons: excluded.reasons.map((r) => humanizeToken(r)) };
   }
-  return { kind: "ok", windows, rvol, rvolReason, outlier, partialReasons: [...partial], notLive };
+  const primaryConfig = state.context.find((w) => w.windowMinutes === 15)?.movementConfigVersion ?? null;
+  const flatZ = engineThresholds(primaryConfig)?.flatZ ?? 0.5;
+  return { kind: "ok", windows, rvol, rvolReason, outlier, partialReasons: [...partial], notLive, flatZ };
 }
 
 // ---------------------------------------------------------------- completed-candle TA per timeframe
@@ -801,13 +812,40 @@ export function nextLimitCrossing(
 
 // ---------------------------------------------------------------- per-pair summary
 
-/** The movement chip on a pair card: the 15m label, capitalised, with its tone. */
-export function pairMovementChip(movement: PairMovementView): { text: string; tone: PairWindowView["tone"] } {
-  if (movement.kind === "unavailable") return { text: "No market reading", tone: "unknown" };
-  if (movement.kind === "excluded") return { text: "Left out of the market reading", tone: "unknown" };
+/** A reason that only means "the window needs more live history" (after a restart): warm-up, not a fault. */
+export const isWarmingReason = (reason: string | null | undefined) => !!reason && /warming/i.test(reason);
+
+export type PairMovementChip = {
+  /** One or two words: "Sharp drop", "Rising", "Steady", "Warming up", "No reading". */
+  text: string;
+  tone: PairWindowView["tone"];
+  /** The component picks the icon from this, never from the tone: only a reading carries a direction symbol. */
+  kind: "reading" | "warming" | "none";
+  /** The full label or the reason, for the tooltip. */
+  title: string;
+};
+
+/** The "Moving now" chip on a pair card, from the 15-minute window of the live engine. */
+export function pairMovementChip(movement: PairMovementView): PairMovementChip {
+  if (movement.kind === "unavailable") {
+    return isWarmingReason(movement.reason)
+      ? { text: "Warming up", tone: "unknown", kind: "warming", title: "Needs a little more live data after a restart" }
+      : { text: "No reading", tone: "unknown", kind: "none", title: movement.reason };
+  }
+  if (movement.kind === "excluded") {
+    return { text: "No reading", tone: "unknown", kind: "none", title: `Left out of the market reading: ${movement.reasons.join(", ").toLowerCase()}` };
+  }
   const w = movement.windows.find((x) => x.minutes === 15);
-  if (!w || !w.available) return { text: "15m move unavailable", tone: "unknown" };
-  return { text: `${w.label.charAt(0).toUpperCase()}${w.label.slice(1)}`, tone: w.tone };
+  if (!w || !w.available) {
+    return isWarmingReason(w?.reason)
+      ? { text: "Warming up", tone: "unknown", kind: "warming", title: "Needs a little more live data after a restart" }
+      : { text: "No reading", tone: "unknown", kind: "none", title: w?.reason ?? "No evidence for this window" };
+  }
+  const sharp = w.label.startsWith("unusually");
+  const text = w.tone === "up" ? (sharp ? "Sharp rise" : "Rising")
+    : w.tone === "down" ? (sharp ? "Sharp drop" : "Falling")
+    : "Steady";
+  return { text, tone: w.tone, kind: "reading", title: `${w.label.charAt(0).toUpperCase()}${w.label.slice(1)} (15 min)` };
 }
 
 /** "Bullish", "Neutral", "Bearish", or why there is no reading, for a TA pill. */

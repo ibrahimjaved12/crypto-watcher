@@ -414,10 +414,10 @@ function Dashboard() {
         title="Market"
         subtitle={
           automatic.enabled
-            ? "Your watched pairs and their latest moves. Updates every minute."
-            : "Your watched pairs and their latest moves. Automatic refresh is paused; press Refresh."
+            ? "Your pairs and their latest moves, every minute."
+            : "Automatic refresh is paused; press Refresh."
         }
-        actionsClassName="w-full sm:w-auto"
+        actionsClassName="mt-1 w-full min-w-0 sm:mt-0 sm:w-auto"
         actions={
           <>
             <Select value={pending} onValueChange={(v) => add.mutate(v)}>
@@ -438,15 +438,16 @@ function Dashboard() {
             </Select>
             <Button
               variant="secondary"
-              className="h-11 flex-1 sm:h-9 sm:flex-none"
+              className="size-11 shrink-0 p-0 sm:h-9 sm:w-auto sm:px-4"
               onClick={refreshAll}
               disabled={market.isFetching || symbols.length === 0}
+              aria-label="Refresh"
             >
               <RefreshCw
                 className={`size-4 ${market.isFetching ? "animate-spin motion-reduce:animate-none" : ""}`}
                 aria-hidden
               />
-              Refresh
+              <span className="hidden sm:inline">Refresh</span>
             </Button>
             <Button
               className="h-11 w-full sm:h-9 sm:w-auto"
@@ -489,7 +490,7 @@ function Dashboard() {
         />
       ) : null}
 
-      <div className="mt-5 grid items-start gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="mt-3 grid items-start gap-3 sm:mt-5 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3">
         {watchlist.isLoading
           ? [0, 1, 2].map((i) => <QuoteCardSkeleton key={i} symbol="pair" />)
           : symbols.map((symbol) => {

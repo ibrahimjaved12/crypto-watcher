@@ -86,6 +86,12 @@ test("no pair moved materially, and a window without breadth, are stated plainly
   assert.match(calm.windows[0].sentence, /^No pair moved materially in 1 min/);
   const none = a.buildMarketStrip(state({ breadthOk: false }), NOW);
   assert.equal(none.windows[0].available, false);
+  assert.equal(none.windows[0].warming, false);
+  const warmingWindow = a.buildMarketStrip(state({ breadthOk: false, excluded: ["DOGEUSDT"] }), NOW);
+  assert.equal(warmingWindow.windows[0].warming, false); // stale-trade exclusion is not warm-up
+  const restarted = state({ breadthOk: false });
+  restarted.context[0].availabilityReasons = ["WARMING_INSUFFICIENT_LIVE_HISTORY"];
+  assert.equal(a.buildMarketStrip(restarted, NOW).windows[0].warming, true);
   assert.match(none.windows[0].sentence, /market universe ineligible/i);
 });
 
@@ -318,13 +324,23 @@ test("freshness of a published copy names the copy and the offline machine", () 
 });
 
 test("pair summary: movement chip from the 15m window and plain TA pill words", () => {
-  assert.deepEqual(a.pairMovementChip(a.buildPairMovement("BTCUSDT", state())), { text: "Unusually sharp drop", tone: "down" });
-  assert.deepEqual(a.pairMovementChip(a.buildPairMovement("ETHUSDT", state())), { text: "About normal", tone: "flat" });
-  assert.equal(a.pairMovementChip(a.buildPairMovement("DOGEUSDT", state({ excluded: ["DOGEUSDT"] }))).text, "Left out of the market reading");
-  assert.equal(a.pairMovementChip(a.buildPairMovement("BTCUSDT", empty, "store_disabled")).text, "No market reading");
+  assert.deepEqual(a.pairMovementChip(a.buildPairMovement("BTCUSDT", state())),
+    { text: "Sharp drop", tone: "down", kind: "reading", title: "Unusually sharp drop (15 min)" });
+  assert.deepEqual([a.pairMovementChip(a.buildPairMovement("ETHUSDT", state())).text, a.pairMovementChip(a.buildPairMovement("ETHUSDT", state())).kind], ["Steady", "reading"]);
+  assert.equal(a.pairMovementChip(a.buildPairMovement("SOLUSDT", state())).text, "Rising");
+  const excluded = a.pairMovementChip(a.buildPairMovement("DOGEUSDT", state({ excluded: ["DOGEUSDT"] })));
+  assert.deepEqual([excluded.text, excluded.kind], ["No reading", "none"]);
+  assert.match(excluded.title, /Left out of the market reading/);
+  assert.deepEqual([a.pairMovementChip(a.buildPairMovement("BTCUSDT", empty, "store_disabled")).kind], ["none"]);
   const ok = a.buildPairMovement("BTCUSDT", state());
+  assert.equal(ok.flatZ, 0.5);
   const noWindow = { ...ok, windows: ok.windows.map((w) => (w.minutes === 15 ? { ...w, available: false } : w)) };
-  assert.equal(a.pairMovementChip(noWindow).text, "15m move unavailable");
+  assert.deepEqual([a.pairMovementChip(noWindow).text, a.pairMovementChip(noWindow).kind], ["No reading", "none"]);
+  // Warm-up after a restart: no direction, calm wording.
+  const warming = { ...ok, windows: ok.windows.map((w) => (w.minutes === 15 ? { ...w, available: false, reason: "warming insufficient live history" } : w)) };
+  assert.deepEqual([a.pairMovementChip(warming).text, a.pairMovementChip(warming).kind, a.pairMovementChip(warming).tone], ["Warming up", "warming", "unknown"]);
+  assert.equal(a.isWarmingReason("WARMING_INSUFFICIENT_LIVE_HISTORY"), true);
+  assert.equal(a.isWarmingReason("market universe ineligible"), false);
   assert.equal(a.taPillText(a.buildTaFrame(taRow(60, 90 * 60_000), 60, NOW)), "Bullish");
   assert.equal(a.taPillText(a.buildTaFrame(taRow(60, 90 * 60_000, { classification: "neutral" }), 60, NOW)), "Neutral");
   assert.equal(a.taPillText(a.buildTaFrame(undefined, 60, NOW)), "No reading");
