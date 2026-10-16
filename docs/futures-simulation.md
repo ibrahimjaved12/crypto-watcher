@@ -512,6 +512,46 @@ research runs. The ledger kinds `stop_moved` and `target_moved` are reserved for
 exits): they exist in the Python, SQL (`20261016180000_paper_ledger_order_kinds.sql`) and TypeScript lists
 (checked equal by a test) but nothing emits them.
 
+### Paper account page (#36 Part 3)
+
+`/paper` ("Paper account", `src/components/paper-account.tsx`, view models in `src/lib/paper/paper-account.ts`) is the
+money view of the simulated wallet. It is a top-level navigation item between **Strategy Lab** and **Alerts**: the
+Strategy Lab answers "does a strategy work" (results by strategy, signals, setups, outcomes), this page answers "what
+does the account hold and do"; a separate page keeps both readable on a phone. The Strategy Lab's former wallet
+panels (balance curve, open positions, last-20 rejections) and its Ledger log tab moved here, so nothing is shown
+twice; the Lab keeps a one-card link.
+
+- **Safety boundary.** A "Simulated account: fake money" note sits at the top (and in the page eyebrow). Every
+  figure is simulated; no credential or order endpoint is involved.
+- **Header strip.** Balance, equity, available margin, margin used, unrealized P&L, realized P&L, fees, funding;
+  each term has a hint. Gains and losses always carry a sign and an arrow, never colour alone; money is
+  tabular-numeral monospace in USDT (2 decimals from 1 USDT, 4 below).
+- **Equity and drawdown.** The balance history (one point per hour, per day beyond 60 days, from
+  `paper_equity_series`) with equity now as the last point, and the drawdown from the running peak. The history is
+  the realized balance: unrealized P&L is only known now, because marks are not stored.
+- **Tabs.** Open positions (side, quantity, entry, mark, unrealized P&L, margin, leverage, liquidation price and
+  distance, stop, target); Closed trades (gross, fees, funding, net, holding time, outcome: target, stopped,
+  liquidated, time limit, unclear or closed early); Rejected (setups, orders and fills the wallet turned down, with
+  the reason); Ledger (every line, with the order/fill ids, CSV export). Lists are keyset-paginated by ledger `seq`
+  (newest first) and reload their first page when the wallet's last update changes.
+- **Mark price.** The wallet's own mark when its state has one (wallet-v3 `mark` events), otherwise the latest
+  published trade price (`market_quotes`), labelled "published price"; a mark older than 3 hours or a price older than
+  10 minutes is flagged stale; a position with no price is valued at its entry and counted in a note.
+- **Results of this run.** From `paper_account_summary()` (SQL over every ledger line, no row cap): completed,
+  rejected, target, stopped, liquidated, unclear, time-limit and closed-early counts, expectancy, profit factor,
+  max drawdown, fees, funding, slippage (wallet-v3 totals only; "not recorded" for v2), liquidation losses and margin
+  utilization, each with a hint, plus the frozen run configuration. A hint states that filtering a report never
+  recreates the wallet.
+- **Breakpoints (Tailwind).** Below 640 px: the cards are a 2-column grid; every list is a stack of cards with the
+  key fields and a 44 px expand control; buttons and tabs are at least 44 px high; the tab bar is sticky under the
+  header; no horizontal page scroll. From 640 px: lists are tables (scrolling inside their own container if wider
+  than the screen) and the cards form a 4-column strip. From 1024 px the strip is one row of 8. Charts and loading
+  skeletons share one reserved height, so nothing jumps.
+- **States.** Every list has loading (skeleton at the final height), empty and error (message and retry) states; the
+  page shows a stale chip with the wallet's age (same 2 h / 6 h thresholds as `npm run mvp:check`).
+- **Data.** The user's own RLS reads through server functions (`paper.functions.ts`), refreshed once a minute like the
+  Strategy Lab; mapping is pure browser code, nothing heavy runs on the Worker.
+
 ## Outcome vocabulary and stop definition
 
 For benchmark-equivalent setups ([analysis and evaluation](analysis-evaluation.md#setup-definition-the-benchmark-barrier-event)),

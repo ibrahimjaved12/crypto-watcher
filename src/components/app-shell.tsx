@@ -8,6 +8,7 @@ import {
   LogOut,
   NotebookPen,
   SlidersHorizontal,
+  Wallet,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -19,6 +20,7 @@ import { supabase } from "@/integrations/supabase/client";
 const NAV = [
   { to: "/dashboard", label: "Market", icon: LineChart },
   { to: "/forward", label: "Strategy Lab", icon: FlaskConical },
+  { to: "/paper", label: "Paper account", icon: Wallet },
   { to: "/alerts", label: "Alerts", icon: Bell },
   { to: "/notes", label: "Notes", icon: NotebookPen },
   { to: "/settings", label: "Control room", icon: SlidersHorizontal },

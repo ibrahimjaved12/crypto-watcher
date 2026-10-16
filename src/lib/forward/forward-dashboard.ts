@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { DAY_MS, rangeMs, reportRpcArgs, strategyIdsFor, type ForwardFilters } from "./forward-filters";
+import { rangeMs, reportRpcArgs, strategyIdsFor, type ForwardFilters } from "./forward-filters";
 import { buildReportRows, toCsv, type NonTradeRow, type OutcomeReportRow, type PairedRow } from "./forward-report";
 
 /**
@@ -11,8 +11,6 @@ import { buildReportRows, toCsv, type NonTradeRow, type OutcomeReportRow, type P
 export const LOG_PAGE_SIZE = 50;
 export const EXPORT_PAGE_SIZE = 1000;
 export const EXPORT_MAX_ROWS = 50_000;
-const DAILY_EQUITY_SPAN_MS = 60 * DAY_MS;
-const HOUR_MS = 3_600_000;
 
 export type LogKind = "signals" | "outcomes" | "ledger";
 export type LogRow = Record<string, string | number | null>;
@@ -32,7 +30,6 @@ export type LatestRun = {
   boundary_ms: number;
   created_at: string;
   freshness: JsonValue;
-  wallet_state: JsonValue;
   assumptions: JsonValue;
 };
 export type LogPage = { rows: LogRow[]; nextCursor: string | null };
@@ -144,53 +141,21 @@ export async function loadForwardReport(client: SupabaseClient, filters: Forward
   return buildReportRows(outcomes, nonTrades, paired);
 }
 
+/**
+ * Strategy Lab dashboard: the latest signals, the open strategy setups and the latest run. The wallet's own views
+ * (balance, equity, positions, rejections, ledger) moved to the Paper account page (`../paper/paper-data.ts`).
+ */
 export async function loadForwardDashboard(client: SupabaseClient) {
   const from = (table: string) => client.from(table) as unknown as Query;
-  const [signals, openSetups, firstLine, lastLine, runs, walletRuns, rejectedPositions] = await Promise.all([
+  const [signals, openSetups, runs] = await Promise.all([
     rows<SignalRow>(from("forward_market_signals").select(COLUMNS.signals.join(","))
       .order("signal_ms", { ascending: false }).limit(50), "signals"),
     rows<OpenSetupRow>(from("forward_market_open_setups").select("setup_id, strategy_id, version, symbol, side, horizon_min, entry_ms, rr")
       .order("entry_ms", { ascending: false }).limit(100), "open setups"),
-    rows<{ ms: number }>(from("paper_ledger").select("ms").order("seq", { ascending: true }).limit(1), "ledger"),
-    rows<{ ms: number }>(from("paper_ledger").select("ms").order("seq", { ascending: false }).limit(1), "ledger"),
     rows<LatestRun>(from("paper_runs")
-      .select("run_key, status, reason, boundary_ms, freshness, wallet_state, assumptions, created_at")
+      .select("run_key, status, reason, boundary_ms, freshness, assumptions, created_at")
       .order("boundary_ms", { ascending: false })
       .order("created_at", { ascending: false }).limit(1), "runs"),
-    rows<{ wallet_state: { positions?: Record<string, Record<string, JsonValue>> }; wallet_config: { leverage_cap?: number }; boundary_ms: number }>(
-      from("paper_runs").select("wallet_state, wallet_config, boundary_ms").eq("status", "ok")
-        .order("boundary_ms", { ascending: false }).limit(1), "wallet snapshot"),
-    rows<{ seq: number; ms: number; symbol: string; setup_id: string; payload: { reason?: string } }>(
-      from("paper_ledger").select("seq, ms, symbol, setup_id, payload")
-        .eq("type", "rejected").order("seq", { ascending: false }).limit(20), "wallet rejections"),
   ]);
-  const wallet = walletRuns[0];
-  const positions = Object.entries(wallet?.wallet_state?.positions ?? {});
-  const ids = [...new Set([...positions.map(([id]) => id), ...rejectedPositions.map((r) => r.setup_id)])];
-  const metadata = new Map<string, OpenSetupRow>();
-  for (let offset = 0; offset < ids.length; offset += 100) {
-    const setups = await rows<OpenSetupRow>(from("forward_market_setups")
-      .select("setup_id, strategy_id, horizon_min").in("setup_id", ids.slice(offset, offset + 100)), "position strategies");
-    for (const setup of setups) metadata.set(setup.setup_id, setup);
-  }
-  const openPositions = positions.map(([setupId, position]) => ({
-    setupId, position, strategyId: metadata.get(setupId)?.strategy_id ?? null,
-    horizonMin: metadata.get(setupId)?.horizon_min ?? null,
-    leverageCap: typeof position["leverage_cap"] === "number" ? position["leverage_cap"] : wallet?.wallet_config?.leverage_cap ?? null,
-  }));
-  const span = firstLine[0] && lastLine[0] ? lastLine[0].ms - firstLine[0].ms : 0;
-  const bucketMs = span > DAILY_EQUITY_SPAN_MS ? DAY_MS : HOUR_MS;
-  const series = await rows<{ ms: number; balance_e8: number | string }>(
-    client.rpc("paper_equity_series", { p_bucket_ms: bucketMs, p_from_ms: null }) as unknown as PromiseLike<Result>,
-    "equity series",
-  );
-  return {
-    signals,
-    openSetups,
-    equity: series.map((line) => ({ ms: Number(line.ms), balance: Number(line.balance_e8) / 1e8 })),
-    equityBucketMs: bucketMs,
-    latestRun: runs[0] ?? null,
-    openPositions, walletAsOf: wallet?.boundary_ms ?? null,
-    rejectedPositions: rejectedPositions.map((r) => ({ ...r, strategyId: metadata.get(r.setup_id)?.strategy_id ?? null })),
-  };
+  return { signals, openSetups, latestRun: runs[0] ?? null };
 }

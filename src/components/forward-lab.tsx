@@ -480,15 +480,14 @@ export function LogsPanel({ filters }: { filters: ForwardFilters }) {
     <section className="panel p-4 sm:p-5">
       <SectionTitle
         title="Logs"
-        hint="Every signal, finished trade and wallet line, newest first. Filters above apply."
+        hint="Every signal and finished trade, newest first. Filters above apply. The wallet ledger is on the Paper account page."
       />
       <Tabs defaultValue="signals">
         <TabsList>
           <TabsTrigger value="signals">Signals</TabsTrigger>
           <TabsTrigger value="outcomes">Outcomes</TabsTrigger>
-          <TabsTrigger value="ledger">Ledger</TabsTrigger>
         </TabsList>
-        {(["signals", "outcomes", "ledger"] as const).map((kind) => (
+        {(["signals", "outcomes"] as const).map((kind) => (
           <TabsContent key={kind} value={kind} className="mt-3">
             <LogTable key={JSON.stringify(filters)} kind={kind} filters={filters} />
           </TabsContent>

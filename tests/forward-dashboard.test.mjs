@@ -18,45 +18,47 @@ const { loadForwardDashboard } = await import(await moduleUrl("../src/lib/forwar
   "./forward-filters": filters, "./forward-report": report,
 }));
 
-test("skipped latest run preserves each funded setup and its strategy metadata", async () => {
+test("the Strategy Lab dashboard reads signals, open setups and the latest run only (the wallet moved to the Paper account page)", async () => {
   const tables = {
+    forward_market_signals: [{ signal_id: "s1", signal_ms: 5 }, { signal_id: "s2", signal_ms: 9 }],
+    forward_market_open_setups: [{ setup_id: "a", entry_ms: 1 }, { setup_id: "b", entry_ms: 2 }],
     paper_runs: [
-      { status: "skipped_stale", paper_account: "default", boundary_ms: 200, created_at: "b", wallet_state: {} },
-      { status: "ok", paper_account: "default", boundary_ms: 100, created_at: "a",
-        wallet_state: { positions: { a: { symbol: "SOLUSDT", side: 1 }, b: { symbol: "SOLUSDT", side: -1 } } },
-        wallet_config: { leverage_cap: 20 } },
+      { status: "skipped_stale", boundary_ms: 200, created_at: "b", wallet_state: { balance_e8: 1 } },
+      { status: "ok", boundary_ms: 100, created_at: "a" },
     ],
-    forward_market_setups: [
-      { setup_id: "a", strategy_id: "bollinger_20_2_reversion:15", horizon_min: 15 },
-      { setup_id: "b", strategy_id: "macd_12_26_9:60", horizon_min: 60 },
-      { setup_id: "c", strategy_id: "rsi_14_reversion:15", horizon_min: 15 },
-    ],
-    paper_ledger: [{ seq: 1, ms: 100, type: "rejected", paper_account: "default", symbol: "SOLUSDT",
-      setup_id: "c", payload: { reason: "cap:max_positions" } }],
   };
+  const read = [];
+  const compare = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
   const client = {
     from(table) {
-      let selected = [...(tables[table] ?? [])];
+      read.push(table);
+      const orders = [];
+      let max = Infinity;
       const query = {
         select() { return query; },
-        eq(key, value) { selected = selected.filter((r) => r[key] === value); return query; },
-        in(key, values) { selected = selected.filter((r) => values.includes(r[key])); return query; },
-        order() { return query; },
-        limit(n) { selected = selected.slice(0, n); return query; },
-        then(resolve) { return Promise.resolve({ data: selected, error: null }).then(resolve); },
+        order(key, { ascending }) { orders.push([key, ascending]); return query; },
+        limit(n) { max = n; return query; },
+        then(resolve) {
+          const rows = [...(tables[table] ?? [])].sort((x, y) => {
+            for (const [key, ascending] of orders) {
+              const result = compare(x[key] ?? 0, y[key] ?? 0);
+              if (result) return ascending ? result : -result;
+            }
+            return 0;
+          });
+          return Promise.resolve({ data: rows.slice(0, max), error: null }).then(resolve);
+        },
       };
       return query;
     },
-    rpc() { return Promise.resolve({ data: [], error: null }); },
+    rpc() { throw new Error("the dashboard no longer calls the equity series"); },
   };
   const data = await loadForwardDashboard(client);
+  assert.deepEqual(Object.keys(data).sort(), ["latestRun", "openSetups", "signals"]);
   assert.equal(data.latestRun.status, "skipped_stale");
-  assert.equal(data.walletAsOf, 100);
-  assert.equal(data.openPositions.length, 2, "same coin must not collapse separate positions");
-  assert.deepEqual(data.openPositions.map((p) => p.strategyId), ["bollinger_20_2_reversion:15", "macd_12_26_9:60"]);
-  assert.equal(data.openPositions[0].leverageCap, 20);
-  assert.equal(data.rejectedPositions[0].payload.reason, "cap:max_positions");
-  assert.equal(data.rejectedPositions[0].strategyId, "rsi_14_reversion:15");
+  assert.deepEqual(data.signals.map((s) => s.signal_id), ["s2", "s1"]);
+  assert.equal(data.openSetups.length, 2);
+  assert.deepEqual([...read].sort(), ["forward_market_open_setups", "forward_market_signals", "paper_runs"]);
 });
 
 const { pythonServiceConfig } = await import(await moduleUrl("../src/lib/python-service.server.ts"));
