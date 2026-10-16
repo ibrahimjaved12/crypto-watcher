@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
@@ -21,7 +21,6 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FiltersBar, LogsPanel, ResultsPanel } from "@/components/forward-lab";
 import { parseSearch, withDefaultRange, type ForwardFilters } from "@/lib/forward/forward-filters";
-import { maxDrawdown } from "@/lib/forward/forward-report";
 import {
   explainSignalEngine,
   explainTrendTrack,
@@ -40,8 +39,6 @@ import {
   relativeTime,
   strategyLabel,
   summarizeReasons,
-  walletAmountLabel,
-  walletRejectionLabel,
 } from "@/lib/labels";
 import { cn } from "@/lib/utils";
 
@@ -266,9 +263,7 @@ function ForwardPage() {
   );
 }
 
-type SignalRun = NonNullable<Parameters<typeof explainSignalEngine>[0]> & {
-  wallet_state?: { positions?: Record<string, Record<string, unknown>> } | null;
-};
+type SignalRun = NonNullable<Parameters<typeof explainSignalEngine>[0]>;
 
 function LabTab({
   value,
@@ -305,9 +300,6 @@ function SignalsSection({
   runNow: ForwardRunAction;
 }) {
   const latest = data.data?.latestRun as unknown as SignalRun | null | undefined;
-  const equity = data.data?.equity ?? [];
-  const positions = data.data?.openPositions ?? [];
-  const rejected = data.data?.rejectedPositions ?? [];
   const signals = (data.data?.signals ?? []).slice(0, 20);
   const openSetups = (data.data?.openSetups ?? []).slice(0, 20);
 
@@ -417,98 +409,18 @@ function SignalsSection({
         </div>
       </section>
 
-      <section className="grid gap-6 md:grid-cols-[3fr_2fr]">
-        <div className="panel p-4 sm:p-5">
-          <SectionTitle
-            title="Paper wallet"
-            hint="Fake-money balance in USDT after closed trades, fees and funding."
-          />
-          <EquityCurve points={equity} />
-        </div>
-        <div className="panel p-4 sm:p-5">
-          <SectionTitle
-            title="Open positions"
-            hint="One simulated position per accepted setup; several may share a coin. Open strategy setups can outnumber funded positions."
-          />
-          {positions.length === 0 ? (
-            <EmptyState
-              icon={Wallet}
-              title="Wallet is flat"
-              body="Positions appear while a paper trade is open."
-              className="py-6"
-            />
-          ) : (
-            <ul className="divide-y divide-border/50 text-sm">
-              {positions.map(({ setupId, position, strategyId, horizonMin, leverageCap }) => (
-                <li key={setupId} className="space-y-2 py-4">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="num font-medium">{coin(position["symbol"])}</span>
-                    <Side side={position["side"]} />
-                    <span className="num ml-auto text-xs">
-                      {String(position["leverage"])}× leverage
-                      {leverageCap !== null && Number(position["leverage"]) === leverageCap
-                        ? ` · at ${leverageCap}× cap`
-                        : ""}
-                    </span>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {strategyLabel(strategyId).name}
-                    {horizonMin !== null ? ` · ${frame(horizonMin)} holding horizon` : ""}
-                  </p>
-                  <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3">
-                    {[
-                      ["Entry price", position["entry_fill"]],
-                      ["Stop", position["stop"]],
-                      ["Target", position["target"]],
-                      ["Liquidation price", position["liquidation_price"]],
-                      ["Margin used (USDT)", position["margin_e8"]],
-                    ].map(([label, value]) => (
-                      <div key={String(label)}>
-                        <dt className="text-muted-foreground">{String(label)}</dt>
-                        <dd className="num mt-1">{walletAmountLabel(value)}</dd>
-                      </div>
-                    ))}
-                    <div>
-                      <dt className="text-muted-foreground">Opened / age</dt>
-                      <dd className="mt-1">{relativeTime(Number(position["entry_ms"]))}</dd>
-                      <dd className="text-muted-foreground">
-                        {time(Number(position["entry_ms"]))}
-                      </dd>
-                    </div>
-                  </dl>
-                </li>
-              ))}
-            </ul>
-          )}
-          <p className="mt-3 text-xs text-muted-foreground">
-            Wallet snapshot: {time(data.data?.walletAsOf)}. Leverage is capped and chosen to keep
-            liquidation at least twice the stop distance from entry.
+      <section className="panel flex flex-wrap items-center gap-3 p-4 sm:p-5">
+        <Wallet className="size-5 shrink-0 text-primary" aria-hidden />
+        <div className="min-w-0 flex-1 text-sm">
+          <p className="font-medium">Paper account</p>
+          <p className="text-muted-foreground">
+            The wallet’s balance and equity, open positions, closed trades, rejected trades and ledger are on the
+            Paper account page.
           </p>
-          <details className="mt-4 border-t border-border pt-3">
-            <summary className="cursor-pointer text-sm font-medium">
-              Recent trades not taken ({rejected.length})
-            </summary>
-            <p className="mt-2 text-xs text-muted-foreground">
-              Latest 20 recorded wallet rejections. The wallet has no one-position-per-coin
-              restriction.
-            </p>
-            {rejected.length === 0 ? (
-              <p className="mt-2 text-sm">No recorded wallet rejections.</p>
-            ) : (
-              <ul className="divide-y divide-border/50 text-xs">
-                {rejected.map((r) => (
-                  <li key={r.seq} className="space-y-1 py-3">
-                    <p className="font-medium">
-                      {coin(r.symbol)} · {strategyLabel(r.strategyId).name}
-                    </p>
-                    <p>{walletRejectionLabel(r.payload.reason)}</p>
-                    <p className="text-muted-foreground">{time(r.ms)}</p>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </details>
         </div>
+        <Button asChild variant="outline" className="min-h-11 sm:min-h-9">
+          <Link to="/paper">Open Paper account</Link>
+        </Button>
       </section>
 
       <LogsPanel filters={filters} />
@@ -870,83 +782,3 @@ function MultiCurve({ series }: { series: { day_ms: number; equity: number }[][]
   );
 }
 
-function EquityCurve({ points }: { points: { ms: number; balance: number }[] }) {
-  if (points.length < 2)
-    return (
-      <EmptyState
-        icon={Wallet}
-        title="No wallet history yet"
-        body="The balance line starts after the first paper trade closes."
-        className="py-6"
-      />
-    );
-  const width = 480;
-  const height = 160;
-  const xs = points.map((p) => p.ms);
-  const ys = points.map((p) => p.balance);
-  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
-  const coords = points.map(
-    (p) =>
-      [
-        ((p.ms - x0) / (x1 - x0 || 1)) * width,
-        height - ((p.balance - y0) / (y1 - y0 || 1)) * height,
-      ] as const,
-  );
-  const path = coords.map(([x, y], i) => `${i ? "L" : "M"}${x},${y}`).join(" ");
-  const first = points[0]!.balance;
-  const last = points.at(-1)!.balance;
-  const change = first ? (last - first) / first : 0;
-  const drawdown = maxDrawdown(points);
-  return (
-    <div>
-      <div className="flex flex-wrap items-baseline gap-x-3">
-        <span className="num text-2xl font-semibold">
-          {last.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDT
-        </span>
-        <span
-          className={cn(
-            "num text-sm",
-            change > 0 ? "text-bull" : change < 0 ? "text-bear" : "text-muted-foreground",
-          )}
-        >
-          {change > 0 ? "▲ +" : change < 0 ? "▼ −" : ""}
-          {Math.abs(change * 100).toFixed(2)}% since start
-        </span>
-        {drawdown ? (
-          <span className="num text-sm text-muted-foreground">
-            <Hint text="Largest fall from a peak to a later low of the wallet balance, measured on the hourly (daily after 60 days) points.">
-              Max drawdown
-            </Hint>{" "}
-            −{drawdown.usdt.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDT (−
-            {(drawdown.fraction * 100).toFixed(2)}%)
-          </span>
-        ) : null}
-      </div>
-      <svg
-        viewBox={`0 0 ${width} ${height}`}
-        className="mt-3 h-40 w-full text-primary"
-        role="img"
-        aria-label={`Paper wallet balance, now ${last.toFixed(2)} USDT`}
-        preserveAspectRatio="none"
-      >
-        <defs>
-          <linearGradient id="wallet-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="currentColor" stopOpacity="0.3" />
-            <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <path d={`${path} L${width},${height} L0,${height} Z`} fill="url(#wallet-fill)" />
-        <path
-          d={path}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          vectorEffect="non-scaling-stroke"
-        />
-      </svg>
-      <p className="num mt-1 text-[11px] text-muted-foreground">
-        {time(points[0]!.ms)} → {time(points.at(-1)!.ms)} · realised balance only
-      </p>
-    </div>
-  );
-}

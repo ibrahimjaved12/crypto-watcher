@@ -572,6 +572,22 @@ export function walletRejectionLabel(reason: string | null | undefined): string 
     insufficient_margin: "Not enough available margin",
     no_admissible_leverage: "No leverage meets the liquidation buffer",
     not_tradeable: "Setup could not be traded",
+    "cap:total_open_risk": "Total open risk limit reached",
+    "cap:cluster_risk": "Same-direction risk limit reached (the six coins move together)",
+    over_close: "Exit larger than the open quantity",
+    invalid_fill_quantity: "Fill quantity must be above zero",
+    no_open_position: "No open position for this fill",
+    no_contract_inputs: "No contract rules for this coin",
+    notional_above_tier_table: "Position larger than the contract's margin brackets",
+    leverage_above_tier_max: "Leverage above the maximum of the larger bracket",
+    below_step_size: "Smaller than the minimum quantity step",
+    below_min_notional: "Smaller than the minimum order value",
+    setup_already_used: "This setup already has a position or order",
+    limit_not_passive: "Limit price is not beyond the decision price",
+    invalid_limit_price: "Invalid limit price",
+    price_off_tick: "Price is not on the tick grid",
+    invalid_expiry: "Expiry is not after submission",
+    invalid_order_type: "Unknown order type",
   };
   return labels[reason ?? ""] ?? humanizeToken(reason);
 }

@@ -1,0 +1,67 @@
+{
+  "version": "contract-inputs-v1",
+  "notes": [
+    "Versioned per-symbol contract inputs of the paper wallet (#36). The wallet records the SHA-256 of this file's canonical JSON in the run configuration and on every ledger line.",
+    "OWNER-SUPPLIED values (source 'owner:#36'): liquidation fee 1.25% of notional for BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT and 1.5% for DOGEUSDT, SOLUSDT; BTCUSDT tier 1: maintenance margin 0.40% up to 300,000 USDT notional, max leverage 150x.",
+    "Every other tier value is a conservative PLACEHOLDER (source 'placeholder'): 1% maintenance margin, max leverage 20x (the cost-v1 flat tier and leverage cap), one bracket up to a notional of 10,000,000 USDT; the maintenance amount of a later bracket keeps the margin continuous at the bracket edge. The owner supplies the real tiers for ETHUSDT, BNBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT and BTCUSDT above 300,000 USDT. The signed Binance leverage-bracket endpoint is NOT used.",
+    "Fee rates are the cost-v1 schedule already in python/market_analysis/benchmark/costs.py (source 'cost-v1').",
+    "Filters (tick, step, minimum notional) are not supplied: null means 'not enforced' and is reported as such, never filled with an invented number."
+  ],
+  "symbols": {
+    "BTCUSDT": {
+      "liquidation_fee_rate": {"value": "0.0125", "source": "owner:#36"},
+      "taker_rate": {"value": "0.0005", "source": "cost-v1"},
+      "maker_rate": {"value": "0.0002", "source": "cost-v1"},
+      "filters": {"tick_size": null, "step_size": null, "min_notional": null, "source": "unsupplied"},
+      "tiers": [
+        {"floor": "0", "cap": "300000", "mmr": "0.004", "cum": "0", "max_leverage": 150, "source": "owner:#36"},
+        {"floor": "300000", "cap": "10000000", "mmr": "0.01", "cum": "1800", "max_leverage": 20, "source": "placeholder"}
+      ]
+    },
+    "ETHUSDT": {
+      "liquidation_fee_rate": {"value": "0.0125", "source": "owner:#36"},
+      "taker_rate": {"value": "0.0005", "source": "cost-v1"},
+      "maker_rate": {"value": "0.0002", "source": "cost-v1"},
+      "filters": {"tick_size": null, "step_size": null, "min_notional": null, "source": "unsupplied"},
+      "tiers": [
+        {"floor": "0", "cap": "10000000", "mmr": "0.01", "cum": "0", "max_leverage": 20, "source": "placeholder"}
+      ]
+    },
+    "BNBUSDT": {
+      "liquidation_fee_rate": {"value": "0.0125", "source": "owner:#36"},
+      "taker_rate": {"value": "0.0005", "source": "cost-v1"},
+      "maker_rate": {"value": "0.0002", "source": "cost-v1"},
+      "filters": {"tick_size": null, "step_size": null, "min_notional": null, "source": "unsupplied"},
+      "tiers": [
+        {"floor": "0", "cap": "10000000", "mmr": "0.01", "cum": "0", "max_leverage": 20, "source": "placeholder"}
+      ]
+    },
+    "SOLUSDT": {
+      "liquidation_fee_rate": {"value": "0.015", "source": "owner:#36"},
+      "taker_rate": {"value": "0.0005", "source": "cost-v1"},
+      "maker_rate": {"value": "0.0002", "source": "cost-v1"},
+      "filters": {"tick_size": null, "step_size": null, "min_notional": null, "source": "unsupplied"},
+      "tiers": [
+        {"floor": "0", "cap": "10000000", "mmr": "0.01", "cum": "0", "max_leverage": 20, "source": "placeholder"}
+      ]
+    },
+    "DOGEUSDT": {
+      "liquidation_fee_rate": {"value": "0.015", "source": "owner:#36"},
+      "taker_rate": {"value": "0.0005", "source": "cost-v1"},
+      "maker_rate": {"value": "0.0002", "source": "cost-v1"},
+      "filters": {"tick_size": null, "step_size": null, "min_notional": null, "source": "unsupplied"},
+      "tiers": [
+        {"floor": "0", "cap": "10000000", "mmr": "0.01", "cum": "0", "max_leverage": 20, "source": "placeholder"}
+      ]
+    },
+    "XRPUSDT": {
+      "liquidation_fee_rate": {"value": "0.0125", "source": "owner:#36"},
+      "taker_rate": {"value": "0.0005", "source": "cost-v1"},
+      "maker_rate": {"value": "0.0002", "source": "cost-v1"},
+      "filters": {"tick_size": null, "step_size": null, "min_notional": null, "source": "unsupplied"},
+      "tiers": [
+        {"floor": "0", "cap": "10000000", "mmr": "0.01", "cum": "0", "max_leverage": 20, "source": "placeholder"}
+      ]
+    }
+  }
+}

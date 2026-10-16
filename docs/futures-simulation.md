@@ -353,6 +353,210 @@ Wallet balance, margin reservation, position/order persistence and the ledger
 remain #36 responsibilities. These fill policies do not reconstruct Binance
 order books, bid/ask history, hidden queue depth or matching-engine queue state.
 
+## Paper wallet implementation (#36)
+
+Code: `python/market_analysis/forward/wallet.py` (**wallet-v2**, frozen: its ledger is stored and the
+forward-parity runs depend on it) and `wallet_v3.py` (**wallet-v3**, this section). Both are pure: no clock, no
+I/O, amounts are integers in 10^-8 USDT rounded half-even once per ledger line, quantities and prices exact
+fractions. Nothing here can place an order: there is no credential, no signed endpoint and no real-order adapter.
+
+### Versions and run configuration
+
+The wallet version is part of the run configuration (`wallet_version` in the wallet service request, stored in
+`paper_runs.wallet_config`). A state of one version is refused by the other (`wallet-v3` state under a v2
+configuration, or the reverse), so a material change is a new run, never a conversion of history. Every v3 option
+defaults to the wallet-v2 behaviour: with all options at their defaults `wallet_v3.step` reproduces
+`wallet.step` ledger lines bit for bit (`python/tests/test_forward_wallet_v3.py`, "golden" tests, including the
+three-configuration portfolio composition). The v3-only request fields are refused under a v2 configuration.
+
+### Account quantities (v3)
+
+`account_summary(state, config, as_of_ms, max_mark_age_ms)` reports, separately (e8 integers):
+wallet balance; used (initial) margin; reserved margin (working orders, Part 2); available balance
+(`balance - used - reserved`); maintenance margin; notional exposure; realized P&L; fees; funding; liquidation
+losses; slippage (informational: it is inside fill prices, not a ledger line); unrealized P&L; equity
+(`balance + unrealized`). Per position: signed quantity, weighted entry, mark, unrealized P&L, margin,
+maintenance margin, leverage, liquidation price and distance, stop and target.
+
+- **Mark price carried by the event stream.** A `mark` event `{type, ms, symbol, mark}` sets the symbol's mark
+  (an older mark never replaces a newer one; replay is a no-op). A position with no mark has no unrealized P&L
+  (None, not zero); its notional and liquidation distance use the entry. Staleness is explicit
+  (`mark_stale`), never assumed. The collector stores no mark price (see the forward harness assumptions), so a
+  mark is the trade-price proxy until the hourly stage supplies one; the hourly stage does **not** emit `mark`
+  events yet.
+- **Sizing basis.** Risk fraction and the exposure cap use the realized balance (default) or, with
+  `sizing_basis: "equity"`, the equity above. The margin check always uses the realized, available balance.
+- **Cost-aware sizing** (`cost_aware_sizing`, off by default). wallet-v2 sizes 1 R as the price distance from the
+  slipped entry fill to the stop, so fees and the stop exit's slippage come on top. With the option on, the loss at the
+  initial stop (price distance, the entry and exit fee, and the stop exit's slippage floor) equals the risk budget,
+  so the quantity is a little smaller; a test closes a position at its stop and checks the loss equals the budget.
+  Expected funding is not forecast by the wallet and stays outside the budget.
+- **Liquidation reserve.** As in v2, the liquidation price reserves maintenance margin plus the closing taker fee.
+
+### Fills: scale-in and partial exit
+
+A `fill` event `{setup_id, fill_id, direction: increase|reduce, qty, price, liquidity?}` is quantity-exact:
+
+- **increase**: weighted average entry `(Q0*E0 + q*P) / (Q0 + q)`, margin `q*P / leverage` added (rounded up like
+  the open), taker fee on the fill, the same exposure and margin checks as an open (a rejection is a
+  `rejected` line with the cap's reason and does not change the position). The liquidation price is recomputed
+  from the new quantity, entry and isolated margin.
+- **reduce**: realized P&L `side * q * (P - E)` on the reduced part only (the average entry never moves),
+  one fee for the fill, margin released pro rata (`floor(margin * q / Q)`, the whole remainder on the last
+  reduction), liquidation price recomputed. Reducing the whole quantity closes the position.
+- A reduction larger than the open quantity, a quantity <= 0 or a fill for no open position is a `rejected`
+  ledger line with a reason (`over_close`, `invalid_fill_quantity`, `no_open_position`) and moves no money.
+- **Idempotent by `fill_id`**: any outcome, even a rejection, spends the id; replaying it adds nothing.
+- Market-style fills (`liquidity` taker, the default) pay the taker fee and the slippage floor against the
+  position; `maker` fills pay the maker fee and no slippage.
+
+Every v3 ledger line can also link its run, position and source event (`ledger_links: true`): `run_id`
+(configuration), `position_id` (one position per setup in one-way mode) and `source_event`
+(`{stage_run_id, symbol, sequence}` of the market event, or `{type, ms}` for derived events such as a
+path liquidation or a direct fill).
+
+### Reconciliation
+
+`reconcile(initial, ledger, state)` (`wallet_reconcile.py`) is pure and **reports; it never corrects**:
+consecutive `seq`, running balance of every line, state balance and seq against the ledger, used margin equal
+to the sum over open positions, no negative available margin, no negative (or empty) open quantity, reserved
+margin equal to the working orders, no duplicated fill or order line, and the totals
+(`initial + realized + fees + funding + liquidation = balance`). It works for v2 and v3 ledgers.
+
+The wallet service endpoint returns `reconciliation` (this call's lines against the state it started from) for
+v3, and `full_reconciliation` whenever the request carries `reconcile: {initial_balance_e8, ledger}` (send
+`events: []` to check a stored state). `npm run mvp:check` runs the whole-ledger check for every account and
+prints **counts only** (PASS, FAIL on any mismatch, WARN when the Python service is not configured or the ledger
+could not be read).
+
+### Contract inputs, tiers and liquidation (v3, #36 Part 2)
+
+`python/market_analysis/forward/data/contract_inputs_v1.json` (loader: `contract_inputs.py`) holds, for the six
+frozen symbols, the maintenance-margin tiers (notional bracket, rate, maintenance amount, max leverage), the
+taker/maker fees, the liquidation fee rate and the tick/step/minimum-notional filters, each with its source. The
+SHA-256 of its canonical JSON is recorded in the run configuration (`contract_inputs_hash`) and on every ledger
+line; selecting it is `contract_inputs: true`. A stored configuration may carry `contract_inputs_version` and
+`contract_inputs_hash` (the run record does); a different file is refused, since changing the inputs is a new
+run. The signed Binance leverage-bracket endpoint is not used.
+
+- **Owner-supplied (#36, used exactly):** liquidation fee 1.25% of notional for BTC, ETH, BNB, XRP and 1.5% for
+  DOGE, SOL; BTCUSDT tier 1: 0.40% maintenance margin up to 300,000 USDT, max leverage 150x.
+- **Placeholders (conservative, labelled `placeholder-tier` on the ledger line):** every other tier value: 1%
+  maintenance margin, 20x, one bracket up to 10,000,000 USDT (BTCUSDT above 300,000 USDT likewise, its maintenance
+  amount chosen so `notional * mmr - cum` is continuous at the edge). A notional above the last bracket is
+  *unavailable* and the setup is rejected (`notional_above_tier_table`); nothing is extrapolated. Without
+  contract inputs the old flat 1% tier applies and lines carry `flat-tier`. Owner-supplied tier lines carry
+  `owner-tier`.
+- **Not supplied:** the filters. `null` means "not enforced" (never an invented number); when set, the quantity is
+  floored to the step (`below_step_size`), a notional under the minimum is rejected (`below_min_notional`) and a limit
+  price must sit on the tick grid (`price_off_tick`).
+- **Bracket of the position's notional.** The quantity is sized first (risk / stop distance), then the bracket of
+  that notional is looked up. Liquidation price (one-way, isolated):
+  `LP = (WB + cum - s*Q*EP) / (Q*MMR - s*Q)` with `WB` the isolated margin, `cum` the bracket's maintenance
+  amount, `s = +1` long and `-1` short; at the liquidation price equity equals `Q*LP*MMR - cum`. For
+  tier 1 (`cum = 0`) a long's `LP = EP (1 - 1/L) / (1 - MMR)`. The leverage selector takes the largest integer
+  leverage, at most the configured cap and the bracket's maximum, whose liquidation price is at least
+  `liquidation_buffer` x the stop distance from the entry: `1/L >= MMR + (need*Q*(1 - s*MMR) - cum) / N`.
+  A scale-in re-looks-up the bracket and is rejected if the position's leverage exceeds the new bracket's maximum.
+- **Reproducing the ticket's example.** BTC at 73,000 with MMR 0.40% (before fees): 7x, 10x and 20x longs liquidate
+  13.94%, 9.64% and 4.62% below entry (the ticket's "about 13.9 / 9.6 / 4.6"), asserted by
+  `test_the_ticket_example_distances_are_reproduced`. The wallet's own liquidation price is slightly *closer*
+  (about 0.045 percentage points at 10x), because, as in v2, its maintenance rate also reserves the closing taker
+  fee (`MMR + taker`, 0.40% + 0.05%); the ticket's numbers exclude fees.
+- **Liquidation charge** uses the symbol's liquidation fee (capped, as before, at the isolated margin). Liquidation
+  is still checked on mark-price extremes before last-price stops (the adverse-path mechanism is unchanged); the
+  mark is the trade-price proxy until the collector stores a mark.
+- Not changed: the leverage rule stays "largest leverage inside the buffer". The later #36 idea of the *lowest*
+  leverage that fits a margin budget, funding moving the liquidation price (funding is debited from the wallet
+  balance, as in v2) and the fractional-Kelly risk fraction are not implemented.
+
+### Portfolio limits (v3)
+
+Run-configuration options, off by default (`max_open_risk_fraction`, `cluster_risk_fraction`; or
+`portfolio_limits: true` for the defaults). Open risk of a position or working order is `qty * |entry - stop|`
+(its loss at the initial stop, before costs).
+
+- **Total open risk** at most 5% of the sizing base (owner default of #36; `DEFAULT_MAX_OPEN_RISK`):
+  rejection `cap:total_open_risk`.
+- **Cluster:** same-direction positions across the six coins count as one cluster; the open risk of one
+  direction is capped (`cap:cluster_risk`). The default (3%) is a **placeholder**, not an owner decision.
+- The existing caps (`cap:max_positions`, `cap:total_exposure`, `insufficient_margin`) keep their names and
+  order; working limit orders count in every limit. Every rejection is a `rejected` ledger line with its reason.
+
+### Orders (v3)
+
+`order` events (`order_type` market or limit) write a lifecycle in the ledger: `order_submitted`, then
+`order_accepted` or `order_rejected` (with the reason), then `order_filled` / `order_partially_filled`,
+`order_cancelled` (`cancel` event), `order_expired` (`expires_ms`, applied by the next event after it), and
+`order_ambiguous`. Money is only ever on the fee/P&L lines; lifecycle lines have amount 0. An order id is spent
+for good: replays do nothing, and a second order for a setup that already has a position or a working order is
+rejected (`setup_already_used`). A market order fills at once like an `open` (taker fee, slippage floor).
+
+A limit order is passive only (a buy below, a sell above the decision price; otherwise `limit_not_passive`). It
+reserves its margin and maker fee (`reserved_e8`, so concurrent setups cannot spend it twice) until it is filled,
+cancelled or expired. **Fill rule (conservative; ambiguity is marked, never resolved in the order's favour):**
+
+1. Evidence is a `tape` event: one *completed* minute of trades for a symbol, stamped at its close. The minute
+   must have begun at or after the order's submission: no data from before the decision, and nothing after the
+   event's own time is ever used (events are processed in time order and the wallet reads nothing else).
+2. The traded price must **cross** the limit: `low < limit` for a buy, `high > limit` for a sell. Touching it does
+   not fill the order (equality proves no queue position).
+3. With `through_qty` (the quantity traded strictly through the limit, e.g. from aggTrades) the fill is
+   `min(remaining, through_qty)`, possibly partial; the orders of one symbol share that quantity in order-id order.
+   With bars only there is no quantity: the whole remainder fills only when the minute *closed* strictly beyond
+   the limit. If the price crossed but closed back (or `through_qty` is 0) the order stays working and one
+   `order_ambiguous` line records it.
+4. Fills are at the limit price (no slippage, no price improvement) with the **maker** fee. Each minute is
+   considered once per order, so replaying a tape is a no-op.
+5. If the fill minute's range also reached the order's stop, the fill line carries
+   `ambiguity: "stop_touched_in_fill_minute"`; the position's clock starts at the fill minute's open, so that
+   minute's mark extremes are inside the liquidation scan (conservative).
+
+The forward harness does not emit limit intents yet; `order`/`tape` events are for the wallet service and the
+research runs. The ledger kinds `stop_moved` and `target_moved` are reserved for #221 (trailing and break-even
+exits): they exist in the Python, SQL (`20261016180000_paper_ledger_order_kinds.sql`) and TypeScript lists
+(checked equal by a test) but nothing emits them.
+
+### Paper account page (#36 Part 3)
+
+`/paper` ("Paper account", `src/components/paper-account.tsx`, view models in `src/lib/paper/paper-account.ts`) is the
+money view of the simulated wallet. It is a top-level navigation item between **Strategy Lab** and **Alerts**: the
+Strategy Lab answers "does a strategy work" (results by strategy, signals, setups, outcomes), this page answers "what
+does the account hold and do"; a separate page keeps both readable on a phone. The Strategy Lab's former wallet
+panels (balance curve, open positions, last-20 rejections) and its Ledger log tab moved here, so nothing is shown
+twice; the Lab keeps a one-card link.
+
+- **Safety boundary.** A "Simulated account: fake money" note sits at the top (and in the page eyebrow). Every
+  figure is simulated; no credential or order endpoint is involved.
+- **Header strip.** Balance, equity, available margin, margin used, unrealized P&L, realized P&L, fees, funding;
+  each term has a hint. Gains and losses always carry a sign and an arrow, never colour alone; money is
+  tabular-numeral monospace in USDT (2 decimals from 1 USDT, 4 below).
+- **Equity and drawdown.** The balance history (one point per hour, per day beyond 60 days, from
+  `paper_equity_series`) with equity now as the last point, and the drawdown from the running peak. The history is
+  the realized balance: unrealized P&L is only known now, because marks are not stored.
+- **Tabs.** Open positions (side, quantity, entry, mark, unrealized P&L, margin, leverage, liquidation price and
+  distance, stop, target); Closed trades (gross, fees, funding, net, holding time, outcome: target, stopped,
+  liquidated, time limit, unclear or closed early); Rejected (setups, orders and fills the wallet turned down, with
+  the reason); Ledger (every line, with the order/fill ids, CSV export). Lists are keyset-paginated by ledger `seq`
+  (newest first) and reload their first page when the wallet's last update changes.
+- **Mark price.** The wallet's own mark when its state has one (wallet-v3 `mark` events), otherwise the latest
+  published trade price (`market_quotes`), labelled "published price"; a mark older than 3 hours or a price older than
+  10 minutes is flagged stale; a position with no price is valued at its entry and counted in a note.
+- **Results of this run.** From `paper_account_summary()` (SQL over every ledger line, no row cap): completed,
+  rejected, target, stopped, liquidated, unclear, time-limit and closed-early counts, expectancy, profit factor,
+  max drawdown, fees, funding, slippage (wallet-v3 totals only; "not recorded" for v2), liquidation losses and margin
+  utilization, each with a hint, plus the frozen run configuration. A hint states that filtering a report never
+  recreates the wallet.
+- **Breakpoints (Tailwind).** Below 640 px: the cards are a 2-column grid; every list is a stack of cards with the
+  key fields and a 44 px expand control; buttons and tabs are at least 44 px high; the tab bar is sticky under the
+  header; no horizontal page scroll. From 640 px: lists are tables (scrolling inside their own container if wider
+  than the screen) and the cards form a 4-column strip. From 1024 px the strip is one row of 8. Charts and loading
+  skeletons share one reserved height, so nothing jumps.
+- **States.** Every list has loading (skeleton at the final height), empty and error (message and retry) states; the
+  page shows a stale chip with the wallet's age (same 2 h / 6 h thresholds as `npm run mvp:check`).
+- **Data.** The user's own RLS reads through server functions (`paper.functions.ts`), refreshed once a minute like the
+  Strategy Lab; mapping is pure browser code, nothing heavy runs on the Worker.
+
 ## Outcome vocabulary and stop definition
 
 For benchmark-equivalent setups ([analysis and evaluation](analysis-evaluation.md#setup-definition-the-benchmark-barrier-event)),

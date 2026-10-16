@@ -64,11 +64,19 @@ export const forwardResolutionSchema = z.object({
 
 export const FINAL_STATUSES = new Set(["T", "S", "E", "L", "X", "ambiguous"]);
 
+/** Ledger kinds of wallet-v2 (the first six) and wallet-v3; the last two are reserved for #221 (never written yet). */
+export const LEDGER_KINDS = [
+  "open_fee", "pnl", "close_fee", "funding", "liquidation", "rejected",
+  "order_submitted", "order_accepted", "order_rejected", "order_cancelled", "order_expired",
+  "order_filled", "order_partially_filled", "order_ambiguous",
+  "stop_moved", "target_moved",
+] as const;
+
 export const ledgerEntrySchema = z
   .object({
     seq: z.number().int().positive(),
     ms,
-    type: z.enum(["open_fee", "pnl", "close_fee", "funding", "liquidation", "rejected"]),
+    type: z.enum(LEDGER_KINDS),
     amount_e8: z.number().int(),
     balance_e8: z.number().int(),
     assumptions: z.array(z.string()),
@@ -77,6 +85,7 @@ export const ledgerEntrySchema = z
   })
   .passthrough();
 
+// passthrough: wallet-v3 states carry more (marks, orders, totals, reserved margin); wallet-v2 states have none.
 export const walletStateSchema = z.object({
   version: z.string(),
   balance_e8: z.number().int(),
@@ -84,7 +93,7 @@ export const walletStateSchema = z.object({
   seq: z.number().int().nonnegative(),
   positions: z.record(z.string(), z.record(z.string(), z.unknown())),
   done: z.array(z.string()),
-});
+}).passthrough();
 
 export const forwardEvaluateResponseSchema = z.object({
   schema_version: z.literal(1),

@@ -28,7 +28,9 @@ from .api_models import (
 )
 from .forward.bars_adapter import CollectorRowError
 from .forward.evaluate import evaluate as forward_evaluate, market_evaluate
+from .forward import wallet_v3
 from .forward.wallet import WalletConfig, initial_state, wallet_step
+from .forward.wallet_reconcile import reconcile
 from .forward.sigma_state import SigmaStateMismatch
 from .forward.trend_track import evaluate as forward_trend
 from .movement_service import MovementBoundaryService
@@ -181,11 +183,31 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
     def forward_wallet_route(body: ForwardWalletRequest):
         try:
             config = body.config.config() if body.config else WalletConfig()
-            state, ledger = wallet_step(body.state or initial_state(config),
-                                        [event.model_dump(exclude_none=True) for event in body.events], config,
-                                        adverse_paths=[path.model_dump() for path in body.adverse_paths])
-            return {"schema_version": 1, "wallet_state": state, "ledger": ledger,
-                    "wallet_config": config.to_record(), "assumptions": list(config.assumptions)}
+            events = [event.model_dump(exclude_none=True) for event in body.events]
+            paths = [path.model_dump() for path in body.adverse_paths]
+            if isinstance(config, wallet_v3.WalletV3Config):
+                before = body.state or wallet_v3.initial_state(config)
+                state, ledger = wallet_v3.wallet_step(before, events, config, adverse_paths=paths)
+                result = {"schema_version": 1, "wallet_state": state, "ledger": ledger,
+                          "wallet_config": config.to_record(), "assumptions": list(config.assumptions),
+                          "account": wallet_v3.account_summary(state, config),
+                          # This call's lines against the state it started from (never corrects anything).
+                          "reconciliation": reconcile(before["balance_e8"], ledger, state,
+                                                      first_seq=before["seq"] + 1)}
+            else:
+                if any(event["type"] not in ("open", "close", "funding") for event in events):
+                    raise ValueError("event kind requires wallet_version wallet-v3")
+                if body.state is not None and body.state.get("version") == wallet_v3.WALLET_VERSION:
+                    raise ValueError("wallet-v3 state needs a wallet-v3 configuration (a new run)")
+                state, ledger = wallet_step(body.state or initial_state(config), events, config,
+                                            adverse_paths=paths)
+                result = {"schema_version": 1, "wallet_state": state, "ledger": ledger,
+                          "wallet_config": config.to_record(), "assumptions": list(config.assumptions)}
+            if body.reconcile is not None:
+                # A whole ledger against the returned state: the full invariant check of #36.
+                result["full_reconciliation"] = reconcile(body.reconcile.initial_balance_e8,
+                                                          body.reconcile.ledger, state)
+            return result
         except (ValueError, KeyError, TypeError, ZeroDivisionError):
             raise HTTPException(409, "Forward wallet step could not be completed") from None
 
