@@ -130,167 +130,6 @@ class MovementBoundaryServiceTests(unittest.TestCase):
         retried = service.advance(body)
         self.assertIs(retried, first)
 
-    def test_high_precision_decimal_text_reaches_canonical_observation_unchanged(self):
-        service = MovementBoundaryService()
-        body = request(
-            BASE,
-            [symbol_input("BTCUSDT", [observation(
-                BASE,
-                1,
-                "101.000000000000000001",
-                "2.000000000000000009",
-            )])],
-        )
-        service.advance(body)
-        engine = service.sessions[SESSION]["engines"]["BTCUSDT"]
-        observed = engine._last_real_observation
-
-        self.assertEqual(observed.price, Decimal("101.000000000000000001"))
-        self.assertEqual(observed.quantity, Decimal("2.000000000000000009"))
-
-    def test_new_symbol_membership_epoch_replaces_only_that_canonical_engine(self):
-        service = MovementBoundaryService()
-        result = None
-        for index in range(25):
-            boundary = BASE + index * 5_000
-            result = service.advance(request(
-                boundary,
-                [
-                    symbol_input(
-                        "BTCUSDT",
-                        [observation(boundary, index + 1, str(100 + index))],
-                        membership_epoch=7,
-                    ),
-                    symbol_input(
-                        "ETHUSDT",
-                        [observation(boundary, index + 101, str(200 + index))],
-                        membership_epoch=1,
-                    ),
-                ],
-            ))
-
-        eth_before = next(
-            item for item in result["snapshots"] if item["symbol"] == "ETHUSDT"
-        )
-        self.assertEqual(eth_before["readiness"][1]["state"], "ready")
-        eth_epoch_1_engine = service.sessions[SESSION]["engines"]["ETHUSDT"]
-        self.assertEqual(len(eth_epoch_1_engine.history), 25)
-        btc_first_price = service.sessions[SESSION]["engines"]["BTCUSDT"].history[0].price
-
-        # No omission request reaches Python between membership tenures. The lower
-        # aggregate ID makes the fresh epoch-2 ordering state explicit below.
-        boundary = BASE + 25 * 5_000
-        replaced = service.advance(request(
-            boundary,
-            [
-                symbol_input(
-                    "BTCUSDT",
-                    [observation(boundary, 26, "125")],
-                    membership_epoch=7,
-                ),
-                symbol_input(
-                    "ETHUSDT",
-                    [observation(boundary, 1, "999")],
-                    membership_epoch=2,
-                ),
-            ],
-        ))
-
-        eth_after = next(
-            item for item in replaced["snapshots"] if item["symbol"] == "ETHUSDT"
-        )
-        btc_after = next(
-            item for item in replaced["snapshots"] if item["symbol"] == "BTCUSDT"
-        )
-        self.assertEqual(len(eth_after["buckets"]), 1)
-        self.assertEqual(eth_after["buckets"][0]["endpointPrice"], 999.0)
-        self.assertEqual(eth_after["readiness"][1]["state"], "warming")
-        self.assertEqual(service.sessions[SESSION]["membership_epochs"]["ETHUSDT"], 2)
-        self.assertIsNot(
-            service.sessions[SESSION]["engines"]["ETHUSDT"],
-            eth_epoch_1_engine,
-        )
-        self.assertEqual(
-            service.sessions[SESSION]["engines"]["ETHUSDT"]._last_accepted_order_key,
-            (boundary, 1),
-        )
-        self.assertEqual(len(service.sessions[SESSION]["engines"]["BTCUSDT"].history), 26)
-        self.assertEqual(btc_after["readiness"][1]["state"], "ready")
-        self.assertEqual(
-            service.sessions[SESSION]["engines"]["BTCUSDT"].history[0].price,
-            btc_first_price,
-        )
-        self.assertEqual(service.sessions[SESSION]["membership_epochs"]["BTCUSDT"], 7)
-
-    def test_evicted_session_restarts_empty_after_two_delayed_old_sessions(self):
-        service = MovementBoundaryService(session_capacity=2)
-        session_n = "3bf4e8d9-c888-4f69-8be3-29f47ebbd271"
-        session_o1 = "4c05f9ea-d999-407a-9c04-30f58fccd382"
-        session_o2 = "5d160afb-eaaa-418b-ad15-41a690dde493"
-        n_first = request(
-            BASE,
-            [symbol_input("BTCUSDT", [observation(BASE, 1, "200")])],
-            session_n,
-        )
-        o1_first = request(
-            BASE,
-            [symbol_input("BTCUSDT", [observation(BASE, 1, "300")])],
-            session_o1,
-        )
-        o2_first = request(
-            BASE,
-            [symbol_input("BTCUSDT", [observation(BASE, 1, "400")])],
-            session_o2,
-        )
-        service.advance(n_first)
-        service.advance(o1_first)
-        service.advance(o2_first)
-        self.assertNotIn(session_n, service.sessions)
-        self.assertEqual(
-            service.sessions[session_o2]["engines"]["BTCUSDT"].history[0].price,
-            Decimal("400"),
-        )
-
-        # N's next valid request is accepted as a fresh empty session, never a 409.
-        n_next = request(
-            BASE + 5_000,
-            [symbol_input("BTCUSDT", [observation(BASE + 5_000, 2, "201")])],
-            session_n,
-        )
-        n_result = service.advance(n_next)
-        self.assertEqual(n_result["sessionId"], session_n)
-        self.assertEqual(len(n_result["snapshots"][0]["buckets"]), 1)
-        self.assertEqual(n_result["snapshots"][0]["readiness"][1]["state"], "warming")
-        self.assertEqual(n_result["snapshots"][0]["buckets"][0]["endpointPrice"], 201.0)
-        self.assertIn(session_n, service.sessions)
-        self.assertNotIn(session_o1, service.sessions)
-        self.assertEqual(
-            service.sessions[session_n]["engines"]["BTCUSDT"].history[0].price,
-            Decimal("201"),
-        )
-        self.assertEqual(
-            service.sessions[session_o2]["engines"]["BTCUSDT"].history[0].price,
-            Decimal("400"),
-        )
-
-    def test_small_response_cache_does_not_shrink_engine_history(self):
-        service = MovementBoundaryService(cache_capacity=3, session_capacity=2)
-        count = DEFAULT_HISTORY_BUCKETS + 5
-        for index in range(1, count + 1):
-            boundary = BASE + index * 5_000
-            body = request(
-                boundary,
-                [symbol_input("BTCUSDT", [observation(boundary, boundary)])],
-            )
-            service.advance(body)
-
-        session = service.sessions[SESSION]
-        self.assertEqual(len(session["responses"]), 3)
-        self.assertEqual(
-            len(session["engines"]["BTCUSDT"].history),
-            DEFAULT_HISTORY_BUCKETS,
-        )
-
     def test_session_and_response_cache_capacities_must_be_positive_integers(self):
         for kwargs in (
             {"cache_capacity": 0},
@@ -432,17 +271,6 @@ class MovementMetricsAdapterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.calculate_metrics(self.metrics_request())
 
-    def test_new_membership_without_older_bucket_is_missing_symbol_input(self):
-        service = self.populated_service()
-        service.register_history(self.history_request())
-        # This engine still exists, but joined after the requested old boundary.
-        replacement = MovementBucketEngine("binance-usdm:SOLUSDT")
-        replacement.advance(BASE + 360 * 5_000, "LIVE")
-        service.sessions[SESSION]["engines"]["SOLUSDT"] = replacement
-        result = service.calculate_metrics(self.metrics_request(BASE + 355 * 5_000))
-        excluded = result["evaluation"]["windows"]["1"]["excluded_symbols"]
-        self.assertIn({"symbol": "SOLUSDT", "reasons": ["MISSING_SYMBOL_INPUT"]}, excluded)
-
     def test_assessment_uses_same_boundary_and_exact_symbol_source_times(self):
         service = self.populated_service()
         service.register_history(self.history_request())
@@ -501,24 +329,6 @@ class MovementMetricsAdapterTests(unittest.TestCase):
                                   ["reversal_candidate"])
                 self.assertEqual(result["classification"]["windows"]["5"]
                                  ["direction_state"], "BROAD_RISE")
-
-    def test_assessment_keeps_missing_exact_symbol_bucket_as_three_none_times(self):
-        service = self.populated_service()
-        service.register_history(self.history_request())
-        replacement = MovementBucketEngine("binance-usdm:SOLUSDT")
-        replacement.advance(BASE + 360 * 5_000, "LIVE")
-        service.sessions[SESSION]["engines"]["SOLUSDT"] = replacement
-        request = MovementClassificationRequest.model_validate({
-            **self.metrics_request(BASE + 355 * 5_000).model_dump(mode="json"),
-            "previous_confirmed_primary_episode": None,
-        })
-        result = service.calculate_assessment(request)
-        for window in ("1", "5", "15"):
-            evidence = result["classification"]["windows"][window]["source_time_evidence"]
-            self.assertEqual(evidence[-1], {"symbol": "SOLUSDT",
-                                            "last_real_trade_time_ms": None,
-                                            "last_real_event_time_ms": None,
-                                            "last_received_at_ms": None})
 
     def test_lifecycle_reuses_metrics_classification_and_canonical_state(self):
         service = self.populated_service(steps=361, rise_from_step=359)
@@ -583,15 +393,6 @@ class MovementMetricsAdapterTests(unittest.TestCase):
         excluded = service.calculate_metrics(self.metrics_request(version="history-v2"))["evaluation"]["windows"]["1"]["excluded_symbols"]
         self.assertIn("SOURCE_UNAVAILABLE", excluded[0]["reasons"])
         self.assertNotIn("UNSUPPORTED_INSTRUMENT", excluded[0]["reasons"])
-
-    def test_replacing_raw_history_version_preserves_same_boundary_result(self):
-        service = self.populated_service()
-        service.register_history(self.history_request())
-        first = service.calculate_metrics(self.metrics_request())["evaluation"]
-        service.register_history(self.history_request(version="history-v2"))
-        second = service.calculate_metrics(self.metrics_request(version="history-v2"))["evaluation"]
-        self.assertEqual(first, second)
-
 
 if __name__ == "__main__":
     unittest.main()

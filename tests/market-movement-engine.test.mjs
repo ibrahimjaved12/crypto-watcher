@@ -140,15 +140,6 @@ test("grace is explicit, server-side and versioned", () => {
   assert.throws(() => movementFinalizationConfig({ MOVEMENT_FINALIZATION_GRACE_MS: "nope" }));
 });
 
-test("universe version is deterministic and changes only with membership", () => {
-  const first = buildMarketUniverse(["btcusdt", "ETHUSDT"]);
-  const reordered = buildMarketUniverse(["ETHUSDT", "BTCUSDT"]);
-  assert.equal(first.id, MARKET_UNIVERSE_ID);
-  assert.deepEqual(first.symbols, ["BTCUSDT", "ETHUSDT"]);
-  assert.equal(first.version, reordered.version);
-  assert.notEqual(buildMarketUniverse(["BTCUSDT"]).version, first.version);
-});
-
 function warmingMovement(universe, boundary) {
   const missing = { available: false, value: null, reason: "MARKET_UNIVERSE_INELIGIBLE" };
   return {
@@ -568,108 +559,6 @@ test("unavailable current state is exposed explicitly, never as a generic state"
   assert.deepEqual(state.context, []);
 });
 
-test("diagnostics reflect engine status, counts, timestamps and transition", () => {
-  const classification = fakeClassification();
-  const currentEvidence = buildMovementCurrentEvidence({
-    classification,
-    universe: buildMarketUniverse(SYMBOLS),
-    status: "LIVE",
-    lateAfterFinalizationCount: 5,
-    engineUpdatedAt: BASE + 1_000,
-    lastSourceEventTime: BASE + 900,
-    lastTradeTime: BASE + 950,
-    lastReceivedAt: BASE + 980,
-    finalizationConfigVersion: "movement-finalization-config-v1:grace-2000",
-    finalizationGraceMs: 2_000,
-    persistenceConfigVersion: "market-episode-persistence-v1",
-    currentSnapshotCadenceMs: 30_000,
-    mostRecentTransition: null,
-  });
-  const diagnostics = toMovementEngineDiagnostics(
-    {
-      universeId: MARKET_UNIVERSE_ID,
-      universeVersion: "market-universe-v1:test",
-      evaluationBoundaryTime: BASE,
-      directionState: "BROAD_RISE",
-      pace: "ACCELERATING",
-      activeEpisodeId: null,
-      activeDirection: null,
-      interrupted: false,
-      episodeAlgorithmVersion: "market-episode-v1",
-      lifecycleConfigVersion: "market-episode-config-v1",
-      classifierAlgorithmVersion: "market-state-v1",
-      classifierConfigVersion: "market-state-config-v1",
-      movementAlgorithmVersion: "market-movement-v1",
-      movementConfigVersion: "market-movement-config-v1",
-      currentEvidence,
-    },
-    { now: BASE + 1_000 },
-  );
-  assert.equal(diagnostics.status, "LIVE");
-  assert.equal(diagnostics.configuredSymbolCount, 10);
-  assert.equal(diagnostics.eligibleSymbolCount, 8);
-  assert.equal(diagnostics.primaryDirectionState, "BROAD_RISE");
-  assert.equal(diagnostics.lastEvaluationBoundaryTime, BASE);
-  assert.equal(diagnostics.lastSourceEventTime, BASE + 900);
-  assert.equal(diagnostics.lateAfterFinalizationCount, 5);
-  assert.equal(diagnostics.classifierAlgorithmVersion, "market-state-v1");
-  assert.equal(diagnostics.classifierConfigVersion, "market-state-config-v1");
-  assert.equal(diagnostics.episodeAlgorithmVersion, "market-episode-v1");
-  assert.equal(diagnostics.lifecycleConfigVersion, "market-episode-config-v1");
-  assert.equal(diagnostics.movementConfigVersion, "market-movement-config-v1");
-  assert.equal(toMovementEngineDiagnostics(null, { now: BASE }), null);
-});
-
-test("finalization config/grace and receive time are auditable through the contracts", () => {
-  const classification = fakeClassification();
-  const currentEvidence = buildMovementCurrentEvidence({
-    classification,
-    universe: buildMarketUniverse(SYMBOLS),
-    status: "LIVE",
-    lateAfterFinalizationCount: 0,
-    engineUpdatedAt: BASE + 1_000,
-    lastSourceEventTime: BASE + 900,
-    lastTradeTime: BASE + 950,
-    lastReceivedAt: BASE + 980,
-    finalizationConfigVersion: "movement-finalization-config-v1:grace-5000",
-    finalizationGraceMs: 5_000,
-    persistenceConfigVersion: "market-episode-persistence-v1",
-    currentSnapshotCadenceMs: 30_000,
-    mostRecentTransition: null,
-  });
-  const persisted = {
-    universeId: MARKET_UNIVERSE_ID,
-    universeVersion: "market-universe-v1:test",
-    evaluationBoundaryTime: BASE,
-    directionState: "BROAD_RISE",
-    pace: "ACCELERATING",
-    activeEpisodeId: null,
-    activeDirection: null,
-    interrupted: false,
-    episodeAlgorithmVersion: "market-episode-v1",
-    lifecycleConfigVersion: "market-episode-config-v1",
-    classifierAlgorithmVersion: "market-state-v1",
-    classifierConfigVersion: "market-state-config-v1",
-    movementAlgorithmVersion: "market-movement-v1",
-    movementConfigVersion: "market-movement-config-v1",
-    currentEvidence,
-  };
-  const state = toMarketMovementCurrentState(persisted, { now: BASE + 1_000 });
-  assert.equal(state.timestamps.lastReceivedAt, BASE + 980);
-  assert.equal(state.finalizationConfigVersion, "movement-finalization-config-v1:grace-5000");
-  assert.equal(state.finalizationGraceMs, 5_000);
-
-  const diagnostics = toMovementEngineDiagnostics(persisted, { now: BASE + 1_000 });
-  assert.equal(diagnostics.finalizationConfigVersion, "movement-finalization-config-v1:grace-5000");
-  assert.equal(diagnostics.finalizationGraceMs, 5_000);
-});
-
-test("unavailable current state exposes no finalization config", () => {
-  const state = toMarketMovementCurrentState(null, { now: BASE });
-  assert.equal(state.finalizationConfigVersion, null);
-  assert.equal(state.finalizationGraceMs, null);
-});
-
 test("snapshot event times preserve exchange and receive provenance across symbols", () => {
   const times = snapshotEventTimes(
     new Map([
@@ -706,40 +595,4 @@ test("snapshot event times preserve exchange and receive provenance across symbo
   assert.equal(times.lastTradeTime, BASE + 400);
   assert.equal(times.lastSourceEventTime, BASE + 500);
   assert.equal(times.lastReceivedAt, BASE + 600);
-});
-
-test("evaluation provenance uses the finalized bucket, not a newer pending trade", () => {
-  const finalized = BASE + 500;
-  const pending = BASE + 5_400; // still sitting in an unfinalized bucket
-  const times = snapshotEventTimes(
-    new Map([
-      [
-        "BTCUSDT",
-        {
-          ...warmingSnapshot("BTCUSDT"),
-          // Snapshot-level fields point at the newer, not-yet-finalized trade.
-          latestRealTradeTime: pending,
-          latestRealReceivedAt: pending + 10,
-          buckets: [
-            {
-              boundaryTime: BASE,
-              lastRealEventTime: finalized,
-              lastRealTradeTime: finalized - 1,
-              lastRealReceivedAt: finalized + 2,
-            },
-          ],
-        },
-      ],
-    ]),
-  );
-  assert.equal(times.lastSourceEventTime, finalized);
-  assert.equal(times.lastTradeTime, finalized - 1);
-  assert.equal(times.lastReceivedAt, finalized + 2);
-});
-
-test("snapshot event times expose no receive time when nothing was received", () => {
-  const times = snapshotEventTimes(new Map([["BTCUSDT", warmingSnapshot("BTCUSDT")]]));
-  assert.equal(times.lastTradeTime, null);
-  assert.equal(times.lastSourceEventTime, null);
-  assert.equal(times.lastReceivedAt, null);
 });

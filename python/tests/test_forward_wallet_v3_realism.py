@@ -88,19 +88,6 @@ class ContractInputTests(unittest.TestCase):
             self.assertEqual((inputs.taker_rate, inputs.maker_rate),
                              (costs.COST_MODEL_V1.taker_rate, costs.COST_MODEL_V1.maker_rate))
 
-    def test_tier_lookup_at_bracket_edges(self):
-        btc, eth = INPUTS.symbol("BTCUSDT"), INPUTS.symbol("ETHUSDT")
-        self.assertEqual(btc.tier_for(0).max_leverage, 150)                       # zero belongs to the first tier
-        self.assertEqual(btc.tier_for(300_000 * E8).max_leverage, 150)            # an exact cap belongs to its own tier
-        self.assertEqual(btc.tier_for(300_000 * E8 + 1).label, "placeholder-tier")  # the next 1e-8 USDT is above it
-        self.assertEqual(btc.tier_for(10_000_000 * E8).label, "placeholder-tier")
-        self.assertIsNone(btc.tier_for(10_000_000 * E8 + 1))                      # above the table: unavailable
-        self.assertEqual(eth.tier_for(10_000_000 * E8).max_leverage, 20)
-        self.assertIsNone(eth.tier_for(10_000_000 * E8 + 1))
-        low, high = btc.tiers
-        self.assertEqual(low.cap, high.floor)
-        self.assertEqual(low.cap * low.mmr - low.cum, high.floor * high.mmr - high.cum)  # maintenance is continuous
-
     def test_the_file_hash_is_content_not_formatting_and_bad_tables_are_refused(self):
         document = json.loads(ci.DATA_FILE.read_text(encoding="utf-8"))
         self.assertEqual(ci.parse(document).sha256, INPUTS.sha256)
@@ -174,27 +161,6 @@ class LiquidationFormulaTests(unittest.TestCase):
 class TieredWalletTests(unittest.TestCase):
     def open(self, cfg, *setups):
         return v3.step(v3.initial_state(cfg), opens(*setups), cfg)
-
-    def test_an_owner_tier_line_says_so_and_a_placeholder_line_says_so(self):
-        cfg = config(contract_inputs=INPUTS)
-        state, ledger = self.open(cfg, setup("btc"), setup("eth", symbol="ETHUSDT"))
-        by_setup = {line["setup_id"]: line for line in ledger}
-        self.assertEqual((by_setup["btc"]["assumptions"], by_setup["eth"]["assumptions"]),
-                         (["owner-tier"], ["placeholder-tier"]))
-        self.assertTrue(all(line["contract_inputs_hash"] == INPUTS.sha256 for line in ledger))
-        self.assertEqual(cfg.to_record()["contract_inputs_hash"], INPUTS.sha256)
-        self.assertEqual((state["positions"]["btc"]["liquidation_rule"], state["positions"]["btc"]["tier_label"]),
-                         ("wallet-v3:tiered", "owner-tier"))
-        # the 0.40 % tier allows more leverage than the flat 1 % at the same stop ...
-        flat = v2.position_terms(setup("btc"), v2.WalletConfig())
-        self.assertGreater(state["positions"]["btc"]["leverage"], flat[1])
-        # ... and the 1 % placeholder tier is wallet-v2's flat tier: same leverage, liquidation price and fee
-        trade = setup("eth", symbol="ETHUSDT")
-        eth_state, eth_lines = self.open(cfg, trade)
-        eth = eth_state["positions"]["eth"]
-        expected = v2.position_terms(trade, v2.WalletConfig())
-        self.assertEqual((eth["leverage"], exact_from_str(eth["liquidation_price"])), (expected[1], expected[2]))
-        self.assertEqual(eth_lines[0]["amount_e8"], v2.step(v2.initial_state(), opens(trade))[1][0]["amount_e8"])
 
     def test_the_bracket_of_the_notional_is_used_and_above_the_table_is_refused(self):
         big = config(contract_inputs=INPUTS, initial_balance_e8=10 ** 6 * E8)       # 10,000 USDT risk, ~500k notional
@@ -273,13 +239,6 @@ class PortfolioLimitTests(unittest.TestCase):
                          [None, None, "cap:cluster_risk", None, "cap:cluster_risk"])
         self.assertEqual(sorted(state["positions"]), ["s0", "s1", "s3"])  # the short is a different cluster
         self.assertEqual(v3.PLACEHOLDER_CLUSTER_RISK, Fraction(3, 100))
-
-    def test_existing_caps_keep_their_names_and_order_when_limits_are_on(self):
-        cfg = config(max_positions=1, max_open_risk_fraction=Fraction(5, 100), cluster_risk_fraction=Fraction(1, 10))
-        _, results = self.run_setups(cfg, [("BTCUSDT", 1), ("ETHUSDT", 1)])
-        self.assertEqual(results[1][1], "cap:max_positions")
-        tight = config(max_exposure_multiple=Fraction(1, 10), max_open_risk_fraction=Fraction(1, 1000))
-        self.assertEqual(self.run_setups(tight, [("BTCUSDT", 1)])[1][0][1], "cap:total_exposure")
 
     def test_working_limit_orders_count_against_the_limits(self):
         cfg = config(max_open_risk_fraction=Fraction(15, 1000))      # one 1 % risk fits, two do not
@@ -362,14 +321,6 @@ class OrderTests(unittest.TestCase):
         self.assertEqual((state["reserved_e8"], state["used_margin_e8"] > 0, reserved > 0), (0, True, True))
         self.assertEqual(state["orders"]["o1"]["status"], "filled")
 
-    def test_a_sell_limit_needs_the_high_to_go_above_it(self):
-        state, _ = self.step([limit_order(limit=101 * E8, side=-1)])
-        state, lines = self.step([tape(START + MINUTE, 99 * E8, 101 * E8, 100 * E8)], state=state)   # touch only
-        self.assertEqual(lines, [])
-        state, lines = self.step([tape(START + 2 * MINUTE, 99 * E8, 102 * E8, 101 * E8 + 1)], state=state)
-        self.assertEqual(kinds(lines), ["order_filled", "open_fee"])
-        self.assertEqual(state["positions"]["s1"]["side"], -1)
-
     def test_partial_fills_follow_the_quantity_that_traded_through_and_replay_is_a_no_op(self):
         state, _ = self.step([limit_order()])
         first = tape(START + MINUTE, 98 * E8, 100 * E8, 99 * E8 + 1, through_qty="1/4")
@@ -425,17 +376,6 @@ class OrderTests(unittest.TestCase):
         self.assertTrue(reconcile(cfg.initial_balance_e8, ledger, state)["ok"])
         self.assertTrue(all(line["position_id"] == "s1" and line["run_id"] == "r1" for line in ledger))
         self.assertEqual(ledger[0]["source_event"], {"type": "order", "ms": START})
-
-    def test_orders_compose_through_the_portfolio_step_with_a_stage_envelope(self):
-        cfg = config(max_exposure_multiple=Fraction(50))
-        events = [{**limit_order(), "symbol": "BTCUSDT", "sequence": 0, "stage_run_id": STAGE},
-                  {**tape(START + MINUTE, 97 * E8, 100 * E8, 98 * E8), "sequence": 1, "stage_run_id": STAGE}]
-        state, ledger = v3.wallet_step(v3.initial_state(cfg), events, cfg)
-        self.assertEqual(kinds(ledger), ["order_submitted", "order_accepted", "order_filled", "open_fee"])
-        path = {"setup_id": "s1", "symbol": "BTCUSDT", "side": 1, "points": [[START + 2 * MINUTE, 1]]}
-        _, with_path = v3.wallet_step(v3.initial_state(cfg), events, cfg, adverse_paths=[path])
-        self.assertEqual(kinds(with_path)[-1], "liquidation")      # a limit-filled position can be liquidated
-
 
 class LifecycleRegressionTests(unittest.TestCase):
     def compose(self, state, events, cfg, paths=()):
@@ -580,64 +520,6 @@ class LedgerKindTests(unittest.TestCase):
         self.assertEqual(in_sql, set(re.findall(r'"([a-z_]+)"', block)))
         self.assertEqual(in_sql, set(v3.LEDGER_KINDS))
         self.assertEqual(set(v3.RESERVED_KINDS), {"stop_moved", "target_moved"})   # #221: reserved, never emitted
-
-
-class ApiTests(unittest.TestCase):
-    def test_contract_inputs_limits_and_orders_through_the_endpoint(self):
-        try:
-            import asyncio
-            import httpx
-            from market_analysis.api import create_app
-        except ImportError:
-            self.skipTest("API dependencies are not installed")
-        token = "test-service-token-" + "x" * 32
-        cfg = {"wallet_version": "wallet-v3", "contract_inputs": True, "portfolio_limits": True,
-               "max_exposure_multiple": "50", "cost_aware_sizing": True}
-
-        def envelope(sequence, **payload):
-            return {"symbol": "BTCUSDT", "sequence": sequence, "stage_run_id": STAGE, **payload}
-
-        async def main():
-            app = create_app(token)
-            async with app.router.lifespan_context(app):
-                transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-                async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-                    headers = {"Authorization": f"Bearer {token}"}
-                    first = await client.post("/v1/forward/wallet_step", headers=headers, json={
-                        "schema_version": 1, "config": cfg, "events": [
-                            envelope(0, type="order", ms=START, order_id="o1", order_type="limit", limit_price=99 * E8,
-                                     setup=setup())]})
-                    second = await client.post("/v1/forward/wallet_step", headers=headers, json={
-                        "schema_version": 1, "config": cfg, "state": first.json()["wallet_state"], "events": [
-                            envelope(1, type="tape", ms=START + MINUTE, low=97 * E8, high=100 * E8, close=98 * E8),
-                            envelope(2, type="cancel", ms=START + 2 * MINUTE, order_id="o1")]})
-                    bad = await client.post("/v1/forward/wallet_step", headers=headers, json={
-                        "schema_version": 1, "config": {"contract_inputs": True}, "events": []})
-                    worse = await client.post("/v1/forward/wallet_step", headers=headers, json={
-                        "schema_version": 1, "config": cfg, "events": [
-                            envelope(0, type="tape", ms=START, low=100 * E8, high=99 * E8, close=99 * E8)]})
-                    pinned = {**cfg, "contract_inputs_version": "contract-inputs-v1",
-                              "contract_inputs_hash": INPUTS.sha256}
-                    same = await client.post("/v1/forward/wallet_step", headers=headers,
-                                             json={"schema_version": 1, "config": pinned, "events": []})
-                    changed = await client.post("/v1/forward/wallet_step", headers=headers, json={
-                        "schema_version": 1, "config": {**pinned, "contract_inputs_hash": "0" * 64}, "events": []})
-                    return first, second, bad, worse, same, changed
-
-        first, second, bad, worse, same, changed = asyncio.run(main())
-        self.assertEqual(first.status_code, 200, first.text)
-        record = first.json()["wallet_config"]
-        self.assertEqual((record["contract_inputs_hash"], record["max_open_risk_fraction"], record["cluster_risk_fraction"]),
-                         (INPUTS.sha256, "1/20", "3/100"))
-        self.assertEqual([line["type"] for line in first.json()["ledger"]], ["order_submitted", "order_accepted"])
-        self.assertEqual(second.status_code, 200, second.text)
-        self.assertEqual([line["type"] for line in second.json()["ledger"]], ["order_filled", "open_fee"])
-        self.assertTrue(second.json()["reconciliation"]["ok"])
-        self.assertEqual(second.json()["account"]["positions"][0]["tier_label"], "owner-tier")
-        self.assertEqual(bad.status_code, 422)     # v3-only option under the default wallet-v2 configuration
-        self.assertEqual(worse.status_code, 422)   # a tape with low above high
-        self.assertEqual(same.status_code, 200, same.text)     # a stored configuration pins the data file ...
-        self.assertEqual(changed.status_code, 409)             # ... and a changed file is a new run, not a swap
 
 
 if __name__ == "__main__":

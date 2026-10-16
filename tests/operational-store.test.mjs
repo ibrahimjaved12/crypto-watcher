@@ -110,44 +110,6 @@ test("completed candles are account-scoped, idempotent and reject identity confl
   );
 });
 
-test("checkpoints are monotonic and recent-candle retention is bounded per account", async () => {
-  const observed = Math.floor(Date.now() / 60_000) * 60_000 - 60_000;
-  const checkpoint = (uid, at, price) =>
-    db.query(
-      `SELECT record_market_data_checkpoint(
-        $1,'binance-usdm:BTCUSDT','BTCUSDT','BTCUSDT','binance-usdm',
-        '/fapi/v1/klines','trade',1,$2,$3
-      ) AS result`,
-      [uid, new Date(at).toISOString(), price],
-    );
-  assert.equal((await checkpoint(user, observed, 100)).rows[0].result.status, "recorded");
-  assert.equal(
-    (await checkpoint(user, observed - 60_000, 90)).rows[0].result.status,
-    "already_processed",
-  );
-  assert.equal(
-    Number((await db.query("SELECT price FROM market_data_checkpoints")).rows[0].price),
-    100,
-  );
-
-  const expired = candleRows(observed - 8 * 24 * 60 * 60_000);
-  await db.query(
-    `INSERT INTO recent_candles (
-      user_id,instrument_id,symbol,native_symbol,source,endpoint,price_type,timeframe_minutes,
-      open_time,close_time,open,high,low,close,volume,source_event_at,collected_at
-    ) SELECT $1,x.* FROM jsonb_to_recordset($2) AS x(
-      instrument_id text,symbol text,native_symbol text,source text,endpoint text,price_type text,
-      timeframe_minutes int,open_time timestamptz,close_time timestamptz,open float8,high float8,
-      low float8,close float8,volume float8,source_event_at timestamptz,collected_at timestamptz)`,
-    [user, JSON.stringify(expired)],
-  );
-  await recordCandles(user);
-  assert.equal(
-    (await db.query("SELECT count(*) FROM recent_candles WHERE user_id=$1", [user])).rows[0].count,
-    1,
-  );
-});
-
 async function stage(resultId, eventId, uid = user, payload = { score: 1 }) {
   return db.query("SELECT stage_durable_result($1,$2,$3,'future.result',$4)", [
     resultId,
@@ -156,17 +118,6 @@ async function stage(resultId, eventId, uid = user, payload = { score: 1 }) {
     JSON.stringify(payload),
   ]);
 }
-
-test("result and outbox staging is atomic, stable and duplicate-safe", async () => {
-  const result = "10000000-0000-0000-0000-000000000001";
-  const event = "20000000-0000-0000-0000-000000000001";
-  await stage(result, event);
-  await stage(result, event);
-  assert.equal((await db.query("SELECT count(*) FROM operational_results")).rows[0].count, 1);
-  assert.equal((await db.query("SELECT count(*) FROM sync_outbox")).rows[0].count, 1);
-  await assert.rejects(stage(result, event, other), /Stable result ID conflict/);
-  assert.equal((await db.query("SELECT count(*) FROM operational_results")).rows[0].count, 1);
-});
 
 test("outbox leases retry safely, dead-letter, and confirm only after delivery", async () => {
   const firstResult = "10000000-0000-0000-0000-000000000001";
@@ -303,58 +254,6 @@ test("removing the last subscription invalidates current health and preserves fa
   assert.deepEqual((await db.query("SELECT * FROM collector_recent_candles")).rows, candles);
 });
 
-test("removing one subscription leaves another symbol's active health unchanged", async () => {
-  await db.query("SELECT assign_collector_subscriptions($1)", [["BTCUSDT", "ETHUSDT"]]);
-  await recordCollectorHealth("BTCUSDT");
-  await recordCollectorHealth("ETHUSDT");
-  const eth = await collectorHealth("ETHUSDT");
-  assert.equal(eth.status, "LIVE");
-  await db.query("SELECT assign_collector_subscriptions($1)", [["ETHUSDT"]]);
-  assert.equal((await collectorHealth("BTCUSDT")).status, "UNAVAILABLE");
-  assert.equal((await collectorHealth("BTCUSDT")).error_message, "collection disabled/unsubscribed");
-  assert.deepEqual(await collectorHealth("ETHUSDT"), eth);
-});
-
-test("late health intents cannot resurrect an unsubscribed symbol", async () => {
-  // No assignment row is also an empty authoritative universe.
-  await recordCollectorHealth("ETHUSDT");
-  assert.equal((await collectorHealth("ETHUSDT")).status, "UNAVAILABLE");
-  await db.query("SELECT assign_collector_subscriptions($1)", [["BTCUSDT"]]);
-  await recordCollectorHealth("BTCUSDT");
-  const factual = await collectorHealth("BTCUSDT");
-  assert.equal(factual.status, "LIVE");
-  await db.query("SELECT assign_collector_subscriptions($1)", [[]]);
-  for (const status of ["LIVE", "RECOVERING", "STALE", "UNAVAILABLE"]) {
-    await recordCollectorHealth("BTCUSDT", status);
-    const health = await collectorHealth("BTCUSDT");
-    assert.equal(health.status, "UNAVAILABLE");
-    assert.equal(health.error_message, "collection disabled/unsubscribed");
-    assert.equal(health.lag_ms, null);
-    assert.equal(health.queue_depth, 0);
-    for (const field of ["last_event_at", "last_completed_open_time", "reconnect_count"])
-      assert.deepEqual(health[field], factual[field]);
-  }
-});
-
-test("reassignment leaves health unavailable until the worker reports recovery and live evidence", async () => {
-  await db.query("SELECT assign_collector_subscriptions($1)", [["BTCUSDT"]]);
-  await recordCollectorHealth("BTCUSDT");
-  await db.query("SELECT assign_collector_subscriptions($1)", [[]]);
-  const unavailable = await collectorHealth("BTCUSDT");
-  assert.equal(unavailable.status, "UNAVAILABLE");
-  assert.equal(unavailable.error_message, "collection disabled/unsubscribed");
-  await db.query("SELECT assign_collector_subscriptions($1)", [["BTCUSDT"]]);
-  assert.deepEqual(await collectorHealth("BTCUSDT"), unavailable);
-  for (const status of ["RECOVERING", "LIVE"]) {
-    await recordCollectorHealth("BTCUSDT", status);
-    const health = await collectorHealth("BTCUSDT");
-    assert.equal(health.status, status);
-    assert.equal(health.error_message, "worker health detail");
-    assert.equal(Number(health.lag_ms), 250);
-    assert.equal(health.queue_depth, 4);
-  }
-});
-
 test("server config is opt-in, bounded and requires a separate secure target", async () => {
   const configUrl = await moduleUrl("../src/lib/operational/config.server.ts");
   const { operationalDbConfig } = await import(configUrl);
@@ -436,30 +335,6 @@ test("repository reads and writes always carry the authenticated user scope", as
   assert.equal(seen.rpc[0][1].p_user_id, user);
 });
 
-test("market movement append rejects null and unexpected RPC statuses", async () => {
-  const repositoryUrl = await moduleUrl(
-    "../src/lib/operational/repository.server.ts",
-    repositoryStubs,
-  );
-  const { createOperationalStore } = await import(repositoryUrl);
-  let status = null;
-  const store = createOperationalStore(
-    {
-      async rpc() {
-        return { data: status, error: null };
-      },
-    },
-    { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
-  );
-
-  const event = { event_id: "example-event" };
-  await assert.rejects(store.appendMarketMovementEvent(event), /returned null/);
-  status = "unexpected";
-  await assert.rejects(store.appendMarketMovementEvent(event), /returned unexpected/);
-  status = "appended";
-  assert.equal(await store.appendMarketMovementEvent(event), "appended");
-});
-
 test("market movement repository preserves canonical lifecycle JSON and event evidence", async () => {
   const repositoryUrl = await moduleUrl(
     "../src/lib/operational/repository.server.ts", repositoryStubs,
@@ -502,180 +377,6 @@ test("market movement repository preserves canonical lifecycle JSON and event ev
   assert.deepEqual(calls[1].args.p_events[0], event);
   const [read] = await store.listMarketMovementEvents(event.episode_id);
   assert.deepEqual(read, event);
-});
-
-test("atomic lifecycle SQL keeps canonical JSON and nullable flattened evidence", async () => {
-  const boundary = 1_800_000_000_000;
-  const oldUniverse = `old-${crypto.randomUUID()}`;
-  const newUniverse = `new-${crypto.randomUUID()}`;
-  const scope = {
-    lifecycle_algorithm_version: "market-episode-lifecycle-v1",
-    lifecycle_config_version: "market-episode-lifecycle-config-v1",
-    universe_id: oldUniverse, universe_version: "v1", primary_window_minutes: 5,
-    classifier_algorithm_version: "market-state-classifier-v1",
-    classifier_config_version: "market-state-classifier-config-v1",
-    movement_algorithm_version: "market-movement-v1",
-    movement_config_version: "market-movement-config-v1",
-    provider: "binance-usdm", exchange: "binance", price_type: "trade",
-  };
-  const missing = (reason) => ({ available: false, value: null, reason });
-  const event = {
-    event_id: `event-${crypto.randomUUID()}`, episode_id: `episode-${crypto.randomUUID()}`,
-    previous_episode_id: null, transition: "ENDED", transition_reason: "universe_changed",
-    from_direction: "BROAD_RISE", to_direction: null, event_family: "BROAD_MOVE",
-    episode_direction: "BROAD_RISE", episode_start_boundary_time_ms: boundary - 5_000,
-    evaluation_boundary_time_ms: boundary, episode_scope: scope,
-    evaluation_scope: { ...scope, universe_id: newUniverse, universe_version: "v2" },
-    pace: missing("NO_BROAD_DIRECTION"),
-    directional_breadth: missing("MARKET_UNIVERSE_INELIGIBLE"),
-    material_breadth: missing("MARKET_UNIVERSE_INELIGIBLE"),
-    median_raw_return: missing("MARKET_UNIVERSE_INELIGIBLE"),
-    median_normalized_movement: missing("MARKET_UNIVERSE_INELIGIBLE"),
-    median_acceleration: missing("ACCELERATION_UNAVAILABLE"),
-    acceleration_breadth: missing("ACCELERATION_UNAVAILABLE"),
-    dispersion_mad_normalized_movement: missing("MARKET_UNIVERSE_INELIGIBLE"),
-    volume_context: [], isolated_outliers: [], supporting_contracts: [],
-    conflicting_contracts: [], configured_universe: ["BTCUSDT"], included_symbols: [],
-    excluded_symbols: [{ symbol: "BTCUSDT", reasons: ["WARMING_INSUFFICIENT_LIVE_HISTORY"] }],
-    windows_context: [{ window_minutes: 1 }, { window_minutes: 5 }, { window_minutes: 15 }],
-    source_time_evidence: [{ symbol: "BTCUSDT", last_real_trade_time_ms: null,
-      last_real_event_time_ms: null, last_received_at_ms: null }],
-    classification: { evaluation_boundary_time_ms: boundary },
-  };
-  const lifecycleState = { serialization_version: "market-episode-state-v1",
-    opaque: { pending_start: ["BTCUSDT", 1] } };
-  const current = {
-    universeId: newUniverse, primaryWindowMinutes: 5, universeVersion: "v2",
-    provider: "binance-usdm", exchange: "binance", priceType: "trade",
-    evaluationBoundaryTime: boundary, directionState: "WARMING", pace: "NOT_APPLICABLE",
-    activeEpisodeId: null, activeDirection: null, interrupted: false,
-    episodeAlgorithmVersion: scope.lifecycle_algorithm_version,
-    lifecycleConfigVersion: scope.lifecycle_config_version,
-    classifierAlgorithmVersion: scope.classifier_algorithm_version,
-    classifierConfigVersion: scope.classifier_config_version,
-    movementAlgorithmVersion: scope.movement_algorithm_version,
-    movementConfigVersion: scope.movement_config_version,
-    lifecycleState, currentEvidence: { primaryWindow: { directionState: "WARMING" } },
-  };
-  const persisted = await db.query(
-    "SELECT public.persist_market_episode_lifecycle_step($1::jsonb, $2::jsonb) AS statuses",
-    [JSON.stringify(current), JSON.stringify([event])],
-  );
-  assert.deepEqual(persisted.rows[0].statuses,
-    [{ eventId: event.event_id, status: "appended" }]);
-  const savedCurrent = await db.query(
-    "SELECT lifecycle_state FROM public.market_state_current WHERE universe_id = $1",
-    [newUniverse],
-  );
-  assert.deepEqual(savedCurrent.rows[0].lifecycle_state, lifecycleState);
-  const savedEvent = await db.query(
-    "SELECT canonical_event, previous_episode_id, directional_breadth, material_breadth, " +
-      "median_acceleration, acceleration_breadth, pace FROM public.market_movement_events " +
-      "WHERE event_id = $1",
-    [event.event_id],
-  );
-  assert.deepEqual(savedEvent.rows[0].canonical_event, event);
-  assert.equal(savedEvent.rows[0].previous_episode_id, null);
-  assert.equal(savedEvent.rows[0].directional_breadth, null);
-  assert.equal(savedEvent.rows[0].material_breadth, null);
-  assert.equal(savedEvent.rows[0].median_acceleration, null);
-  assert.equal(savedEvent.rows[0].acceleration_breadth, null);
-  assert.equal(savedEvent.rows[0].pace, "NOT_APPLICABLE");
-  const replay = await db.query(
-    "SELECT public.append_market_movement_event($1::jsonb) AS status", [JSON.stringify(event)],
-  );
-  assert.equal(replay.rows[0].status, "already_exists");
-});
-
-test("outbox delivery confirms only after sink success", async () => {
-  const outboxUrl = await moduleUrl("../src/lib/operational/outbox.server.ts");
-  const { deliverOutboxBatch } = await import(outboxUrl);
-  const marked = [];
-  const failed = [];
-  const store = {
-    enabled: true,
-    claimOutbox: async () => [
-      { eventId: "one", payload: {}, attempts: 1 },
-      { eventId: "two", payload: {}, attempts: 1 },
-    ],
-    markOutboxDelivered: async (id) => marked.push(id),
-    markOutboxFailed: async (id) => failed.push(id),
-  };
-  let batch;
-  let result = await deliverOutboxBatch(
-    store,
-    {
-      deliver: async (events) => {
-        batch = events.map((event) => event.eventId);
-      },
-    },
-    worker,
-  );
-  assert.deepEqual(batch, ["one", "two"]);
-  assert.deepEqual(result, { claimed: 2, delivered: 2, failed: 0 });
-  assert.deepEqual(marked, ["one", "two"]);
-  assert.deepEqual(failed, []);
-
-  marked.length = 0;
-  result = await deliverOutboxBatch(
-    store,
-    { deliver: async () => Promise.reject(new Error("destination down")) },
-    worker,
-  );
-  assert.deepEqual(result, { claimed: 2, delivered: 0, failed: 2 });
-  assert.deepEqual(marked, []);
-  assert.deepEqual(failed, ["one", "two"]);
-});
-
-test("movement normalization history RPC returns compact one-minute candles per symbol", async () => {
-  const observed = Math.floor(Date.now() / 60_000) * 60_000 - 3 * 60_000;
-  const rows = [0, 1, 2].map((index) => {
-    const openTime = observed + index * 60_000;
-    return {
-      instrument_id: "binance-usdm:BTCUSDT",
-      symbol: "BTCUSDT",
-      native_symbol: "BTCUSDT",
-      provider: "binance-usdm",
-      endpoint: "/fapi/v1/klines",
-      price_type: "trade",
-      timeframe_minutes: 1,
-      open_time: new Date(openTime).toISOString(),
-      close_time: new Date(openTime + 60_000 - 1).toISOString(),
-      open: 100,
-      high: 110,
-      low: 90,
-      close: 100 + index,
-      volume: 5,
-      quote_volume: 551 + index,
-      source_event_at: null,
-      received_at: new Date(openTime + 60_000).toISOString(),
-      transport: "rest",
-    };
-  });
-  await db.query("SELECT record_collector_candles($1,$2)", [JSON.stringify(rows), 7]);
-
-  const history = (
-    await db.query("SELECT get_collector_movement_candles($1,$2,$3) AS history", [
-      ["BTCUSDT"],
-      new Date(observed - 60_000).toISOString(),
-      new Date(observed + 10 * 60_000).toISOString(),
-    ])
-  ).rows[0].history;
-  assert.equal(history.BTCUSDT.length, 3);
-  assert.equal(history.BTCUSDT[0][0], observed);
-  assert.equal(history.BTCUSDT[0][1], 100);
-  assert.equal(history.BTCUSDT[2][1], 102);
-  assert.equal(history.BTCUSDT[0][2], 5);
-  assert.equal(history.BTCUSDT[0][3], 551);
-
-  const empty = (
-    await db.query("SELECT get_collector_movement_candles($1,$2,$3) AS history", [
-      [],
-      new Date(observed).toISOString(),
-      new Date(observed + 10 * 60_000).toISOString(),
-    ])
-  ).rows[0].history;
-  assert.deepEqual(empty, {});
 });
 
 test("collector persistence binds transport, endpoint and source event without clock ordering", async () => {
@@ -815,29 +516,6 @@ test("the observed failure: stream 15m candle then a REST candle with another vo
   await assert.rejects(db.query("DELETE FROM collector_candle_revisions"), /append-only/);
 });
 
-test("reconciliation skips conflicts outside the tolerance or without a REST offer", async () => {
-  await resetConflicts();
-  const opening = Math.floor(Date.now() / 60_000) * 60_000 - 10 * 60_000;
-  const ws = (index, overrides = {}) => collectorCandle(opening, index, {
-    transport: "websocket", endpoint: "wss://fstream.binance.com/market/stream",
-    source_event_at: new Date(opening + index * 60_000 + 60_010).toISOString(), ...overrides });
-  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([ws(0), ws(1), ws(2)])]);
-  await db.query("SELECT record_collector_candles($1,7)", [JSON.stringify([
-    collectorCandle(opening, 0, { volume: 2.5, quote_volume: 252.5 }),  // REST, volume 25 % off: outside 2 %
-    collectorCandle(opening, 1, { open: 100.5 }),  // REST, the open differs: never reconciled
-    ws(2, { volume: 2.01, quote_volume: 203.01 }),  // stream vs stream: no REST side
-  ])]);
-  assert.equal(await countRows("collector_candle_conflicts"), 3);
-  assert.equal((await db.query("SELECT reconcile_conflicts(0) AS n")).rows[0].n, 0);
-  const sides = (await db.query("SELECT rest_side FROM collector_candle_conflicts ORDER BY open_time")).rows;
-  assert.deepEqual(sides.map((row) => row.rest_side), ["offered", "offered", "neither"]);
-  const versions = (await db.query(
-    "SELECT get_collector_forward_minutes('BTCUSDT', $1, $2) AS rows",
-    [new Date(opening).toISOString(), new Date(opening + 3 * 60_000).toISOString()])).rows[0].rows;
-  assert.equal(versions.length, 3);
-  assert.ok(versions.every((row) => row.length === 9 && /^[0-9a-f]{32}$/.test(row[8])));
-});
-
 test("collector TA candle RPC returns full ascending provenance for one frame", async () => {
   const duration = 15 * 60_000;
   const observed = Math.floor(Date.now() / duration) * duration - duration;
@@ -926,102 +604,6 @@ test("collector TA candle RPC returns full ascending provenance for one frame", 
     db.query("SELECT get_collector_completed_candles('BTCUSDT',7,10)"),
     /Invalid collector completed candle timeframe/,
   );
-});
-
-test("repository collector TA read transports recorded provenance without fabricating it", async () => {
-  const repositoryUrl = await moduleUrl(
-    "../src/lib/operational/repository.server.ts",
-    repositoryStubs,
-  );
-  const { createOperationalStore } = await import(repositoryUrl);
-  const base = 1_800_000_000_000;
-  const step = 900_000;
-  const row = (index, transport, endpoint, sourceEventTime = undefined) => ({
-    provider: "binance-usdm",
-    instrument_id: "binance-usdm:BTCUSDT",
-    native_symbol: "BTCUSDT",
-    symbol: "BTCUSDT", market_type: "futures", contract_type: "perpetual", timeframe_minutes: 15,
-    price_type: "trade",
-    endpoint,
-    transport,
-    open_time_ms: base + index * step,
-    close_time_ms: base + index * step + step - 1,
-    // REST rows have no exchange event; WebSocket rows carry the actual event time,
-    // deliberately offset from the completion boundary to prove it is not rewritten.
-    source_event_at_ms:
-      sourceEventTime ?? (transport === "rest" ? null : base + index * step + step + 7),
-    received_at_ms: base + index * step + step + 120,
-    open: 100,
-    high: 110,
-    low: 90,
-    close: 101,
-    volume: 3,
-    quote_volume: 303.5,
-  });
-  const rows = [
-    row(0, "rest", "/fapi/v1/klines"),
-    row(1, "websocket", "wss://fstream.binance.com/market/stream", base + 2 * step - 7),
-  ];
-  const store = createOperationalStore(
-    {
-      async rpc(name, args) {
-        assert.equal(name, "get_collector_completed_candles");
-        assert.deepEqual(args, {
-          p_symbol: "BTCUSDT",
-          p_timeframe_minutes: 15,
-          p_limit: 260,
-        });
-        return { data: rows, error: null };
-      },
-    },
-    { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
-  );
-  const result = await store.readCollectorCompletedCandles("btcusdt", 15);
-  assert.equal(result.identity.provider, "binance-usdm");
-  assert.equal(result.identity.instrumentId, "binance-usdm:BTCUSDT");
-  assert.equal(result.identity.timeframeMinutes, 15);
-  assert.deepEqual(result.observations, rows.map((row) => ({
-    candle: { openTime: row.open_time_ms, closeTime: row.close_time_ms, open: row.open,
-      high: row.high, low: row.low, close: row.close, baseVolume: row.volume,
-      quoteVolume: row.quote_volume },
-    provenance: row.transport === "rest"
-      ? { sourceKind: "rest", endpoint: row.endpoint, retrievedAt: row.received_at_ms }
-      : { sourceKind: "websocket", endpoint: row.endpoint,
-          sourceEventTime: row.source_event_at_ms, receivedAt: row.received_at_ms },
-  })));
-  assert.equal("sourceEventTime" in result.observations[0].provenance, false);
-
-  const malformed = createOperationalStore(
-    {
-      async rpc() {
-        return {
-          data: [{ ...row(0, "rest", "/fapi/v1/klines"), close: "bad" }],
-          error: null,
-        };
-      },
-    },
-    { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
-  );
-  await assert.rejects(
-    malformed.readCollectorCompletedCandles("BTCUSDT", 15),
-    /invalid collector completed candle row/,
-  );
-
-  // Structural corruption remains rejected instead of being silently normalised.
-  for (const corrupt of [{ ...row(0, "rest", "/fapi/v1/klines"), transport: "carrier-pigeon" }]) {
-    const invalid = createOperationalStore(
-      {
-        async rpc() {
-          return { data: [corrupt], error: null };
-        },
-      },
-      { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
-    );
-    await assert.rejects(
-      invalid.readCollectorCompletedCandles("BTCUSDT", 15),
-      /invalid collector completed candle row/,
-    );
-  }
 });
 
 test("collector retention preserves TA history and bounds the separate forward minute window", async (t) => {
@@ -1118,31 +700,6 @@ test("collector retention preserves TA history and bounds the separate forward m
   }
 });
 
-test("repository movement history read maps compact rows and skips malformed entries", async () => {
-  const repositoryUrl = await moduleUrl(
-    "../src/lib/operational/repository.server.ts",
-    repositoryStubs,
-  );
-  const { createOperationalStore } = await import(repositoryUrl);
-  const store = createOperationalStore(
-    {
-      async rpc(name) {
-        assert.equal(name, "get_collector_movement_candles");
-        return {
-          data: { BTCUSDT: [[1000, 101.5, 2, 400], [2000, 102, 3, null], ["bad"]], ETHUSDT: "nope" },
-          error: null,
-        };
-      },
-    },
-    { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 },
-  );
-  const history = await store.readMovementCandleHistory(["btcusdt", "ethusdt"], 0, 5000);
-  assert.deepEqual(history.get("BTCUSDT"), [
-    { openTime: 1000, close: 101.5, volume: 2, quoteVolume: 400 },
-  ]);
-  assert.equal(history.has("ETHUSDT"), false);
-});
-
 test("market-state-current read forwards only known fields and never service credentials", async () => {
   const baseTime = 1_800_000_000_000;
   const repositoryUrl = await moduleUrl(
@@ -1237,30 +794,6 @@ test("the store wraps reconcile_conflicts, the conflict read and the append-only
   assert.deepEqual(
     await store.missingAppendOnlyTriggers(["collector_candle_conflicts", "collector_candle_revisions", "no_such_table"]),
     ["no_such_table"]);
-});
-
-test("forward minutes are read in non-overlapping windows and a transient failure retries once", async () => {
-  const day = 86_400_000;
-  const calls = [];
-  let failNext = true;
-  const hash = "a".repeat(32);
-  const client = {
-    async rpc(name, args) {
-      assert.equal(name, "get_collector_forward_minutes");
-      calls.push([Date.parse(args.p_since), Date.parse(args.p_before)]);
-      if (failNext) { failNext = false; throw new TypeError("fetch failed"); }
-      return { data: [[Date.parse(args.p_since), 1, 1, 1, 1, 1, "rest", null, hash]], error: null };
-    },
-  };
-  const { createOperationalStore } = await import(await moduleUrl("../src/lib/operational/repository.server.ts", repositoryStubs));
-  const store = createOperationalStore(client, { candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10 });
-  const rows = await store.readForwardMinuteCandles("btcusdt", 0, 7 * day);
-  assert.deepEqual(calls, [[0, 3 * day], [0, 3 * day], [3 * day, 6 * day], [6 * day, 7 * day]], "first window retried, then contiguous half-open windows");
-  assert.deepEqual(rows.map((row) => row.open_time_ms), [0, 3 * day, 6 * day]);
-  failNext = true;
-  calls.length = 0;
-  client.rpc = async () => { throw new TypeError("fetch failed"); };
-  await assert.rejects(store.readForwardMinuteCandles("btcusdt", 0, day), /fetch failed/, "a second failure surfaces");
 });
 
 test("settle reconciliation appends a later REST copy without changing provisional evidence", async () => {

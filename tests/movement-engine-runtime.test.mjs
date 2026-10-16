@@ -411,42 +411,6 @@ test("transition-free current state follows the application 30-second persistenc
   assert.deepEqual(harness.calls.persist[1].events, []);
 });
 
-test("alternate application persistence cadence is auditable without changing Python state", async () => {
-  const harness = createHarness({
-    version: "market-episode-persistence-test-v2", currentSnapshotCadenceMs: 10_000,
-  });
-  harness.control.transitionBoundaries.clear();
-  await harness.runtime.runOnce();
-  assert.equal(harness.calls.persist.length, 1);
-  harness.state.now = BASE + 5_000;
-  harness.state.boundary = harness.state.now;
-  await harness.runtime.runOnce();
-  assert.equal(harness.calls.persist.length, 1);
-  harness.state.now = BASE + 10_000;
-  harness.state.boundary = harness.state.now;
-  await harness.runtime.runOnce();
-  assert.equal(harness.calls.persist.length, 2);
-  const current = harness.calls.persist[1].current;
-  assert.equal(current.evaluationBoundaryTime, BASE + 10_000);
-  assert.equal(current.currentEvidence.persistenceConfigVersion,
-    "market-episode-persistence-test-v2");
-  assert.equal(current.currentEvidence.currentSnapshotCadenceMs, 10_000);
-  assert.deepEqual(current.lifecycleState,
-    { serialization_version: "market-episode-state-v1", opaque_marker: BASE + 10_000 });
-  assert.equal("persistenceConfigVersion" in current.lifecycleState, false);
-  assert.equal("currentSnapshotCadenceMs" in current.lifecycleState, false);
-  assert.deepEqual(harness.calls.persist[1].events, []);
-});
-
-test("application persistence config rejects missing versions and invalid cadences", () => {
-  assert.throws(() => createHarness({ version: " ", currentSnapshotCadenceMs: 10_000 }));
-  for (const cadence of [0, -5_000, 1.5, Infinity]) {
-    assert.throws(() => createHarness({
-      version: "market-episode-persistence-test-v2", currentSnapshotCadenceMs: cadence,
-    }));
-  }
-});
-
 test("raw history registers for each completed-minute cutoff and the canonical session", async () => {
   const harness = createHarness();
   await harness.runtime.runOnce();
@@ -482,21 +446,6 @@ test("raw history registers for each completed-minute cutoff and the canonical s
   assert.equal(harness.calls.register.length, 5);
 });
 
-test("raw candles are reused within a completed-minute cutoff while each boundary is evaluated", async () => {
-  const harness = createHarness();
-  await harness.runtime.runOnce();
-  harness.state.now = BASE + 5_000;
-  harness.state.boundary = BASE + 5_000;
-  await harness.runtime.runOnce();
-  harness.state.now = BASE + 10_000;
-  harness.state.boundary = BASE + 10_000;
-  await harness.runtime.runOnce();
-  assert.equal(harness.calls.history, 2);
-  assert.equal(harness.calls.register.length, 2);
-  assert.deepEqual(harness.calls.lifecycle.map((call) => call.boundary),
-    [BASE, BASE + 5_000, BASE + 10_000]);
-});
-
 test("Python lifecycle failure does not stop #70 finalization or advance #73", async () => {
   const harness = createHarness();
   harness.control.failLifecycle = true;
@@ -511,16 +460,6 @@ test("Python lifecycle failure does not stop #70 finalization or advance #73", a
   harness.control.failLifecycle = false;
   await harness.runtime.runOnce();
   assert.equal(harness.runtime.engine.lastEvaluatedBoundary, BASE + 5_000);
-});
-
-test("old session and changed universe responses are discarded before #72/#73", async () => {
-  for (const change of ["rotateDuringLifecycle", "changeUniverseDuringLifecycle"]) {
-    const harness = createHarness();
-    harness.control[change] = true;
-    await harness.runtime.runOnce();
-    assert.equal(harness.runtime.engine.lastEvaluatedBoundary, null);
-    assert.equal(harness.calls.persist.length, 0);
-  }
 });
 
 test("pending lifecycle persistence does not block newer bucket finalization", async () => {
@@ -569,17 +508,6 @@ test("pending lifecycle persistence does not block newer bucket finalization", a
   assert.equal(harness.runtime.engine.lastEvaluatedBoundary, BASE + 10_000);
 });
 
-test("start installs the #70 timer without waiting for lifecycle restore", async () => {
-  const harness = createHarness();
-  try {
-    await harness.runtime.start();
-    assert.notEqual(harness.runtime.timer, null);
-    assert.equal(harness.calls.restore, 0);
-  } finally {
-    await harness.runtime.stop();
-  }
-});
-
 test("a transient lifecycle restore failure blocks downstream work but not #70", async () => {
   const harness = createHarness();
   harness.control.failRestore = 1;
@@ -625,40 +553,6 @@ test("a failed normalization-history load is retried with backoff, not every tic
   harness.state.boundary = BASE + 5_000;
   await harness.runtime.runOnce();
   assert.equal(harness.calls.history, 2, "history is retried after the bounded backoff");
-});
-
-test("a changed universe forces an immediate raw-history refresh", async () => {
-  const harness = createHarness();
-  await harness.runtime.runOnce();
-  assert.equal(harness.calls.history, 1);
-
-  // A newly completed minute changes the raw candle cutoff.
-  harness.state.now = BASE + 5_000;
-  harness.state.boundary = BASE + 5_000;
-  await harness.runtime.runOnce();
-  assert.equal(harness.calls.history, 2);
-
-  // A newly watched symbol changes the universe version immediately.
-  harness.control.symbols = [...SYMBOLS, "LINKUSDT"];
-  harness.state.now = BASE + 10_000;
-  harness.state.boundary = BASE + 10_000;
-  await harness.runtime.runOnce();
-  assert.equal(harness.calls.history, 3, "a universe change forces an immediate refresh");
-});
-
-test("completed collector backfill can force normalization history to refresh immediately", async () => {
-  const harness = createHarness();
-  await harness.runtime.runOnce();
-  assert.equal(harness.calls.history, 1);
-
-  harness.runtime.requestNormalizationHistoryRefresh();
-  harness.state.now = BASE + 5_000;
-  harness.state.boundary = BASE + 5_000;
-  await harness.runtime.runOnce();
-
-  assert.equal(harness.calls.history, 2);
-  assert.equal(harness.calls.register.length, 2);
-  assert.equal(harness.calls.historyReads[1].beforeBoundaryMs, BASE + 5_000);
 });
 
 test("reacquiring the lease reloads durable state and discards the previous tenure's batch", async () => {

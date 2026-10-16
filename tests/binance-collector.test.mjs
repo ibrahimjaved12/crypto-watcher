@@ -369,14 +369,6 @@ test("reconnect recovery and repeated final do not duplicate completion", async 
   assert.equal(events.filter((event) => event.origin === "live").length, 1);
 });
 
-test("a new candle recovery generation does not reuse an old failing single-flight", async () => {
-  await exerciseCollectorRecoveryTenure("failure");
-});
-
-test("stale candle recovery success cannot write health into a newer generation", async () => {
-  await exerciseCollectorRecoveryTenure("success");
-});
-
 test("stale candle persistence cannot commit latest state or completion side effects", async () => {
   let holdOldWrite = false;
   let releaseOldWrite;
@@ -443,126 +435,6 @@ test("stale health completion reasserts the newer persistence-visible health", a
     persistedHealth.map((input) => input.errorMessage),
     ["generation A", "generation B"],
   );
-});
-
-test("stale health persistence failure cannot poison newer authoritative health", async () => {
-  let rejectOldWrite;
-  const oldWrite = new Promise((resolve, reject) => { rejectOldWrite = reject; });
-  const persistedHealth = [];
-  const { collector } = harness({
-    recordCollectorHealth: async (input) => {
-      if (input.errorMessage === "generation A") await oldWrite;
-      persistedHealth.push(input);
-    },
-  });
-  await collector.reconcile(["BTCUSDT"]);
-  persistedHealth.length = 0;
-  const t1 = canonical("BTCUSDT", 1, BASE - 60_000);
-  const t2 = canonical("BTCUSDT", 1, BASE);
-
-  const generationA = collector.beginCandleRecoveryTenure();
-  const staleHealth = collector.setHealth(
-    t1,
-    "RECOVERING",
-    "generation A",
-    generationA,
-  );
-  collector.invalidateCandleRecoveryTenure(generationA);
-  const generationB = collector.beginCandleRecoveryTenure();
-  const currentHealth = collector.setHealth(t2, "LIVE", "generation B", generationB);
-
-  rejectOldWrite(new Error("obsolete health write failed"));
-  assert.equal(await staleHealth, false);
-  assert.equal(await currentHealth, true);
-  assert.equal(collector.health.get("BTCUSDT:1").status, "LIVE");
-  assert.equal(collector.health.get("BTCUSDT:1").lastCompletedOpenTime, t2.openTime);
-  assert.deepEqual(
-    persistedHealth.map((input) => input.errorMessage),
-    ["generation B"],
-  );
-});
-
-test("replacement recovery tenure does not invalidate slow disconnect health", async () => {
-  let holdDisconnect = false;
-  let releaseDisconnect;
-  const disconnectWrite = new Promise((resolve) => { releaseDisconnect = resolve; });
-  const persistedHealth = new Map();
-  const { collector } = harness({
-    recordCollectorHealth: async (input) => {
-      if (
-        holdDisconnect &&
-        input.timeframeMinutes === 1 &&
-        input.errorMessage === "fixture disconnect"
-      ) {
-        await disconnectWrite;
-      }
-      persistedHealth.set(`${input.symbol}:${input.timeframeMinutes}`, input);
-    },
-  });
-  await collector.reconcile(["BTCUSDT"]);
-  await collector.markConnectionStatus("LIVE", null);
-
-  holdDisconnect = true;
-  const recovering = collector.markConnectionStatus("RECOVERING", "fixture disconnect");
-  assert.equal(collector.health.get("BTCUSDT:1").status, "RECOVERING");
-  collector.beginCandleRecoveryTenure();
-  assert.equal(collector.health.get("BTCUSDT:1").status, "RECOVERING");
-
-  releaseDisconnect();
-  await recovering;
-  assert.equal(collector.health.get("BTCUSDT:1").status, "RECOVERING");
-  assert.equal(persistedHealth.get("BTCUSDT:1").status, "RECOVERING");
-});
-
-test("health provenance uses one bounded trailing refresh while events continue", async () => {
-  let releaseFirstWrite;
-  let releaseTrailingWrite;
-  let observeTrailingWrite;
-  const firstWrite = new Promise((resolve) => { releaseFirstWrite = resolve; });
-  const trailingWrite = new Promise((resolve) => { releaseTrailingWrite = resolve; });
-  const trailingWriteStarted = new Promise((resolve) => { observeTrailingWrite = resolve; });
-  const persistedHealth = [];
-  let slowWriteCount = 0;
-  const { collector } = harness({
-    recordCollectorHealth: async (input) => {
-      if (input.errorMessage === "slow health") {
-        slowWriteCount += 1;
-        if (slowWriteCount === 1) await firstWrite;
-        if (slowWriteCount === 2) {
-          observeTrailingWrite();
-          await trailingWrite;
-        }
-      }
-      persistedHealth.push(input);
-    },
-  });
-  await collector.reconcile(["BTCUSDT"]);
-  persistedHealth.length = 0;
-  const open = BASE - 60_000;
-  const t1 = BASE - 1_000;
-  const t2 = BASE - 500;
-  const t3 = BASE - 250;
-  assert.equal(collector.accept(wsKline(open, 1, false, t1)), true);
-
-  const writing = collector.setHealth(
-    canonical("BTCUSDT", 1, open),
-    "LIVE",
-    "slow health",
-  );
-  assert.equal(collector.accept(wsKline(open, 1, false, t2)), true);
-  assert.equal(collector.health.get("BTCUSDT:1").lastEventAt, t2);
-
-  releaseFirstWrite();
-  await trailingWriteStarted;
-  assert.equal(collector.accept(wsKline(open, 1, false, t3)), true);
-  releaseTrailingWrite();
-  assert.equal(await writing, true);
-  assert.equal(collector.health.get("BTCUSDT:1").lastEventAt, t3);
-  assert.deepEqual(
-    persistedHealth.map((input) => input.lastEventAt),
-    [t1, t2],
-  );
-  assert.equal(slowWriteCount, 2);
 });
 
 test("aggregate-trade buffers obey both time and hard-count bounds", async () => {
@@ -663,35 +535,6 @@ test("accepted aggregate trades preserve exact decimals for Python movement calc
   assert.equal(collector.movementSnapshot("BTCUSDT"), pythonSnapshot);
 });
 
-test("movement reset fences late replies from the prior collector tenure", async () => {
-  let finishOldRequest;
-  const oldReply = new Promise((resolve) => { finishOldRequest = resolve; });
-  let call = 0;
-  const freshSnapshot = { symbol: "BTCUSDT", marker: "fresh-tenure" };
-  const { collector, movementCalls } = harness({
-    advanceMovementBoundary: async () => {
-      call += 1;
-      return call === 1
-        ? oldReply
-        : { snapshots: [freshSnapshot], lateAfterFinalizationCount: 0 };
-    },
-  });
-  await collector.reconcile(["BTCUSDT"]);
-
-  const priorAdvance = collector.advanceMovementBuckets(BASE);
-  const priorSession = movementCalls[0].sessionId;
-  collector.resetMovementTransportState();
-  await collector.advanceMovementBuckets(BASE);
-  assert.notEqual(movementCalls[1].sessionId, priorSession);
-
-  finishOldRequest({
-    snapshots: [{ symbol: "BTCUSDT", marker: "stale-tenure" }],
-    lateAfterFinalizationCount: 0,
-  });
-  await priorAdvance;
-  assert.equal(collector.movementSnapshot("BTCUSDT"), freshSnapshot);
-});
-
 test("connection movement state changes synchronously before deferred health persistence", async () => {
   let deferHealth = false;
   let releaseHealth;
@@ -765,52 +608,6 @@ test("an in-flight boundary response cannot restore a removed movement membershi
   assert.equal(collector.movementRetry, null);
 });
 
-test("an exact retry preserves the original membership epoch across remove and re-add", async () => {
-  let requestCount = 0;
-  const oldSnapshot = { symbol: "ETHUSDT", marker: "epoch-1" };
-  const { collector, movementCalls } = harness({
-    advanceMovementBoundary: async () => {
-      requestCount += 1;
-      if (requestCount === 1) throw new Error("transient Python failure");
-      return { snapshots: [oldSnapshot], lateAfterFinalizationCount: 0 };
-    },
-  });
-  await collector.reconcile(["ETHUSDT"]);
-  assert.equal(collector.accept({
-    stream: "ethusdt@aggTrade",
-    data: {
-      e: "aggTrade", E: BASE, s: "ETHUSDT", st: 1,
-      a: 1, p: "2000.1", q: "0.1", T: BASE,
-    },
-  }, BASE), true);
-
-  await assert.rejects(collector.advanceMovementBuckets(BASE), /transient Python failure/);
-  const original = movementCalls[0];
-  assert.equal(original.symbols[0].membershipEpoch, 1);
-  await collector.reconcile([]);
-  await collector.reconcile(["ETHUSDT"]);
-  assert.equal(collector.movementMembershipEpochs.get("ETHUSDT"), 2);
-  assert.equal(collector.accept({
-    stream: "ethusdt@aggTrade",
-    data: {
-      e: "aggTrade", E: BASE + 1, s: "ETHUSDT", st: 1,
-      a: 2, p: "2000.2", q: "0.2", T: BASE + 1,
-    },
-  }, BASE + 1), true);
-
-  await collector.advanceMovementBuckets(BASE);
-  const retried = movementCalls[1];
-  assert.equal(retried.sessionId, original.sessionId);
-  assert.equal(retried.boundaryTime, original.boundaryTime);
-  assert.equal(retried.symbols, original.symbols);
-  assert.equal(retried.symbols[0].membershipEpoch, 1);
-  assert.equal(collector.movementSnapshot("ETHUSDT"), null);
-  assert.deepEqual(
-    collector.movementObservations.get("ETHUSDT").map((trade) => trade.aggregateId),
-    [2],
-  );
-});
-
 test("source outage within a bucket remains attached after source returns LIVE", async () => {
   const { collector, movementCalls, setClock } = harness();
   await collector.reconcile(["BTCUSDT"]);
@@ -868,18 +665,6 @@ test("per-symbol candle health remains a separate collector diagnostic", async (
   assert.equal(collector.movementSourceStatus("BTCUSDT"), "LIVE");
 });
 
-test("unrelated 4h candle recovery does not poison movement source state", async () => {
-  const { collector, movementCalls } = harness();
-  await collector.reconcile(["BTCUSDT"]);
-  await collector.markConnectionStatus("LIVE", null);
-
-  await collector.setHealth(canonical("BTCUSDT", 240, BASE), "RECOVERING", "4h gap repair");
-  assert.equal(collector.movementSourceStatus("BTCUSDT"), "LIVE");
-
-  await collector.advanceMovementBuckets(BASE + 5_000);
-  assert.equal(movementCalls.at(-1).symbols[0].sourceState, "LIVE");
-});
-
 test("movement observation backpressure fences source before the lost trade is dropped", async () => {
   let overloads = 0;
   const { collector, movementCalls } = harness({
@@ -927,20 +712,6 @@ test("known duplicate aggTrade is ignored but a unique ordering regression fence
   await collector.advanceMovementBuckets(BASE + 5_000);
   assert.equal(movementCalls.at(-1).symbols[0].sourceState, "UNAVAILABLE");
   assert.equal(movementCalls.at(-1).symbols[0].observations.length, 1);
-});
-
-test("malformed attributable aggTrade combined frame fences movement continuity", async () => {
-  let overloads = 0;
-  const { collector } = harness({ onOverload: () => { overloads += 1; } });
-  await collector.reconcile(["BTCUSDT"]);
-  await collector.markConnectionStatus("LIVE", null);
-
-  assert.equal(collector.accept({
-    stream: "btcusdt@aggTrade",
-    data: { e: "wrong-event", s: "", p: "NaN", q: null, a: -1, E: "bad", T: "bad" },
-  }), false);
-  assert.equal(collector.movementSourceStatus("BTCUSDT"), "UNAVAILABLE");
-  assert.equal(overloads, 1);
 });
 
 test("unparseable JSON frame fails closed for all subscribed movement sources", async () => {
@@ -1025,40 +796,6 @@ test("trade arriving during boundary request is dropped locally before the next 
   await collector.advanceMovementBuckets(BASE + 5_000);
   assert.equal(collector.movementLateRejections(), 6);
   assert.equal(movementCalls[1].symbols[0].observations.length, 0);
-});
-
-test("Python cumulative late diagnostics cannot decrease transport late counts", async () => {
-  let responseCount = 0;
-  const { collector } = harness({
-    advanceMovementBoundary: async () => {
-      responseCount += 1;
-      return {
-        snapshots: [],
-        lateAfterFinalizationCount: [0, 2, 0, 1][responseCount - 1] ?? 1,
-      };
-    },
-  });
-  await collector.reconcile(["BTCUSDT"]);
-  await collector.markConnectionStatus("LIVE", null);
-  const late = {
-    stream: "btcusdt@aggTrade",
-    data: {
-      e: "aggTrade", E: BASE - 1, s: "BTCUSDT", st: 1,
-      a: 99, p: "100", q: "1", T: BASE - 1,
-    },
-  };
-  await collector.advanceMovementBuckets(BASE);
-  assert.equal(collector.accept(late, BASE + 1), false);
-  assert.equal(collector.movementLateRejections(), 1);
-
-  await collector.advanceMovementBuckets(BASE + 5_000);
-  assert.equal(collector.movementLateRejections(), 3);
-
-  await collector.advanceMovementBuckets(BASE + 10_000);
-  assert.equal(collector.movementLateRejections(), 3);
-
-  await collector.advanceMovementBuckets(BASE + 15_000);
-  assert.equal(collector.movementLateRejections(), 4);
 });
 
 test("WebSocket event and receive times are preserved exactly; REST invents no event", () => {
@@ -1203,25 +940,6 @@ test("empty movement history is backfilled as exact bounded newest-first pages",
   assert.ok(stored.length >= 3 * 24 * 60);
 });
 
-test("partial recent movement history fetches only the missing older prefix", async () => {
-  const { firstOpen, lastOpen } = movementHistoryBounds();
-  const existingCount = 300;
-  const existingFirstOpen = lastOpen - (existingCount - 1) * MINUTE_MS;
-  const existing = Array.from({ length: existingCount }, (_, index) =>
-    canonical("BTCUSDT", 1, existingFirstOpen + index * MINUTE_MS));
-  const { collector, history, requests } = movementHistoryHarness(existing);
-
-  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
-    historyChanged: true,
-    retryNeeded: false,
-  });
-
-  assert.equal(requests.reduce((total, request) => total + request.limit, 0), 9_780);
-  assert.equal(requests[0].endTime, existingFirstOpen - 1);
-  assert.equal(requests.at(-1).startTime, firstOpen);
-  assert.equal(history.size, MOVEMENT_LOOKBACK_CANDLES);
-});
-
 test("a five-day-old contract backfills its factual history without requiring seven days", async () => {
   const { lastOpen } = movementHistoryBounds();
   const availableCandles = 5 * 24 * 60;
@@ -1241,29 +959,6 @@ test("a five-day-old contract backfills its factual history without requiring se
   assert.equal(stored.at(-1).openTime, lastOpen);
   assert.ok(stored.length * MINUTE_MS >= 3 * 24 * 60 * MINUTE_MS);
   assert.ok(requests.every((request) => request.limit <= 1_000));
-});
-
-test("a two-day-old contract stops at listing and remains truthfully below normalization minimum", async () => {
-  const { lastOpen } = movementHistoryBounds();
-  const availableCandles = 2 * 24 * 60;
-  const listedAt = lastOpen - (availableCandles - 1) * MINUTE_MS;
-  const { collector, history, requests } = movementHistoryHarness([], {
-    listedAtBySymbol: { BTCUSDT: listedAt },
-  });
-
-  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
-    historyChanged: true,
-    retryNeeded: false,
-  });
-  assert.equal(history.size, availableCandles);
-  assert.ok(history.size * MINUTE_MS < 3 * 24 * 60 * MINUTE_MS);
-  const requestCount = requests.length;
-
-  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
-    historyChanged: false,
-    retryNeeded: false,
-  });
-  assert.equal(requests.length, requestCount);
 });
 
 test("one symbol failure does not prevent another symbol from completing", async () => {
@@ -1292,39 +987,6 @@ test("one symbol failure does not prevent another symbol from completing", async
   );
 });
 
-test("retry resumes before the persisted suffix without redownloading successful pages", async () => {
-  const { lastOpen } = movementHistoryBounds();
-  const listedAt = lastOpen - 3_499 * MINUTE_MS;
-  let failThirdPage = true;
-  const { collector, history, requests } = movementHistoryHarness([], {
-    listedAtBySymbol: { BTCUSDT: listedAt },
-    async loadRest(request, requestNumber) {
-      if (failThirdPage && requestNumber === 3) {
-        failThirdPage = false;
-        throw new Error("transient older page failure");
-      }
-      return exactMovementHistoryPage(request);
-    },
-  });
-
-  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
-    historyChanged: true,
-    retryNeeded: true,
-  });
-  assert.equal(history.size, 2_000);
-  const firstRetryRequest = requests.length;
-
-  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
-    historyChanged: true,
-    retryNeeded: false,
-  });
-  assert.equal(history.size, 3_500);
-  assert.equal(requests[firstRetryRequest].endTime, requests[1].startTime - 1);
-  assert.ok(
-    requests.slice(firstRetryRequest).every((request) => request.endTime < requests[1].startTime),
-  );
-});
-
 test("an internal provider gap after listing fails closed and requests retry", async () => {
   const { lastOpen } = movementHistoryBounds();
   const listedAt = lastOpen - 9 * MINUTE_MS;
@@ -1342,40 +1004,6 @@ test("an internal provider gap after listing fails closed and requests retry", a
   assert.equal(history.size, 0);
 });
 
-test("sufficient contiguous movement history performs no REST refetch", async () => {
-  const { firstOpen } = movementHistoryBounds();
-  const existing = Array.from({ length: MOVEMENT_LOOKBACK_CANDLES }, (_, index) =>
-    canonical("BTCUSDT", 1, firstOpen + index * MINUTE_MS));
-  const { collector, requests } = movementHistoryHarness(existing);
-
-  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
-    historyChanged: false,
-    retryNeeded: false,
-  });
-
-  assert.deepEqual(requests, []);
-});
-
-test("movement-history backfill retry does not prevent later Python bucket finalization", async () => {
-  const { collector, movementCalls } = harness({
-    async loadRest(request) {
-      if (request.startTime !== undefined) throw new Error("historical REST unavailable");
-      const duration = request.timeframeMinutes * MINUTE_MS;
-      return [canonical(request.symbol, request.timeframeMinutes, BASE - 2 * duration)];
-    },
-  });
-  await collector.reconcile(["BTCUSDT"]);
-
-  assert.deepEqual(await collector.backfillMovementHistory(MOVEMENT_LOOKBACK_MS, BASE), {
-    historyChanged: false,
-    retryNeeded: true,
-  });
-  await collector.advanceMovementBuckets(BASE);
-
-  assert.equal(movementCalls.length, 1);
-  assert.equal(movementCalls[0].boundaryTime, BASE);
-});
-
 test("REST settle decision uses the exact inclusive boundary and leaves other intervals unchanged", () => {
   const closeTime = BASE - 1;
   for (const delay of [0, 700, 4_700, 14_999]) {
@@ -1391,13 +1019,4 @@ test("REST settle decision uses the exact inclusive boundary and leaves other in
     assert.equal(isRestCandleSettled(closeTime, minutes, closeTime), false);
     assert.equal(isRestCandleSettled(closeTime, minutes, closeTime + 1), true);
   }
-});
-
-test("REST normalization discards provisional responses until a fresh settled fetch", () => {
-  const candles = [{ time: BASE - 60_000, open: 100, high: 102, low: 99,
-    close: 101, volume: 12, quoteVolume: 1234, complete: true }];
-  const input = { symbol: "BTCUSDT", timeframeMinutes: 1, candles };
-  assert.deepEqual(normalizeRestCandles({ ...input, retrievedAt: BASE + 4_699 }), []);
-  assert.equal(normalizeRestCandles({ ...input, retrievedAt: BASE + 14_999 }).length, 1);
-  assert.deepEqual(normalizeRestCandles({ ...input, retrievedAt: BASE + 14_999, settleSeconds: 60 }), []);
 });

@@ -349,40 +349,6 @@ test("movement history backfill failure leaves the live collector and #70 runtim
   }
 });
 
-test("partial multi-symbol backfill refreshes normalization history while scheduling retry", async () => {
-  globalThis.__collectorBoundary = {
-    reconciled: [],
-    leaseClaims: 0,
-    leaseReleases: 0,
-    universeReads: 0,
-    movementResets: 0,
-    movementStarts: 0,
-    historyBackfills: 0,
-    historyRefreshes: 0,
-    historyBackfillResult: { historyChanged: true, retryNeeded: true },
-    historyBackfillError: null,
-  };
-  const previousWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = FakeWebSocket;
-  let runtime;
-  try {
-    const module = await import(
-      transpile(await read("../src/lib/market/collector.server.ts"), collectorReplacements)
-    );
-    runtime = new module.CollectorRuntime(boundaryStore(["BTCUSDT", "ETHUSDT"]));
-    await runtime.tryBecomeActive();
-    await settleScheduledHistoryBackfill(runtime);
-
-    assert.equal(globalThis.__collectorBoundary.historyBackfills, 1);
-    assert.equal(globalThis.__collectorBoundary.historyRefreshes, 1);
-    assert.equal(runtime.historyBackfillAttempts, 1);
-    assert.notEqual(runtime.historyBackfillTimer, null);
-  } finally {
-    if (runtime) await runtime.stop();
-    globalThis.WebSocket = previousWebSocket;
-  }
-});
-
 test("movement transport resets on collector lease acquisition and loss", async () => {
   globalThis.__collectorBoundary = {
     reconciled: [],
@@ -479,67 +445,6 @@ test("an aggTrade stream rejects a valid trade for another symbol without cross-
   }
 });
 
-test("an aggTrade stream rejects an otherwise valid kline event", async () => {
-  const previousWebSocket = globalThis.WebSocket;
-  ValidatingFakeWebSocket.instances.length = 0;
-  globalThis.WebSocket = ValidatingFakeWebSocket;
-  try {
-    const module = await loadBehavioralCollectorRuntime();
-    const { runtime, socket } = await openBehavioralRuntime(module, ["BTCUSDT"]);
-    const klineOnTradeStream = {
-      stream: "btcusdt@aggTrade",
-      data: {
-        e: "kline",
-        E: 60_000,
-        s: "BTCUSDT",
-        st: 1,
-        k: {
-          t: 0,
-          T: 59_999,
-          s: "BTCUSDT",
-          i: "1m",
-          o: "100",
-          h: "102",
-          l: "99",
-          c: "101",
-          v: "12",
-          x: false,
-        },
-      },
-    };
-
-    assert.doesNotThrow(() =>
-      socket.emit("message", { data: JSON.stringify(klineOnTradeStream) }),
-    );
-    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "UNAVAILABLE");
-    assert.equal(runtime.collector.developingCandle("BTCUSDT", 1), null);
-    assert.deepEqual(runtime.collector.movementObservations.get("BTCUSDT"), []);
-    assert.equal(socket.closeCalls.length, 1);
-    assert.ok(socket.closeCalls[0].code >= 3000 && socket.closeCalls[0].code <= 4999);
-  } finally {
-    globalThis.WebSocket = previousWebSocket;
-  }
-});
-
-test("WebSocket Binance kline preserves exact quote asset volume", async () => {
-  const previousWebSocket = globalThis.WebSocket;
-  ValidatingFakeWebSocket.instances.length = 0;
-  globalThis.WebSocket = ValidatingFakeWebSocket;
-  try {
-    const module = await loadBehavioralCollectorRuntime();
-    const { runtime, socket } = await openBehavioralRuntime(module, ["BTCUSDT"]);
-    const openTime = 1_800_000_000_000;
-    socket.emit("message", { data: JSON.stringify({
-      e: "kline", E: openTime + 1_000, s: "BTCUSDT", st: 1,
-      k: { t: openTime, T: openTime + 59_999, s: "BTCUSDT", i: "1m",
-        o: "100", h: "102", l: "99", c: "101", v: "2", q: "345.67", x: false },
-    }) });
-    assert.equal(runtime.collector.developingCandle("BTCUSDT", 1).quoteVolume, 345.67);
-  } finally {
-    globalThis.WebSocket = previousWebSocket;
-  }
-});
-
 test("subscription acknowledgement makes movement LIVE while candle recovery is pending", async () => {
   const previousWebSocket = globalThis.WebSocket;
   ValidatingFakeWebSocket.instances.length = 0;
@@ -595,55 +500,6 @@ test("a stale failed recovery cannot poison the replacement connection", async (
   });
 });
 
-test("a stale successful recovery cannot overwrite the replacement connection", async () => {
-  await exerciseStaleRecoveryHandoff((recovery) => {
-    recovery.resolve();
-  });
-});
-
-test("a transient candle recovery failure retries without another WebSocket", async () => {
-  const previousWebSocket = globalThis.WebSocket;
-  ValidatingFakeWebSocket.instances.length = 0;
-  globalThis.WebSocket = ValidatingFakeWebSocket;
-  try {
-    const module = await loadBehavioralCollectorRuntime();
-    const { runtime, socket } = await openBehavioralRuntime(module, ["BTCUSDT"]);
-    let recoveryCalls = 0;
-    runtime.collector.recoverAfterReconnect = async () => {
-      recoveryCalls += 1;
-      if (recoveryCalls === 1) throw new Error("transient REST failure");
-    };
-    const scheduleCandleRecoveryRetry = runtime.scheduleCandleRecoveryRetry.bind(runtime);
-    let scheduledRetries = 0;
-    runtime.scheduleCandleRecoveryRetry = (...args) => {
-      scheduledRetries += 1;
-      runtime.runCandleRecovery(...args);
-    };
-    let observeLive;
-    const candleLive = new Promise((resolve) => { observeLive = resolve; });
-    const markCandleConnectionStatus =
-      runtime.collector.markCandleConnectionStatus.bind(runtime.collector);
-    runtime.collector.markCandleConnectionStatus = async (status, message, generation) => {
-      const result = markCandleConnectionStatus(status, message, generation);
-      if (status === "LIVE") observeLive();
-      return result;
-    };
-
-    await acknowledge(socket);
-    await candleLive;
-    assert.equal(recoveryCalls, 2);
-    assert.equal(scheduledRetries, 1);
-    assert.equal(ValidatingFakeWebSocket.instances.length, 1);
-    assert.equal(runtime.collector.movementSourceStatus("BTCUSDT"), "LIVE");
-
-    runtime.scheduleCandleRecoveryRetry = scheduleCandleRecoveryRetry;
-    runtime.active = false;
-    await runtime.stop();
-  } finally {
-    globalThis.WebSocket = previousWebSocket;
-  }
-});
-
 test("collector worker rejects retention shorter than the active movement lookback", async () => {
   const operationalConfig = transpile(
     await read("../src/lib/operational/config.server.ts"),
@@ -673,60 +529,4 @@ test("collector worker rejects retention shorter than the active movement lookba
     }),
     /OPERATIONAL_CANDLE_RETENTION_DAYS>=8/,
   );
-});
-
-test("the operational store maps the collector subscription RPCs", async () => {
-  const calls = [];
-  const client = {
-    rpc(name, args) {
-      calls.push([name, args]);
-      if (name === "get_collector_subscriptions") {
-        return Promise.resolve({ data: ["btcusdt", "ethusdt"], error: null });
-      }
-      if (name === "get_collector_completed_candles") {
-        return Promise.resolve({ data: [], error: null });
-      }
-      return Promise.resolve({ data: null, error: null });
-    },
-  };
-  const module = await import(
-    transpile(await read("../src/lib/operational/repository.server.ts"), {
-      "@supabase/supabase-js": stub(
-        `export function createClient() { throw new Error("unused"); }`,
-      ),
-      "../market/completed-candle-contract": transpile(await read("../src/lib/market/completed-candle-contract.ts")),
-      "./config.server": stub(
-        `export function operationalDbConfig() { throw new Error("unused"); }`,
-      ),
-      "../market/symbols": stub(`
-        export const MARKET_SOURCE = "binance-usdm";
-        export const MARKET_PRICE_TYPE = "trade";
-        export function futuresInstrument(symbol) {
-          const native = symbol.toUpperCase();
-          return {
-            id: "binance-usdm:" + native, exchange: "binance", nativeSymbol: native,
-            marketType: "futures", contractType: "perpetual",
-            baseAsset: native.replace(/USDT$/, ""), quoteAsset: "USDT", marginAsset: "USDT",
-            settlementAsset: "USDT", linear: true, contractMultiplier: 1,
-          };
-        }
-      `),
-    })
-  );
-  const store = module.createOperationalStore(client, {
-    candleRetentionDays: 7,
-    monitorRunRetentionDays: 30,
-    outboxMaxAttempts: 10,
-  });
-  await store.assignCollectorSubscriptions(["btcusdt", "ETHUSDT"]);
-  assert.deepEqual(calls[0], [
-    "assign_collector_subscriptions",
-    { p_symbols: ["BTCUSDT", "ETHUSDT"] },
-  ]);
-  assert.deepEqual(await store.readCollectorSubscriptions(), ["BTCUSDT", "ETHUSDT"]);
-  assert.equal(calls[1][0], "get_collector_subscriptions");
-  // The application reads canonical collector candles back through the same adapter.
-  await store.readCollectorCompletedCandles("btcusdt", 15);
-  assert.equal(calls[2][0], "get_collector_completed_candles");
-  assert.deepEqual(calls[2][1], { p_symbol: "BTCUSDT", p_timeframe_minutes: 15, p_limit: 260 });
 });

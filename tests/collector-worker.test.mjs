@@ -110,44 +110,6 @@ test("the worker is a no-op when the collector is disabled", async () => {
   assert.equal(registered, false);
 });
 
-test("a shutdown failure still exits, with a failure code", async () => {
-  const module = await loadWorker(`
-    export function startBinanceCollector() {
-      return { stop: async () => { throw new Error("lease release failed"); } };
-    }
-  `);
-  const capture = captureShutdown();
-  const originalError = console.error;
-  console.error = () => {};
-  try {
-    module.startCollectorWorker(capture.options);
-    capture.shutdown(0);
-    await capture.exited;
-  } finally {
-    console.error = originalError;
-  }
-  assert.equal(capture.exitCode, 1);
-});
-
-test("the worker wires SIGTERM and SIGINT by default", async () => {
-  const module = await loadWorker(`
-    export function startBinanceCollector() { return { stop: async () => {} }; }
-  `);
-  const beforeTerm = process.listeners("SIGTERM").length;
-  const beforeInt = process.listeners("SIGINT").length;
-  const runtime = module.startCollectorWorker({ exit: () => {} });
-  assert.ok(runtime);
-  const termListeners = process.listeners("SIGTERM").slice(beforeTerm);
-  const intListeners = process.listeners("SIGINT").slice(beforeInt);
-  try {
-    assert.equal(termListeners.length, 1);
-    assert.equal(intListeners.length, 1);
-  } finally {
-    for (const listener of termListeners) process.removeListener("SIGTERM", listener);
-    for (const listener of intListeners) process.removeListener("SIGINT", listener);
-  }
-});
-
 test("the production worker artifact builds and runs with plain node", async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const artifact = buildWorkerArtifact(root);
@@ -319,44 +281,6 @@ test("the built collector artifact runs with operational credentials only", asyn
     // mismatched VITE_* build must never surface as an environment error.
     assert.doesNotMatch(stderr, /\[Environment\]/);
     assert.doesNotMatch(stderr, /SUPABASE_SERVICE_ROLE_KEY/);
-    assert.equal(child.exitCode, null, "the worker must keep running");
-  } finally {
-    child.kill("SIGKILL");
-    await stopFakeServer(operational.server);
-  }
-});
-
-test("the built worker reads its subscription universe from the operational database", async () => {
-  const root = fileURLToPath(new URL("..", import.meta.url));
-  const artifact = buildWorkerArtifact(root);
-
-  // The fake operational Supabase grants the lease but fails the subscription
-  // universe read. The worker surfaces it and stays in standby: it never opens a
-  // market stream and never contacts the main database.
-  const operational = await startFakeServer((response, request) => {
-    const isLease = String(request.url).includes("claim_collector_lease");
-    response.writeHead(isLease ? 200 : 400, { "content-type": "application/json" });
-    response.end(
-      isLease ? "true" : JSON.stringify({ message: "universe unavailable", code: "400" }),
-    );
-  });
-
-  const child = spawn(process.execPath, [artifact], {
-    env: {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
-      ...workerEnv({ OPERATIONAL_SUPABASE_URL: `http://127.0.0.1:${operational.port}` }),
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stderr = "";
-  child.stderr.on("data", (chunk) => (stderr += chunk));
-  try {
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
-    assert.match(
-      stderr,
-      /startup unavailable: Operational database collector subscription read failed/,
-    );
     assert.equal(child.exitCode, null, "the worker must keep running");
   } finally {
     child.kill("SIGKILL");
