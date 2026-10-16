@@ -5,10 +5,14 @@ implicit ``core`` tier is every other discovered module, so a new test file alwa
 A listed name that matches no module is an error.
 
 ``--changed-file`` (study only) restricts the tier to the modules whose imports reach a changed path
-(``select_tests.py``); no file means every module of the tier. Each module runs as
+(``select_tests.py``); no file means every module of the tier.
+
+``core`` packs its modules into at most ``--jobs`` bins (greedy longest-processing-time on ``WEIGHTS``)
+and runs each bin as one ``python -m unittest <module> ...`` subprocess, so interpreter and import
+start-up is paid once per bin, not once per module. The other tiers run each module as
 ``python -m unittest <module>`` in its own subprocess (same discovery names as
-``python -m unittest discover -s tests``), longest first, ``--jobs`` at a time, and its output is
-printed when it completes. A per-module seconds table and a ``run_shard:`` summary line close the run.
+``python -m unittest discover -s tests``), longest first, ``--jobs`` at a time. Output is printed only
+for a failed module or bin. A seconds table and a ``run_shard:`` summary line close the run.
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ TESTS = Path(__file__).resolve().parent
 PYTHON_DIR = TESTS.parent
 CORE, STUDY = "core", "study"
 # Seconds measured on a 2-core sandbox; only the order matters (longest first). Unknown modules weigh 1.
+# core also uses these weights to pack its modules into bins.
 WEIGHTS = {
     "test_historical_market_state_study_part_c": 53,
     "test_historical_market_state_study": 36,
@@ -72,13 +77,32 @@ def modules_for(tier: str, shards: dict[str, list[str]], modules: set[str]) -> s
     return set(shards[tier])
 
 
-def run_module(module: str) -> tuple[str, int, float, int, str]:
+def weight(module: str) -> float:
+    return WEIGHTS.get(module, 1)
+
+
+def pack_bins(modules: list[str], jobs: int) -> list[list[str]]:
+    """Greedy longest-processing-time: heaviest module first, each into the currently lightest bin."""
+    bins: list[list[str]] = [[] for _ in range(max(1, min(jobs, len(modules))))]
+    loads = [0.0] * len(bins)
+    for module in sorted(modules, key=lambda name: (-weight(name), name)):
+        lightest = loads.index(min(loads))
+        bins[lightest].append(module)
+        loads[lightest] += weight(module)
+    return bins
+
+
+def run_modules(modules: list[str]) -> tuple[int, float, int, str]:
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(TESTS), str(PYTHON_DIR)])}
     started = time.monotonic()
-    result = subprocess.run([sys.executable, "-m", "unittest", module], cwd=PYTHON_DIR, env=env,
+    result = subprocess.run([sys.executable, "-m", "unittest", *modules], cwd=PYTHON_DIR, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
     ran = re.search(r"^Ran (\d+) tests? in", result.stdout, re.MULTILINE)
-    return module, result.returncode, time.monotonic() - started, int(ran.group(1)) if ran else 0, result.stdout
+    return result.returncode, time.monotonic() - started, int(ran.group(1)) if ran else 0, result.stdout
+
+
+def run_module(module: str) -> tuple[str, int, float, int, str]:
+    return (module, *run_modules([module]))
 
 
 def main(argv: list[str]) -> int:
@@ -100,22 +124,34 @@ def main(argv: list[str]) -> int:
             return 0
     if not selected:
         raise SystemExit(f"tier {args.tier!r} selected no tests")
-    selected.sort(key=lambda module: (-WEIGHTS.get(module, 1), module))
+    selected.sort(key=lambda module: (-weight(module), module))
     print(f"run_shard: {args.tier}: {len(selected)} module(s), {args.jobs} job(s)", flush=True)
     started = time.monotonic()
     rows: list[tuple[str, int, float, int]] = []
-    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        for module, code, seconds, tests, output in pool.map(run_module, selected):
-            print(f"\n=== {module} ({tests} tests, {seconds:.1f}s) {'ok' if code == 0 else 'FAILED'} ===", flush=True)
-            if code != 0:
-                print(output, flush=True)
-            rows.append((module, code, seconds, tests))
-    print("\nseconds  tests  module")
-    for module, code, seconds, tests in sorted(rows, key=lambda row: -row[2]):
-        print(f"{seconds:7.1f}  {tests:5d}  {module}{'  FAILED' if code else ''}")
-    failed = [module for module, code, _, _ in rows if code]
+    if args.tier == CORE:
+        bins = pack_bins(selected, args.jobs)
+        with ThreadPoolExecutor(max_workers=len(bins)) as pool:
+            for number, (modules, (code, seconds, tests, output)) in enumerate(
+                    zip(bins, pool.map(run_modules, bins)), start=1):
+                print(f"\n=== bin {number} (modules={len(modules)}, tests={tests}, {seconds:.1f}s) "
+                      f"{'ok' if code == 0 else 'FAILED'} ===", flush=True)
+                print("  " + " ".join(modules), flush=True)
+                if code != 0:
+                    print(output, flush=True)
+                rows.append((f"bin {number}", code, seconds, tests))
+    else:
+        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+            for module, code, seconds, tests, output in pool.map(run_module, selected):
+                print(f"\n=== {module} ({tests} tests, {seconds:.1f}s) {'ok' if code == 0 else 'FAILED'} ===", flush=True)
+                if code != 0:
+                    print(output, flush=True)
+                rows.append((module, code, seconds, tests))
+    print(f"\nseconds  tests  {'bin' if args.tier == CORE else 'module'}")
+    for name, code, seconds, tests in sorted(rows, key=lambda row: -row[2]):
+        print(f"{seconds:7.1f}  {tests:5d}  {name}{'  FAILED' if code else ''}")
+    failed = [name for name, code, _, _ in rows if code]
     total = sum(tests for _, _, _, tests in rows)
-    print(f"run_shard: {args.tier} modules={len(rows)} tests={total} failed={len(failed)} "
+    print(f"run_shard: {args.tier} modules={len(selected)} tests={total} failed={len(failed)} "
           f"seconds={time.monotonic() - started:.0f}", flush=True)
     return 1 if failed else 0
 

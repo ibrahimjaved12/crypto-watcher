@@ -120,7 +120,7 @@ Setup charts are rendered on the owner's machine from windows captured at event 
 - Be specific: correct architecture, correct math and trading-algorithm technicality.
 - Include good improvements you notice rather than leaving them as optional notes.
 - Never invent prices, news, or certainty. The repo is public: no secrets, no private notes.
-- Python CI budget: the whole Python job must finish in under 3 minutes wall-clock. New test modules should stay under ~10 s; heavier statistical acceptance tests use tests/slow.py and run in slow-tests.yml; update python/tests/shards.json if a module exceeds ~40 s.
+- Python CI budget: the whole Python job must finish in under 2 minutes wall-clock. New test modules should stay under ~10 s; heavier statistical acceptance tests use tests/slow.py and run in slow-tests.yml; update python/tests/shards.json if a module exceeds ~40 s.
 
 ## 7. Known drift under review (2026-10-07)
 

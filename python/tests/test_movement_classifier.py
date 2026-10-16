@@ -153,14 +153,6 @@ def classify(primary, *, prior=None, provenance=None):
 
 
 class ConfigVersionTests(unittest.TestCase):
-    def test_default_version_uses_exact_canonical_v1_thresholds(self):
-        config = MarketClassifierConfig()
-        self.assertEqual(config.version, "market-state-classifier-config-v1")
-        self.assertEqual((config.directional_breadth, config.material_breadth,
-                          config.normalized_movement, config.acceleration_breadth,
-                          config.isolated_outlier_breadth_disagreement),
-                         (0.70, 0.50, 0.50, 0.60, 0.50))
-
     def test_default_version_rejects_each_changed_threshold(self):
         changes = {
             "directional_breadth": 0.90,

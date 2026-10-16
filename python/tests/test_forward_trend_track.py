@@ -4,6 +4,7 @@ from __future__ import annotations
 from array import array
 from decimal import Decimal
 from fractions import Fraction
+from functools import lru_cache
 import unittest
 
 import numpy as np
@@ -22,7 +23,9 @@ SYMBOLS = data_lake.SYMBOLS[:3]
 GAPS = {SYMBOLS[1]: (200, 470)}  # one in the warm-up, one inside the tracked window
 
 
+@lru_cache(maxsize=None)
 def fixture(seed=7):
+    """Built once per seed; callers only read it (``forward_symbols`` and ``backtest_symbols`` copy)."""
     rng = np.random.default_rng(seed)
     out = {}
     for n, symbol in enumerate(SYMBOLS):
