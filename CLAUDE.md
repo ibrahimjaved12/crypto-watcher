@@ -62,7 +62,7 @@ that until the tool proves it makes money.
   realistic futures costs (fees, funding, slippage, liquidation).
 - Later: ML/AI layers, only if they measurably beat simple baselines out of sample.
 
-Forex is planned for later as a separate, owner-led strategy track (#374); nothing is scheduled.
+Forex is in scope as a second market next to crypto (#374): CFD-style spot and futures, same repo and name, dashboard Crypto/Forex toggle, backend computes both. Design and decisions: docs/forex.md.
 
 ## 3. Current priorities (set 2026-10-07)
 
