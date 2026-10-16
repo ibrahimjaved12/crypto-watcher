@@ -6,7 +6,9 @@ export const SELF_HEAL_STALE_FOR_MS = 20_000;
 export const SELF_HEAL_COOLDOWN_MS = 3 * 60_000;
 
 /**
- * Runs one monitor check on the user's behalf when TA or the movement reading has stayed stale for
+ * `stale` is the underlying data problem (data past its limit or the machine late), not the display grade: a poll
+ * or a refetch briefly turns the grade into "catching up", which must neither restart the 20 s wait nor clear
+ * `attempted`. Runs one monitor check on the user's behalf when TA or the movement reading has stayed stale for
  * SELF_HEAL_STALE_FOR_MS while the tab is visible and `allowed` (monitoring on, no resume settle, no manual
  * check pending), at most once per SELF_HEAL_COOLDOWN_MS. `run` reports its own failures; success is silent.
  * `healing` is true while the check runs (the grades then read "catching up"); `attempted` stays true once a

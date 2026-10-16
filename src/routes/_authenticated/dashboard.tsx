@@ -290,12 +290,6 @@ function Dashboard() {
               canRefresh: taAutomatic.enabled, healing, ...refreshOf(query) });
       return { frame, grade };
     });
-  // Without the self-heal override: what the self-heal watches.
-  const rawMovementGrade = worse(
-    gradeItem(itemOf("movement"), movementRefresh, automatic.enabled, false),
-    gradeItem(itemOf("stream"), movementRefresh, automatic.enabled, false),
-  );
-  const rawTaStale = symbols.some((symbol) => taFrames(symbol, false).some((t) => t.grade === "stale"));
 
   const healCheck = async () => {
     try {
@@ -308,8 +302,12 @@ function Dashboard() {
       invalidateAfterCheck();
     }
   };
+  // The self-heal watches the underlying problem (past its limit after the display grace), which a poll or a
+  // refetch does not interrupt; the grades above only decide what the page shows meanwhile.
+  const movementProblem = itemOf("movement").status === "stale" || itemOf("stream").status === "stale";
+  const taProblem = symbols.some((symbol) => taFrames(symbol, false).some((t) => t.frame.status === "stale"));
   const heal = useStaleSelfHeal({
-    stale: rawTaStale || rawMovementGrade === "stale",
+    stale: taProblem || movementProblem,
     allowed:
       !settling &&
       runner.canCheckAlerts &&
@@ -325,7 +323,9 @@ function Dashboard() {
     gradeItem(itemOf("stream"), movementRefresh, automatic.enabled, catchingUp),
   );
   const status = stripStatus(strip, movementGrade, settling, movementRefresh.lastAttemptFailed);
-  const movementCurrent = status === "live" || status === "updating";
+  // "Updating…" only looks current for a reading that is itself within its limit (a resume settle or a routine
+  // poll); a reading already past its limit stays muted with its "as of" time while it is retried.
+  const movementCurrent = status === "live" || (status === "updating" && !movementProblem);
   const framesBySymbol = new Map(symbols.map((symbol) => [symbol, taFrames(symbol, catchingUp)]));
   const staleFrames = [...framesBySymbol.values()].flat().filter((t) => t.grade === "stale");
   const oldestStaleAt = staleFrames.reduce<number | null>((min, t) => {
@@ -463,6 +463,7 @@ function Dashboard() {
         <MarketStrip
           view={strip}
           status={status}
+          current={movementCurrent}
           freshness={freshness}
           now={now}
           taNotice={taNotice}

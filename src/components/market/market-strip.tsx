@@ -28,6 +28,7 @@ const directionClass = (value: number | null) =>
 export function MarketStrip({
   view,
   status,
+  current,
   freshness,
   now,
   taNotice,
@@ -36,6 +37,8 @@ export function MarketStrip({
 }: {
   view: MarketStripView;
   status: StripStatusKind;
+  /** The reading may be shown as current (false keeps an already-late reading muted with its time, even while retried). */
+  current: boolean;
   freshness: FreshnessItem[];
   now: number;
   /** "Technical analysis is catching up (last updated 14 min ago)." after a self-heal did not clear it. */
@@ -46,7 +49,7 @@ export function MarketStrip({
   checkNow: { run: () => void; pending: boolean; disabled: boolean; title?: string | undefined } | null;
 }) {
   const reading = view.times.evaluationBoundary;
-  const fresh = status === "live" || status === "updating";
+  const fresh = current;
   const headline = stripHeadline(view);
   const detail = stripHeadlineDetail(view);
 
