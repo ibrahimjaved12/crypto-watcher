@@ -49,7 +49,7 @@ One job `Python tests, Node tests and builds` in workflow `Tests`, three lanes s
 
 ## What runs when
 
-- **Pull request:** core Python tier, the Node tests + `tsc` + both builds, and only the study-tier
+- **Pull request:** core Python tier, the Node tests (which also build and run the collector worker) + `tsc` + the app build, and only the study-tier
   modules whose imports reach a changed file (`python/tests/select_tests.py`). Python and Node run
   concurrently on the two vCPUs; one failing lane never hides the other.
 - **Weekly (Monday 04:41 UTC) and manual dispatch:** everything, including the whole study tier and

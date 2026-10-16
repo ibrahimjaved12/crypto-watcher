@@ -63,7 +63,7 @@ test("compatibility reasons match the Python strings and order", () => {
   const requires = new Set(["ohlc", "taker_flow"]);
   const cryptoOnly = { markets: new Set(["crypto"]), requires };
   assert.deepEqual(inst.checkCompatibility(cryptoOnly, btc), { ok: true, reasons: [] });
-  assert.deepEqual(inst.checkCompatibility(cryptoOnly, eur).reasons, ["market_not_supported:forex"]);
+  assert.deepEqual(inst.checkCompatibility(cryptoOnly, eur).reasons, ["market_not_supported:forex", "missing_field:taker_flow"]);
   const both = { markets: new Set(["crypto", "forex"]), requires };
   assert.deepEqual(inst.checkCompatibility(both, eur), { ok: false, reasons: ["missing_field:taker_flow"] });
 

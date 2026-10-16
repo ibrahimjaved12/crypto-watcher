@@ -81,7 +81,7 @@ class CompatibilityTests(unittest.TestCase):
                                            frozenset({DataField.OHLC, DataField.TAKER_FLOW}))
         self.assertTrue(check_compatibility(crypto_only, self.btc).ok)
         self.assertEqual(check_compatibility(crypto_only, self.eur).reasons,
-                         ("market_not_supported:forex",))
+                         ("market_not_supported:forex", "missing_field:taker_flow"))
         both = StrategyCapabilities(frozenset({Market.CRYPTO, Market.FOREX}),
                                     frozenset({DataField.OHLC, DataField.TAKER_FLOW}))
         result = check_compatibility(both, self.eur)
