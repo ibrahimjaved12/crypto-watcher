@@ -2,17 +2,12 @@ import { createFileRoute } from "@tanstack/react-router";
 import { activityEnabled, logActivity } from "@/lib/activity-controls";
 
 import { authenticateScheduledRequest } from "@/lib/scheduled-auth.server";
-import {
-  DEFAULT_SETTINGS,
-  recordRun,
-  runLeasedMonitorForUser,
-  type MonitorSettings,
-} from "@/lib/monitor/engine.server";
-import { createMonitorRunContext } from "@/lib/monitor/run-context";
+import { runScheduledMonitorPass, ScheduledPassLoadError } from "@/lib/monitor/scheduled-pass.server";
 
 /**
- * Scheduled price monitoring. When explicitly enabled, the backend scheduler can
- * call this route every five minutes so monitoring runs with no browser open.
+ * Scheduled price monitoring through the Worker cron. Off in production (SCHEDULED_MONITOR_ENABLED=false and
+ * the Worker has no operational database): the worker-host child `monitor-scheduler` owns scheduled checks on
+ * the machine. Both call the same `runScheduledMonitorPass`.
  *
  * The collector's shared subscription universe is reconciled separately by
  * `/api/public/hooks/sync-collector-subscriptions`, so pausing scheduled monitoring
@@ -36,72 +31,15 @@ async function handle(request: Request) {
 
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
-  // Every user with at least one watched symbol gets checked.
-  const { data: watchers, error } = await supabaseAdmin
-    .from("watchlist_items")
-    .select("user_id, symbol");
-
-  if (error) {
-    return Response.json({ ok: false, error: error.message }, { status: 500 });
-  }
-
-  const userIds = [...new Set((watchers ?? []).map((w) => w.user_id))];
-
-  const { data: settingsRows, error: settingsError } = await supabaseAdmin
-    .from("monitor_settings")
-    .select(
-      "user_id, threshold_pct, window_minutes, cooldown_minutes, monitoring_enabled, market_data_collection_enabled, completed_candle_ta_enabled, movement_alerts_enabled, developing_setup_evaluation_enabled, paper_trading_enabled",
-    )
-    .in("user_id", userIds.length ? userIds : ["00000000-0000-0000-0000-000000000000"]);
-  if (settingsError) {
-    return Response.json({ ok: false, error: settingsError.message }, { status: 500 });
-  }
-
-  const byUser = new Map<string, MonitorSettings>(
-    (settingsRows ?? []).map((s) => [s.user_id, s as unknown as MonitorSettings]),
-  );
-
-  const results = [];
-  const runContext = createMonitorRunContext();
-  for (const userId of userIds) {
-    const settings = {
-      ...DEFAULT_SETTINGS,
-      ...byUser.get(userId),
-      user_id: userId,
-    };
-    try {
-      const result = await runLeasedMonitorForUser(supabaseAdmin, userId, settings, runContext);
-      if (result.status !== "skipped") await recordRun(supabaseAdmin, result);
-      results.push(result);
-    } catch (err) {
-      const result = {
-        userId,
-        status: "failed" as const,
-        symbolsChecked: 0,
-        alertsCreated: 0,
-        taChecks: 0,
-        taFailures: 0,
-        dataSource: null,
-        error: err instanceof Error ? err.message : String(err),
-        durationMs: 0,
-        metrics: {
-          exchangeRequests: 0,
-          candleRows: 0,
-          marketCacheHits: 0,
-          taCalculations: 0,
-          taSignalsSaved: 0,
-          taOutcomesUpdated: 0,
-          databaseReads: 0,
-          databaseWriteAttempts: 0,
-          databaseNoOps: 0,
-        },
-      };
-      await recordRun(supabaseAdmin, result);
-      results.push(result);
+  try {
+    const results = await runScheduledMonitorPass(supabaseAdmin);
+    return Response.json({ ok: true, users: results.length, results });
+  } catch (error) {
+    if (error instanceof ScheduledPassLoadError) {
+      return Response.json({ ok: false, error: error.message }, { status: 500 });
     }
+    throw error;
   }
-
-  return Response.json({ ok: true, users: results.length, results });
 }
 
 export const Route = createFileRoute("/api/public/hooks/monitor-prices")({

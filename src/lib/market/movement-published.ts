@@ -68,9 +68,10 @@ export type MarketMovementRead = MarketMovementCurrentState & {
 const emptyState = (now: number) => toMarketMovementCurrentState(null, { now });
 
 /**
- * Maps the hosted row to the consumer contract. The engine's own STALE rule applies to the evaluation time
- * (deriveMovementEngineStatus inside the mapper); the page separately compares `publishedAt` with the
- * machine-offline window. A missing row and a malformed payload are named, never shown as live.
+ * Maps the hosted row to the consumer contract. The engine's own STALE rule applies to the evaluation time as the
+ * machine saw it: the mapper's clock is `published_at`, so the publish and read delays never make a healthy engine
+ * look stale. The page separately compares `publishedAt` with the machine-offline window. A missing row and a
+ * malformed payload are named, never shown as live.
  */
 export function readPublishedState(
   row: { payload: unknown; published_at: string } | null,
@@ -80,7 +81,7 @@ export function readPublishedState(
   const payload = parsePublishedPayload(row.payload);
   const publishedAt = Date.parse(row.published_at);
   if (!payload || !Number.isFinite(publishedAt)) return { ...emptyState(now), readStatus: "read_failed", publishedAt: null };
-  return { ...toMarketMovementCurrentState(payload, { now }), readStatus: "published", publishedAt };
+  return { ...toMarketMovementCurrentState(payload, { now: publishedAt }), readStatus: "published", publishedAt };
 }
 
 // ---------------------------------------------------------------- the site hook

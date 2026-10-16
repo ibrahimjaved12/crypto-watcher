@@ -73,6 +73,24 @@ test("end to end: a published copy of an offline machine is never shown as live"
   assert.deepEqual([strip.tone, strip.current, strip.machineOffline], ["offline", false, true]);
 });
 
+test("the publish and poll delays alone never make a healthy copy stale; silence makes it offline", () => {
+  // Published 37 s after its boundary (the engine's 30 s write cadence plus the finalization lag), read by the
+  // browser 80 s after the publish: 117 s old on the browser clock, but on time on the machine's clock.
+  const row = { payload: payload(37_000), published_at: new Date(NOW).toISOString() };
+  const read = published.readPublishedState(row, NOW + 80_000);
+  assert.equal(read.status, "LIVE"); // the mapper judges the evaluation at published_at, not at read time
+  const strip = assess.buildMarketStrip(read, NOW + 80_000, read.readStatus, read.publishedAt);
+  assert.deepEqual([strip.status, strip.tone, strip.machineOffline, strip.machineLateMs], ["LIVE", "live", false, 37_000]);
+  // 90 s of silence (publish 30 s + poll 30 s + 30 s margin) is the machine-offline line.
+  assert.equal(assess.buildMarketStrip(read, NOW + 90_000, read.readStatus, read.publishedAt).machineOffline, false);
+  assert.equal(assess.buildMarketStrip(read, NOW + 90_001, read.readStatus, read.publishedAt).machineOffline, true);
+  // An engine that published an evaluation more than 60 s (+3 s display grace) after its boundary is late.
+  const late = published.readPublishedState({ payload: payload(64_000), published_at: new Date(NOW).toISOString() }, NOW);
+  assert.equal(assess.buildMarketStrip(late, NOW, late.readStatus, late.publishedAt).status, "STALE");
+  const graced = published.readPublishedState({ payload: payload(62_000), published_at: new Date(NOW).toISOString() }, NOW);
+  assert.equal(assess.buildMarketStrip(graced, NOW, graced.readStatus, graced.publishedAt).status, "LIVE");
+});
+
 // ---------------------------------------------------------------- the site hook
 
 test("hook input is validated: universe, envelope against payload, size, ops", () => {

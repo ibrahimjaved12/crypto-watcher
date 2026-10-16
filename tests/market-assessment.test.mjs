@@ -104,7 +104,7 @@ test("WARMING is provisional, never presented as live", () => {
 test("STALE keeps the old numbers but says so, and is never shown as live", () => {
   const view = a.buildMarketStrip(state({ status: "STALE", boundaryAgo: 5 * 60_000 }), NOW);
   assert.deepEqual([view.tone, view.statusLabel, view.current], ["stale", "Stale", false]);
-  assert.match(view.explanation, /Not live: the last evaluation is 5 min old/);
+  assert.match(view.explanation, /Not live: the last evaluation was 5 min old when your machine saved it \(limit 60 s\)/);
   assert.ok(view.windows.length === 3); // the as-of numbers remain visible
   assert.notEqual(view.statusLabel, "Live");
 });
@@ -181,7 +181,8 @@ test("TA: ok, stale, missing, failed and not loaded are each explicit", () => {
   assert.match(ok.note, /Candle closed 5 min ago, snapshot saved 4 min ago/);
   const stale = a.buildTaFrame(taRow(15, 3 * 3_600_000), 15, NOW);
   assert.equal(stale.status, "stale");
-  assert.match(stale.note, /^Stale: the candle closed/);
+  assert.match(stale.note, /^Waiting for a newer snapshot: the candle closed/);
+  assert.equal(a.buildTaFrame(taRow(60, 60 * 60_000 + 70 * 60_000 + 2_000), 60, NOW).status, "ok"); // within the 3 s display grace
   const justDue = a.buildTaFrame(taRow(60, 60 * 60_000 + 60 * 60_000 + 5 * 60_000), 60, NOW); // closed 65 min ago: within 1 h + 10 min
   assert.equal(justDue.status, "ok");
   assert.equal(a.buildTaFrame(taRow(60, 60 * 60_000 + 80 * 60_000), 60, NOW).status, "stale"); // closed 80 min ago
@@ -218,7 +219,7 @@ test("freshness: each stale or missing source is named even when the page just r
   assert.match(stream[0].detail, /DOGE/);
   const movement = a.buildFreshness({ state: state({ status: "STALE", boundaryAgo: 5 * 60_000 }), read: "ok", symbols: SYMBOLS, quotes: quotes(), ta: fullTa() }, NOW);
   assert.equal(movement[1].status, "stale");
-  assert.match(movement[1].detail, /5 min ago.*engine status stale/);
+  assert.match(movement[1].detail, /5 min ago, 5 min old when saved.*engine status stale/);
   const candles = a.buildFreshness({ state: state(), read: "ok", symbols: SYMBOLS, quotes: quotes({ ETHUSDT: { stale: true } }), ta: fullTa() }, NOW);
   assert.equal(candles[2].status, "stale");
   assert.match(candles[2].detail, /ETH/);
@@ -246,16 +247,33 @@ test("age formatting", () => {
 
 const movementState = await import(load("../src/lib/market/market-movement-state.ts"));
 
-test("the machine-offline window is the engine's stale window plus one publish interval (derived, not a market threshold)", () => {
+test("the machine-offline window is one publish interval plus one poll plus 30 s of margin (derived, not a market threshold)", () => {
   assert.equal(movementState.MOVEMENT_ENGINE_STALE_AFTER_MS, 60_000);
   assert.equal(movementState.MOVEMENT_PUBLISH_INTERVAL_MS, 30_000);
+  assert.equal(movementState.MOVEMENT_POLL_INTERVAL_MS, 30_000);
+  assert.equal(a.MOVEMENT_POLL_INTERVAL_MS, 30_000);
   assert.equal(movementState.PUBLISHED_COPY_OFFLINE_AFTER_MS, 90_000);
+  assert.equal(a.FRESH_DISPLAY_GRACE_MS, 3_000);
 });
 
-test("an evaluation that aged past the engine's stale window is STALE even if the state was read as LIVE", () => {
+test("lateness is judged on the machine's clock: saved late is STALE, merely old in the browser is not", () => {
+  // Saved 297 s after its boundary: the engine was late.
   const view = a.buildMarketStrip(state({ status: "LIVE", boundaryAgo: 5 * 60_000 }), NOW);
-  assert.deepEqual([view.status, view.tone, view.current], ["STALE", "stale", false]);
+  assert.deepEqual([view.status, view.tone, view.current, view.machineLateMs], ["STALE", "stale", false, 297_000]);
   assert.match(view.notLiveNote, /not live/);
+  // Saved 7 s after its boundary and read 80 s later (publish + poll delay): still LIVE, even when the server's
+  // mapper had already called it STALE against its own clock.
+  const onTime = state({ status: "STALE", boundaryAgo: 87_000 });
+  onTime.timestamps.engineUpdatedAt = NOW - 80_000;
+  const live = a.buildMarketStrip(onTime, NOW);
+  assert.deepEqual([live.status, live.tone, live.machineOffline, live.machineLateMs], ["LIVE", "live", false, 7_000]);
+  // A direct read whose saved state stops advancing goes offline after the same 90 s of silence.
+  onTime.timestamps.engineUpdatedAt = NOW - 91_000;
+  assert.equal(a.buildMarketStrip(onTime, NOW).machineOffline, true);
+  // Stream lag is measured back from the evaluation boundary, so the poll delay alone never lags it.
+  const items = a.buildFreshness({ state: state({ boundaryAgo: 85_000, stream: Object.fromEntries(SYMBOLS.map((s) => [s, NOW - 90_000])) }),
+    read: "ok", symbols: SYMBOLS, quotes: quotes(), ta: fullTa() }, NOW);
+  assert.deepEqual([items[0].status, items[0].ageMs], ["fresh", 5_000]);
 });
 
 test("published copy: live copy, stale evaluation, machine offline and no row are four different states", () => {
@@ -299,40 +317,99 @@ test("freshness of a published copy names the copy and the offline machine", () 
   assert.match(none[1].detail, /No published copy yet/);
 });
 
-test("collapsed summary line: movement label, 1h TA lean and snapshot age, in every state", () => {
+test("pair summary: movement chip from the 15m window and plain TA pill words", () => {
+  assert.deepEqual(a.pairMovementChip(a.buildPairMovement("BTCUSDT", state())), { text: "Unusually sharp drop", tone: "down" });
+  assert.deepEqual(a.pairMovementChip(a.buildPairMovement("ETHUSDT", state())), { text: "About normal", tone: "flat" });
+  assert.equal(a.pairMovementChip(a.buildPairMovement("DOGEUSDT", state({ excluded: ["DOGEUSDT"] }))).text, "Left out of the market reading");
+  assert.equal(a.pairMovementChip(a.buildPairMovement("BTCUSDT", empty, "store_disabled")).text, "No market reading");
   const ok = a.buildPairMovement("BTCUSDT", state());
-  const frames = (row, load) => [15, 60, 240].map((tf) => a.buildTaFrame(tf === 60 ? row : undefined, tf, NOW, tf === 60 ? load : "loaded"));
-  assert.equal(a.summarizePair(ok, frames(taRow(60, 90 * 60_000)), NOW), "15m move: unusually sharp drop · 1h TA: bullish lean · snapshot 29 min old");
-  assert.equal(a.summarizePair(ok, frames(taRow(60, 4 * 3_600_000)), NOW), "15m move: unusually sharp drop · 1h TA: bullish lean (stale) · snapshot 3 h old"); // stale
-  assert.equal(a.summarizePair(ok, frames(undefined, "loaded"), NOW), "15m move: unusually sharp drop · 1h TA: no snapshot"); // missing
-  assert.equal(a.summarizePair(ok, frames(undefined, "failed"), NOW), "15m move: unusually sharp drop · 1h TA: could not load"); // failed
-  assert.equal(a.summarizePair(ok, frames(undefined, "not_loaded"), NOW), "15m move: unusually sharp drop · 1h TA: not loaded"); // not loaded
-  assert.equal(a.summarizePair(ok, [], NOW), "15m move: unusually sharp drop · 1h TA: no snapshot");
-  assert.equal(a.summarizePair(a.buildPairMovement("DOGEUSDT", state({ excluded: ["DOGEUSDT"] })), [], NOW), "15m move: left out of the engine · 1h TA: no snapshot");
-  assert.equal(a.summarizePair(a.buildPairMovement("BTCUSDT", empty, "store_disabled"), [], NOW), "15m move: no engine data · 1h TA: no snapshot");
-  const notLive = a.buildPairMovement("BTCUSDT", state(), "published", "As of 11:00, not live");
-  assert.match(a.summarizePair(notLive, [], NOW), /^15m move: unusually sharp drop \(not live\)/);
   const noWindow = { ...ok, windows: ok.windows.map((w) => (w.minutes === 15 ? { ...w, available: false } : w)) };
-  assert.match(a.summarizePair(noWindow, [], NOW), /^15m move: unavailable/);
+  assert.equal(a.pairMovementChip(noWindow).text, "15m move unavailable");
+  assert.equal(a.taPillText(a.buildTaFrame(taRow(60, 90 * 60_000), 60, NOW)), "Bullish");
+  assert.equal(a.taPillText(a.buildTaFrame(taRow(60, 90 * 60_000, { classification: "neutral" }), 60, NOW)), "Neutral");
+  assert.equal(a.taPillText(a.buildTaFrame(undefined, 60, NOW)), "No reading");
+  assert.equal(a.taPillText(a.buildTaFrame(undefined, 60, NOW, "failed")), "Couldn't load");
+  assert.equal(a.taPillText(a.buildTaFrame(undefined, 60, NOW, "not_loaded")), "Loading");
 });
 
-test("the remembered collapse choice survives unavailable or throwing storage", () => {
-  const store = new Map();
-  const ok = () => ({ getItem: (k) => store.get(k) ?? null, setItem: (k, v) => void store.set(k, v) });
-  assert.equal(a.readStoredFlag(ok, "k", false), false); // nothing stored: the fallback (expanded)
-  assert.equal(a.writeStoredFlag(ok, "k", true), true);
-  assert.equal(a.readStoredFlag(ok, "k", false), true);
-  assert.equal(a.writeStoredFlag(ok, "k", false), true);
-  assert.equal(a.readStoredFlag(ok, "k", true), false);
-  store.set("k", "garbage");
-  assert.equal(a.readStoredFlag(ok, "k", true), true);
-  const throwing = () => ({ getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("quota"); } });
-  assert.equal(a.readStoredFlag(throwing, "k", true), true);
-  assert.equal(a.writeStoredFlag(throwing, "k", true), false);
-  const blocked = () => { throw new Error("SecurityError"); }; // touching window.localStorage itself throws
-  assert.equal(a.readStoredFlag(blocked, "k", false), false);
-  assert.equal(a.writeStoredFlag(blocked, "k", true), false);
-  assert.equal(a.readStoredFlag(() => null, "k", false), false);
-  assert.equal(a.writeStoredFlag(() => undefined, "k", true), false);
-  assert.match(a.PAIR_COLLAPSED_KEY, /pair-assessment-collapsed/);
+test("strip headline, detail and tile line: numbers lead, plain words", () => {
+  const view = a.buildMarketStrip(state(), NOW);
+  assert.deepEqual(a.stripHeadline(view), { text: "Broad drop, speeding up", tone: "down" });
+  assert.equal(a.stripHeadlineDetail(view), "4 of 6 pairs fell in the last 15 min");
+  assert.equal(a.stripHeadlineDetail(a.buildMarketStrip(state({ fallingMaterial: 0 }), NOW)), "No pair moved much in the last 15 min");
+  assert.equal(view.windows[0].short, "4 of 6 falling"); // the median move is negative
+  assert.equal(a.stripHeadline(a.buildMarketStrip(state({ direction: "NEUTRAL" }), NOW)).tone, "neutral");
+  assert.equal(a.stripHeadline(a.buildMarketStrip(empty, NOW, "store_disabled")), null);
+  assert.equal(a.unavailableShort(a.buildMarketStrip(empty, NOW, "published_none")), "Your machine hasn't sent a market reading yet.");
+});
+
+// ---------------------------------------------------------------- grades: fresh, catching up, stale
+
+const LIMIT = 60_000;
+const grade = (over = {}) => a.gradeFreshness({ ageMs: 10_000, limitMs: LIMIT, refreshing: false, lastRefreshAt: NOW - 5_000,
+  lastAttemptFailed: false, now: NOW, ...over });
+
+test("grade: within the limit (and the 3 s grace) is fresh", () => {
+  assert.equal(grade(), "fresh");
+  assert.equal(grade({ ageMs: LIMIT + 3_000 }), "fresh");
+  assert.equal(grade({ ageMs: LIMIT + 3_001, lastRefreshAt: null }), "catching_up");
+});
+
+test("grade: past the limit is catching up until a refresh after the crossing still leaves it past", () => {
+  // Crossed 10 s ago (age 70 s, limit 60 s); no refresh since the crossing: the next poll or the pre-emptive refetch is due.
+  assert.equal(grade({ ageMs: 70_000, lastRefreshAt: NOW - 20_000 }), "catching_up");
+  // A refresh in flight, a self-heal check or a resume settle.
+  assert.equal(grade({ ageMs: 70_000, lastRefreshAt: NOW - 1_000, refreshing: true }), "catching_up");
+  assert.equal(grade({ ageMs: 5 * 60_000, lastRefreshAt: NOW - 60_000, healing: true }), "catching_up");
+  // Refreshed after the crossing: catching up for 15 s, then stale.
+  assert.equal(grade({ ageMs: 70_000, lastRefreshAt: NOW - 5_000 }), "catching_up");
+  assert.equal(grade({ ageMs: 5 * 60_000, lastRefreshAt: NOW - 16_000 }), "stale");
+  // Explicit crossing time for an age that does not grow with the clock (machine-side lateness).
+  assert.equal(grade({ ageMs: 90_000, crossedAt: NOW - 120_000, lastRefreshAt: NOW - 30_000 }), "stale");
+  assert.equal(grade({ ageMs: 90_000, crossedAt: NOW - 120_000, lastRefreshAt: NOW - 130_000 }), "catching_up");
+  // Known past with no measurable age (a flagged quote): stale once a refresh landed 15 s ago.
+  assert.equal(grade({ ageMs: Number.POSITIVE_INFINITY, crossedAt: null, lastRefreshAt: NOW - 20_000 }), "stale");
+  // Nothing will refresh it (automatic refresh paused): stale at once.
+  assert.equal(grade({ ageMs: 70_000, lastRefreshAt: NOW - 20_000, canRefresh: false }), "stale");
+});
+
+test("grade: a failed refresh or an offline machine is stale; a retry in flight is catching up", () => {
+  assert.equal(grade({ lastAttemptFailed: true }), "stale");
+  assert.equal(grade({ lastAttemptFailed: true, refreshing: true }), "catching_up");
+  assert.equal(grade({ offline: true }), "stale");
+  assert.equal(grade({ offline: true, refreshing: true, healing: true }), "stale");
+});
+
+test("strip status: one state, a short lag is updating, faults only after an attempt", () => {
+  const live = a.buildMarketStrip(state(), NOW);
+  assert.equal(a.stripStatus(live, "fresh", false, false), "live");
+  assert.equal(a.stripStatus(live, "catching_up", false, false), "updating");
+  assert.equal(a.stripStatus(live, "fresh", true, false), "updating"); // tab just resumed
+  assert.equal(a.stripStatus(live, "stale", false, false), "late");
+  assert.equal(a.stripStatus(live, "stale", false, true), "failed");
+  assert.equal(a.stripStatus(live, "stale", true, true), "updating"); // never red while settling
+  const offline = a.buildMarketStrip(state(), NOW, "published", NOW - 3 * 60_000);
+  assert.equal(a.stripStatus(offline, "stale", false, false), "offline");
+  assert.equal(a.stripStatus(a.buildMarketStrip(state({ status: "WARMING", direction: "WARMING" }), NOW), "fresh", false, false), "warming");
+  assert.equal(a.stripStatus(a.buildMarketStrip(empty, NOW, "store_disabled"), "fresh", false, false), "unavailable");
+  assert.equal(a.stripStatus(a.buildMarketStrip(empty, NOW, "read_failed"), "fresh", false, true), "failed");
+  assert.equal(a.stripStatus(a.buildMarketStrip(empty, NOW, "not_loaded"), "fresh", false, false), "loading");
+});
+
+test("freshness items carry age, limit and crossing for grading", () => {
+  const items = a.buildFreshness({ state: state(), read: "ok", symbols: SYMBOLS, quotes: quotes(), ta: fullTa() }, NOW);
+  const movement = items[1];
+  assert.deepEqual([movement.ageMs, movement.limitMs, movement.crossedAt, movement.offline], [7_000, 60_000, NOW - 10_000 + 60_000, false]);
+  const candles = items[2];
+  assert.deepEqual([candles.ageMs, candles.limitMs, candles.crossedAt], [60_000, 10 * 60_000, NOW - 60_000 + 10 * 60_000]);
+  const flagged = a.buildFreshness({ state: state(), read: "ok", symbols: SYMBOLS, quotes: quotes({ ETHUSDT: { stale: true } }), ta: fullTa() }, NOW)[2];
+  assert.deepEqual([flagged.ageMs, flagged.crossedAt], [Number.POSITIVE_INFINITY, null]);
+  const ta = items[3];
+  assert.equal(ta.limitMs, 15 * 60_000 + a.TA_RUN_ALLOWANCE_MS); // the 15m frames are nearest their limit
+  assert.equal(ta.ageMs, 5 * 60_000);
+});
+
+test("the next limit crossing is the soonest future one (after the display grace)", () => {
+  assert.equal(a.nextLimitCrossing([{ asOf: NOW - 50_000, limitMs: LIMIT }, { asOf: NOW - 10_000, limitMs: LIMIT }], NOW), NOW + 13_000);
+  assert.equal(a.nextLimitCrossing([{ asOf: NOW - 2 * LIMIT, limitMs: LIMIT }, { asOf: null, limitMs: LIMIT }], NOW), null);
 });

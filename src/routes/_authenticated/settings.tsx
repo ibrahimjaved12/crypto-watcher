@@ -495,7 +495,7 @@ function SettingsPage() {
               <EmptyState
                 icon={History}
                 title="No checks recorded yet"
-                body="Scheduled checks run every few minutes while monitoring is on; “Check for alerts now” on the Market page runs one immediately."
+                body="Your machine checks about once a minute while monitoring is on; “Check for alerts now” on the Market page runs one immediately."
                 className="py-6"
               />
             ) : null}

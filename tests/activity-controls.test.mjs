@@ -201,22 +201,22 @@ test("TA controls independently gate inserts and outcome reads; both off avoid a
 });
 
 test("scheduled endpoint defaults disabled, authenticates and skips before database access", async () => {
+  const scheduledPassUrl = await moduleUrl("../src/lib/monitor/scheduled-pass.server.ts", {
+    "./engine.server": stub(
+      "export const DEFAULT_SETTINGS={}; export const recordRun=()=>{throw Error('must not write')}; export const runLeasedMonitorForUser=()=>{throw Error('must not run')};",
+    ),
+    "./run-context": stub(
+      "export const createMonitorRunContext=()=>{throw Error('must not create context')};",
+    ),
+  });
   const { Route } = await import(
     await moduleUrl("../src/routes/api/public/hooks/monitor-prices.ts", {
       "@tanstack/react-router": stub("export const createFileRoute=()=>x=>x;"),
       "@/lib/activity-controls": controlsUrl,
-      "@/integrations/supabase/cron-auth": stub(
-        "export const authenticateCronRequest=async()=>new Response('Unauthorized',{status:401});",
-      ),
       "@/lib/scheduled-auth.server": stub(
         "export const authenticateScheduledRequest=async(request)=>{const m=/^Bearer ([^,]+)$/.exec(request.headers.get('authorization')||'');const t=process.env.MONITOR_CRON_TOKEN;if(t&&m&&m[1]===t)return null;return new Response('Unauthorized',{status:401});};",
       ),
-      "@/lib/monitor/engine.server": stub(
-        "export const DEFAULT_SETTINGS={}; export const recordRun=()=>{throw Error('must not write')}; export const runLeasedMonitorForUser=()=>{throw Error('must not run')};",
-      ),
-      "@/lib/monitor/run-context": stub(
-        "export const createMonitorRunContext=()=>{throw Error('must not create context')};",
-      ),
+      "@/lib/monitor/scheduled-pass.server": scheduledPassUrl,
       "@/integrations/supabase/client.server": stub("throw Error('must not load database');"),
     })
   );

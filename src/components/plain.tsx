@@ -11,11 +11,13 @@ export function PageHeader({
   title,
   subtitle,
   actions,
+  actionsClassName,
 }: {
   eyebrow?: string | undefined;
   title: string;
   subtitle: ReactNode;
   actions?: ReactNode;
+  actionsClassName?: string;
 }) {
   return (
     <div className="flex flex-wrap items-end gap-3">
@@ -24,7 +26,7 @@ export function PageHeader({
         <h1 className="mt-1 text-2xl font-semibold sm:text-3xl">{title}</h1>
         <p className="mt-1 max-w-2xl text-sm text-muted-foreground">{subtitle}</p>
       </div>
-      {actions ? <div className="ml-auto flex flex-wrap items-center gap-2">{actions}</div> : null}
+      {actions ? <div className={cn("ml-auto flex flex-wrap items-center gap-2", actionsClassName)}>{actions}</div> : null}
     </div>
   );
 }

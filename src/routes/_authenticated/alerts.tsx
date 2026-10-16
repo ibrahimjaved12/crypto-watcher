@@ -191,7 +191,7 @@ function AlertsPage() {
             body={
               search
                 ? "Try a pair such as BTC, or clear the search."
-                : "An alert appears here when a watched pair moves more than your threshold from its starting price. Checks run every few minutes."
+                : "An alert appears here when a watched pair moves more than your threshold from its starting price. Your machine checks about once a minute."
             }
           />
         ) : (

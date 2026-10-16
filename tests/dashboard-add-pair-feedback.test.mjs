@@ -9,8 +9,9 @@ test("adding a pair confirms success and keeps previous market quotes", async ()
   assert.ok(add, "add mutation exists");
   assert.match(add, /toast\.success\(/);
   assert.match(add, /baseAsset\(symbol\)/);
-  assert.match(source, /Could not load\. Press Refresh\./);
-  assert.match(source, /No data for this pair/);
-  assert.match(source, /market\.isError/);
-  assert.match(source, /market\.isFetching/);
+  assert.match(source, /<QuoteCard\b[\s\S]*?onRetry=\{\(\) => void market\.refetch\(\)\}/);
+  assert.match(source, /market\.isFetching \|\| \(!market\.data && !market\.isError\) \? \(\s*<QuoteCardSkeleton/);
+  const unavailable = source.split('Price unavailable{" "}')[1]?.split("</p>")[0];
+  assert.ok(unavailable, "missing quotes show the unavailable-price fallback");
+  assert.match(unavailable, /<button\b[\s\S]*?onClick=\{\(\) => void market\.refetch\(\)\}[\s\S]*?>\s*Retry\s*<\/button>/);
 });

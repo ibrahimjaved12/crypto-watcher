@@ -7,7 +7,8 @@ import { createRunnerHealthReporter } from "./runner-health.mjs";
 
 // Worker-host supervisor (#270). Runs the forward-test workers on the owner's machine in production
 // mode against the hosted main Supabase and the local operational Supabase: two FastAPI services,
-// the collector, the hourly forward job and the daily trend job. Pure logic (preflight, backoff,
+// the collector, the hourly forward job, the daily trend job and the non-essential siblings (quote and
+// movement-state publishers, alert charts, the monitor scheduler). Pure logic (preflight, backoff,
 // crash-loop accounting, status file) lives in src/lib/worker-host.ts; this file only spawns and
 // wires. See docs/worker-host.md.
 const root = resolve(import.meta.dirname, "..");
@@ -33,6 +34,8 @@ let healthPublishing;
 let healthWarned = false;
 const KILL_AFTER_MS = 10_000; // SIGTERM first, SIGKILL after this long
 const RUNNER_JOBS_DRAIN_MS = 60_000;
+// Children that finish their current unit of work on SIGTERM while Python and the collector stay up.
+const DRAIN_FIRST = ["runner-jobs", "monitor-scheduler"];
 
 const importLib = async (path) => {
   const loaded = (await runnerImport(path, { root, mode: MODE, configFile: false, envDir: false })).module;
@@ -278,7 +281,7 @@ async function shutdown(reason, requestedCode = 0) {
     return;
   }
   shuttingDown = true;
-  log(`${reason}; stopping children (runner jobs drain for up to 60s; other children then get ${KILL_AFTER_MS / 1000}s).`);
+  log(`${reason}; stopping children (runner jobs and the monitor scheduler drain for up to 60s; other children then get ${KILL_AFTER_MS / 1000}s).`);
   for (const record of records.values()) {
     if (record.timer) clearTimeout(record.timer);
     record.timer = null;
@@ -290,20 +293,25 @@ async function shutdown(reason, requestedCode = 0) {
   const exits = [...records.values()]
     .filter((r) => r.state === "stopping")
     .map((r) => new Promise((done) => r.proc.once("exit", done)));
-  // Keep Python and the collector alive while the on-demand job drains, then stop the rest.
-  const runnerJobs = records.get("runner-jobs");
-  if (runnerJobs?.state === "stopping") {
+  // Keep Python and the collector alive while the on-demand job and the current monitor pass (which may call
+  // Python and holds a monitor lease) finish, then stop the rest.
+  const draining = DRAIN_FIRST.map((name) => records.get(name)).filter((r) => r?.state === "stopping");
+  if (draining.length) {
     let drainTimer;
-    const drained = new Promise((done) => runnerJobs.proc.once("exit", done));
+    const drained = Promise.all(draining.map((r) => new Promise((done) => {
+      if (!isAlive(r.proc)) done();
+      else r.proc.once("exit", done);
+    })));
     const drainDeadline = new Promise((done) => {
       drainTimer = setTimeout(done, RUNNER_JOBS_DRAIN_MS);
     });
-    signalChild(runnerJobs, "SIGTERM");
+    for (const r of draining) signalChild(r, "SIGTERM");
     await Promise.race([drained, drainDeadline]);
     clearTimeout(drainTimer);
-    if (isAlive(runnerJobs.proc)) signalChild(runnerJobs, "SIGKILL");
+    for (const r of draining) if (isAlive(r.proc)) signalChild(r, "SIGKILL");
   }
-  for (const record of records.values()) if (record.state === "stopping") signalChild(record, "SIGTERM");
+  for (const record of records.values())
+    if (record.state === "stopping" && !DRAIN_FIRST.includes(record.name)) signalChild(record, "SIGTERM");
   const killTimer = setTimeout(() => {
     for (const record of records.values()) if (record.state === "stopping") signalChild(record, "SIGKILL");
   }, KILL_AFTER_MS);
@@ -458,6 +466,10 @@ async function main() {
   if (env.MOVEMENT_STATE_PUBLISH_ENABLED !== "false" && env.OPERATIONAL_DB_ENABLED === "true"
       && (env.MOVEMENT_STATE_HOSTED_URL?.trim() || env.ALERT_CHART_HOSTED_URL?.trim()))
     specs.push(nodeJob("movement-state-publisher", "scripts/movement-state-publisher.mjs"));
+  // Monitor scheduler (#30): non-essential; runs the scheduled monitoring pass (movement alerts and completed-candle
+  // TA) about once a minute. The Worker cron stays off, so without this child checks only run on a manual click.
+  if (lib.monitorSchedulerConfigured(env))
+    specs.push(nodeJob("monitor-scheduler", "scripts/monitor-scheduler.mjs"));
   for (const spec of specs) {
     records.set(spec.name, {
       ...spec,
@@ -493,6 +505,8 @@ async function main() {
   void startAfterPython(records.get("forward-hourly"), urls, pythonNames);
   void startAfterPython(records.get("forward-trend"), urls, pythonNames);
   if (records.has("runner-jobs")) void startAfterPython(records.get("runner-jobs"), urls, pythonNames);
+  // TA calls the analysis service, so the scheduler also waits for both health endpoints.
+  if (records.has("monitor-scheduler")) void startAfterPython(records.get("monitor-scheduler"), urls, pythonNames);
 }
 
 // SIGHUP is what a closed terminal sends; without it the children would outlive the host.

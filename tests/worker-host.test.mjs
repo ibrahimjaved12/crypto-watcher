@@ -353,3 +353,35 @@ test("runner jobs require only the existing main Supabase credentials when enabl
   assert.equal(w.ESSENTIAL_CHILD, "collector");
   assert.deepEqual(w.FORWARD_CHILDREN, ["forward-hourly", "forward-trend"]);
 });
+
+// ── Monitor scheduler (#30) ──────────────────────────────────────────────────────────────────────
+
+test("monitor scheduler: preflight validates its flag and interval; the child needs hosted credentials and the operational DB", () => {
+  assert.deepEqual(run({ MONITOR_SCHEDULER_ENABLED: "false", MONITOR_SCHEDULER_INTERVAL_SECONDS: "30" }), []);
+  assert.deepEqual(run({ MONITOR_SCHEDULER_INTERVAL_SECONDS: "3600" }), []);
+  refuses({ MONITOR_SCHEDULER_ENABLED: "yes" }, /^MONITOR_SCHEDULER_ENABLED must be true or false\.$/);
+  for (const bad of ["29", "3601", "60.5", "abc", "-60"])
+    refuses({ MONITOR_SCHEDULER_INTERVAL_SECONDS: bad }, /^MONITOR_SCHEDULER_INTERVAL_SECONDS must be a whole number from 30 to 3600\.$/);
+  assert.equal(w.monitorSchedulerConfigured(good()), true);
+  assert.equal(w.monitorSchedulerConfigured({ ...good(), MONITOR_SCHEDULER_ENABLED: "false" }), false);
+  assert.equal(w.monitorSchedulerConfigured({ ...good(), OPERATIONAL_DB_ENABLED: "false" }), false);
+  assert.equal(w.monitorSchedulerConfigured({ ...good(), SUPABASE_SERVICE_ROLE_KEY: "" }), false);
+  assert.equal(w.monitorSchedulerIntervalMs({}), 60_000);
+  assert.equal(w.monitorSchedulerIntervalMs({ MONITOR_SCHEDULER_INTERVAL_SECONDS: "45" }), 45_000);
+  assert.throws(() => w.monitorSchedulerIntervalMs({ MONITOR_SCHEDULER_INTERVAL_SECONDS: "10" }), /MONITOR_SCHEDULER_INTERVAL_SECONDS/);
+});
+
+test("monitor scheduler: passes sit at the boundary plus 8 s, never overlap and never burst after an overrun", () => {
+  const minute = Date.parse("2026-10-16T12:00:00Z");
+  // First pass: the next minute boundary plus the settle.
+  assert.equal(w.nextMonitorPassAt(minute + 1_000, null, 60_000), minute + 8_000);
+  assert.equal(w.nextMonitorPassAt(minute + 9_000, null, 60_000), minute + 68_000);
+  // A pass that started a little late is followed by the next grid instant, not one a minute later still.
+  assert.equal(w.nextMonitorPassAt(minute + 8_400, minute + 8_000, 60_000), minute + 68_000);
+  // A pass that overran its slot waits for the following instant (no catch-up burst).
+  assert.equal(w.nextMonitorPassAt(minute + 75_000, minute + 8_000, 60_000), minute + 128_000);
+  // Sub-minute intervals sit on their own grid; longer ones round up to whole minutes.
+  assert.equal(w.nextMonitorPassAt(minute + 9_000, minute + 8_000, 30_000), minute + 38_000);
+  assert.equal(w.nextMonitorPassAt(minute + 9_000, minute + 8_000, 90_000), minute + 128_000);
+  assert.equal(w.MONITOR_SCHEDULER_SETTLE_MS, 8_000);
+});

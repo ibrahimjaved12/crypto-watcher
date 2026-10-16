@@ -1,6 +1,6 @@
 import { Area, AreaChart, ResponsiveContainer, Tooltip, YAxis } from "recharts";
 import type { ReactNode } from "react";
-import { AlertTriangle, Loader2, Trash2 } from "lucide-react";
+import { Loader2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -28,41 +28,43 @@ function changeClass(value: number | null | undefined): string {
 export function QuoteCard({
   quote,
   onRemove,
+  onRetry,
   retrying = false,
   assessment,
+  now: nowProp,
 }: {
   quote: SymbolQuote;
   onRemove?: () => void;
+  /** Refetch prices; shown as a "Retry" link when the price is unavailable. */
+  onRetry?: () => void;
   retrying?: boolean;
-  /** The per-pair "Current assessment" block (#30), shown under the existing price and changes. */
+  /** The per-pair "Current assessment" block (#30), shown under the price, changes and chart. */
   assessment?: ReactNode;
+  /** The page's clock (held while a resumed tab settles); falls back to a local one. */
+  now?: number;
 }) {
-  const now = useNow();
+  const localNow = useNow();
+  const now = nowProp ?? localNow;
   const unavailable = isUnavailable(quote);
-  const checkedAt = Date.parse(quote.fetchedAt);
 
   return (
-    <article className="panel flex flex-col gap-4 p-5 transition-colors hover:border-primary/40">
+    <article className="panel flex min-w-0 flex-col gap-4 p-4 transition-colors hover:border-primary/40 sm:p-5">
       <header className="flex items-start gap-3">
-        <div>
-          <h3 className="font-display text-lg font-semibold">
+        <div className="min-w-0">
+          <h3 className="font-display text-base font-semibold">
             {baseAsset(quote.symbol)}
             {/* TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days */}
             <span className="text-muted-foreground">
               /{quote.source === "kraken-futures" ? "USD" : "USDT"}
             </span>
           </h3>
-          <p className="num mt-1 text-2xl font-semibold">
-            {unavailable ? (
-              <span className="text-base text-muted-foreground">Price unavailable</span>
-            ) : (
-              `$${formatPrice(quote.price!)}`
-            )}
-          </p>
+          {unavailable ? null : (
+            <p className="mt-1 font-display text-2xl font-semibold tabular-nums">${formatPrice(quote.price!)}</p>
+          )}
         </div>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+        <div className="ml-auto flex items-center gap-1 text-muted-foreground">
           {quote.source ? (
-            <Badge variant="secondary" className="text-[10px]" title={quote.source}>
+            <Badge variant="outline" className="text-xs font-normal text-muted-foreground" title={quote.source}>
               {sourceLabel(quote.source)}
             </Badge>
           ) : null}
@@ -70,6 +72,7 @@ export function QuoteCard({
             <Button
               variant="ghost"
               size="icon"
+              className="size-11 text-muted-foreground sm:size-9"
               onClick={onRemove}
               aria-label={`Remove ${quote.symbol}`}
             >
@@ -79,52 +82,51 @@ export function QuoteCard({
         </div>
       </header>
       {unavailable ? (
-        <p
-          aria-live="polite"
-          className="flex items-start gap-2 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground"
-        >
-          {retrying ? (
-            <Loader2
-              className="mt-0.5 size-4 shrink-0 animate-spin motion-reduce:animate-none"
-              aria-hidden
-            />
-          ) : (
-            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
-          )}
-          <span>
-            {quote.error ??
-              (retrying
-                ? "Price feed is catching up — retrying automatically"
-                : "No market data available.")}
-            {quote.lastCandleAt !== null && Number.isFinite(quote.lastCandleAt) && (
-              <span className="mt-1 block">
-                Last price seen {formatAgo(quote.lastCandleAt, now)} ({formatClock(quote.lastCandleAt, now)})
-              </span>
+        <div aria-live="polite" className="text-sm text-muted-foreground" title={quote.error ?? undefined}>
+          <p className="flex flex-wrap items-center gap-x-2">
+            {retrying ? (
+              <>
+                <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden />
+                Price unavailable · retrying…
+              </>
+            ) : (
+              <>
+                Price unavailable
+                {onRetry ? (
+                  <button
+                    type="button"
+                    className="inline-flex min-h-11 items-center text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-0"
+                    onClick={onRetry}
+                  >
+                    Retry
+                  </button>
+                ) : null}
+              </>
             )}
-            {Number.isFinite(checkedAt) && (
-              <span className="mt-1 block">Last checked {formatClock(checkedAt, now)}</span>
-            )}
-          </span>
-        </p>
+          </p>
+          {quote.lastCandleAt !== null && Number.isFinite(quote.lastCandleAt) ? (
+            <p className="mt-1 text-xs">Last price seen {formatAgo(quote.lastCandleAt, now)}</p>
+          ) : null}
+        </div>
       ) : (
         <>
-          <div className="grid grid-cols-5 gap-1 text-center">
+          <dl className="grid grid-cols-3 gap-x-2 gap-y-3 sm:grid-cols-5">
             {CHANGE_WINDOWS.map((w) => {
               const value = quote.changes[w];
               return (
-                <div key={w} className="rounded-md bg-secondary/60 px-1 py-2">
-                  <div className="text-[10px] uppercase text-muted-foreground">
+                <div key={w} className="min-w-0">
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                     {WINDOW_LABELS[w]}
-                  </div>
-                  <div className={`num text-xs font-semibold ${changeClass(value)}`}>
+                  </dt>
+                  <dd className={`num text-[13px] font-semibold ${changeClass(value)}`}>
                     {value == null
                       ? "—"
                       : `${value > 0 ? "▲" : value < 0 ? "▼" : ""}${Math.abs(value).toFixed(2)}%`}
-                  </div>
+                  </dd>
                 </div>
               );
             })}
-          </div>
+          </dl>
 
           <div className="h-24">
             <ResponsiveContainer width="100%" height="100%">
@@ -160,13 +162,32 @@ export function QuoteCard({
               </AreaChart>
             </ResponsiveContainer>
           </div>
-          <p className="num text-[11px] text-muted-foreground">
-            Last 24 hours (15-minute candles) · updated{" "}
-            {new Date(quote.fetchedAt).toLocaleTimeString()}
+          <p className="text-xs text-muted-foreground">
+            Last 24 hours · updated{" "}
+            <span className="num">{formatClock(Date.parse(quote.fetchedAt), now)}</span>
           </p>
         </>
       )}
       {assessment}
     </article>
+  );
+}
+
+/** Loading placeholder in the shape of a pair card (soft pulse, still under reduced motion). */
+export function QuoteCardSkeleton({ symbol }: { symbol: string }) {
+  return (
+    <div className="panel flex flex-col gap-4 p-4 sm:p-5" aria-busy="true" aria-label={`Loading ${symbol}`}>
+      <div className="animate-pulse motion-reduce:animate-none">
+        <div className="h-5 w-24 rounded-md bg-secondary/60" />
+        <div className="mt-2 h-7 w-36 rounded-md bg-secondary/60" />
+        <div className="mt-4 grid grid-cols-3 gap-2 sm:grid-cols-5">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div key={i} className="h-9 rounded-md bg-secondary/40" />
+          ))}
+        </div>
+        <div className="mt-4 h-24 rounded-md bg-secondary/40" />
+        <div className="mt-4 h-6 w-40 rounded-full bg-secondary/40" />
+      </div>
+    </div>
   );
 }
