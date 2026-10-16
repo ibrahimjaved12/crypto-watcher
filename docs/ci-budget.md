@@ -10,14 +10,16 @@ so later market work (forex, #374) fits without a new job.
 
 - **`core`** (implicit: every module not listed in `shards.json`): the foundation and the live
   product: bars, candles, costs, labels, evaluation, hidden-stretch guard, data lake, canonical
-  identity, instruments, every `test_forward_*`, movement, execution evidence, futures execution, API,
+  identity, instruments, every `test_forward_*`, movement, API,
   analysis, slow movement and the CI selector tests. It runs on every PR as at most `--jobs` bins
   (greedy longest-processing-time on `WEIGHTS` in `run_shard.py`); each bin is one
   `python -m unittest <module> ...` subprocess, so interpreter and import start-up is paid once per
   bin. CI uses `--jobs 2`.
 - **`study`**: research machinery: the #123/EXP-75 cluster, doji/pattern research (paused),
   candle-table research, benchmark statistics/screening (SPA, StepM, DSR, bootstrap, scans, order
-  flow, sigma calibration, experiment runner/log, ...) and data-lake/label tooling. Each module runs
+  flow, sigma calibration, experiment runner/log, ...), data-lake/label tooling, and the #37 exact
+  execution cluster (`futures_execution*`, `execution_evidence`), which no live code imports yet;
+  move it back to `core` when the paper wallet starts using it. Each module runs
   in its own subprocess, only when a PR's changed files reach its imports, and always weekly.
 - **`study-heavy`**: weekly and dispatch only (below).
 

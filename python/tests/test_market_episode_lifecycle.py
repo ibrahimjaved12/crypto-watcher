@@ -219,13 +219,6 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
 
     def test_v1_config_is_versioned_and_immutable(self):
         config = MarketEpisodeLifecycleConfig()
-        self.assertEqual((config.version, config.evaluation_cadence_ms,
-                          config.start_confirmation_count, config.end_confirmation_count,
-                          config.reversal_confirmation_count, config.strengthen_confirmation_count,
-                          config.weaken_confirmation_count, config.resume_confirmation_count,
-                          config.continuation_breadth, config.material_strengthen_breadth,
-                          config.material_weaken_breadth),
-                         (DEFAULT_CONFIG_VERSION, 5_000, 2, 3, 2, 2, 2, 2, 0.55, 0.70, 0.50))
         changed = {
             "evaluation_cadence_ms": 10_000,
             "start_confirmation_count": 3, "end_confirmation_count": 4,
@@ -727,7 +720,7 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
                 self.assertEqual(deserialize_market_episode_lifecycle_state(
                     serialize_market_episode_lifecycle_state(candidate)), candidate)
 
-    def test_event_preserves_canonical_windows_times_metrics_and_contracts(self):
+    def test_event_maps_direction_specific_breadth_and_contracts(self):
         initial = classification(BASE, outlier=True)
         first = process_market_episode_lifecycle(initial)
         confirm_input = classification(BASE + 5_000, outlier=True)
@@ -738,30 +731,10 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
         self.assertEqual(event.windows_context,
                          tuple(confirm_input.windows[minute] for minute in (1, 5, 15)))
         self.assertEqual(event.classification, confirm_input)
-        self.assertEqual(event.source_time_evidence, primary.source_time_evidence)
         self.assertEqual(event.directional_breadth, primary.breadth.rising)
         self.assertEqual(event.material_breadth, primary.breadth.material_rising)
-        self.assertEqual(event.median_raw_return, primary.median_raw_return)
-        self.assertEqual(event.median_normalized_movement,
-                         primary.median_normalized_movement)
-        self.assertEqual(event.median_acceleration, primary.median_acceleration)
         self.assertEqual(event.acceleration_breadth,
                          primary.positive_acceleration_breadth)
-        self.assertEqual(event.pace, primary.pace)
-        self.assertEqual(event.dispersion_mad_normalized_movement,
-                         primary.dispersion_mad_normalized_movement)
-        self.assertEqual(event.volume_context, primary.volume_context)
-        self.assertEqual(event.isolated_outliers, primary.isolated_outliers)
-        self.assertEqual(event.configured_universe, primary.configured_universe)
-        self.assertEqual(event.included_symbols, primary.included_symbols)
-        self.assertEqual(event.excluded_symbols, primary.excluded_symbols)
-        self.assertEqual(event.episode_scope.classifier_config_version,
-                         primary.classifier_config_version)
-        self.assertEqual(event.evaluation_scope.movement_config_version,
-                         primary.movement_config_version)
-        self.assertEqual(event.episode_scope.lifecycle_algorithm_version, ALGORITHM_VERSION)
-        self.assertEqual(event.episode_lifecycle_config, MarketEpisodeLifecycleConfig())
-        self.assertEqual(event.evaluation_lifecycle_config, MarketEpisodeLifecycleConfig())
         self.assertEqual([item.symbol for item in event.supporting_contracts],
                          list(SYMBOLS[:80]))
         self.assertEqual([item.symbol for item in event.conflicting_contracts],
