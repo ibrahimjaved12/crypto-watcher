@@ -437,6 +437,37 @@ class OrderTests(unittest.TestCase):
         self.assertEqual(kinds(with_path)[-1], "liquidation")      # a limit-filled position can be liquidated
 
 
+class CostAwareSizingTests(unittest.TestCase):
+    def test_the_loss_at_the_stop_equals_the_risk_budget_only_when_costs_are_inside_it(self):
+        for side in (1, -1):
+            for aware in (False, True):
+                cfg = config(cost_aware_sizing=aware)
+                trade = setup("s", side)
+                state, opened = v3.step(v3.initial_state(cfg), opens(trade), cfg)
+                _, closed = v3.step(state, [{"type": "close", "ms": START + MINUTE, "setup_id": "s", "outcome": "S",
+                                             "exit_ref_price": trade["stop"]}], cfg)
+                loss = -sum(line["amount_e8"] for line in [*opened, *closed])
+                risk = cfg.initial_balance_e8 * cfg.risk_fraction
+                if aware:
+                    self.assertLessEqual(abs(loss - risk), 2, (side, loss))      # three rounded ledger lines
+                else:
+                    self.assertGreater(loss, risk + 10 ** 6, (side, loss))       # fees and exit slippage on top of 1 R
+        self.assertTrue(config(cost_aware_sizing=True).to_record()["cost_aware_sizing"])
+        self.assertFalse(config().to_record()["cost_aware_sizing"])
+
+
+class SafetyBoundaryTests(unittest.TestCase):
+    FORBIDDEN = re.compile(r"X-MBX-APIKEY|/fapi/v\d/(order|batchOrders|leverage|marginType|positionSide)|newOrder|hmac\.new|signature=")
+
+    def test_no_trading_credential_or_order_endpoint_in_the_wallet_path(self):
+        paths = [*(ROOT / "python/market_analysis/forward").glob("*.py"), ROOT / "python/market_analysis/api.py",
+                 *(ROOT / "src/lib/paper").glob("*.ts"), ROOT / "src/components/paper-account.tsx",
+                 ROOT / "src/lib/paper.functions.ts"]
+        self.assertGreater(len(paths), 10)
+        for path in paths:
+            self.assertIsNone(self.FORBIDDEN.search(path.read_text(encoding="utf-8")), path.name)
+
+
 class LedgerKindTests(unittest.TestCase):
     def test_python_sql_and_typescript_list_the_same_ledger_kinds(self):
         sql = (ROOT / "supabase/migrations/20261016180000_paper_ledger_order_kinds.sql").read_text(encoding="utf-8")
@@ -460,7 +491,7 @@ class ApiTests(unittest.TestCase):
             self.skipTest("API dependencies are not installed")
         token = "test-service-token-" + "x" * 32
         cfg = {"wallet_version": "wallet-v3", "contract_inputs": True, "portfolio_limits": True,
-               "max_exposure_multiple": "50"}
+               "max_exposure_multiple": "50", "cost_aware_sizing": True}
 
         def envelope(sequence, **payload):
             return {"symbol": "BTCUSDT", "sequence": sequence, "stage_run_id": STAGE, **payload}

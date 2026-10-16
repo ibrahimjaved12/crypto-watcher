@@ -386,6 +386,11 @@ maintenance margin, leverage, liquidation price and distance, stop and target.
   events yet.
 - **Sizing basis.** Risk fraction and the exposure cap use the realized balance (default) or, with
   `sizing_basis: "equity"`, the equity above. The margin check always uses the realized, available balance.
+- **Cost-aware sizing** (`cost_aware_sizing`, off by default). wallet-v2 sizes 1 R as the price distance from the
+  slipped entry fill to the stop, so fees and the stop exit's slippage come on top. With the option on, the loss at the
+  initial stop (price distance, the entry and exit fee, and the stop exit's slippage floor) equals the risk budget,
+  so the quantity is a little smaller; a test closes a position at its stop and checks the loss equals the budget.
+  Expected funding is not forecast by the wallet and stays outside the budget.
 - **Liquidation reserve.** As in v2, the liquidation price reserves maintenance margin plus the closing taker fee.
 
 ### Fills: scale-in and partial exit

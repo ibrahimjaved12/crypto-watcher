@@ -65,6 +65,7 @@ class WalletV3Config(v2.WalletConfig):
     contract_inputs: ContractInputs | None = None
     max_open_risk_fraction: Fraction | None = None
     cluster_risk_fraction: Fraction | None = None
+    cost_aware_sizing: bool = False
 
     def __post_init__(self):
         if self.sizing_basis not in SIZING_BASES:
@@ -89,7 +90,8 @@ class WalletV3Config(v2.WalletConfig):
             "max_open_risk_fraction": None if self.max_open_risk_fraction is None
             else exact_to_str(self.max_open_risk_fraction),
             "cluster_risk_fraction": None if self.cluster_risk_fraction is None
-            else exact_to_str(self.cluster_risk_fraction)})
+            else exact_to_str(self.cluster_risk_fraction),
+            "cost_aware_sizing": self.cost_aware_sizing})
         return record
 
 
@@ -358,6 +360,19 @@ def _cap_reason(state: dict, config: WalletV3Config, base: Fraction, symbol: str
     return None
 
 
+def _loss_per_unit(config: WalletV3Config, fill: Fraction, stop, side: int, entry_rate: Fraction,
+                   exit_rate: Fraction) -> Fraction:
+    """What one unit loses if the initial stop executes. By default the price distance (wallet-v2's 1 R).
+
+    With ``cost_aware_sizing`` the expected trading costs are inside the budget: the stop exit fills at the stop
+    with the slippage floor against the position, and both the entry and the exit fee are paid, so the whole loss at
+    the stop equals the risk budget (funding is not forecast and stays outside)."""
+    if not config.cost_aware_sizing:
+        return abs(fill - stop)
+    exit_fill = _slipped(stop, side, config, False)
+    return side * (fill - exit_fill) + entry_rate * fill + exit_rate * exit_fill
+
+
 def _plan(state: dict, config: WalletV3Config, setup: dict, *, limit_price: int | None = None):
     """Plan a new position (market) or order (limit): ``(plan, None)`` or ``(None, reason)``.
 
@@ -375,7 +390,7 @@ def _plan(state: dict, config: WalletV3Config, setup: dict, *, limit_price: int 
     rate = maker_rate_of(config, symbol) if limit_price is not None else taker
     fill = Fraction(limit_price) if limit_price is not None else _slipped(setup["p0"], side, config, True)
     base = sizing_base(state, config)
-    qty = base * config.risk_fraction / abs(fill - stop)
+    qty = base * config.risk_fraction / _loss_per_unit(config, fill, stop, side, rate, taker)
     bracket = None
     if inputs is None:
         terms = _flat_terms(side, fill, stop, config)

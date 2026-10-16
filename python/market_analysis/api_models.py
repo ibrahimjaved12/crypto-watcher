@@ -499,10 +499,12 @@ class ForwardWalletConfig(InputModel):
     portfolio_limits: bool = False
     max_open_risk_fraction: str | None = None
     cluster_risk_fraction: str | None = None
+    cost_aware_sizing: bool = False
 
     V3_ONLY: ClassVar[frozenset] = frozenset({
         "maker_rate", "sizing_basis", "ledger_links", "run_id", "contract_inputs", "contract_inputs_version",
-        "contract_inputs_hash", "portfolio_limits", "max_open_risk_fraction", "cluster_risk_fraction"})
+        "contract_inputs_hash", "portfolio_limits", "max_open_risk_fraction", "cluster_risk_fraction",
+        "cost_aware_sizing"})
 
     @field_validator("max_open_risk_fraction", "cluster_risk_fraction")
     @classmethod
