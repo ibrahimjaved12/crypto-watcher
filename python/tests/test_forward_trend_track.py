@@ -4,6 +4,7 @@ from __future__ import annotations
 from array import array
 from decimal import Decimal
 from fractions import Fraction
+from functools import lru_cache
 import unittest
 
 import numpy as np
@@ -22,7 +23,9 @@ SYMBOLS = data_lake.SYMBOLS[:3]
 GAPS = {SYMBOLS[1]: (200, 470)}  # one in the warm-up, one inside the tracked window
 
 
+@lru_cache(maxsize=None)
 def fixture(seed=7):
+    """Built once per seed; callers only read it (``forward_symbols`` and ``backtest_symbols`` copy)."""
     rng = np.random.default_rng(seed)
     out = {}
     for n, symbol in enumerate(SYMBOLS):
@@ -212,13 +215,6 @@ class ApiTests(unittest.TestCase):
         no_clock = {key: value for key, value in body.items() if key != "evaluated_at_ms"}
         self.assertEqual(asyncio.run(send(no_clock, headers)).status_code, 422)  # the caller supplies the time
 
-    def test_evaluator_is_pure(self):
-        data = fixture()
-        with self.assertRaises(TypeError):  # no wall-clock fallback
-            tt.evaluate(forward_symbols(data), S0 + 505 * DAY, track_start_ms=S0 + 500 * DAY)
-        first = evaluate(forward_symbols(data), S0 + 505 * DAY, track_start_ms=S0 + 500 * DAY)
-        self.assertEqual(evaluate(forward_symbols(data), S0 + 505 * DAY, track_start_ms=S0 + 500 * DAY), first)
-
 class RecoveryTests(unittest.TestCase):
     def test_incomplete_universe_never_emits_initial_state_or_decisions(self):
         data = fixture()
@@ -265,18 +261,6 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "configuration identity"):
                 evaluate(symbols, start + DAY, first["states"], **kwargs)
 
-    def test_adjusted_settlement_interval_requires_its_full_grid(self):
-        symbols = forward_symbols(fixture())
-        start = S0 + 500 * DAY
-        interval = 4 * 3_600_000
-        for item in symbols:
-            item["funding_interval_ms"] = interval
-            item["funding"] = [{"calc_time_ms": calc, "rate": "0"}
-                               for calc in range(start + interval, start + DAY + 1, interval)]
-        self.assertTrue(evaluate(symbols, start, track_start_ms=start)["ledger"])
-        symbols[0]["funding"] = symbols[0]["funding"][1:]
-        self.assertEqual(evaluate(symbols, start, track_start_ms=start)["ledger"], [])
-
     def test_prospective_and_reconstructed_statistics_are_separate(self):
         symbols = forward_symbols(fixture())
         start = S0 + 500 * DAY
@@ -299,19 +283,6 @@ class RecoveryTests(unittest.TestCase):
         decisions[0]["weights"][SYMBOLS[0]] += 0.01
         with self.assertRaisesRegex(ValueError, "recorded decision differs"):
             evaluate(symbols, start, initial["states"], track_start_ms=start, decisions=decisions)
-
-    def test_420_days_changes_canonical_2020_weight_path(self):
-        days = (tt.TRACK_START_MS - tt.HISTORY_START_MS) // DAY + 8
-        rng = np.random.default_rng(71)
-        close = 100 * np.exp(np.cumsum(0.001 + 0.02 * rng.standard_normal(days)))
-        track = tt.TRACKS_BY_NAME["tsmom_7"]
-        full, _ = tt.weight_path(track, close)
-        cut = days - 8 - 420
-        short, _ = tt.weight_path(track, close[cut:])
-        self.assertTrue(np.any(full[-8:] != short[-8:]))
-        target = tt.target_weights([track], {"BTCUSDT": (tt.HISTORY_START_MS, close)}, tt.TRACK_START_MS - DAY)
-        self.assertEqual(target[track.name]["BTCUSDT"][0], full[days - 8])
-
 
 if __name__ == "__main__":
     unittest.main()

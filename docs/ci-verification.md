@@ -4,11 +4,12 @@ One GitHub Actions workflow, `Tests` (`.github/workflows/verify.yml`), with one 
 `Python tests, Node tests and builds` (the check shows as "Tests / Python tests, Node tests and builds"). It runs for pull requests (not for docs-only changes), every Monday as a full run, and on
 manual dispatch. There is no push-to-main run: merged code was verified on its PR. New pushes cancel
 older in-progress runs for the same PR. The job has a 12-minute timeout and needs no repository
-secrets. Budget, tiers and how tests are selected: [ci-budget.md](ci-budget.md).
+secrets. A typical PR run should finish in under 2 minutes. Budget, tiers and how tests are
+selected: [ci-budget.md](ci-budget.md).
 
 | Lane   | Verification                                                                                                                                                                      |
 | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Python | Python 3.10, pinned `python/requirements.txt`, the `core` tier of `python/tests/` always, plus the `study` tier modules a PR's changed files reach (weekly/dispatch: all tiers). |
+| Python | Python 3.10, pinned `python/requirements.txt`, the `core` tier of `python/tests/` (foundation + live product + forward, run as two binned `unittest` processes) always, plus the `study` tier (research machinery) modules a PR's changed files reach (weekly/dispatch: all tiers). |
 | Node   | Node 22 from `.nvmrc`, both npm lockfiles, the full `tests/*.test.mjs` suite, TypeScript typecheck, application build, and standalone collector-worker build.                    |
 
 The lanes run concurrently; a failure in either fails the job and the other lane's log is still

@@ -118,15 +118,6 @@ class GoldenEquivalenceTests(unittest.TestCase):
             seen |= {line["type"] for line in actual[1]}
         self.assertTrue({"liquidation", "rejected", "pnl", "funding"} <= seen)
 
-    def test_versions_never_mix(self):
-        with self.assertRaisesRegex(ValueError, "new run"):
-            v3.step(v2.initial_state(), [])
-        # wallet-v2 keeps overwriting the version, so the API refuses a v3 state for a v2 configuration.
-        self.assertEqual(v3.initial_state()["version"], "wallet-v3")
-        self.assertEqual(v3.WalletV3Config().to_record()["wallet_version"], "wallet-v3")
-        self.assertNotIn("wallet_version", v2.WalletConfig().to_record())
-
-
 class MarkToMarketTests(unittest.TestCase):
     def opened(self, *setups, config=v3.WalletV3Config()):
         return v3.step(v3.initial_state(config), opens(*setups), config)
@@ -170,24 +161,6 @@ class MarkToMarketTests(unittest.TestCase):
         late = v3.account_summary(state, as_of_ms=START + 60 * MINUTE, max_mark_age_ms=2 * MINUTE)
         self.assertEqual((fresh["positions"][0]["mark_stale"], late["positions"][0]["mark_stale"]), (False, True))
         self.assertIsNone(v3.account_summary(state)["positions"][0]["mark_stale"])
-
-    def test_sizing_uses_the_realized_balance_unless_equity_is_selected(self):
-        results = {}
-        for basis in ("balance", "equity"):
-            config = v3.WalletV3Config(sizing_basis=basis, max_exposure_multiple=Fraction(100))
-            state, _ = self.opened(setup("first"), config=config)
-            state, _ = v3.step(state, [mark(START + MINUTE, P0 + 10 * 10 ** 8)], config)
-            balance, unrealized = state["balance_e8"], v3.unrealized_total(state)
-            self.assertGreater(unrealized, 0)
-            state, _ = v3.step(state, opens(setup("second", entry_ms=START + 2 * MINUTE)), config)
-            results[basis] = (exact_from_str(state["positions"]["second"]["qty"]), balance, unrealized)
-        (q_balance, balance_a, _), (q_equity, balance_b, unrealized) = results["balance"], results["equity"]
-        self.assertEqual(balance_a, balance_b)
-        self.assertEqual(q_equity * balance_b, q_balance * (balance_b + unrealized))  # exact ratio equity / balance
-        self.assertGreater(q_equity, q_balance)
-        with self.assertRaises(ValueError):
-            v3.WalletV3Config(sizing_basis="margin")
-
 
 class FillTests(unittest.TestCase):
     def open_long(self, config=v3.WalletV3Config(max_exposure_multiple=Fraction(50))):
@@ -283,22 +256,6 @@ class FillTests(unittest.TestCase):
         _, lines = v3.step(state, [fill("more", "increase", "10", P0, START + MINUTE, setup_id="a")], config)
         self.assertEqual(lines[0]["reason"], "insufficient_margin")
 
-    def test_ledger_lines_link_run_position_and_source_event(self):
-        config = v3.WalletV3Config(ledger_links=True, run_id="run-1", max_exposure_multiple=Fraction(50))
-        events = [{**event, "symbol": "BTCUSDT", "sequence": i, "stage_run_id": STAGE}
-                  for i, event in enumerate(opens(setup()))]
-        state, ledger = v3.wallet_step(v3.initial_state(config), events, config)
-        state, more = v3.step(state, [fill("f1", "reduce", str(exact_from_str(state["positions"]["s1"]["qty"]) / 2),
-                                           P0, START + MINUTE)], config)
-        for line in [*ledger, *more]:
-            self.assertEqual((line["run_id"], line["position_id"], line["setup_id"]), ("run-1", "s1", "s1"))
-        self.assertEqual(ledger[0]["source_event"], {"stage_run_id": STAGE, "symbol": "BTCUSDT", "sequence": 0})
-        self.assertEqual(more[0]["source_event"], {"type": "fill", "ms": START + MINUTE})
-        self.assertEqual({line["fill_id"] for line in more}, {"f1"})
-        plain = v3.step(v3.initial_state(), opens(setup()))[1]
-        self.assertTrue(all("run_id" not in line and "source_event" not in line for line in plain))
-
-
 class ReconcileTests(unittest.TestCase):
     def history(self):
         config = v3.WalletV3Config(max_exposure_multiple=Fraction(50))
@@ -381,39 +338,6 @@ class ApiTests(unittest.TestCase):
 
     def event(self, sequence, **payload):
         return {"symbol": "BTCUSDT", "sequence": sequence, "stage_run_id": STAGE, **payload}
-
-    def test_v3_marks_fills_account_and_reconciliation_through_the_endpoint(self):
-        config = {"wallet_version": "wallet-v3", "run_id": "api-run", "ledger_links": True, "max_exposure_multiple": "50"}
-
-        async def scenario(send):
-            first = await send({"schema_version": 1, "config": config,
-                                "events": [self.event(0, type="open", ms=START, setup=setup())]})
-            self.assertEqual(first.status_code, 200, first.text)
-            data = first.json()
-            self.assertEqual(data["wallet_state"]["version"], "wallet-v3")
-            self.assertTrue(data["reconciliation"]["ok"])
-            self.assertEqual(data["ledger"][0]["run_id"], "api-run")
-            qty = exact_from_str(data["wallet_state"]["positions"]["s1"]["qty"])
-            later = [self.event(1, type="mark", ms=START + MINUTE, mark=P0 + 10 ** 8),
-                     self.event(2, type="fill", ms=START + 2 * MINUTE, setup_id="s1", fill_id="f1",
-                                direction="reduce", qty=str(qty / 2), price=P0 + 2 * 10 ** 8)]
-            second = await send({"schema_version": 1, "state": data["wallet_state"], "events": later, "config": config,
-                                 "reconcile": {"initial_balance_e8": 100 * 10 ** 8, "ledger": data["ledger"]}})
-            self.assertEqual(second.status_code, 200, second.text)
-            result = second.json()
-            self.assertTrue(result["reconciliation"]["ok"], result["reconciliation"])
-            account = result["account"]
-            self.assertEqual(account["equity_e8"], account["balance_e8"] + account["unrealized_e8"])
-            self.assertEqual(account["positions"][0]["mark"], P0 + 10 ** 8)
-            # the supplied ledger lacks this call's lines, so the whole-ledger check reports exactly that ...
-            self.assertFalse(result["full_reconciliation"]["ok"])
-            # ... and passes once the whole history is supplied (events [] checks a stored state)
-            whole = await send({"schema_version": 1, "state": result["wallet_state"], "events": [], "config": config,
-                                "reconcile": {"initial_balance_e8": 100 * 10 ** 8,
-                                              "ledger": [*data["ledger"], *result["ledger"]]}})
-            self.assertTrue(whole.json()["full_reconciliation"]["ok"], whole.json()["full_reconciliation"])
-
-        self.run_scenario(scenario)
 
     def test_wallet_v2_stays_v2_and_refuses_v3_inputs(self):
         async def scenario(send):

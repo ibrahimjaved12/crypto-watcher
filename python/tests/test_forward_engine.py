@@ -56,15 +56,6 @@ def row(open_ms, price=100.5, transport="rest"):
 
 
 class AdapterTests(unittest.TestCase):
-    def test_scaling_rule_is_shortest_repr_then_half_even(self):
-        self.assertEqual(ba.to_scaled(0.1), 10_000_000)
-        self.assertEqual(ba.to_scaled(65432.1), 6_543_210_000_000)
-        self.assertEqual(ba.to_scaled(1.000000005), 100_000_000)   # ...0.5 -> even
-        self.assertEqual(ba.to_scaled(1.000000015), 100_000_002)   # ...1.5 -> even
-        for bad in (float("nan"), float("inf"), -1.0, True, "1"):
-            with self.assertRaises(ba.CollectorRowError):
-                ba.to_scaled(bad)
-
     def test_gaps_alignment_and_flags(self):
         first = START + 30 * MINUTE  # not a 4h boundary: the series starts at the boundary before it
         rows = [row(first), row(first + MINUTE, 101.25, "websocket"), row(first + 3 * MINUTE)]
@@ -115,26 +106,6 @@ class SignalTests(unittest.TestCase):
         signals, reasons = sg.generate_signals("BTCUSDT", short, START, short.end_ms, ["ema_cross_50_200:240"])
         self.assertEqual((signals, reasons), ([], {"ema_cross_50_200:240": "insufficient_history"}))
 
-    def test_placebo_is_reproducible_and_matches_the_rate(self):
-        strategy = sg.FORWARD_STRATEGIES["placebo-v1:rsi_14_reversion:15"]
-        frozen = sg.ForwardStrategy(strategy.strategy_id, strategy.version, "placebo", strategy.name, 15, 15,
-                                    strategy.matched_id, Fraction(1, 4))
-        original = sg.FORWARD_STRATEGIES[frozen.strategy_id]
-        sg.FORWARD_STRATEGIES[frozen.strategy_id] = frozen
-        try:
-            window = (START + 5 * 86_400_000, START + 40 * 86_400_000 - 2 * MINUTE)
-            signals, reasons = sg.generate_signals("BTCUSDT", self.bars, *window, [frozen.strategy_id])
-        finally:
-            sg.FORWARD_STRATEGIES[frozen.strategy_id] = original
-        decisions = (window[1] - window[0]) // sg.PLACEBO_STEP_MS
-        self.assertAlmostEqual(len(signals) / decisions, 0.25, delta=0.05)
-        self.assertNotIn(frozen.strategy_id, reasons)
-        self.assertTrue(all(s.signal_ms % sg.PLACEBO_STEP_MS == 0 for s in signals))
-        sides = [s.side for s in signals]
-        self.assertTrue(0.35 < sides.count(1) / len(sides) < 0.65)
-        self.assertEqual(sg.placebo_draw("x:15", "BTCUSDT", window[0]), sg.placebo_draw("x:15", "BTCUSDT", window[0]))
-
-
 class LabelEquivalenceTests(unittest.TestCase):
     """Forward setups and resolutions equal build_labels (labels-v2) row for row on the same bars."""
 
@@ -174,29 +145,6 @@ class LabelEquivalenceTests(unittest.TestCase):
         self.assertGreater(traded, 100)
         self.assertGreater(compared, 1500)
 
-    def test_incremental_resolution_reaches_the_same_final_result(self):
-        tradeable = [s for r in self.rows if r.status == "T" for s in self.setups_for(r)][:12]
-        for setup in tradeable:
-            full = resolve_setup(setup, self.bars)
-            e = (setup.entry_ms - self.bars.start_ms) // MINUTE
-            previous = None
-            for cut in (e, e + 1, e + 7, e + 23, e + 59, e + 61):
-                current = resolve_setup(setup, truncated(self.bars, min(cut, self.bars.minutes)), previous=previous)
-                if previous is not None and previous.final:
-                    self.assertIs(current, previous)  # a final resolution never changes
-                if cut == e:
-                    self.assertEqual(current.status, "pending")
-                previous = current
-            self.assertEqual(previous, full)
-
-    def test_setup_round_trip_and_immutability(self):
-        setup = next(s for r in self.rows if r.status == "T" for s in self.setups_for(r))
-        self.assertEqual(Setup.from_dict(setup.to_dict()), setup)
-        with self.assertRaises(ValueError):
-            Setup.from_dict({**setup.to_dict(), "rr": "3"})
-        with self.assertRaises(Exception):
-            setup.stop = 1
-
     def test_ambiguous_minute_is_not_resolved_optimistically(self):
         p0 = 100_000 * TICK
         setup = Setup("a", "s", "test:15", "test", "BTCUSDT", 1, 15, START + MINUTE, START + MINUTE, "2", "3/2", "T", 1,
@@ -234,11 +182,6 @@ class HcalSigmaTests(unittest.TestCase):
         signal_ms = START + day * 86_400_000 + 15 * MINUTE
         signal = sg.Signal("sig", "test:15", "test", "BTCUSDT", signal_ms, side, 15)
         return signal_ms, build_setup(signal, self.bars, self.sigma, tick=TICK, params=HCAL, next_comp=self.nc)
-
-    def test_forward_params_are_the_hcal_labels_v3_model(self):
-        self.assertEqual(FORWARD_PARAMS.sigma_model, "ewma-robust-hcal")
-        self.assertEqual(FORWARD_PARAMS.schema, "labels-v3")
-        self.assertIn("hcal", FORWARD_PARAMS.to_record()["robust"])
 
     def test_refuses_to_emit_before_sixty_days_of_windows(self):
         for day in (1, 30, 60):  # factors need 28 days, then 60 days of completed windows

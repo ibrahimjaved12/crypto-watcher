@@ -62,7 +62,7 @@ that until the tool proves it makes money.
   realistic futures costs (fees, funding, slippage, liquidation).
 - Later: ML/AI layers, only if they measurably beat simple baselines out of sample.
 
-Forex is planned for later as a separate, owner-led strategy track (#374); nothing is scheduled.
+Forex is in scope as a second market next to crypto (#374): CFD-style spot and futures, same repo and name, dashboard Crypto/Forex toggle, backend computes both. Design and decisions: docs/forex.md.
 
 ## 3. Current priorities (set 2026-10-07)
 
@@ -120,7 +120,7 @@ Setup charts are rendered on the owner's machine from windows captured at event 
 - Be specific: correct architecture, correct math and trading-algorithm technicality.
 - Include good improvements you notice rather than leaving them as optional notes.
 - Never invent prices, news, or certainty. The repo is public: no secrets, no private notes.
-- Python CI budget: the whole Python job must finish in under 3 minutes wall-clock. New test modules should stay under ~10 s; heavier statistical acceptance tests use tests/slow.py and run in slow-tests.yml; update python/tests/shards.json if a module exceeds ~40 s.
+- Python CI budget: the whole Python job must finish in under 2 minutes wall-clock. New test modules should stay under ~10 s; heavier statistical acceptance tests use tests/slow.py and run in slow-tests.yml; update python/tests/shards.json if a module exceeds ~40 s.
 
 ## 7. Known drift under review (2026-10-07)
 

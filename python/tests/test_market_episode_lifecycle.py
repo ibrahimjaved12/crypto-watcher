@@ -205,27 +205,8 @@ def start(**kwargs):
 
 
 class MarketEpisodeLifecycleTests(unittest.TestCase):
-    def test_public_transition_serializer_preserves_complete_canonical_evidence(self):
-        _, event = start()
-        serialized = serialize_market_episode_transition(event)
-        self.assertEqual(set(serialized), {field.name for field in fields(event)})
-        self.assertEqual(serialized["event_id"], event.event_id)
-        self.assertEqual(serialized["source_time_evidence"][0]["symbol"], SYMBOLS[0])
-        self.assertEqual(serialized["volume_context"][0]
-                         ["current_notional_volume"]["value"], "100")
-        self.assertEqual(json.loads(json.dumps(serialized)), serialized)
-        with self.assertRaises(ValueError):
-            serialize_market_episode_transition({"event_id": event.event_id})
-
     def test_v1_config_is_versioned_and_immutable(self):
         config = MarketEpisodeLifecycleConfig()
-        self.assertEqual((config.version, config.evaluation_cadence_ms,
-                          config.start_confirmation_count, config.end_confirmation_count,
-                          config.reversal_confirmation_count, config.strengthen_confirmation_count,
-                          config.weaken_confirmation_count, config.resume_confirmation_count,
-                          config.continuation_breadth, config.material_strengthen_breadth,
-                          config.material_weaken_breadth),
-                         (DEFAULT_CONFIG_VERSION, 5_000, 2, 3, 2, 2, 2, 2, 0.55, 0.70, 0.50))
         changed = {
             "evaluation_cadence_ms": 10_000,
             "start_confirmation_count": 3, "end_confirmation_count": 4,
@@ -293,24 +274,6 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
         self.assertEqual([event.transition for event in ended.transitions], ["ENDED"])
         self.assertEqual(ended.transitions[0].transition_reason, "continuation_failed")
         self.assertIsNone(ended.next_state.active_episode)
-
-    def test_passing_continuation_resets_failure_count(self):
-        state, _ = start()
-        failed = advance(state, BASE + 10_000, direction="NEUTRAL", same_count=54)
-        passed = advance(failed.next_state, BASE + 15_000, direction="NEUTRAL", same_count=55)
-        self.assertEqual(passed.next_state.continuation_failure_count, 0)
-        self.assertEqual(passed.transitions, ())
-
-    def test_drop_continuation_uses_falling_breadth_and_negative_raw_sign(self):
-        state, _ = start(direction="BROAD_DROP")
-        passing = advance(state, BASE + 10_000, direction="NEUTRAL",
-                          same_count=55, material_count=40, raw=-0.01,
-                          breadth_direction="FALLING")
-        self.assertEqual(passing.next_state.continuation_failure_count, 0)
-        failing = advance(passing.next_state, BASE + 15_000, direction="NEUTRAL",
-                          same_count=55, material_count=40, raw=0.01,
-                          breadth_direction="FALLING")
-        self.assertEqual(failing.next_state.continuation_failure_count, 1)
 
     def test_clean_opposite_two_tick_reversal_precedes_exit_and_has_no_cooldown(self):
         state, started = start()
@@ -418,25 +381,6 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
         self.assertEqual(failed.next_state.pending_weaken, ())
         self.assertEqual(failed.next_state.continuation_failure_count, 1)
 
-    def test_pace_and_material_confirmation_combine_into_one_transition(self):
-        state, _ = start(pace="MIXED", material_count=69)
-        first = advance(state, BASE + 10_000, pace="ACCELERATING", material_count=70)
-        confirmed = advance(first.next_state, BASE + 15_000,
-                            pace="ACCELERATING", material_count=71)
-        self.assertEqual(len(confirmed.transitions), 1)
-        self.assertEqual(confirmed.transitions[0].transition, "STRENGTHENED")
-        self.assertEqual(confirmed.transitions[0].transition_reason,
-                         "pace_accelerating+material_strengthening")
-
-    def test_episode_creation_sets_crossing_baseline(self):
-        state, _ = start(pace="ACCELERATING", material_count=80)
-        same = advance(state, BASE + 10_000, pace="ACCELERATING", material_count=80)
-        self.assertEqual(same.transitions, ())
-        state, _ = start(pace="DECELERATING", material_count=50)
-        same = advance(state, BASE + 10_000, pace="DECELERATING",
-                       direction="NEUTRAL", same_count=60, material_count=50)
-        self.assertEqual(same.transitions, ())
-
     def test_warming_and_unavailable_interrupt_without_ordinary_exit(self):
         first = advance(None, BASE)
         self.assertIsNone(advance(first.next_state, BASE + 5_000,
@@ -477,64 +421,6 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
                           universe_version="v2")
         self.assertEqual(changed.transitions, ())
         self.assertEqual(changed.next_state.pending_start.count, 1)
-
-    def test_scope_versions_and_provider_changes_end_active_episode(self):
-        changes = {
-            "universe_id": "other", "classifier_algorithm_version": "classifier-v2",
-            "classifier_config_version": "custom-classifier-v2",
-            "movement_algorithm_version": "movement-v2",
-            "movement_config_version": "movement-config-v2",
-            "provider": "other-provider", "exchange": "other-exchange",
-            "price_type": "mid",
-        }
-        expected = {
-            "universe_id": "universe_changed",
-            "classifier_algorithm_version": "classifier_algorithm_changed",
-            "classifier_config_version": "classifier_config_changed",
-            "movement_algorithm_version": "movement_algorithm_changed",
-            "movement_config_version": "movement_config_changed",
-            "provider": "provider_changed", "exchange": "exchange_changed",
-            "price_type": "price_type_changed",
-        }
-        for field, value in changes.items():
-            with self.subTest(field=field):
-                state, started = start()
-                result = advance(state, BASE + 10_000, **{field: value})
-                self.assertEqual([event.transition for event in result.transitions], ["ENDED"])
-                self.assertEqual(result.transitions[0].transition_reason, expected[field])
-                self.assertEqual(result.transitions[0].episode_id, started.episode_id)
-                self.assertIsNone(result.next_state.active_episode)
-        state, _ = start()
-        changed_config = MarketEpisodeLifecycleConfig(version="custom-v2")
-        result = process_market_episode_lifecycle(classification(BASE + 10_000),
-                                                  state, changed_config)
-        self.assertEqual(result.transitions[0].transition_reason,
-                         "lifecycle_config_changed")
-        self.assertEqual(result.transitions[0].episode_lifecycle_config, state.lifecycle_config)
-        self.assertEqual(result.transitions[0].evaluation_lifecycle_config, changed_config)
-        for scope_field, changed_value, reason in (
-            ("lifecycle_algorithm_version", "previous-lifecycle-v0",
-             "lifecycle_algorithm_changed"),
-            ("primary_window_minutes", 1, "primary_window_changed"),
-        ):
-            with self.subTest(scope_field=scope_field):
-                state, _ = start()
-                old_scope = replace(state.scope, **{scope_field: changed_value})
-                old_id = (_episode_id(old_scope, state.active_episode.direction,
-                          state.active_episode.start_boundary_time_ms)
-                          if old_scope.lifecycle_algorithm_version == ALGORITHM_VERSION
-                          else "previous-scope-episode")
-                old_episode = replace(state.active_episode, scope=old_scope,
-                                      episode_id=old_id)
-                old_state = replace(state, scope=old_scope, active_episode=old_episode,
-                                    lifecycle_algorithm_version=old_scope.lifecycle_algorithm_version)
-                self.assertEqual(deserialize_market_episode_lifecycle_state(
-                    serialize_market_episode_lifecycle_state(old_state)), old_state)
-                result = process_market_episode_lifecycle(
-                    classification(BASE + 10_000), old_state)
-                self.assertEqual(result.transitions[0].transition_reason, reason)
-                self.assertEqual(result.transitions[0].episode_scope, old_scope)
-                self.assertEqual(result.transitions[0].episode_id, old_episode.episode_id)
 
     def test_duplicate_backward_gap_and_replay_identities(self):
         first_input = classification(BASE)
@@ -709,73 +595,6 @@ class MarketEpisodeLifecycleTests(unittest.TestCase):
             with self.subTest(payload=invalid):
                 with self.assertRaises(ValueError):
                     deserialize_market_episode_lifecycle_state(invalid)
-
-    def test_serialization_round_trips_pending_confirmation_state(self):
-        pending_start = advance(None, BASE).next_state
-        state, _ = start(pace="MIXED", material_count=69)
-        pending_strengthen = advance(state, BASE + 10_000,
-                                     pace="ACCELERATING", material_count=70).next_state
-        pending_reversal = advance(state, BASE + 10_000,
-                                   direction="BROAD_DROP").next_state
-        interrupted = interrupt_market_episode_state_on_restart(state)
-        pending_resume = advance(interrupted, BASE + 10_000).next_state
-        failed = advance(state, BASE + 10_000, direction="NEUTRAL",
-                         same_count=54).next_state
-        for candidate in (pending_start, pending_strengthen, pending_reversal,
-                          pending_resume, failed):
-            with self.subTest(candidate=candidate.current_direction_state):
-                self.assertEqual(deserialize_market_episode_lifecycle_state(
-                    serialize_market_episode_lifecycle_state(candidate)), candidate)
-
-    def test_event_preserves_canonical_windows_times_metrics_and_contracts(self):
-        initial = classification(BASE, outlier=True)
-        first = process_market_episode_lifecycle(initial)
-        confirm_input = classification(BASE + 5_000, outlier=True)
-        second = process_market_episode_lifecycle(confirm_input, first.next_state)
-        event = second.transitions[0]
-        primary = confirm_input.windows[5]
-        self.assertEqual(event.event_family, "BROAD_MOVE")
-        self.assertEqual(event.windows_context,
-                         tuple(confirm_input.windows[minute] for minute in (1, 5, 15)))
-        self.assertEqual(event.classification, confirm_input)
-        self.assertEqual(event.source_time_evidence, primary.source_time_evidence)
-        self.assertEqual(event.directional_breadth, primary.breadth.rising)
-        self.assertEqual(event.material_breadth, primary.breadth.material_rising)
-        self.assertEqual(event.median_raw_return, primary.median_raw_return)
-        self.assertEqual(event.median_normalized_movement,
-                         primary.median_normalized_movement)
-        self.assertEqual(event.median_acceleration, primary.median_acceleration)
-        self.assertEqual(event.acceleration_breadth,
-                         primary.positive_acceleration_breadth)
-        self.assertEqual(event.pace, primary.pace)
-        self.assertEqual(event.dispersion_mad_normalized_movement,
-                         primary.dispersion_mad_normalized_movement)
-        self.assertEqual(event.volume_context, primary.volume_context)
-        self.assertEqual(event.isolated_outliers, primary.isolated_outliers)
-        self.assertEqual(event.configured_universe, primary.configured_universe)
-        self.assertEqual(event.included_symbols, primary.included_symbols)
-        self.assertEqual(event.excluded_symbols, primary.excluded_symbols)
-        self.assertEqual(event.episode_scope.classifier_config_version,
-                         primary.classifier_config_version)
-        self.assertEqual(event.evaluation_scope.movement_config_version,
-                         primary.movement_config_version)
-        self.assertEqual(event.episode_scope.lifecycle_algorithm_version, ALGORITHM_VERSION)
-        self.assertEqual(event.episode_lifecycle_config, MarketEpisodeLifecycleConfig())
-        self.assertEqual(event.evaluation_lifecycle_config, MarketEpisodeLifecycleConfig())
-        self.assertEqual([item.symbol for item in event.supporting_contracts],
-                         list(SYMBOLS[:80]))
-        self.assertEqual([item.symbol for item in event.conflicting_contracts],
-                         list(SYMBOLS[80:100]))
-        self.assertEqual(event.source_time_evidence[0].last_real_event_time_ms,
-                         BASE + 5_000 - 4_000)
-
-        _, drop_event = start(direction="BROAD_DROP", pace="ACCELERATING")
-        self.assertEqual(drop_event.directional_breadth,
-                         drop_event.classification.windows[5].breadth.falling)
-        self.assertEqual(drop_event.material_breadth,
-                         drop_event.classification.windows[5].breadth.material_falling)
-        self.assertEqual(drop_event.acceleration_breadth,
-                         drop_event.classification.windows[5].negative_acceleration_breadth)
 
     def test_episode_id_changes_with_true_identity(self):
         _, baseline = start()

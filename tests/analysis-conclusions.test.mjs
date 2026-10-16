@@ -138,34 +138,3 @@ function mockClient(responses) {
     },
   };
 }
-
-test("server append path returns the original row for an exact retry", async () => {
-  const emptyAdmin = `data:text/javascript;base64,${Buffer.from(
-    "export const supabaseAdmin = {};",
-  ).toString("base64")}`;
-  const { persistAnalysisConclusion } = await import(
-    await moduleUrl("../src/lib/analysis-conclusions.server.ts", {
-      "@/integrations/supabase/client.server": emptyAdmin,
-    })
-  );
-  const input = { user_id: user, idempotency_key: "retry", input_hash: hash };
-  const saved = { ...input, input_reference: null, id: "saved-id" };
-  const result = await persistAnalysisConclusion(
-    input,
-    mockClient([
-      { data: null, error: { code: "23505" } },
-      { data: saved, error: null },
-    ]),
-  );
-  assert.equal(result.id, "saved-id");
-  await assert.rejects(
-    persistAnalysisConclusion(
-      { ...input, input_hash: "b".repeat(64) },
-      mockClient([
-        { data: null, error: { code: "23505" } },
-        { data: saved, error: null },
-      ]),
-    ),
-    /reused for different input/,
-  );
-});

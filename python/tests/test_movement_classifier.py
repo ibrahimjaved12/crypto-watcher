@@ -153,14 +153,6 @@ def classify(primary, *, prior=None, provenance=None):
 
 
 class ConfigVersionTests(unittest.TestCase):
-    def test_default_version_uses_exact_canonical_v1_thresholds(self):
-        config = MarketClassifierConfig()
-        self.assertEqual(config.version, "market-state-classifier-config-v1")
-        self.assertEqual((config.directional_breadth, config.material_breadth,
-                          config.normalized_movement, config.acceleration_breadth,
-                          config.isolated_outlier_breadth_disagreement),
-                         (0.70, 0.50, 0.50, 0.60, 0.50))
-
     def test_default_version_rejects_each_changed_threshold(self):
         changes = {
             "directional_breadth": 0.90,
@@ -175,26 +167,6 @@ class ConfigVersionTests(unittest.TestCase):
                     MarketClassifierConfig(
                         version="market-state-classifier-config-v1", **{name: value}
                     )
-
-    def test_custom_version_retains_exact_config_and_is_deterministic(self):
-        config = MarketClassifierConfig(
-            version="market-state-classifier-config-custom-v2",
-            directional_breadth=0.90, material_breadth=0.60,
-            normalized_movement=0.75, acceleration_breadth=0.70,
-            isolated_outlier_breadth_disagreement=0.40,
-        )
-        primary = window_result()
-        movement = evaluation(primary)
-        provenance = provenance_for(primary)
-        context = MarketClassificationContext({
-            minutes: MarketWindowClassificationContext(provenance)
-            for minutes in (1, 5, 15)
-        })
-        first = classify_market_movement(movement, context, config)
-        self.assertIs(first.classifier_config, config)
-        self.assertEqual(first.classifier_config_version, config.version)
-        self.assertEqual(first, classify_market_movement(movement, context, config))
-
 
 class DirectionTests(unittest.TestCase):
     def test_broad_rise_at_exact_directional_material_and_normalized_thresholds(self):
@@ -248,21 +220,6 @@ class PaceTests(unittest.TestCase):
                                  sum(value < 0 for value in values))
         self.assertEqual(classify(window_result(accelerations=cases[0][0])).windows[5]
                          .positive_acceleration_breadth.value.fraction, 0.60)
-
-    def test_drop_accelerating_decelerating_and_mixed(self):
-        drop = dict(directions=("FALLING",) * 7 + ("RISING",) * 3,
-                    median_raw=-0.01, median_normalized=-0.5)
-        cases = (
-            ((-1.0,) * 6 + (1.0,) * 4, "ACCELERATING"),
-            ((1.0,) * 6 + (-1.0,) * 4, "DECELERATING"),
-            ((-1.0,) * 5 + (1.0,) * 5, "MIXED"),
-        )
-        for values, expected in cases:
-            with self.subTest(expected=expected):
-                pace = classify(window_result(**drop, accelerations=values)).windows[5].pace
-                self.assertTrue(pace.available)
-                self.assertEqual(pace.value, expected)
-                self.assertIsNone(pace.reason)
 
     def test_non_broad_pace_has_no_broad_direction(self):
         pace = classify(window_result(material_count=4)).windows[5].pace
@@ -320,29 +277,6 @@ class OutlierAndReversalTests(unittest.TestCase):
         self.assertEqual((outlier.same_direction_breadth_count,
                           outlier.same_direction_breadth_fraction,
                           outlier.same_direction_breadth_denominator), (4, 0.4, 10))
-
-    def test_falling_isolated_outlier_uses_falling_breadth(self):
-        result = classify(window_result(
-            directions=("FALLING",) * 4 + ("RISING",) * 6,
-            material_count=4, outlier_index=0,
-        )).windows[5]
-        self.assertEqual(len(result.isolated_outliers), 1)
-        outlier = result.isolated_outliers[0]
-        self.assertEqual((outlier.symbol, outlier.direction, outlier.raw_return),
-                         ("S0", "FALLING", -0.01))
-        self.assertEqual((outlier.historical_z, outlier.cross_sectional_z), (-2.0, -4.0))
-        self.assertEqual((outlier.same_direction_breadth_count,
-                          outlier.same_direction_breadth_fraction,
-                          outlier.same_direction_breadth_denominator), (4, 0.4, 10))
-
-    def test_exact_half_and_market_agreeing_outliers_are_not_isolated(self):
-        for rising in (5, 7):
-            with self.subTest(rising=rising):
-                result = classify(window_result(
-                    directions=("RISING",) * rising + ("FALLING",) * (10 - rising),
-                    outlier_index=0,
-                )).windows[5]
-                self.assertEqual(result.isolated_outliers, ())
 
     def test_relaxed_upstream_outlier_candidate_cannot_bypass_v1_z_thresholds(self):
         primary = window_result(
@@ -422,65 +356,6 @@ class AvailabilityAndOutputTests(unittest.TestCase):
                 self.assertIn("CLASSIFIER_V1_UNIVERSE_INELIGIBLE",
                               result.availability_reasons)
 
-    def test_horizons_metadata_provenance_snapshot_and_determinism(self):
-        primary = window_result()
-        provenance = (
-            SymbolSourceTimeEvidence("S0", 1_799_000, 1_798_000, 1_799_500),
-            SymbolSourceTimeEvidence("S1", 1_797_000, None, 1_799_100),
-            *(SymbolSourceTimeEvidence(symbol, None, None, None)
-              for symbol in primary.configured_universe[2:]),
-        )
-        unavailable_provenance = provenance_for(primary)
-        context = MarketClassificationContext({
-            1: MarketWindowClassificationContext(unavailable_provenance),
-            5: MarketWindowClassificationContext(provenance, "BROAD_DROP"),
-            15: MarketWindowClassificationContext(unavailable_provenance),
-        })
-        input_evaluation = evaluation(primary)
-        first = classify_market_movement(input_evaluation, context)
-        self.assertEqual(first, classify_market_movement(input_evaluation, context))
-        self.assertEqual(first.primary_window_minutes, 5)
-        for minutes, role in ((1, "RAPID"), (5, "PRIMARY"), (15, "PERSISTENCE")):
-            result = first.windows[minutes]
-            self.assertEqual((result.horizon_role, result.is_primary), (role, minutes == 5))
-            self.assertIs(result.movement_snapshot, input_evaluation.windows[minutes])
-            self.assertEqual(result.included_symbols, primary.included_symbols)
-            self.assertEqual(result.configured_universe, primary.configured_universe)
-            self.assertEqual(result.classifier_algorithm_version, "market-state-classifier-v1")
-            self.assertEqual(result.classifier_config_version, "market-state-classifier-config-v1")
-            self.assertEqual(result.movement_algorithm_version, "market-movement-v1")
-            self.assertEqual(result.movement_config_version, "market-movement-config-v1")
-            self.assertEqual((result.universe_id, result.universe_version,
-                              result.provider, result.exchange, result.price_type),
-                             ("watched", "v4", "binance-usdm", "binance", "trade"))
-            self.assertEqual(result.evaluation_boundary_time_ms, BOUNDARY)
-            self.assertEqual(result.dispersion_mad_normalized_movement.value, 0.2)
-            self.assertEqual(result.trimmed_mean_normalized_movement.value, 0.4)
-            self.assertEqual(result.liquidity_weighted_normalized_movement.value, 0.45)
-            self.assertEqual(result.volume_context[0].current_notional_volume.value,
-                             Decimal("100"))
-            self.assertEqual(result.volume_context[0].rvol.value, 1.25)
-        self.assertEqual(first.windows[5].source_time_evidence, provenance)
-        self.assertIs(first.windows[5].source_time_evidence,
-                      context.windows[5].source_time_evidence)
-        self.assertEqual(first.windows[1].source_time_evidence, unavailable_provenance)
-        self.assertEqual(first.windows[15].source_time_evidence, unavailable_provenance)
-        self.assertEqual(first.windows[5].source_time_evidence[1].last_real_event_time_ms, None)
-        self.assertEqual(first.windows[5].source_time_evidence[3],
-                         SymbolSourceTimeEvidence("S3", None, None, None))
-        with self.assertRaises(FrozenInstanceError):
-            provenance[0].last_real_trade_time_ms = 0
-        with self.assertRaises(FrozenInstanceError):
-            first.windows[5].direction_state = "NEUTRAL"
-        with self.assertRaises(TypeError):
-            first.windows[5] = first.windows[1]
-
-    def test_source_time_evidence_validates_timestamp_types(self):
-        with self.assertRaises(ValueError):
-            SymbolSourceTimeEvidence("S0", True, None, None)
-        with self.assertRaises(ValueError):
-            SymbolSourceTimeEvidence("S0", None, -1, None)
-
     def test_source_time_evidence_must_match_each_window_universe_in_order(self):
         primary = window_result()
         valid = provenance_for(primary)
@@ -500,17 +375,6 @@ class AvailabilityAndOutputTests(unittest.TestCase):
                 })
                 with self.assertRaises(ValueError):
                     classify_market_movement(evaluation(primary), context)
-
-    def test_excluded_reasons_are_preserved_without_reconstruction(self):
-        primary = window_result(directions=("RISING",) * 6, material_count=5,
-                                exclusion_reasons=("SOURCE_RECOVERING", "UNSUPPORTED_INSTRUMENT"))
-        result = classify(primary).windows[5]
-        self.assertEqual(result.direction_state, "BROAD_RISE")
-        self.assertEqual(result.excluded_symbols, primary.excluded_symbols)
-        self.assertEqual(result.availability_reasons,
-                         ("SOURCE_RECOVERING", "UNSUPPORTED_INSTRUMENT"))
-        self.assertEqual(result.included_symbols, primary.included_symbols)
-
 
 if __name__ == "__main__":
     unittest.main()

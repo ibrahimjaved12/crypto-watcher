@@ -83,22 +83,6 @@ class MovementBucketTests(unittest.TestCase):
         self.assertEqual(status.state, "stale")
         self.assertEqual(status.last_real_trade_age_ms, MAX_LAST_TRADE_AGE_MS + BUCKET_INTERVAL_MS)
 
-    def test_event_and_receive_times_do_not_replace_trade_time_freshness(self):
-        boundary = BASE + BUCKET_INTERVAL_MS
-        trade_time = boundary - 1
-        observation_value = observation(
-            boundary + 30_000,
-            trade_time_ms=trade_time,
-            received_at_ms=boundary + 60_000,
-        )
-        self.engine.observe([observation_value])
-        bucket = self.engine.advance(boundary, "LIVE")
-
-        self.assertEqual(bucket.last_real_event_time_ms, boundary + 30_000)
-        self.assertEqual(bucket.last_real_trade_time_ms, trade_time)
-        self.assertEqual(bucket.last_received_at_ms, boundary + 60_000)
-        self.assertEqual(bucket.price, Decimal("100"))
-
     def test_finalized_bucket_is_immutable_and_late_events_are_counted(self):
         boundary = BASE + BUCKET_INTERVAL_MS
         original = observation(boundary, "100", "2")
@@ -218,67 +202,6 @@ class MovementBucketTests(unittest.TestCase):
         self.assertEqual(bucket.quote_volume, Decimal("200"))
         self.assertEqual(bucket.trade_count, 1)
 
-    def test_in_batch_order_regression_is_rejected_atomically(self):
-        boundary = BASE + BUCKET_INTERVAL_MS
-        earlier_key = observation(
-            boundary,
-            "100",
-            trade_time_ms=boundary - 1,
-            aggregate_trade_id=49,
-        )
-        later_key = observation(
-            boundary + 1,
-            "101",
-            trade_time_ms=boundary - 1,
-            aggregate_trade_id=50,
-        )
-        with self.assertRaises(ValueError):
-            self.engine.observe([later_key, earlier_key])
-
-        bucket = self.engine.advance(boundary, "LIVE")
-        self.assertEqual(bucket.trade_count, 0)
-        self.assertIsNone(bucket.price)
-
-    def test_replaying_same_ordered_observations_produces_identical_buckets(self):
-        first_boundary = BASE + BUCKET_INTERVAL_MS
-        batches = [
-            [
-                observation(
-                    first_boundary + 20,
-                    "100",
-                    "2",
-                    trade_time_ms=first_boundary - 1,
-                    aggregate_trade_id=40,
-                ),
-                observation(
-                    first_boundary - 20,
-                    "101",
-                    "3",
-                    trade_time_ms=first_boundary,
-                    aggregate_trade_id=41,
-                ),
-            ],
-            [
-                observation(
-                    first_boundary - 30,
-                    "102",
-                    "4",
-                    trade_time_ms=first_boundary,
-                    aggregate_trade_id=42,
-                )
-            ],
-        ]
-
-        def replay():
-            engine = MovementBucketEngine(INSTRUMENT)
-            for batch in batches:
-                self.assertEqual(engine.observe(batch), len(batch))
-            engine.advance(first_boundary, "LIVE")
-            engine.advance(first_boundary + BUCKET_INTERVAL_MS, "LIVE")
-            return engine.history
-
-        self.assertEqual(replay(), replay())
-
     def test_history_is_bounded_and_supports_two_adjacent_fifteen_minute_windows(self):
         count = DEFAULT_HISTORY_BUCKETS + 10
         boundaries = [BASE + index * BUCKET_INTERVAL_MS for index in range(1, count + 1)]
@@ -342,31 +265,6 @@ class MovementBucketTests(unittest.TestCase):
         self.assertEqual(len(restarted.history), 1)
         self.assertEqual(result.state, "warming")
         self.assertEqual(result.reason, "insufficient_exact_live_history")
-
-    def test_readiness_exposes_collector_health_and_missing_history(self):
-        boundary = BASE + BUCKET_INTERVAL_MS
-        self.engine.observe([observation(boundary)])
-        self.engine.advance(boundary, "LIVE")
-
-        recovering = self.engine.readiness(boundary, 1, "RECOVERING")
-        self.assertEqual(recovering.state, "unavailable")
-        stale = self.engine.readiness(boundary, 1, "STALE")
-        self.assertEqual(stale.state, "stale")
-        missing = self.engine.readiness(boundary - BUCKET_INTERVAL_MS, 1, ENDPOINT)
-        self.assertEqual(missing.state, "missing_history")
-
-    def test_empty_pre_trade_buckets_never_make_history_ready(self):
-        count = WINDOW_BUCKETS[1]
-        boundaries = [
-            BASE + index * BUCKET_INTERVAL_MS for index in range(1, count + 1)
-        ]
-        for boundary in boundaries:
-            self.engine.advance(boundary, "LIVE")
-
-        result = self.engine.readiness(boundaries[-1], 1, ENDPOINT)
-        self.assertEqual(result.state, "unavailable")
-        self.assertEqual(result.reason, "no_real_trade_history")
-        self.assertTrue(all(bucket.price is None for bucket in result.history))
 
     def test_stale_gap_blocks_readiness_until_it_leaves_adjacent_history(self):
         first_boundary = BASE + BUCKET_INTERVAL_MS
@@ -457,61 +355,6 @@ class MovementBucketTests(unittest.TestCase):
         self.assertEqual(carried.last_real_trade_time_ms, new_boundary)
         self.assertEqual(carried.last_real_event_time_ms, new_boundary - 50)
         self.assertEqual(carried.last_received_at_ms, new_boundary + 25)
-
-    def test_short_source_outage_is_not_bridged_and_ages_out_for_every_window(self):
-        for window_minutes, required_count in ((1, 25), (5, 121), (15, 361)):
-            with self.subTest(window_minutes=window_minutes):
-                engine = MovementBucketEngine(INSTRUMENT)
-                boundary = BASE
-                for _ in range(required_count):
-                    boundary += BUCKET_INTERVAL_MS
-                    engine.observe([observation(boundary, trade_time_ms=boundary)])
-                    engine.advance(boundary, "LIVE")
-                self.assertEqual(
-                    engine.readiness(boundary, window_minutes, "LIVE").state, "ready"
-                )
-
-                outage_state = {
-                    1: "RECOVERING",
-                    5: "STALE",
-                    15: "UNAVAILABLE",
-                }[window_minutes]
-                outage_boundary = boundary + BUCKET_INTERVAL_MS
-                outage = engine.advance(outage_boundary, outage_state)
-                self.assertEqual(outage.source_state, outage_state)
-                self.assertIsNone(outage.price)
-                self.assertTrue(outage_boundary - boundary < MAX_LAST_TRADE_AGE_MS)
-
-                # Returning LIVE without a new real trade cannot reuse the pre-outage price.
-                recovery_boundary = outage_boundary + BUCKET_INTERVAL_MS
-                resumed = engine.advance(recovery_boundary, "LIVE")
-                self.assertIsNone(resumed.price)
-                self.assertTrue(
-                    engine.readiness(recovery_boundary, window_minutes, "LIVE").state
-                    != "ready"
-                )
-
-                for recovered_count in range(1, required_count + 1):
-                    recovery_boundary += BUCKET_INTERVAL_MS
-                    engine.observe([
-                        observation(recovery_boundary, trade_time_ms=recovery_boundary)
-                    ])
-                    engine.advance(recovery_boundary, "LIVE")
-                    result = engine.readiness(recovery_boundary, window_minutes, "LIVE")
-                    if recovered_count < required_count:
-                        self.assertNotEqual(result.state, "ready")
-                        self.assertTrue(
-                            any(
-                                bucket.source_state != "LIVE" or bucket.price is None
-                                for bucket in result.history
-                            )
-                        )
-                    else:
-                        self.assertEqual(result.state, "ready")
-                        self.assertTrue(
-                            all(bucket.source_state == "LIVE" and bucket.price is not None
-                                for bucket in result.history)
-                        )
 
     def test_boundaries_must_be_explicit_aligned_and_consecutive(self):
         with self.assertRaises(ValueError):

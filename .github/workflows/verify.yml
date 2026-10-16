@@ -70,7 +70,7 @@ jobs:
           set -uo pipefail
           lane_python() {
             local start=$SECONDS status=0
-            python/.venv/bin/python python/tests/run_shard.py core --jobs 1 || status=1
+            python/.venv/bin/python python/tests/run_shard.py core --jobs 2 || status=1
             if [ "$full" = "true" ]; then
               python/.venv/bin/python python/tests/run_shard.py study --jobs 1 || status=1
               python/.venv/bin/python python/tests/run_shard.py study-heavy --jobs 1 || status=1

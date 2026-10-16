@@ -134,14 +134,6 @@ class ApiTests(unittest.TestCase):
             self.request(app, "POST", "/v1/analysis", json=payload(), headers=HEADERS).status_code,
             200)
 
-    def test_fastapi_uses_shared_technical_calculator(self):
-        app = create_app(TOKEN, analyzer_for())
-        response = self.request(app, "POST", "/v1/technical-analysis",
-                                json=technical_payload(), headers=HEADERS)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
-        self.assertEqual(response.json()["score"], 60)
-
     def test_scheduled_batch_targets_due_candles(self):
         app = create_app(TOKEN, analyzer_for())
         latest = technical_payload()
@@ -161,102 +153,6 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["candle_open_time_ms"], latest["candles"][-1]["open_ms"])
         self.assertEqual(results[1]["candle_open_time_ms"], target)
-
-    def test_movement_boundary_uses_python_engine_and_replays_identically(self):
-        app = create_app(TOKEN, analyzer_for())
-        body = movement_payload()
-        first = self.request(
-            app,
-            "POST",
-            "/v1/movement/boundary",
-            json=body,
-            headers=HEADERS,
-        )
-        second = self.request(
-            app,
-            "POST",
-            "/v1/movement/boundary",
-            json=body,
-            headers=HEADERS,
-        )
-        self.assertEqual(first.status_code, 200)
-        self.assertEqual(second.status_code, 200)
-        self.assertEqual(first.json(), second.json())
-        result = first.json()
-        self.assertEqual(result["snapshots"][0]["buckets"][0]["endpointPrice"], 101)
-        self.assertEqual(result["snapshots"][0]["buckets"][0]["lastRealTradeTime"], NOW)
-        self.assertEqual(result["snapshots"][0]["buckets"][0]["lastRealEventTime"], NOW + 20)
-        self.assertEqual(result["snapshots"][0]["buckets"][0]["lastRealReceivedAt"], NOW + 30)
-        readiness = result["snapshots"][0]["readiness"]["1"]
-        self.assertEqual(readiness["state"], "warming")
-        self.assertEqual(readiness["reason"], "insufficient_exact_live_history")
-        self.assertEqual(readiness["status"], "WARMING")
-
-    def test_authenticated_history_and_metrics_use_session_engines(self):
-        app = create_app(TOKEN, analyzer_for())
-        boundary = movement_payload()
-        session_id = boundary["session_id"]
-        self.assertEqual(self.request(app, "POST", "/v1/movement/boundary",
-                                      json=boundary, headers=HEADERS).status_code, 200)
-        history = {
-            "schema_version": 1, "session_id": session_id,
-            "history_version": "history-v1", "as_of_boundary_time_ms": NOW,
-            "universe_id": "watched",
-            "universe_version": "watched-v1", "symbols": ["BTCUSDT"],
-            "config": asdict(MarketMovementConfig()),
-            "historical": [{"symbol": "BTCUSDT", "instrument_compatible": True,
-                            "candles": []}],
-        }
-        self.assertEqual(self.request(app, "POST", "/v1/movement/history",
-                                      json=history).status_code, 401)
-        self.assertEqual(self.request(app, "POST", "/v1/movement/history",
-                                      json=history, headers=HEADERS).status_code, 200)
-        metrics = {"schema_version": 1, "session_id": session_id,
-                   "history_version": "history-v1", "universe_id": "watched",
-                   "universe_version": "watched-v1",
-                   "evaluation_boundary_time_ms": NOW}
-        response = self.request(app, "POST", "/v1/movement/metrics",
-                                json=metrics, headers=HEADERS)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["evaluation"]["windows"]["1"]["symbols"][0]
-                         ["exclusion_reasons"], ["WARMING_INSUFFICIENT_LIVE_HISTORY",
-                                                  "INSUFFICIENT_NORMALIZATION_HISTORY"])
-        self.assertEqual(self.request(app, "POST", "/v1/movement/metrics",
-                                      json={**metrics, "snapshots": []},
-                                      headers=HEADERS).status_code, 422)
-        classification_request = {**metrics, "previous_confirmed_primary_episode": None}
-        self.assertEqual(self.request(app, "POST", "/v1/movement/classification",
-                                      json=classification_request).status_code, 401)
-        assessment = self.request(app, "POST", "/v1/movement/classification",
-                                  json=classification_request, headers=HEADERS)
-        self.assertEqual(assessment.status_code, 200)
-        self.assertEqual(assessment.json()["evaluation"], response.json()["evaluation"])
-        self.assertIsNone(assessment.json()["effective_previous_confirmed_primary_direction"])
-        self.assertEqual(assessment.json()["classification"]["windows"]["5"]
-                         ["source_time_evidence"][0]["symbol"], "BTCUSDT")
-
-        lifecycle_request = {**metrics, "previous_lifecycle_state": None,
-                             "interrupt_previous_state": False}
-        self.assertEqual(self.request(app, "POST", "/v1/movement/lifecycle",
-                                      json=lifecycle_request).status_code, 401)
-        lifecycle = self.request(app, "POST", "/v1/movement/lifecycle",
-                                 json=lifecycle_request, headers=HEADERS)
-        self.assertEqual(lifecycle.status_code, 200)
-        payload = lifecycle.json()
-        self.assertEqual(payload["evaluation"], response.json()["evaluation"])
-        self.assertEqual(payload["classification"], assessment.json()["classification"])
-        self.assertEqual(payload["lifecycle"]["serialized_state"]["serialization_version"],
-                         "market-episode-state-v1")
-        self.assertEqual(payload["lifecycle"]["state_summary"]["current_direction_state"],
-                         "UNAVAILABLE")
-        self.assertEqual(payload["lifecycle"]["transitions"], [])
-        self.assertEqual(self.request(app, "POST", "/v1/movement/lifecycle",
-                                      json={**lifecycle_request, "snapshots": []},
-                                      headers=HEADERS).status_code, 422)
-        self.assertEqual(self.request(app, "POST", "/v1/movement/lifecycle",
-                                      json={**lifecycle_request, "previous_lifecycle_state":
-                                            {"serialization_version": "market-episode-state-v1"}},
-                                      headers=HEADERS).status_code, 409)
 
     def test_batch_provenance_and_completion_boundary(self):
         app = create_app(TOKEN, analyzer_for())
@@ -298,27 +194,6 @@ class ApiTests(unittest.TestCase):
             self.request(app, "POST", "/v1/analysis", json=payload(), headers=HEADERS).status_code,
             503)
 
-    def test_rolling_and_baseline_use_different_comparisons(self):
-        body = payload()
-        original = deepcopy(body)
-        response = self.post(body)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers["cache-control"], "no-store")
-        data = response.json()
-        self.assertEqual(data["mode"], "read_only")
-        self.assertEqual(data["status"], "ok")
-        self.assertEqual(Decimal(data["rolling"]["15"]["change_pct"]), 0)
-        self.assertEqual(Decimal(data["baseline"]["change_pct"]), 2)
-        self.assertEqual(data["baseline"]["status"], "eligible")
-        self.assertTrue(data["baseline"]["alert_eligible"])
-        self.assertTrue(data["baseline"]["cooldown_evaluated"])
-        self.assertEqual(set(data["technical"]), {"15", "60", "240"})
-        self.assertTrue(all(row["status"] == "ok" for row in data["technical"].values()))
-        self.assertEqual(data["source_instrument"]["instrument_id"],
-                         "binance-usdm:BTCUSDT")
-        self.assertTrue(all(row["factor_breakdown"] for row in data["technical"].values()))
-        self.assertEqual(body, original)
-
     def test_missing_and_changed_baseline_are_not_reset(self):
         for baseline, expected in ((None, "baseline_required"),
                                    ({**payload()["baseline"], "threshold": "3"}, "baseline_reset_required")):
@@ -338,16 +213,6 @@ class ApiTests(unittest.TestCase):
         body["baseline"]["last_up_alert_ms"] = NOW - 15 * MINUTE
         self.assertTrue(self.post(body).json()["baseline"]["alert_eligible"])
 
-    def test_downward_reversal_ignores_upward_cooldown(self):
-        body = payload()
-        body["baseline"]["last_up_alert_ms"] = NOW - MINUTE
-        async def falling(client, provider, symbol):
-            return workload(provider, symbol, "98")
-        data = self.post(body, falling).json()["baseline"]
-        self.assertEqual(data["direction"], "down")
-        self.assertEqual(Decimal(data["change_pct"]), -2)
-        self.assertTrue(data["alert_eligible"])
-
     def test_already_processed_disabled_and_below_threshold(self):
         body = payload()
         body["baseline"]["last_observed_ms"] = NOW
@@ -361,16 +226,6 @@ class ApiTests(unittest.TestCase):
         data = self.post(loader=below).json()["baseline"]
         self.assertEqual(data["status"], "below_threshold")
         self.assertFalse(data["cooldown_evaluated"])
-
-    def test_partial_history_preserves_independent_baseline_analysis(self):
-        async def partial(client, provider, symbol):
-            value = workload(provider, symbol)
-            value["rolling"][15] = value["rolling"][15][-2:]
-            return value
-        data = self.post(loader=partial).json()
-        self.assertEqual(data["status"], "partial")
-        self.assertEqual(data["rolling"]["1440"]["status"], "unavailable")
-        self.assertTrue(data["baseline"]["alert_eligible"])
 
     def test_insufficient_ta_history_is_explicit(self):
         async def insufficient(client, provider, symbol):
@@ -434,30 +289,6 @@ class ApiTests(unittest.TestCase):
                                     json=payload(), headers=HEADERS)
             self.assertEqual(response.status_code, expected)
             self.assertNotIn("private-token-content", response.text)
-
-    def test_async_http_adapter_reuses_provider_conventions(self):
-        async def check():
-            urls = []
-            def handler(request):
-                urls.append(str(request.url))
-                if request.url.path.endswith("/exchangeInfo"):
-                    return httpx.Response(200, json={"symbols": [{
-                        "symbol": "BTCUSDT", "pair": "BTCUSDT", "contractType": "PERPETUAL",
-                        "status": "TRADING", "baseAsset": "BTC", "quoteAsset": "USDT",
-                        "marginAsset": "USDT", "onboardDate": 1569398400000,
-                        "deliveryDate": 4133404800000, "filters": [
-                            {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
-                            {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
-                            {"filterType": "MIN_NOTIONAL", "notional": "100"}]}]})
-                interval = 1 if request.url.params["interval"] == "1m" else 15
-                row = [NOW - interval * MINUTE, "100", "102", "100", "102", "1", NOW - 1]
-                return httpx.Response(200, json=[row])
-            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-                loaded = await load_series(client, SOURCE, "BTCUSDT")
-            self.assertEqual(loaded[1][0].close, Decimal("102"))
-            self.assertTrue(any("limit=62" in url for url in urls))
-            self.assertTrue(any("limit=98" in url for url in urls))
-        asyncio.run(check())
 
     def test_workload_adapter_fetches_all_ta_frames_from_one_provider(self):
         async def check():

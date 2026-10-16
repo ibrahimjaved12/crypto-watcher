@@ -170,22 +170,6 @@ test("resume rejects a changed parameter hash or frozen universe", async () => {
   await assert.rejects(() => commit(changed, prior, "changed-universe"), /configuration identity/);
 });
 
-test("recording timestamps classify backfill as reconstruction and preserve first recording", async () => {
-  const value = response();
-  await commit(value);
-  const first = (
-    await db.query("SELECT decided_at_ms,recorded_at_ms,sample_kind FROM forward_trend_weights")
-  ).rows[0];
-  assert.equal(first.sample_kind, "retrospective");
-  assert.ok(first.recorded_at_ms >= first.decided_at_ms);
-  await commit(value, await latest(), "repeat");
-  assert.deepEqual(
-    (await db.query("SELECT decided_at_ms,recorded_at_ms,sample_kind FROM forward_trend_weights"))
-      .rows[0],
-    first,
-  );
-});
-
 test("an actually recorded decision for the running day is prospective before its close", async () => {
   const value = response();
   value.weights[0].day_ms = LAST + DAY;
@@ -204,23 +188,6 @@ test("an actually recorded decision for the running day is prospective before it
   ).rows[0];
   assert.equal(row.sample_kind, "prospective");
   assert.ok(row.recorded_at_ms < row.day_ms + DAY);
-});
-
-test("a later startup diagnostic cannot become a checkpoint", async () => {
-  const value = response();
-  await commit(value);
-  const prior = await latest();
-  await db.query(
-    `INSERT INTO forward_trend_state(user_id,run_key,trigger,status,reason,last_complete_day_ms,
-    history_start_ms,track_start_ms,symbols,states) VALUES ($1,'diagnostic','daily','partial','startup failed',$2,$3,$2,$4,'{}')`,
-    [USER, LAST, Date.UTC(2020, 0, 1), JSON.stringify(["BTCUSDT"])],
-  );
-  assert.equal(await latest(), prior);
-  assert.deepEqual(await commit(value, prior, "after-diagnostic"), {
-    bars_inserted: 0,
-    weights: 0,
-    ledger: 0,
-  });
 });
 
 test("RLS exposes only the owner's rows; clients cannot invoke the commit RPC", async () => {

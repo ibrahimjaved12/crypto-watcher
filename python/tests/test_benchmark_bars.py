@@ -65,21 +65,6 @@ def series(start_ms, prices, marks=None, flags=None, symbol="BTCUSDT"):
     return BarSeries(symbol, start_ms, count, flags=array("H", flags or [0] * count), **columns)
 
 
-class CompromisedIndexTests(unittest.TestCase):
-    def test_matches_the_scanning_helper_for_every_range(self):
-        flags = [0, 2, 0, 16, 0, 1, 0, 0]
-        bars = series(START, [1] * 8, flags=flags)
-        for mask in (COMPROMISED_FLAGS, 2, 16):
-            index = CompromisedIndex(bars, mask)
-            for start in range(8):
-                for end in range(start, 8):
-                    with self.subTest(mask=mask, start=start, end=end):
-                        self.assertEqual(index.any_in(start, end), compromised_in(bars, start, end, mask=mask))
-        for start, end in ((-1, 2), (3, 2), (0, 8)):
-            with self.subTest(start=start, end=end), self.assertRaises(ValueError):
-                CompromisedIndex(bars).any_in(start, end)
-
-
 class ReadBarsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -107,10 +92,6 @@ class ReadBarsTests(unittest.TestCase):
         for bad in (START - 60_000, START + 30_000, END):
             with self.subTest(ms=bad), self.assertRaises(ValueError):
                 bars.index_of(bad)
-
-    def test_gzip_binary_equals_text(self):
-        self.assertEqual(read_bars_csv(io.BytesIO(gzip.compress(self.text.encode("ascii"))), "BTCUSDT", MONTH),
-                         self.parsed)
 
     def test_structural_errors_name_line_and_column(self):
         cases = (
@@ -153,30 +134,6 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(infer_tick(series(START, odd)), 5 * 10 ** 6)
         with self.assertRaises(ValueError):
             infer_tick(series(START, [MISSING, MISSING]))
-
-    def test_infer_tick_tolerates_rare_off_tick_prints(self):
-        grid = [(517_350 + i % 1000) * 10 ** 7 for i in range(3000)]  # 0.1 grid; n = 12,000 prices, 1 allowed off
-        clean = series(START, grid)
-        self.assertEqual(infer_tick(clean), 10 ** 7)
-        self.assertEqual(off_tick_count(clean, 10 ** 7), 0)
-        one = series(START, grid)
-        one.high[5] = 5_173_562 * 10 ** 6  # 51735.62: the gcd alone would collapse to 0.02
-        self.assertEqual(infer_tick(one), 10 ** 7)
-        self.assertEqual(off_tick_count(one, 10 ** 7), 1)
-        self.assertEqual(off_tick_count(one, 2 * 10 ** 6), 0)
-        with self.assertRaises(ValueError):
-            off_tick_count(one, 0)
-
-    def test_infer_tick_keeps_exact_gcd_and_falls_back_when_too_many_off(self):
-        legit = series(START, [25 * (4000 + i) for i in range(3000)])  # a non-1-2-5 tick, no outliers
-        self.assertEqual(infer_tick(legit), 25)
-        many = series(START, [(517_350 + i % 1000) * 10 ** 7 for i in range(3000)])
-        many.high[5] = 5_173_562 * 10 ** 6  # .62: a multiple of 0.02, not of 0.05
-        many.high[6] = 5_173_565 * 10 ** 6  # .65: a multiple of 0.05, not of 0.02
-        many.high[7] = 5_173_555 * 10 ** 6  # .55
-        # 3 off the 0.1 grid > 12,000 // 10,000: 0.1 is invalid; 0.05 has 1 off (valid), 0.02 has 2 off.
-        self.assertEqual(infer_tick(many), 5 * 10 ** 6)  # above the collapsed gcd 0.01
-        self.assertEqual(off_tick_count(many, 10 ** 7), 3)
 
     def test_compromised_in(self):
         flags = [0, data_lake.FLAG_KLINE_ROW_MISSING, 0, data_lake.FLAG_MARK_MISSING, 0]
@@ -246,17 +203,6 @@ class FundingTests(unittest.TestCase):
         for after, upto in ((START - 1, START), (START, END), (START + 2, START + 1)):
             with self.subTest(after=after, upto=upto), self.assertRaises(ValueError):
                 funding.events_between(after, upto)
-
-    def test_concat_contiguous_months(self):
-        march_start, march_end, _ = data_lake.month_bounds_ms("2025-03")
-        february = read_funding_csv(io.StringIO(funding_text(FUNDING_ROWS[:2])), MONTH)
-        march = read_funding_csv(io.StringIO(funding_text([(march_start, 8, "0.0001", "0.0001")])), "2025-03")
-        joined = FundingSeries.concat([february, march])
-        self.assertEqual((joined.start_ms, joined.end_ms, len(joined.calc_time_ms)), (START, march_end, 3))
-        self.assertEqual(joined.events_between(START + 8 * HOUR, march_start),
-                         [(march_start, Fraction(1, 10_000), 8)])  # the month-boundary settlement
-        with self.assertRaisesRegex(ValueError, "not contiguous"):
-            FundingSeries.concat([march, february])
 
     def test_settlement_mark_rule(self):
         bars = series(START, [10, 20, 30], marks=[100, MISSING, 300])

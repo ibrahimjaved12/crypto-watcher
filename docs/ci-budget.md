@@ -3,6 +3,25 @@
 GitHub bills each job rounded **up** to whole minutes, so billed minutes = the sum over jobs of
 `ceil(job minutes)`. The private repo's monthly allowance was being spent on tests alone.
 
+**Budget: the `Tests` job of a typical PR finishes in under 2 minutes** (each lane under about 110 s),
+so later market work (forex, #374) fits without a new job.
+
+## Tiers (since #374)
+
+- **`core`** (implicit: every module not listed in `shards.json`): a small essential set: costs,
+  labels, hidden-stretch guard, paper wallet (v2/v3), API, instruments and the CI selector tests.
+  Everything else runs in `study` when its imports change and weekly. Core runs on every PR as at
+  most `--jobs` bins (greedy longest-processing-time on `WEIGHTS` in `run_shard.py`); each bin is one
+  `python -m unittest <module> ...` subprocess, so interpreter and import start-up is paid once per
+  bin. CI uses `--jobs 2`.
+- **`study`**: research machinery: the #123/EXP-75 cluster, doji/pattern research (paused),
+  candle-table research, benchmark statistics/screening (SPA, StepM, DSR, bootstrap, scans, order
+  flow, sigma calibration, experiment runner/log, ...), data-lake/label tooling, and the #37 exact
+  execution cluster (`futures_execution*`, `execution_evidence`), which no live code imports yet;
+  move it back to `core` when the paper wallet starts using it. Each module runs
+  in its own subprocess, only when a PR's changed files reach its imports, and always weekly.
+- **`study-heavy`**: weekly and dispatch only (below).
+
 ## Before (measured 2026-10-10, run 38035890716 on d61643b)
 
 | job | wall | billed |
@@ -49,15 +68,15 @@ One job `Python tests, Node tests and builds` in workflow `Tests`, three lanes s
 ## Adding a test
 
 - Put it in `python/tests/` as usual: **core by default** (every module not listed in `shards.json`).
-- List a module under `"study"` in `python/tests/shards.json` only for the #123/EXP-75 research
-  cluster (`historical_*`, `experiments/market_state_*`, `replay`). The fate of #123/#152/#163 is an
-  open owner decision, so those tests are gated, not removed.
+- List a module under `"study"` in `python/tests/shards.json` when it tests research machinery rather
+  than the live product or a foundation the forward engine imports (see Tiers). The fate of
+  #123/#152/#163 is an open owner decision, so those tests are gated, not removed.
 - Heavy statistical trials use `@slow` from `python/tests/slow.py` and keep a small deterministic case
   in the default suite. `test_benchmark_spa.test_null_calibration` and
   `test_benchmark_stepm.test_all_noise_rejects_nothing_mostly` are `@slow` now (run them with
   `RUN_SLOW_TESTS=1`; `slow-tests.yml` currently runs only `test_benchmark_calibration`).
-- `python tests/run_shard.py core|study [--changed-file FILE] [--jobs N]` prints a per-module seconds
-  table (slowest first). A new module over ~10 s needs a reason.
+- `python tests/run_shard.py core|study [--changed-file FILE] [--jobs N]` prints a seconds
+  table (slowest first; per bin for `core`, per module otherwise). A new module over ~10 s needs a reason.
 - Node test files run in a bounded-parallel pool (`tests/run-tests.mjs`, `TEST_JOBS` or CPU count).
 
 ## Pruning standard for new and existing tests

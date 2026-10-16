@@ -67,15 +67,15 @@ class RealRepositorySelectionTests(unittest.TestCase):
     def run_select(self, *changed):
         return select(list(changed), load_shards()["study"], self.PYTHON_DIR)
 
-    def test_benchmark_forward_and_frontend_changes_select_no_study_module(self):
-        self.assertEqual(self.run_select("python/market_analysis/benchmark/scan.py"), [])
-        self.assertEqual(self.run_select("python/market_analysis/forward/setups.py"), [])
-        self.assertEqual(self.run_select("python/tests/test_forward_engine.py", "src/lib/forward/x.ts"), [])
+    def test_forward_and_frontend_changes_select_no_study_module(self):
+        self.assertEqual(self.run_select("src/lib/forward/x.ts"), [])
 
     def test_study_source_and_shared_live_code_select_study_modules(self):
         self.assertIn("test_historical_market_state_study_models",
                       self.run_select("python/market_analysis/historical_market_state_study_models.py"))
         self.assertTrue(self.run_select("python/market_analysis/canonical_identity.py"))
+        # benchmark research tests are study-tier since #374, so their sources select them
+        self.assertIn("test_benchmark_scan", self.run_select("python/market_analysis/benchmark/scan.py"))
         self.assertEqual(self.run_select("python/tests/shards.json"), load_shards()["study"])
 
 
