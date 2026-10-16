@@ -23,6 +23,7 @@ from .api_models import (
     MovementHistoryRegistrationRequest,
     MovementLifecycleRequest,
     MovementMetricsRequest,
+    SlowMovementRequest,
     TechnicalAnalysisBatchRequest,
     TechnicalAnalysisRequest,
 )
@@ -35,6 +36,7 @@ from .forward.sigma_state import SigmaStateMismatch
 from .forward.trend_track import evaluate as forward_trend
 from .movement_service import MovementBoundaryService
 from .service import analyze_request
+from .slow_movement import evaluate_slow_movement
 from .technical import calculate_technical_analysis
 
 
@@ -125,6 +127,16 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
                 return request.app.state.movement_boundary_service.advance(body)
         except ValueError:
             raise HTTPException(409, "Movement boundary could not be applied") from None
+
+    @app.post("/v1/movement/slow", dependencies=[Depends(authorize)])
+    def movement_slow(body: SlowMovementRequest):
+        # Stateless descriptor (slow-movement-v1): no session store and no movement_lock.
+        try:
+            return evaluate_slow_movement(
+                body.boundaryMs, body.horizonsMin, [(item.symbol, item.grid) for item in body.symbols]
+            )
+        except ValueError:
+            raise HTTPException(422, "Slow movement could not be evaluated") from None
 
     @app.post("/v1/movement/history", dependencies=[Depends(authorize)])
     def movement_history(body: MovementHistoryRegistrationRequest, request: Request):

@@ -1,6 +1,6 @@
 """Versioned server-to-server input. Never accepts DB credentials or a user JWT."""
 from decimal import Decimal
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -762,3 +762,32 @@ class ForwardTrendRequest(InputModel):
         out.update(expected_symbols=self.expected_symbols, saved_params_hash=self.saved_params_hash,
                    decisions=self.decisions, evaluated_at_ms=self.evaluated_at_ms)
         return out
+
+
+# ── Multi-hour movement descriptor ("Longer moves", slow-movement-v1) ─────────────────────────────
+
+SlowGridPrice = Optional[Annotated[float, Field(gt=0, le=1e20)]]
+
+
+class SlowMovementSymbolRequest(InputModel):
+    symbol: str = Field(min_length=2, max_length=32, pattern=r"^[A-Z0-9]+$")
+    grid: Annotated[list[SlowGridPrice], Field(min_length=672, max_length=672)]
+
+
+class SlowMovementRequest(InputModel):
+    """Stateless request for POST /v1/movement/slow: 672 grid prices per symbol (7 days at 15 minutes)."""
+
+    boundaryMs: Timestamp
+    horizonsMin: Annotated[list[Literal[60, 240, 720]], Field(min_length=1, max_length=3)]
+    symbols: Annotated[list[SlowMovementSymbolRequest], Field(min_length=1, max_length=20)]
+
+    @model_validator(mode="after")
+    def aligned_unique(self):
+        if self.boundaryMs % 900_000:
+            raise ValueError("slow movement boundary must be a multiple of 15 minutes")
+        if len(set(self.horizonsMin)) != len(self.horizonsMin):
+            raise ValueError("slow movement horizons must be unique")
+        names = [item.symbol for item in self.symbols]
+        if len(names) != len(set(names)):
+            raise ValueError("slow movement symbols must be unique")
+        return self

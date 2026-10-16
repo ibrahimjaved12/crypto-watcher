@@ -62,6 +62,8 @@ archive files and manifests supply historical research. These responsibilities r
 | Newest 260 completed candles per canonical series | Operational DB / **resource/retention**, TA availability margin | Stored surplus is neutral with identical inputs; changing the TA input prefix can change outputs | TA history/catch-up coverage and input-prefix impact evidence |
 | 15-minute directional alert cooldown (user configurable) | Individual cumulative monitoring / **product/user notification policy** | Not market-wide V1, episode reversal or predictive evidence; suppression does not create a market state | User notification/product evidence |
 | One Python worker / one replica for live movement | Python deployment / **operational safety**, authoritative state owner | Not mathematical algorithm identity | Designed ownership, partitioning, fencing, ordering and recovery semantics before scaling |
+| 672-point 15-minute grid (7 days); 576 reference windows; 288 minimum | "Longer moves" / **slow, provisional, descriptor** (`slow-config-v1`) | Separate identity; no V1 effect | New slow config version; see [slow-movement.md](slow-movement.md) |
+| z threshold 2; coordinated share 0.70; minimum 5 included pairs | "Longer moves" / **slow, provisional, descriptor** (`slow-config-v1`) | Separate identity; no V1 effect; creates no alerts | Research (#373) and a new slow config version |
 
 Each horizon compares the current window with the immediately preceding equal-length window.
 The largest calculation needs `2 × 15 minutes / 5 seconds + 1 = 361` records, including the boundary.
@@ -252,6 +254,11 @@ persisted current state and the Worker reads that copy.
 - **Settings (machine):** `MOVEMENT_STATE_HOSTED_URL` (site origin; falls back to `ALERT_CHART_HOSTED_URL`) with
   `RUNNER_GATEWAY_SECRET`; `MOVEMENT_STATE_PUBLISH_ENABLED=false` turns it off. Apply the hosted migration
   `20261016170000_market_state_published.sql` and restart the host.
+
+### Longer moves (1 h / 4 h / 12 h)
+
+A separate, versioned multi-hour descriptor (`slow-movement-v1`) is shown below the V1 tiles. It leaves V1 untouched,
+creates no alerts and is not a predictor. Algorithm, constants, transport and UI states: [slow-movement.md](slow-movement.md).
 
 ## Persistence
 
