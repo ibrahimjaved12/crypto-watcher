@@ -11,6 +11,9 @@ import {
   type PairMovementView,
   type TaFrameView,
 } from "@/lib/market/assessment";
+import { slowUnusualWord, type slowPairRows } from "@/lib/market/slow-movement-view";
+
+export type SlowPairRow = ReturnType<typeof slowPairRows>[number];
 
 const toneClass = { up: "text-bull", down: "text-bear", flat: "text-muted-foreground", unknown: "text-muted-foreground" } as const;
 
@@ -28,6 +31,7 @@ export function PairAssessment({
   ta,
   healAttempted,
   now,
+  slowRows = [],
 }: {
   movement: PairMovementView;
   /** False when the market reading is not fresh (machine offline, late, failed): the chip is shown muted. */
@@ -35,6 +39,8 @@ export function PairAssessment({
   ta: TaFrameState[];
   healAttempted: boolean;
   now: number;
+  /** "Longer moves" per horizon for this pair: return and z (z is shown only here, in Details). */
+  slowRows?: SlowPairRow[];
 }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
@@ -123,16 +129,32 @@ export function PairAssessment({
         inert={!open}
       >
         <div className={cn("min-h-0 overflow-hidden", !open && "invisible")}>
-          <Details movement={movement} ta={ta} now={now} />
+          <Details movement={movement} ta={ta} now={now} slowRows={slowRows} />
         </div>
       </div>
     </div>
   );
 }
 
-function Details({ movement, ta, now }: { movement: PairMovementView; ta: TaFrameState[]; now: number }) {
+function Details({ movement, ta, now, slowRows }: { movement: PairMovementView; ta: TaFrameState[]; now: number; slowRows: SlowPairRow[] }) {
   return (
     <div className="flex flex-col gap-4 pb-1 text-sm">
+      {slowRows.length ? (
+        <section>
+          <h4 className="text-xs font-medium text-muted-foreground">Longer moves (versus its own past week)</h4>
+          <dl className="mt-1 grid grid-cols-3 gap-2">
+            {slowRows.map((row) => (
+              <div key={row.horizonMin}>
+                <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">{row.label}</dt>
+                <dd className="num">{row.z === null ? "—" : `z ${row.z > 0 ? "+" : ""}${row.z.toFixed(2)}`}</dd>
+                <dd className="text-xs text-muted-foreground">
+                  {row.status === "ok" ? (slowUnusualWord(row.z) ?? "—") : row.status === "collecting_history" ? "Collecting history" : "Not available"}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ) : null}
       <section>
         <h4 className="text-xs font-medium text-muted-foreground">How unusual is the move</h4>
         {movement.kind === "unavailable" ? (

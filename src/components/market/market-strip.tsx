@@ -14,6 +14,15 @@ import {
   type MarketStripView,
   type StripStatusKind,
 } from "@/lib/market/assessment";
+import {
+  SLOW_ATTENTION_MS,
+  SLOW_HORIZON_LABEL,
+  slowBreadthLine,
+  slowCoordinatedSentence,
+  slowUnusualWord,
+  type SlowMovementRead,
+  type SlowStatus,
+} from "@/lib/market/slow-movement-view";
 
 const time = (ms: number | null) => (ms === null ? "—" : new Date(ms).toLocaleTimeString());
 const signedPct = (value: number) => `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toFixed(2)}%`;
@@ -34,6 +43,7 @@ export function MarketStrip({
   taNotice,
   diagnostics = [],
   checkNow,
+  slow,
 }: {
   view: MarketStripView;
   status: StripStatusKind;
@@ -47,6 +57,8 @@ export function MarketStrip({
   diagnostics?: Array<[string, string]>;
   /** The existing manual check; null when this user cannot run one. */
   checkNow: { run: () => void; pending: boolean; disabled: boolean; title?: string | undefined } | null;
+  /** "Longer moves" (slow-movement-v1): the published reading and its freshness on the page's clock. */
+  slow?: { read: SlowMovementRead | undefined; status: SlowStatus } | undefined;
 }) {
   const reading = view.times.evaluationBoundary;
   const fresh = current;
@@ -141,7 +153,9 @@ export function MarketStrip({
         <OutlierLine view={view} />
       ) : null}
 
-      <Diagnostics view={view} freshness={freshness} now={now} extra={diagnostics} />
+      {slow ? <LongerMoves read={slow.read} status={slow.status} now={now} /> : null}
+
+      <Diagnostics view={view} freshness={freshness} now={now} extra={[...(slow ? slowDiagnostics(slow.read) : []), ...diagnostics]} />
     </section>
   );
 }
@@ -231,6 +245,93 @@ function StripSkeleton() {
       </div>
     </div>
   );
+}
+
+function LongerMoves({ read, status, now }: { read: SlowMovementRead | undefined; status: SlowStatus; now: number }) {
+  const result = read?.result ?? null;
+  const fresh = status === "current" || status === "catching_up";
+  const age = read?.boundaryMs != null ? Math.max(0, now - read.boundaryMs) : null;
+  const coordinated = result && fresh ? result.horizons.map((h) => ({ h, text: slowCoordinatedSentence(h) })).find((c) => c.text) : undefined;
+  return (
+    <section className="mt-6" aria-label="Longer moves">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <h3 className="font-display text-base font-semibold">Longer moves</h3>
+        <p className="flex items-center gap-1.5 text-sm text-muted-foreground" role="status">
+          {status === "warming" ? (
+            "Collecting history, needs about 3 days of data"
+          ) : status === "unavailable" ? (
+            "Not available right now"
+          ) : status === "catching_up" ? (
+            <>
+              <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden />
+              Updating…
+            </>
+          ) : status === "late" && age !== null ? (
+            age > SLOW_ATTENTION_MS ? (
+              <span className="flex flex-wrap items-center gap-2">
+                <StatusChip level="wait">Behind</StatusChip>
+                Longer moves last updated {formatAge(age)} ago
+              </span>
+            ) : (
+              <>Longer moves last updated {formatAge(age)} ago</>
+            )
+          ) : null}
+        </p>
+      </div>
+      {result ? (
+        <ul
+          className="mt-3 flex snap-x snap-mandatory gap-3 overflow-x-auto pb-1 sm:grid sm:grid-cols-3 sm:overflow-visible sm:pb-0"
+          aria-label="Moves over 1, 4 and 12 hours"
+        >
+          {result.horizons.map((h) => {
+            const label = SLOW_HORIZON_LABEL[h.horizonMin];
+            const word = slowUnusualWord(h.medianZ);
+            const breadth = slowBreadthLine(h);
+            return (
+              <li
+                key={h.horizonMin}
+                className={cn("flex w-[70%] shrink-0 snap-start flex-col rounded-lg bg-secondary/40 p-4 sm:w-auto", !fresh && "opacity-70")}
+                aria-label={`${label?.long ?? h.horizonMin}: median move ${h.medianReturnPct === null ? "unavailable" : signedPct(h.medianReturnPct)}, ${breadth}${word ? `, ${word.toLowerCase()}` : ""}`}
+              >
+                <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{label?.tile ?? `${h.horizonMin} MIN`}</p>
+                <p className={cn("mt-1 font-display text-2xl font-semibold tabular-nums", fresh ? directionClass(h.medianReturnPct) : "text-muted-foreground")}>
+                  {h.medianReturnPct === null ? "—" : signedPct(h.medianReturnPct)}
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">{breadth}</p>
+                {word ? <p className="mt-auto pt-1 text-xs font-medium text-muted-foreground">{word}</p> : null}
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+      {coordinated?.text ? (
+        <p className={cn("mt-3 font-display text-base font-semibold", coordinated.h.coordinated === "fall" ? "text-bear" : "text-bull")}>
+          {coordinated.text}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function slowDiagnostics(read: SlowMovementRead | undefined): Array<[string, string]> {
+  const rows: Array<[string, string]> = [
+    [
+      "How longer moves work",
+      "Compares each pair's last 1, 4 and 12 hours with its own typical moves over the past week. It describes the market; it does not predict it.",
+    ],
+  ];
+  const result = read?.result;
+  if (result) {
+    rows.push(
+      ["Longer moves version", `${result.algorithmVersion} · ${result.configVersion} (${result.configHash})`],
+      ["Longer moves boundary", new Date(result.boundaryMs).toLocaleString()],
+      ...result.horizons.map((h): [string, string] => [
+        `Longer moves ${SLOW_HORIZON_LABEL[h.horizonMin]?.short ?? h.horizonMin}`,
+        `${h.included} included · median z ${h.medianZ === null ? "—" : h.medianZ.toFixed(2)} · ${h.up} up, ${h.down} down, ${h.neutral} neither (|z| ≥ ${result.config.zThreshold})`,
+      ]),
+    );
+  }
+  return rows;
 }
 
 function Diagnostics({

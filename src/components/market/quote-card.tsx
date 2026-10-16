@@ -31,6 +31,7 @@ export function QuoteCard({
   onRetry,
   retrying = false,
   assessment,
+  longerMoves,
   now: nowProp,
 }: {
   quote: SymbolQuote;
@@ -40,6 +41,8 @@ export function QuoteCard({
   retrying?: boolean;
   /** The per-pair "Current assessment" block (#30), shown under the price, changes and chart. */
   assessment?: ReactNode;
+  /** One muted "1h −0.4% · 4h −1.9% · 12h −3.2%" line under the timeframe row ("Longer moves"). */
+  longerMoves?: ReactNode;
   /** The page's clock (held while a resumed tab settles); falls back to a local one. */
   now?: number;
 }) {
@@ -127,6 +130,7 @@ export function QuoteCard({
               );
             })}
           </dl>
+          {longerMoves}
 
           <div className="h-24">
             <ResponsiveContainer width="100%" height="100%">

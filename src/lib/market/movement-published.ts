@@ -12,6 +12,12 @@ import {
   type PersistedCurrentLike,
 } from "./market-movement-state";
 import type { MovementReadStatus } from "./assessment";
+import {
+  SLOW_GRID_STEP_MS,
+  SLOW_UNIVERSE_ID,
+  slowPublishedSchema,
+  type SlowPublishedPayload,
+} from "./slow-movement-contract";
 
 export const PUBLISHED_STATE_VERSION = "market-state-published-v1";
 export const MOVEMENT_HOOK_PATH = "/api/public/hooks/market-state-publish";
@@ -88,9 +94,20 @@ export function readPublishedState(
 
 export type MovementHookInput =
   | { op: "publish"; universeId: string; evaluationBoundaryMs: number; payload: PersistedCurrentLike }
-  | { op: "heartbeat"; universeId: string };
+  | { op: "heartbeat"; universeId: string }
+  | { op: "publish_slow"; universeId: string; evaluationBoundaryMs: number; payload: SlowPublishedPayload };
 
 export function parseMovementHookInput(value: unknown): MovementHookInput | null {
+  if (isObject(value) && value["op"] === "publish_slow") {
+    // "Longer moves" (slow-movement-v1): its own row beside the V1 row; no heartbeat for it.
+    if (value["universeId"] !== SLOW_UNIVERSE_ID) return null;
+    const boundary = value["evaluationBoundaryMs"];
+    if (!Number.isSafeInteger(boundary) || (boundary as number) <= 0 || (boundary as number) % SLOW_GRID_STEP_MS !== 0) return null;
+    const parsed = slowPublishedSchema.safeParse(value["payload"]);
+    if (!parsed.success || parsed.data.result.boundaryMs !== boundary) return null;
+    if (JSON.stringify(parsed.data).length > PUBLISHED_PAYLOAD_MAX_BYTES) return null;
+    return { op: "publish_slow", universeId: SLOW_UNIVERSE_ID, evaluationBoundaryMs: boundary as number, payload: parsed.data };
+  }
   if (!isObject(value) || value["universeId"] !== MARKET_UNIVERSE_ID) return null;
   if (value["op"] === "heartbeat") return { op: "heartbeat", universeId: MARKET_UNIVERSE_ID };
   if (value["op"] !== "publish") return null;

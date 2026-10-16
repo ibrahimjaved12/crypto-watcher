@@ -9,6 +9,14 @@
 import { MARKET_UNIVERSE_ID, MOVEMENT_PUBLISH_INTERVAL_MS } from "./market-movement-state";
 import { MOVEMENT_HOOK_PATH, toPublishedPayload } from "./movement-published";
 import type { PersistedMarketStateCurrent } from "../operational/types";
+import {
+  SLOW_MAX_ATTEMPTS,
+  SLOW_RETRY_SPACING_MS,
+  SLOW_SETTLE_MS,
+  SLOW_UNIVERSE_ID,
+  slowBoundaryAtOrBefore,
+  type SlowPublishedPayload,
+} from "./slow-movement-contract";
 
 export type MovementPublisherDeps = {
   read(): Promise<PersistedMarketStateCurrent | null>;
@@ -99,4 +107,68 @@ export function hostSender(config: MovementPublisherConfig, fetchImpl: typeof fe
     try { json = (await response.json()) as Record<string, unknown>; } catch { /* non-JSON error page */ }
     return { status: response.status, json };
   };
+}
+
+// ---------------------------------------------------------------- "Longer moves" (slow-movement-v1)
+
+export type SlowPublisherDeps = {
+  compute(boundaryMs: number): Promise<SlowPublishedPayload | null>;
+  send(body: Record<string, unknown>): Promise<{ status: number; json: Record<string, unknown> }>;
+  now?: () => number;
+};
+
+export type SlowPublisherState = {
+  /** The 15-minute boundary already published (or with nothing to publish). */
+  doneBoundary: number | null;
+  /** The boundary the attempts below belong to. */
+  attemptBoundary: number | null;
+  attempts: number;
+  nextAttemptAt: number;
+};
+
+export type SlowPublishOutcome =
+  | { kind: "idle" }
+  | { kind: "published"; boundary: number }
+  | { kind: "retrying"; boundary: number; error: string }
+  | { kind: "failed"; boundary: number; error: string };
+
+export const newSlowPublisherState = (): SlowPublisherState => ({
+  doneBoundary: null, attemptBoundary: null, attempts: 0, nextAttemptAt: 0,
+});
+
+/** Off only when SLOW_MOVEMENT_ENABLED is exactly "false" (compute and publish both stop). */
+export const slowMovementEnabled = (env: Record<string, string | undefined> = process.env) =>
+  env["SLOW_MOVEMENT_ENABLED"] !== "false";
+
+/**
+ * One tick of the slow descriptor: at most once per 15-minute boundary, first 20 s after it, up to 3 attempts 30 s
+ * apart, then wait for the next boundary. Independent of the V1 publish state, never throws, and only the final
+ * failure of a boundary is reported as "failed" (the caller logs that once).
+ */
+export async function publishSlowOnce(deps: SlowPublisherDeps, state: SlowPublisherState): Promise<SlowPublishOutcome> {
+  const now = (deps.now ?? Date.now)();
+  const boundary = slowBoundaryAtOrBefore(now);
+  if (state.doneBoundary === boundary || now < boundary + SLOW_SETTLE_MS) return { kind: "idle" };
+  if (state.attemptBoundary !== boundary) {
+    state.attemptBoundary = boundary;
+    state.attempts = 0;
+    state.nextAttemptAt = boundary + SLOW_SETTLE_MS;
+  }
+  if (state.attempts >= SLOW_MAX_ATTEMPTS || now < state.nextAttemptAt) return { kind: "idle" };
+  state.attempts += 1;
+  state.nextAttemptAt = now + SLOW_RETRY_SPACING_MS;
+  try {
+    const payload = await deps.compute(boundary);
+    // No V1 state yet (e.g. right after a restart): retry within the attempt budget instead of skipping the boundary.
+    if (!payload) throw new Error("no movement universe yet");
+    const reply = await deps.send({ op: "publish_slow", universeId: SLOW_UNIVERSE_ID, evaluationBoundaryMs: boundary, payload });
+    if (reply.status !== 200 || reply.json["ok"] !== true) throw new Error(`site answered ${reply.status}`);
+    state.doneBoundary = boundary;
+    return { kind: "published", boundary };
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 200);
+    return state.attempts >= SLOW_MAX_ATTEMPTS
+      ? { kind: "failed", boundary, error: message }
+      : { kind: "retrying", boundary, error: message };
+  }
 }

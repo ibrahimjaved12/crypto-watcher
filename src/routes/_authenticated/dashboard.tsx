@@ -29,7 +29,8 @@ import { marketQueryKey, useMarketSelfHeal } from "@/lib/market/use-market-self-
 import { runMyMonitorCheck } from "@/lib/monitor.functions";
 import { describeAlertCheck } from "@/lib/monitor/check-message";
 import { getOperationalState } from "@/lib/operational.functions";
-import { getMarketMovementCurrentState } from "@/lib/market-movement.functions";
+import { getMarketMovementCurrentState, getSlowMovementState } from "@/lib/market-movement.functions";
+import { slowPairRows, slowStatus } from "@/lib/market/slow-movement-view";
 import {
   PUBLISHED_COPY_OFFLINE_AFTER_MS,
   toMarketMovementCurrentState,
@@ -149,6 +150,7 @@ function Dashboard() {
   const loadMarket = useServerFn(getMarketSnapshot);
   const loadOperationalState = useServerFn(getOperationalState);
   const loadMovement = useServerFn(getMarketMovementCurrentState);
+  const loadSlow = useServerFn(getSlowMovementState);
 
   const watchlist = useQuery({ queryKey: ["watchlist"], queryFn: fetchWatchlist });
   const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
@@ -162,7 +164,8 @@ function Dashboard() {
   const taKeys = TA_ASSESSMENT_FRAMES.map((timeframe) => ["ta", timeframe, "dashboard-latest", symbols.join(",")] as const);
   // A tab that comes back after a while refetches first and holds the clock meanwhile, so no age jumps past its
   // limit in the moment before the fresh data lands. `now` is the only clock of the assessment path.
-  const settling = useResumeSettle([marketKey, movementKey, ...taKeys]);
+  const slowKey = ["market-movement-slow"] as const;
+  const settling = useResumeSettle([marketKey, movementKey, slowKey, ...taKeys]);
   const now = useNow(15_000, { hold: settling });
 
   const market = useQuery({
@@ -188,6 +191,15 @@ function Dashboard() {
     refetchInterval: automatic.enabled ? MOVEMENT_POLL_INTERVAL_MS : false,
     enabled: automatic.enabled && symbols.length > 0,
   });
+  // "Longer moves" (slow-movement-v1): published once per 15-minute boundary; the shared 60 s poll is plenty.
+  const slow = useQuery({
+    queryKey: slowKey,
+    queryFn: () => loadSlow(),
+    ...automatic,
+    enabled: automatic.enabled && symbols.length > 0,
+  });
+  const slowState = slowStatus(slow.data, now);
+  const slowShown = slowState === "current" || slowState === "catching_up";
   const taQueries = useQueries({
     queries: TA_ASSESSMENT_FRAMES.map((timeframe, index) => ({
       queryKey: taKeys[index]!,
@@ -468,6 +480,7 @@ function Dashboard() {
           now={now}
           taNotice={taNotice}
           diagnostics={diagnostics}
+          slow={{ read: slow.data, status: slow.data === undefined && slow.isFetching ? "catching_up" : slowState }}
           checkNow={
             runner.canCheckAlerts
               ? { run: () => check.mutate(), pending: check.isPending, disabled: checkDisabled, title: checkTitle }
@@ -494,8 +507,10 @@ function Dashboard() {
                       movementCurrent={movementCurrent}
                       ta={framesBySymbol.get(symbol) ?? []}
                       healAttempted={heal.attempted}
+                      slowRows={slowPairRows(slow.data?.result ?? null, symbol)}
                     />
                   }
+                  longerMoves={<LongerMovesLine rows={slowPairRows(slow.data?.result ?? null, symbol)} current={slowShown} />}
                   retrying={automatic.enabled && retrying && down.includes(symbol)}
                   onRemove={() => {
                     const item = watchlist.data?.find((w) => w.symbol === quote.symbol);
@@ -534,5 +549,24 @@ function Dashboard() {
       {runner.canAnalyse && <MarketRead symbols={symbols} />}
       <TechnicalAnalysis />
     </AppShell>
+  );
+}
+
+/** One muted "1h −0.4% · 4h −1.9% · 12h −3.2%" line on a pair card; numbers coloured by direction when current. */
+function LongerMovesLine({ rows, current }: { rows: ReturnType<typeof slowPairRows>; current: boolean }) {
+  const shown = rows.filter((row) => row.returnPct !== null);
+  if (!shown.length) return null;
+  return (
+    <p className="text-xs text-muted-foreground" aria-label="Longer moves">
+      {shown.map((row, index) => (
+        <span key={row.horizonMin}>
+          {index ? " · " : ""}
+          {row.label}{" "}
+          <span className={`num ${current ? (row.returnPct! > 0 ? "text-bull" : row.returnPct! < 0 ? "text-bear" : "") : ""}`}>
+            {`${row.returnPct! > 0 ? "+" : row.returnPct! < 0 ? "−" : ""}${Math.abs(row.returnPct!).toFixed(1)}%`}
+          </span>
+        </span>
+      ))}
+    </p>
   );
 }
