@@ -95,6 +95,7 @@ export async function loadPaperAccount(client: SupabaseClient): Promise<PaperAcc
       from("paper_runs")
         .select("boundary_ms, created_at, paper_account, wallet_config, wallet_state")
         .eq("status", "ok")
+        .eq("market", "crypto")
         .order("boundary_ms", { ascending: false })
         .order("created_at", { ascending: false })
         .limit(1),

@@ -65,7 +65,7 @@ test("the account read takes the latest OK run, converts SQL numbers and the pri
   const tables = {
     forward_market_setups: [{ setup_id: "p1", strategy_id: "macd_12_26_9:60", horizon_min: 60 }, { setup_id: "zz", strategy_id: "x", horizon_min: 15 }],
     paper_runs: [
-      { status: "ok", boundary_ms: 100, created_at: "a", paper_account: "acct", wallet_config: { leverage_cap: 20 },
+      { status: "ok", market: "crypto", boundary_ms: 100, created_at: "a", paper_account: "acct", wallet_config: { leverage_cap: 20 },
         wallet_state: { balance_e8: 1, positions: { p1: { symbol: "BTCUSDT" } } } },
       { status: "skipped_stale", boundary_ms: 200, created_at: "b", paper_account: "acct", wallet_state: {} },
     ],
@@ -90,7 +90,7 @@ test("the account read takes the latest OK run, converts SQL numbers and the pri
 });
 
 test("a failing totals call or price read degrades that part only; a failing wallet read is an error", async () => {
-  const tables = { paper_runs: [{ status: "ok", boundary_ms: 100, created_at: "a", paper_account: "acct", wallet_state: {} }] };
+  const tables = { paper_runs: [{ status: "ok", market: "crypto", boundary_ms: 100, created_at: "a", paper_account: "acct", wallet_state: {} }] };
   const partial = await m.loadPaperAccount(client({ tables, errors: { market_quotes: "prices down" },
     rpc: { paper_account_summary: new Error("function does not exist") } }));
   assert.equal(partial.run.boundary_ms, 100);

@@ -36,6 +36,7 @@ test("the Strategy Lab dashboard reads signals, open setups and the latest run o
       let max = Infinity;
       const query = {
         select() { return query; },
+        eq() { return query; },
         order(key, { ascending }) { orders.push([key, ascending]); return query; },
         limit(n) { max = n; return query; },
         then(resolve) {
