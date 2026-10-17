@@ -274,6 +274,30 @@ forex is an access rule.
 - **Not done yet:** forex report RPCs (outcome/paired/non-trade reports), runner wiring, the
   operational candle tables, and a calendar table.
 
+### Dashboard toggle
+
+Code: `src/lib/market/market-select.ts` (pure rules), `src/lib/market/market-context.tsx`
+(`MarketProvider`, `useMarket()`), `src/components/market-toggle.tsx`, `src/components/forex-landing.tsx`.
+
+- **UI-only.** The backend always computes and stores both markets; the switch only chooses which
+  screens are shown. The Forex identity is a teal primary and nebula (`:root[data-market="forex"]`,
+  set on `<html>` and on the shell) on the same surfaces, plus a 2 px market line under the header
+  and a small "Forex" chip beside the logo.
+- **Entitlement.** The provider reads `my_markets()` (react-query key `my-markets`, 5 min). While it
+  loads or fails, only crypto can be opened; the app never waits for it. A revoked plan snaps the
+  choice back to crypto.
+- **Locked state.** Without forex the Forex half stays visible but dimmed, with a lock and a dashed
+  outline. Activating it opens a short note ("Forex is not on your plan yet") and never switches. No
+  price, purchase button or link.
+- **Storage.** The choice is kept in `localStorage` under `cw.market` (wrapped in try/catch) and
+  shared across tabs through the `storage` event.
+- **What Forex shows today.** Market, Strategy Lab, Paper account and Alerts show a Forex landing
+  screen. Its real parts are the open/closed state with the next open or close time, and the four
+  sessions in the viewer's time zone, both from the trading calendar mirror. It also shows tiles for
+  the default instruments with "No data yet" and no numbers, and a footnote that nothing here is a
+  price or a signal. Notes and Control room are market-neutral. Every forex price, chart and account
+  screen arrives with its data feed and runner.
+
 ## Roadmap of PRs
 
 1. Foundation: instrument vocabulary and compatibility check (done).

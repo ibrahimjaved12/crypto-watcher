@@ -14,6 +14,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
+import { ForexLanding } from "@/components/forex-landing";
 import { useRunnerStatus } from "@/lib/runner/use-runner-status";
 import { Hint } from "@/components/hint";
 import { EmptyState, PageHeader, SectionTitle, StatusCard } from "@/components/plain";
@@ -41,11 +42,12 @@ import {
   summarizeReasons,
 } from "@/lib/labels";
 import { cn } from "@/lib/utils";
+import { useMarket } from "@/lib/market/market-context";
 
 export const Route = createFileRoute("/_authenticated/forward")({
   head: () => ({ meta: [{ title: "Strategy Lab — Crypto Watch" }] }),
   validateSearch: (search: Record<string, unknown>): ForwardFilters => parseSearch(search),
-  component: ForwardPage,
+  component: ForwardPageRoute,
 });
 
 const time = (ms: number | null | undefined) =>
@@ -163,6 +165,18 @@ function Side({ side }: { side: unknown }) {
       <Icon className="size-3" aria-hidden />
       {long ? "Long" : "Short"}
     </span>
+  );
+}
+
+/** Forex has no data feed yet (#374): its own landing screen; the crypto page below is unchanged. */
+function ForwardPageRoute() {
+  const { market } = useMarket();
+  return market === "forex" ? (
+    <AppShell>
+      <ForexLanding page="lab" />
+    </AppShell>
+  ) : (
+    <ForwardPage />
   );
 }
 
