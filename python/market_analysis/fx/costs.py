@@ -10,9 +10,12 @@ Conventions:
   +rr R before slippage, commission and swap, and the spread shows up symmetrically as a tighter stop
   and a harder target rather than as a hidden P&L term.
 
-Every function is pure and exact (``int`` / ``Fraction``, never floats) and unit-agnostic as long as
-its price arguments share one unit (scaled ints or real-price Fractions), except ``units_for_risk``,
-which needs real price units. Sides are +1 (long) and -1 (short). The Binance perpetual model in
+Every function is pure and exact (``int`` / ``Fraction``, never floats). Price-to-price functions
+(fills, slippage, triggers, stop-out price, max admissible leverage) are unit-agnostic: their
+results are in the unit of their price arguments (scaled ints or real-price Fractions). Functions
+that combine a price with base units or account money need REAL price units (callers convert scaled
+ints with ``Fraction(x, 10**8)``): ``units_for_risk`` and ``required_margin``. Cash results
+(``commission_cash``, ``swap_cash_quote``, ``required_margin``) are real currency amounts. Sides are +1 (long) and -1 (short). The Binance perpetual model in
 ``market_analysis.benchmark.costs`` is separate and unchanged.
 """
 from __future__ import annotations
@@ -181,8 +184,12 @@ ASSUMPTIONS_FX_V1 = (
 
 
 def with_multiplier(model: FxCostModel, multiplier) -> FxCostModel:
-    """Copy with ``cost_multiplier`` (slippage and commission) set, for the 0x/1x/2x/3x cost grid."""
-    return replace(model, cost_multiplier=Fraction(multiplier))
+    """Copy with ``cost_multiplier`` (slippage and commission) set, for the 0x/1x/2x/3x cost grid.
+
+    The value goes through ``FxCostModel`` validation unchanged: an ``int`` or ``Fraction`` only
+    (floats, bools and strings are rejected, never converted).
+    """
+    return replace(model, cost_multiplier=multiplier)
 
 
 # ---------------------------------------------------------------- prices and fills
@@ -304,6 +311,11 @@ def units_for_risk(risk_account, risk_distance_price, quote_to_account, contract
 
 
 def required_margin(units, price, leverage: int, quote_to_account) -> Fraction:
+    """Account-currency margin ``units * price * quote_to_account / leverage``.
+
+    ``price`` must be in REAL price units for a real cash result: EURUSD ``Fraction("1.08")`` with
+    5000 units at 100x gives 54 USD, whereas the scaled ``108000000`` would give 5,400,000,000.
+    """
     if type(leverage) is not int or leverage < 1:
         raise ValueError(f"leverage must be an int >= 1, got {leverage!r}")
     return (_price(units, "units") * _price(price, "price") * _price(quote_to_account, "quote_to_account")

@@ -142,6 +142,10 @@ class ModelTests(unittest.TestCase):
             changed = replace(fx.FX_COST_MODEL_V1, **{field.name: value})
             self.assertNotEqual(changed.identity(), identity, field.name)
         self.assertEqual(replace(fx.FX_COST_MODEL_V1, cost_multiplier=2).cost_multiplier, F(2))
+        self.assertEqual(fx.with_multiplier(fx.FX_COST_MODEL_V1, F(3, 2)).cost_multiplier, F(3, 2))
+        for bad in (0.1, True, "2"):
+            with self.assertRaises(ValueError):
+                fx.with_multiplier(fx.FX_COST_MODEL_V1, bad)
         self.assertTrue(fx.ASSUMPTIONS_FX_V1)
         self.assertEqual(COST_MODEL_V1.version, "cost-v1")  # the Binance perpetual model is untouched
 
