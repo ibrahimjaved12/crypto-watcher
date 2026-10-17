@@ -4,7 +4,8 @@ Pure decision logic: no clock, no I/O, no database. An entry is inside a blackou
 event that affects the instrument, at or above ``rule.min_impact``, puts the decision time inside
 ``[event - before, event + after]`` (inclusive). Point in time: an event counts only if it was
 already known at the decision time (``first_seen_ms <= ts_ms``), so a backtest never uses a schedule
-published later.
+published later. An event may be first seen after its scheduled time (late ingestion); it then
+affects only decisions from its discovery to the end of its window.
 
 Modes: ``off`` (no effect), ``tag`` (keep and mark), ``suppress`` (drop new entries and keep them in
 a "would have fired" list with the deciding events). The window lengths are UNVERIFIED placeholders.
@@ -68,8 +69,6 @@ class CalendarEvent:
             raise ValueError("event_id must be a non-empty string")
         _int("ts_ms", self.ts_ms)
         _int("first_seen_ms", self.first_seen_ms)
-        if self.first_seen_ms > self.ts_ms:
-            raise ValueError("first_seen_ms must not be after ts_ms")
         _currency(self.currency)
         object.__setattr__(self, "impact", Impact(self.impact))
         if type(self.title) is not str or type(self.source) is not str:

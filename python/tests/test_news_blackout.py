@@ -77,6 +77,13 @@ class WindowTests(unittest.TestCase):
         self.assertTrue(blackout(EURUSD, NFP - 10 * MINUTE, late).active)
         self.assertTrue(blackout(EURUSD, NFP - 5 * MINUTE, late).active)
 
+    def test_event_discovered_after_release(self):
+        found = EventIndex([event("late-nfp", NFP, "USD", Impact.HIGH, first_seen=NFP + 5 * MINUTE)])  # 13:35
+        self.assertFalse(blackout(EURUSD, NFP + 4 * MINUTE, found).active)  # before discovery
+        self.assertTrue(blackout(EURUSD, NFP + 5 * MINUTE, found).active)
+        self.assertTrue(blackout(EURUSD, NFP + 10 * MINUTE, found).active)  # 13:40 is suppressed
+        self.assertFalse(blackout(EURUSD, NFP + 30 * MINUTE + 1, found).active)  # window over
+
     def test_overlapping_windows_union(self):
         both = EventIndex([event("a", NFP, "USD", Impact.HIGH), event("b", NFP + 20 * MINUTE, "USD", Impact.HIGH)])
         decision = blackout(EURUSD, NFP + 10 * MINUTE, both)
@@ -122,8 +129,6 @@ class ValidationTests(unittest.TestCase):
     def test_bad_inputs(self):
         with self.assertRaises(ValueError):
             EventIndex([event("x", NFP, "USD", Impact.HIGH), event("x", NFP + 1, "USD", Impact.HIGH)])
-        with self.assertRaises(ValueError):
-            event("y", NFP, "USD", Impact.HIGH, first_seen=NFP + 1)
         for currency in ("usd", "US", "USDT", 840):
             with self.assertRaises(ValueError):
                 event("z", NFP, currency, Impact.HIGH)
@@ -147,7 +152,8 @@ class PerformanceTests(unittest.TestCase):
 
         start = utc("2026-01-05T00:00:00")
         currencies = ("USD", "EUR", "JPY", "GBP", "CAD")
-        index = Counting(event(f"e{i}", start + i * 7 * MINUTE, currencies[i % 5], Impact.HIGH) for i in range(5000))
+        index = Counting(event(f"e{i}", start + i * 7 * MINUTE, currencies[i % 5], Impact.HIGH, first_seen=start - DAY)
+                         for i in range(5000))
         for j in range(2000):
             blackout(EURUSD, start + j * 17 * MINUTE, index)
         self.assertEqual(len(sizes), 2000)
