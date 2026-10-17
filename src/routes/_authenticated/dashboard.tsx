@@ -7,6 +7,7 @@ import { Plus, RefreshCw, PlayCircle, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
+import { ForexLanding } from "@/components/forex-landing";
 import { QuoteCard, QuoteCardSkeleton } from "@/components/market/quote-card";
 import { MarketRead } from "@/components/market/market-read";
 import { MarketStrip } from "@/components/market/market-strip";
@@ -58,6 +59,7 @@ import { useNow } from "@/lib/use-now";
 import { useResumeSettle } from "@/lib/use-resume-settle";
 import { useStaleSelfHeal } from "@/lib/use-stale-self-heal";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
+import { useMarket } from "@/lib/market/market-context";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
@@ -73,7 +75,7 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
       { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
-  component: Dashboard,
+  component: DashboardRoute,
 });
 
 /**
@@ -135,6 +137,18 @@ function usePreEmptiveRefresh(
     }, Math.max(0, at - Date.now()));
     return () => clearTimeout(timer);
   }, [enabled, at, key]);
+}
+
+/** Forex has no data feed yet (#374): its own landing screen; the crypto page below is unchanged. */
+function DashboardRoute() {
+  const { market } = useMarket();
+  return market === "forex" ? (
+    <AppShell>
+      <ForexLanding page="market" />
+    </AppShell>
+  ) : (
+    <Dashboard />
+  );
 }
 
 function Dashboard() {
