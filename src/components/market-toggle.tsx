@@ -74,7 +74,7 @@ export function MarketToggle({ variant, className }: { variant: "desktop" | "mob
             {locked ? <span className="sr-only">(locked)</span> : null}
           </button>
         );
-        if (locked) return <LockedHalf key={m}>{button}</LockedHalf>;
+        if (locked) return <LockedHalf key={m} market={m}>{button}</LockedHalf>;
         if (mobile) return <Fragment key={m}>{button}</Fragment>;
         return (
           <Tooltip key={m}>
@@ -87,7 +87,7 @@ export function MarketToggle({ variant, className }: { variant: "desktop" | "mob
   );
 }
 
-function LockedHalf({ children }: { children: ReactElement }) {
+function LockedHalf({ market, children }: { market: Market; children: ReactElement }) {
   return (
     <Popover>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
@@ -97,8 +97,8 @@ function LockedHalf({ children }: { children: ReactElement }) {
             <Lock className="size-4 text-muted-foreground" aria-hidden />
           </span>
           <div className="min-w-0">
-            <p className="font-medium">Forex is not on your plan yet</p>
-            <p className="mt-1 text-sm text-muted-foreground">Your crypto tools are unchanged.</p>
+            <p className="font-medium">{`${MARKET_META[market].label} isn't switched on for you`}</p>
+            <p className="mt-1 text-sm text-muted-foreground">Ask the owner to add it.</p>
           </div>
         </div>
       </PopoverContent>

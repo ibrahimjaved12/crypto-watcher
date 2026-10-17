@@ -1,6 +1,7 @@
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 
 import { supabase } from "@/integrations/supabase/client";
+import { AccessGate } from "@/components/access-gate";
 import { MarketProvider } from "@/lib/market/market-context";
 
 export const Route = createFileRoute("/_authenticated")({
@@ -12,7 +13,9 @@ export const Route = createFileRoute("/_authenticated")({
   },
   component: () => (
     <MarketProvider>
-      <Outlet />
+      <AccessGate>
+        <Outlet />
+      </AccessGate>
     </MarketProvider>
   ),
 });

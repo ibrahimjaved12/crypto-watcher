@@ -3,7 +3,14 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 
 import { supabase } from "@/integrations/supabase/client";
 import { MARKETS, type Market } from "./instruments";
-import { MARKET_STORAGE_KEY, canOpen as canOpenFor, normalizeEntitled, resolveMarket } from "./market-select";
+import {
+  MARKET_STORAGE_KEY,
+  accessState,
+  canOpen as canOpenFor,
+  normalizeEntitled,
+  resolveMarket,
+  type AccessState,
+} from "./market-select";
 
 type MarketState = {
   market: Market;
@@ -11,9 +18,11 @@ type MarketState = {
   entitled: readonly Market[];
   ready: boolean;
   canOpen: (market: Market) => boolean;
+  access: AccessState;
+  refetch: () => unknown;
 };
 
-const CRYPTO_ONLY: readonly Market[] = Object.freeze(["crypto"]);
+const NONE: readonly Market[] = Object.freeze([]);
 const MarketContext = createContext<MarketState | null>(null);
 
 function readStored(): string | null {
@@ -38,13 +47,15 @@ async function loadMyMarkets(): Promise<Market[]> {
   return normalizeEntitled(data);
 }
 
-/** UI-only market switch. Never blocks rendering: until `my_markets()` answers, only crypto is open. */
+/** Market switch and access (#411): nobody has access by default; `my_markets()` lists what may be opened. */
 export function MarketProvider({ children }: { children: ReactNode }) {
   const query = useQuery({ queryKey: ["my-markets"], queryFn: loadMyMarkets, staleTime: 5 * 60_000, retry: 1 });
   const ready = query.isSuccess;
-  const entitled = ready ? query.data : CRYPTO_ONLY;
+  const entitled = ready ? query.data : NONE;
+  const access = accessState(ready ? "ready" : query.isError ? "error" : "loading", entitled);
+  const { refetch } = query;
   // While my_markets() is still loading, honour the stored choice (no crypto flash for Forex users; UI-only, RLS
-  // guards the data). Once it answers or fails, a choice that is not entitled snaps back to crypto. Clicks always
+  // guards the data). Once it answers or fails, a choice that is not entitled snaps to an open market. Clicks always
   // use the real `entitled`, and this fallback never writes the stored value.
   const open: readonly Market[] = ready || query.isError ? entitled : MARKETS;
   const [market, setMarketState] = useState<Market>(() => resolveMarket(readStored(), open));
@@ -82,8 +93,8 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   );
   const canOpen = useCallback((value: Market) => canOpenFor(value, entitled), [entitled]);
   const value = useMemo(
-    () => ({ market, setMarket, entitled, ready, canOpen }),
-    [market, setMarket, entitled, ready, canOpen],
+    () => ({ market, setMarket, entitled, ready, canOpen, access, refetch }),
+    [market, setMarket, entitled, ready, canOpen, access, refetch],
   );
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>;
 }
