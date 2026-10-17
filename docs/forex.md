@@ -220,6 +220,25 @@ reports from ever mixing forex ATR setups with crypto sigma setups.
 - **Open research item:** port the crypto robust seasonal sigma to FX (session seasonality, weekend
   handling) and compare it with the ATR geometry.
 
+### Paper wallet
+
+Code: `python/market_analysis/fx/wallet.py` (`fx-wallet-v1`; the crypto wallets are unchanged). Same
+`step(state, events, config) -> (state, ledger)` shape and ledger line fields as the crypto wallet,
+so the existing `paper_ledger` table can store it later.
+
+- Size in base units from the broker's contract size (lots = units / contract size), floored to the
+  lot step; risk per trade = `risk_fraction` × balance over the setup's risk distance, converted to
+  the account currency. Below the minimum lot → `rejected` (`below_min_lot`).
+- Margin = notional / leverage in the **account** currency (the quote currency is converted with the
+  event's `quote_to_account`); leverage = the highest whose stop-out stays two stop distances away,
+  capped at the account's maximum.
+- Commission per lot and side (`open_fee`, `close_fee`); the spread is already inside the fills.
+- Swap at each rollover is a `funding` line with `kind: "swap"` (×3 on the triple day).
+- Stop-out is **isolated per position** at the stored stop-out price, never losing more than that
+  position's margin. The real account is cross-margin, so this is conservative.
+- Not done yet: mark-to-market equity, portfolio risk caps beyond total exposure, and wiring into
+  any runner or the database.
+
 ## Roadmap of PRs
 
 1. Foundation: instrument vocabulary and compatibility check (done).
