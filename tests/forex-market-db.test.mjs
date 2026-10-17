@@ -28,7 +28,8 @@ before(async () => {
     "20261010121000_forward_retryable_runs.sql", "20261011090000_forward_paired_report.sql",
     "20261011130000_forward_sigma_state.sql", "20261011150000_forward_shared_stages.sql",
     "20261016180000_paper_ledger_order_kinds.sql", "20261016190000_paper_account_summary.sql",
-    "20261018100000_forex_access_and_market_tables.sql"])
+    "20261018100000_forex_access_and_market_tables.sql",
+    "20261018110000_commit_user_run_market.sql"])
     await db.exec(await readFile(new URL(`../supabase/migrations/${file}`, import.meta.url), "utf8"));
 });
 beforeEach(() => db.exec(`RESET ROLE; SELECT set_config('request.jwt.claim.sub','',false);
@@ -128,7 +129,8 @@ test("RLS: fx facts are visible only to forex-entitled users and are append-only
   assert.equal(await count("fx_market_open_setups"), 0);  // its only setup has a final outcome
   await db.exec("RESET ROLE");
   for (const table of FX_TABLES) {
-    await assert.rejects(db.query(`UPDATE ${table} SET payload=payload`), /append-only/, table);
+    const column = table === "fx_market_events" ? "payload" : "created_at";
+    await assert.rejects(db.query(`UPDATE ${table} SET ${column}=${column}`), /append-only/, table);
     await assert.rejects(db.query(`DELETE FROM ${table}`), /append-only/, table);
   }
 });
