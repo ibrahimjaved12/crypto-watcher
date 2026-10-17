@@ -154,6 +154,33 @@ Code: `python/market_analysis/news_blackout.py` (level 1: scheduled timing only;
 - **Not done yet:** calendar source choice (FMP vs ForexFactory feed), the `calendar_event` table, the
   ingestion job that records the schedule from day one, and interpreting surprises or reactions.
 
+### Bars and candles
+
+Code: `python/market_analysis/fx/bars.py`, `python/market_analysis/fx/candles.py` (separate from the
+crypto `BarSeries`/`CandleSeries`, which assume every minute exists).
+
+- Gateway rows must be UTC (`time_basis = "utc"`; broker server time is converted by the gateway) and
+  carry BID OHLC, `spread_points` (× the broker's tick size) and tick volume.
+- Each minute is classified with the trading calendar: row + open = present; no row + closed =
+  expected (closed); no row + open = **missing** (real data loss); row + closed = kept and counted as
+  an anomaly.
+- **A closed market is no candle, not a gap.** Weekend, holiday and break buckets are omitted, so the
+  next candle follows in trading time and indicators never reset at a weekend (they reset on every
+  invalid candle, and an EMA200 needs 402 consecutive valid candles). Only a minute missing while open
+  makes its candle invalid.
+- Rows printed while the calendar says closed are **quarantined**: kept in the bars and counted, but
+  never part of a candle's OHLC or volume, and a bucket with no open minute is never a candle.
+- `spread_points` are MT5 points (`10^-digits`), which can differ from the tick size (the minimum
+  price change); the spread uses the point.
+- Candles that straddle a close or reopen are kept as `partial`; a partial candle ends at its last open
+  minute, so a Friday signal is dated at the close, never inside the weekend. Buckets at the series
+  edge that the series covers only partly are not built.
+- `volume` is the **sum of tick volume** (price updates), not traded volume; `taker_buy_volume` is
+  unavailable.
+- ASSUMPTION to verify on the Exness demo: buckets are UTC-epoch multiples (240-minute candles open at
+  00:00, 04:00, ... UTC), which matches a broker whose MT5 server time is GMT+0. Compare a downloaded
+  H4 bar with the 240-minute bucket before comparing with the broker's charts.
+
 ## Roadmap of PRs
 
 1. Foundation: instrument vocabulary and compatibility check (done).
