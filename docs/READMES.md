@@ -314,6 +314,12 @@ npm run up -- --update-worker-secret
 5. Writes the new tunnel URL into the Worker’s RUNNER_GATEWAY_URL secret, so the live site can reach your laptop.
 6. Restarts the tunnel if it dies (the URL changes, and it updates the secret again). Ctrl+C shuts everything down cleanly.
 
+To grant Crypto or Forex access:
+```sh
+npm run access:grant -- ibrahimjaved730@gmail.com --label [label]
+```
+Label can be: crypto, forex, all
+
 For the charts:
 ```sh
 npm run alert-charts -- --mode production --event-id <alerts.id>
