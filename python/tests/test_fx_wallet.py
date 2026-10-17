@@ -220,7 +220,7 @@ class SwapPruneTests(unittest.TestCase):
     swap = SwapTests.swap
 
     def test_close_prunes_only_that_setups_keys_and_idempotence_holds(self):
-        cfg = config()
+        cfg = config(max_exposure_multiple=Fraction(20))  # two 5400-USD notionals exceed the default 10 x 1000
         other = setup("b")
         first = self.swap()
         state, l1 = step(initial_state(cfg), [open_event(setup()), open_event(other), first], cfg)
