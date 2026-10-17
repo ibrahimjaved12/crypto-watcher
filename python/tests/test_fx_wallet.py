@@ -92,6 +92,22 @@ class OpenCloseTests(unittest.TestCase):
         assert_balanced(self, cfg, state, [ledger])
 
 
+class EntryMinuteExitTests(unittest.TestCase):
+    def test_entry_minute_stop_and_target_in_one_batch(self):
+        cfg = config()
+        state, ledger = step(initial_state(cfg), [close_event("a", 107_810_000, ms=T0, outcome="S"),
+                                                  open_event(setup())], cfg)
+        self.assertEqual([l["type"] for l in ledger], ["open_fee", "pnl", "close_fee"])
+        self.assertEqual((ledger[1]["amount_e8"], state["positions"], state["used_margin_e8"]), (-10 * E8, {}, 0))
+        state, ledger = step(initial_state(cfg), [open_event(setup("b")), close_event("b", 108_410_000, ms=T0)], cfg)
+        self.assertEqual((ledger[1]["amount_e8"], state["positions"]), (2_000_000_000, {}))
+        # an unrelated position's exit still runs before a new open in the same minute
+        opened, _ = step(initial_state(cfg), [open_event(setup("c", entry_ms=T0 - MINUTE), ms=T0 - MINUTE)], cfg)
+        _, ledger = step(opened, [open_event(setup("d")), close_event("c", 108_410_000, ms=T0)], cfg)
+        self.assertEqual([(l["type"], l["setup_id"]) for l in ledger],
+                         [("pnl", "c"), ("close_fee", "c"), ("open_fee", "d")])
+
+
 class SwapTests(unittest.TestCase):
     def swap(self, symbol="EURUSD", ms=T0 + MINUTE, long_rate="-1/50000", short_rate="1/200000", conv=ONE, mult=3):
         return {"type": "swap", "ms": ms, "symbol": symbol, "multiplier": mult, "long_per_unit": long_rate,
@@ -107,6 +123,19 @@ class SwapTests(unittest.TestCase):
         self.assertEqual(ledger[-1]["amount_e8"], 2_500_000)  # 5000 x 0.000005 = +0.025 USD received
         state, ledger = step(initial_state(cfg), [open_event(setup()), self.swap(ms=T0)], cfg)
         self.assertEqual([l["type"] for l in ledger], ["open_fee"])  # entry_ms >= swap ms: no swap
+
+    def test_swap_is_charged_once_and_on_an_exit_at_the_rollover(self):
+        cfg = config()
+        swap = self.swap()
+        state, ledger = step(initial_state(cfg), [open_event(setup()), swap, dict(swap)], cfg)
+        self.assertEqual([l["type"] for l in ledger], ["open_fee", "funding"])  # duplicate in one batch
+        again, nothing = step(state, [swap], cfg)
+        self.assertEqual((nothing, again["balance_e8"]), ([], state["balance_e8"]))  # replayed later
+        opened, _ = step(initial_state(cfg), [open_event(setup())], cfg)
+        closed, ledger = step(opened, [close_event("a", 108_410_000, ms=T0 + MINUTE), swap], cfg)
+        self.assertEqual([l["type"] for l in ledger], ["funding", "pnl", "close_fee"])  # exit at rollover: charged
+        _, ledger = step(initial_state(cfg), [open_event(setup(entry_ms=T0 + MINUTE), ms=T0 + MINUTE), swap], cfg)
+        self.assertEqual([l["type"] for l in ledger], ["open_fee"])  # entry at rollover: not charged
 
     def test_jpy_quote_converts_to_the_account_currency(self):
         cfg = config()

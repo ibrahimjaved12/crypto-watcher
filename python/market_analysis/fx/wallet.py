@@ -28,7 +28,10 @@ from .costs import (FX_COST_MODEL_V1, FxContract, FxCostModel, SwapRates, commis
 
 WALLET_VERSION = "fx-wallet-v1"
 E8 = 10 ** 8
-_ORDER = {"liquidation": 0, "close": 1, "swap": 2, "open": 3}
+# A rollover applies to positions held just before it, including ones that close or stop out at that
+# instant (exit exactly at rollover is charged, entry exactly at it is not), so swap goes first.
+_ORDER = {"swap": 0, "liquidation": 1, "close": 2, "open": 3}
+_EXIT_AFTER_OWN_OPEN = 4  # an exit in the same minute as its own open (entry-minute stop/target)
 
 
 @dataclass(frozen=True)
@@ -75,7 +78,7 @@ class FxWalletConfig:
 
 def initial_state(config: FxWalletConfig = FxWalletConfig()) -> dict:
     return {"version": WALLET_VERSION, "balance_e8": config.initial_balance_e8, "used_margin_e8": 0, "seq": 0,
-            "positions": {}, "done": []}
+            "positions": {}, "done": [], "swaps": []}
 
 
 def position_account_value(position: dict, bid: int, spread: int, quote_to_account) -> Fraction:
@@ -91,19 +94,24 @@ def _round(value: Fraction) -> int:
 
 
 def step(state: dict, events, config: FxWalletConfig = FxWalletConfig()) -> tuple:
-    """Apply events in (ms, liquidation < close < swap < open, id) order; returns (new state, ledger)."""
+    """Apply events in (ms, swap < liquidation < close < open, id) order; returns (new state, ledger).
+
+    An exit at the same ms as its own open in this batch runs after that open. Each (position,
+    rollover) pair is charged once, across batches too (``state["swaps"]``).
+    """
     state = {"version": WALLET_VERSION, "balance_e8": int(state["balance_e8"]),
              "used_margin_e8": int(state["used_margin_e8"]), "seq": int(state["seq"]),
              "positions": {key: dict(value) for key, value in state["positions"].items()},
-             "done": list(state["done"])}
+             "done": list(state["done"]), "swaps": list(state.get("swaps", []))}
     done = set(state["done"])
+    swapped = set(state["swaps"])
     ledger = []
     model = config.model
 
-    def entry(kind: str, ms: int, amount: int, **fields) -> None:
+    def entry(entry_type: str, ms: int, amount: int, **fields) -> None:
         state["seq"] += 1
         state["balance_e8"] += amount
-        ledger.append({"seq": state["seq"], "ms": ms, "type": kind, "amount_e8": amount,
+        ledger.append({"seq": state["seq"], "ms": ms, "type": entry_type, "amount_e8": amount,
                        "balance_e8": state["balance_e8"], "assumptions": list(config.assumptions), **fields})
 
     def finish(setup_id: str) -> None:
@@ -116,9 +124,15 @@ def step(state: dict, events, config: FxWalletConfig = FxWalletConfig()) -> tupl
     for event in events:
         if event.get("type") not in _ORDER:
             raise ValueError(f"unknown wallet event {event.get('type')!r}")
-    ordered = sorted(events, key=lambda ev: (ev["ms"], _ORDER[ev["type"]],
-                                             ev.get("setup_id") or ev.get("setup", {}).get("setup_id")
-                                             or ev.get("symbol", "")))
+    opened_at = {(ev["setup"]["setup_id"], ev["ms"]) for ev in events if ev["type"] == "open"}
+
+    def order(ev) -> tuple:
+        priority = _ORDER[ev["type"]]
+        if ev["type"] in ("close", "liquidation") and (ev["setup_id"], ev["ms"]) in opened_at:
+            priority = _EXIT_AFTER_OWN_OPEN
+        return (ev["ms"], priority, ev.get("setup_id") or ev.get("setup", {}).get("setup_id") or ev.get("symbol", ""))
+
+    ordered = sorted(events, key=order)
     for event in ordered:
         kind, ms = event["type"], event["ms"]
         if kind == "open":
@@ -197,8 +211,11 @@ def step(state: dict, events, config: FxWalletConfig = FxWalletConfig()) -> tupl
             rates = SwapRates(exact_from_str(event["long_per_unit"]), exact_from_str(event["short_per_unit"]))
             conv = exact_from_str(event["quote_to_account"])
             for setup_id, position in sorted(state["positions"].items()):
-                if position["symbol"] != event["symbol"] or position["entry_ms"] >= ms:
+                key = f"{setup_id}|{ms}"
+                if position["symbol"] != event["symbol"] or position["entry_ms"] >= ms or key in swapped:
                     continue
+                swapped.add(key)
+                state["swaps"].append(key)
                 cash = swap_cash_quote(position["side"], exact_from_str(position["units"]), event["multiplier"],
                                        rates, model)
                 entry("funding", ms, _round(cash * conv * E8), setup_id=setup_id, symbol=position["symbol"],
