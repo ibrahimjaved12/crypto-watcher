@@ -214,3 +214,28 @@ class GuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SwapPruneTests(unittest.TestCase):
+    swap = SwapTests.swap
+
+    def test_close_prunes_only_that_setups_keys_and_idempotence_holds(self):
+        cfg = config(max_exposure_multiple=Fraction(20))  # two 5400-USD notionals exceed the default 10 x 1000
+        other = setup("b")
+        first = self.swap()
+        state, l1 = step(initial_state(cfg), [open_event(setup()), open_event(other), first], cfg)
+        self.assertEqual(sorted(state["swaps"]), [f"a|{T0 + MINUTE}", f"b|{T0 + MINUTE}"])
+        closed, l2 = step(state, [close_event("a", 108_410_000, ms=T0 + 2 * MINUTE)], cfg)
+        self.assertFalse([key for key in closed["swaps"] if key.startswith("a|")])
+        self.assertEqual(closed["swaps"], [f"b|{T0 + MINUTE}"])
+        again, nothing = step(closed, [first], cfg)  # replayed rollover for the still-open "b"
+        self.assertEqual((nothing, again["balance_e8"]), ([], closed["balance_e8"]))
+        assert_balanced(self, cfg, again, [l1, l2, nothing])
+
+    def test_exit_and_swap_at_the_same_ms_still_charge_swap_first(self):
+        cfg = config()
+        opened, l1 = step(initial_state(cfg), [open_event(setup())], cfg)
+        closed, l2 = step(opened, [close_event("a", 108_410_000, ms=T0 + MINUTE), self.swap()], cfg)
+        self.assertEqual([l["type"] for l in l2], ["funding", "pnl", "close_fee"])
+        self.assertEqual(closed["swaps"], [])
+        assert_balanced(self, cfg, closed, [l1, l2])

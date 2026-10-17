@@ -110,3 +110,28 @@ class GeometryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class EntryMinuteBoundsTests(unittest.TestCase):
+    def build(self, bars, signal_ms):
+        candles = {60: build_fx_candles(bars, 60, FX_WEEK)}
+        return build_fx_setups(make_signal(STRATEGY, "EURUSD", signal_ms, 1), candles, bars, FX_WEEK, FX_COST_MODEL_V1)
+
+    def test_closed_signal_at_bars_end_is_unavailable_not_an_error(self):
+        close = FX_WEEK.open_until_ms(SIGNAL_MS)  # the next session close after the signal
+        bars = fixture(end=close)
+        self.assertEqual(bars.end_ms, close)
+        self.assertFalse(FX_WEEK.is_open(close))
+        self.assertEqual({(s.status, s.reason) for s in self.build(bars, close)}, {("C", "entry_minute_unavailable")})
+
+    def test_open_signal_beyond_the_bars_raises(self):
+        bars = fixture(end=SIGNAL_MS)  # the bars stop exactly at the (open) signal minute
+        with self.assertRaisesRegex(ValueError, r"^entry minute is not in the bars yet$"):
+            self.build_with_candles(bars)
+
+    def build_with_candles(self, bars):
+        full = fixture()  # candles up to the signal exist; the entry minute's bar does not yet
+        candles = {60: build_fx_candles(full, 60, FX_WEEK)}
+        return build_fx_setups(make_signal(STRATEGY, "EURUSD", SIGNAL_MS, 1), candles, bars, FX_WEEK, FX_COST_MODEL_V1)
+
+    def test_in_range_signal_is_unchanged(self):
+        self.assertEqual([s.to_dict() for s in self.build(fixture(), SIGNAL_MS)], [s.to_dict() for s in setups(1)])

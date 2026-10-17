@@ -15,7 +15,8 @@ Every function is pure and exact (``int`` / ``Fraction``, never floats). Price-t
 results are in the unit of their price arguments (scaled ints or real-price Fractions). Functions
 that combine a price with base units or account money need REAL price units (callers convert scaled
 ints with ``Fraction(x, 10**8)``): ``units_for_risk`` and ``required_margin``. Cash results
-(``commission_cash``, ``swap_cash_quote``, ``required_margin``) are real currency amounts. Sides are +1 (long) and -1 (short). The Binance perpetual model in
+(``commission_cash``, ``swap_cash_quote``, ``required_margin``) are real currency amounts. Sides are +1 (long)
+and -1 (short). The Binance perpetual model in
 ``market_analysis.benchmark.costs`` is separate and unchanged.
 """
 from __future__ import annotations

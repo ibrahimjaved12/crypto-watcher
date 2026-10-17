@@ -217,6 +217,12 @@ reports from ever mixing forex ATR setups with crypto sigma setups.
   `cost_ur`; swap at each rollover (×3 on the triple day) is `fund_ur`.
 - Time limit: 4 × horizon in open minutes, and the whole window must lie in one open session, so no
   trade is truncated by a weekend or break; a closed minute inside a window is an error.
+- Time-limit exit `E` is stamped with the OPEN time of the last window minute but fills at that
+  minute's CLOSE; rollover swap is counted for rollovers in `(entry_ms, exit_ms]`, so a rollover at
+  exactly the end of the window is not charged. This is a deliberate v1 convention, to be revisited
+  with real broker swap statements.
+- Outcome `X` (a minute missing while open) has no exit fill, so the wallet cannot close it yet; the
+  policy is an open owner decision tracked in the forex runner ticket.
 - **Open research item:** port the crypto robust seasonal sigma to FX (session seasonality, weekend
   handling) and compare it with the ATR geometry.
 

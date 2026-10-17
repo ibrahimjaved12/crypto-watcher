@@ -115,8 +115,12 @@ def _geometry(signal: Signal, candles: Dict[int, FxCandleSeries], bars: FxBarSer
     if value is None:
         return {**out, "status": "V", "reason": "atr_unavailable"}
     out["atr"] = value
+    if not calendar.is_open(signal.signal_ms):  # e.g. a signal at the Friday close, at bars.end_ms
+        return {**out, "status": "C", "reason": "entry_minute_unavailable"}
+    if not bars.start_ms <= signal.signal_ms < bars.end_ms:
+        raise ValueError("entry minute is not in the bars yet")  # not decidable yet: the caller waits
     e = bars.index_of(signal.signal_ms)
-    if bars.flags[e] == FLAG_MISSING_OPEN or not calendar.is_open(signal.signal_ms):
+    if bars.flags[e] == FLAG_MISSING_OPEN:
         return {**out, "status": "C", "reason": "entry_minute_unavailable"}
     if bars.open[e] % bars.tick:
         return {**out, "status": "P", "reason": "open_off_tick_grid"}
