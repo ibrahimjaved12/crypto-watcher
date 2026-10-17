@@ -5,6 +5,7 @@ import { History } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
+import { ForexLanding } from "@/components/forex-landing";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,6 +23,7 @@ import {
   summarizeReasons,
 } from "@/lib/labels";
 import { fetchSettings, saveSettings } from "@/lib/db";
+import { useMarket } from "@/lib/market/market-context";
 import { timestampFreshness, type FreshnessState } from "@/lib/freshness";
 import { getOperationalState } from "@/lib/operational.functions";
 import type { CollectorHealthStatus } from "@/lib/operational/types";
@@ -45,7 +47,7 @@ export const Route = createFileRoute("/_authenticated/settings")({
       { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
-  component: SettingsPage,
+  component: SettingsPageRoute,
 });
 
 function formatInterval(minutes: number) {
@@ -67,6 +69,18 @@ function collectorOverallStatus(
   if (health.some((entry) => entry.status === "STALE")) return "STALE";
   if (health.some((entry) => entry.status === "RECOVERING")) return "RECOVERING";
   return "LIVE";
+}
+
+/** Forex has no data feed yet (#374): its own landing screen; the crypto page below is unchanged. */
+function SettingsPageRoute() {
+  const { market } = useMarket();
+  return market === "forex" ? (
+    <AppShell>
+      <ForexLanding page="control" />
+    </AppShell>
+  ) : (
+    <SettingsPage />
+  );
 }
 
 function SettingsPage() {

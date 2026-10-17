@@ -1,15 +1,22 @@
 import {
   ArrowDownUp,
   ArrowLeftRight,
+  Bell,
+  BellRing,
   CandlestickChart,
   Coins,
   Droplet,
+  FlaskConical,
   Moon,
+  Plug,
+  Server,
+  Timer,
   Wallet,
   type LucideIcon,
 } from "lucide-react";
 
-import { PageHeader } from "@/components/plain";
+import { EmptyState, PageHeader } from "@/components/plain";
+import { formatCountdown } from "@/lib/market/countdown";
 import { FOREX_DEFAULTS, type AssetClass, type Instrument } from "@/lib/market/instruments";
 import { FX_SESSIONS, fxNextOpenMs, fxSessionTags, fxWeekWindow, isFxOpen } from "@/lib/market/trading-calendar";
 import { useNow } from "@/lib/use-now";
@@ -19,7 +26,38 @@ import { cn } from "@/lib/utils";
  * Forex screens before the data feed exists (#374). Only the trading calendar and session clock are real; there
  * are no prices, charts, signals or accounts, and nothing here pretends otherwise.
  */
-const TITLES = { market: "Market", paper: "Paper account", alerts: "Alerts", lab: "Strategy Lab" } as const;
+type ForexPage = "market" | "paper" | "alerts" | "lab" | "control";
+/** Same eyebrow and title as each crypto page: the teal theme alone says which market is shown. */
+const PAGES: Record<ForexPage, { eyebrow: string; title: string; subtitle: string }> = {
+  market: { eyebrow: "Live market", title: "Market", subtitle: "Prices, spreads and trading sessions for your forex pairs." },
+  lab: { eyebrow: "Forward test", title: "Strategy Lab", subtitle: "Strategies are tested here with fake money and realistic fees." },
+  paper: {
+    eyebrow: "Simulated · fake money",
+    title: "Paper account",
+    subtitle: "The simulated forex wallet: what it holds, what it did, and what it was not allowed to do.",
+  },
+  alerts: { eyebrow: "Mission log", title: "Alerts", subtitle: "Every forex alert your rules raise will be logged here." },
+  control: {
+    eyebrow: "Settings & health",
+    title: "Control room",
+    subtitle: "Choose when you get alerts and what is collected, and check that everything is running.",
+  },
+};
+const EMPTY: Partial<Record<ForexPage, { icon: LucideIcon; title: string; body: string }>> = {
+  paper: { icon: Wallet, title: "No forex trades yet", body: "Your separate USD paper account appears with the first forex trade." },
+  alerts: { icon: BellRing, title: "No forex alerts yet", body: "Alerts from your forex rules will be logged here." },
+  lab: {
+    icon: FlaskConical,
+    title: "No forex strategies running yet",
+    body: "Forex strategies are tested here once the data feed is connected.",
+  },
+};
+const PIPELINE: readonly { icon: LucideIcon; name: string; state: string }[] = [
+  { icon: Plug, name: "Data feed", state: "Not connected" },
+  { icon: Server, name: "Collector", state: "Not started" },
+  { icon: Timer, name: "Hourly run", state: "Not started" },
+  { icon: Bell, name: "Alerts", state: "Off" },
+];
 const SESSION_LABELS: Record<string, string> = {
   sydney: "Sydney",
   tokyo: "Tokyo",
@@ -69,40 +107,41 @@ function localHour(ms: number): number {
   return (((new Date(ms).getUTCHours() + new Date(ms).getUTCMinutes() / 60 + zoneOffsetHours(undefined, ms)) % 24) + 24) % 24;
 }
 
-export function ForexLanding({ page }: { page: keyof typeof TITLES }) {
+export function ForexLanding({ page }: { page: ForexPage }) {
   const now = useNow(30_000);
+  const meta = PAGES[page];
+  const empty = EMPTY[page];
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="Forex · simulated"
-        title={TITLES[page]}
-        subtitle="The forex engine is built; its data feed is not connected yet."
-      />
+    <div className="space-y-6 overflow-x-clip">
+      <PageHeader eyebrow={meta.eyebrow} title={meta.title} subtitle={meta.subtitle} />
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
         <MarketStateCard now={now} />
-        <SessionStrip now={now} />
+        {page === "market" ? <SessionStrip now={now} /> : null}
+        {page === "control" ? <PipelineCard /> : null}
+        {empty ? <EmptyState icon={empty.icon} title={empty.title} body={empty.body} className="panel rounded-2xl" /> : null}
       </div>
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {FOREX_DEFAULTS.map((instrument) => (
-          <InstrumentTile key={instrument.instrumentId} instrument={instrument} />
-        ))}
-      </div>
-      <div className="-mx-4 flex snap-x snap-mandatory gap-3 overflow-x-auto px-4 pb-1 sm:mx-0 sm:grid sm:grid-cols-3 sm:overflow-visible sm:px-0">
-        {COMING.map(({ icon: Icon, title }) => (
-          <div
-            key={title}
-            className="panel flex min-w-[11rem] shrink-0 snap-start items-center gap-3 rounded-2xl border border-border p-3 sm:min-w-0"
-          >
-            <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/25">
-              <Icon className="size-4" aria-hidden />
-            </span>
-            <span className="text-sm font-medium">{title}</span>
+      {page === "market" ? (
+        <>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {FOREX_DEFAULTS.map((instrument) => (
+              <InstrumentTile key={instrument.instrumentId} instrument={instrument} />
+            ))}
           </div>
-        ))}
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Simulated. Forex data is not connected yet; nothing here is a price or a signal.
-      </p>
+          <div className="grid grid-cols-3 gap-2 sm:gap-3">
+            {COMING.map(({ icon: Icon, title }) => (
+              <div
+                key={title}
+                className="panel flex min-w-0 flex-col items-center gap-2 rounded-2xl border border-border p-2.5 sm:flex-row sm:gap-3 sm:p-3"
+              >
+                <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/25">
+                  <Icon className="size-4" aria-hidden />
+                </span>
+                <span className="text-center text-[11px] leading-tight font-medium sm:text-left sm:text-sm">{title}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -111,7 +150,7 @@ function MarketStateCard({ now }: { now: number }) {
   const open = isFxOpen(now);
   const next = open ? fxWeekWindow(now)[1] : fxNextOpenMs(now);
   return (
-    <section className="panel flex flex-col justify-center gap-3 rounded-2xl border border-border p-5" aria-label="Forex market state">
+    <section className="panel flex flex-col gap-3 rounded-2xl border border-border p-5" aria-label="Forex market state">
       <span
         className={cn(
           "inline-flex w-fit items-center gap-2 rounded-full px-4 py-2 font-display text-lg font-semibold",
@@ -128,9 +167,50 @@ function MarketStateCard({ now }: { now: number }) {
         )}
         {open ? "Market open" : "Market closed"}
       </span>
-      <p className="text-sm text-muted-foreground">
-        {open ? "Closes" : "Next open"} <span className="num text-foreground">{whenFormat.format(next)}</span>
-      </p>
+      <div>
+        <p className="num font-display text-2xl font-semibold">
+          {open ? "Closes in" : "Opens in"} {formatCountdown(next - now)}
+        </p>
+        <p className="mt-0.5 text-sm text-muted-foreground">
+          <span className="num">{whenFormat.format(next)}</span>
+        </p>
+      </div>
+      <div className="mt-auto flex items-center gap-2 border-t border-border/60 pt-3 text-sm">
+        <Plug className="size-4 text-muted-foreground" aria-hidden />
+        <span>Data feed</span>
+        <NotYetChip text="Not connected" className="ml-auto" />
+      </div>
+    </section>
+  );
+}
+
+function NotYetChip({ text, className }: { text: string; className?: string }) {
+  return (
+    <span className={cn("inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground", className)}>
+      <span className="size-1.5 rounded-full bg-current" aria-hidden />
+      {text}
+    </span>
+  );
+}
+
+/** Control room: the forex pipeline, all muted, because none of it runs yet. */
+function PipelineCard() {
+  return (
+    <section className="panel rounded-2xl border border-border p-5" aria-label="Forex pipeline">
+      <ol>
+        {PIPELINE.map(({ icon: Icon, name, state }, i) => (
+          <li key={name} className="relative flex items-center gap-3 pb-5 last:pb-0">
+            {i < PIPELINE.length - 1 ? (
+              <span aria-hidden className="absolute top-8 bottom-0 left-4 border-l border-dashed border-border" />
+            ) : null}
+            <span className="relative grid size-8 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground ring-1 ring-border">
+              <Icon className="size-4" aria-hidden />
+            </span>
+            <span className="min-w-0 flex-1 text-sm font-medium">{name}</span>
+            <NotYetChip text={state} />
+          </li>
+        ))}
+      </ol>
     </section>
   );
 }
@@ -148,11 +228,11 @@ function SessionStrip({ now }: { now: number }) {
               <span className={cn("mb-1 block text-xs sm:mb-0 sm:text-sm", on ? "text-foreground" : "text-muted-foreground")}>
                 {SESSION_LABELS[name] ?? name}
               </span>
-              <div className="relative h-3.5 overflow-hidden rounded-full bg-background/50 ring-1 ring-border/60 sm:h-3">
+              <div className="relative h-3.5 overflow-hidden rounded-full bg-background/60 ring-1 ring-border/60 sm:h-3">
                 {localSegments(timeZone, start, end, now).map(([from, to]) => (
                   <span
                     key={from}
-                    className={cn("absolute inset-y-0 rounded-full", on ? "bg-primary" : "bg-muted")}
+                    className={cn("absolute inset-y-0 rounded-full", on ? "bg-primary" : "bg-foreground/10")}
                     style={{ left: `${(from / 24) * 100}%`, width: `${((to - from) / 24) * 100}%` }}
                   />
                 ))}
@@ -179,13 +259,13 @@ function InstrumentTile({ instrument }: { instrument: Instrument }) {
   const Icon = style.icon;
   const name = instrument.display !== symbol ? instrument.display : `${instrument.base} / ${instrument.quote}`;
   return (
-    <div className="panel flex flex-col gap-3 rounded-2xl border border-border p-4">
+    <div className="panel flex min-w-0 flex-col gap-3 overflow-hidden rounded-2xl border border-border p-3 sm:p-4">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="truncate font-display text-lg font-semibold">{symbol}</p>
           <p className="truncate text-xs text-muted-foreground">{name}</p>
         </div>
-        <span className={cn("grid size-9 shrink-0 place-items-center rounded-xl ring-1", style.chip)}>
+        <span className={cn("grid size-8 shrink-0 place-items-center rounded-xl ring-1 sm:size-9", style.chip)}>
           <Icon className="size-4" aria-hidden />
         </span>
       </div>
