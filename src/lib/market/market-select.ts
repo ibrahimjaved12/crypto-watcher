@@ -34,7 +34,7 @@ export function accessState(status: "loading" | "error" | "ready", entitled: rea
   return entitled.length ? "granted" : "none";
 }
 
-export const MARKET_META: Record<Market, { label: string; tagline: string; icon: "bitcoin" | "globe" }> = {
-  crypto: { label: "Crypto", tagline: "24/7 perpetual futures", icon: "bitcoin" },
-  forex: { label: "Forex", tagline: "Weekday FX, metals and oil", icon: "globe" },
+export const MARKET_META: Record<Market, { label: string }> = {
+  crypto: { label: "Crypto" },
+  forex: { label: "Forex" },
 };

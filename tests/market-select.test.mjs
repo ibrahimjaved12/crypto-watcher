@@ -57,7 +57,5 @@ test("MARKET_META describes both markets", () => {
   assert.deepEqual(Object.keys(sel.MARKET_META).sort(), ["crypto", "forex"]);
   assert.equal(sel.MARKET_META.crypto.label, "Crypto");
   assert.equal(sel.MARKET_META.forex.label, "Forex");
-  assert.equal(sel.MARKET_META.crypto.icon, "bitcoin");
-  assert.equal(sel.MARKET_META.forex.icon, "globe");
   assert.equal(sel.MARKET_STORAGE_KEY, "cw.market");
 });
