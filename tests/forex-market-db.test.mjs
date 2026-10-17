@@ -29,7 +29,8 @@ before(async () => {
     "20261011130000_forward_sigma_state.sql", "20261011150000_forward_shared_stages.sql",
     "20261016180000_paper_ledger_order_kinds.sql", "20261016190000_paper_account_summary.sql",
     "20261018100000_forex_access_and_market_tables.sql",
-    "20261018110000_commit_user_run_market.sql", "20261019090000_fx_stage_defaults_and_rls.sql"])
+    "20261018110000_commit_user_run_market.sql", "20261019090000_fx_stage_defaults_and_rls.sql",
+    "20261019100000_access_labels.sql"])
     await db.exec(await readFile(new URL(`../supabase/migrations/${file}`, import.meta.url), "utf8"));
 });
 beforeEach(() => db.exec(`RESET ROLE; SELECT set_config('request.jwt.claim.sub','',false);
@@ -92,27 +93,26 @@ async function accounts(user) {
 const line = (seq, type, amount, balance, extra = {}) =>
   ({ seq, ms: 60000 * seq, type, symbol: "EURUSD", amount_e8: amount, balance_e8: balance, ...extra });
 
-test("access: defaults, roles, plans, extras and expiry; users read only their own row and cannot write it", async () => {
+test("access labels: none by default, crypto/forex/all, expiry; users read only their own row and cannot write it", async () => {
+  assert.deepEqual(await markets(A), []);
+  await grant(A, { plan: "crypto" });
   assert.deepEqual(await markets(A), ["crypto"]);
-  await grant(A, { role: "owner" });
-  assert.deepEqual(await markets(A), ["crypto", "forex"]);
-  await db.query("UPDATE user_access SET role='member',plan='forex' WHERE user_id=$1", [A]);
+  await db.query("UPDATE user_access SET plan='forex' WHERE user_id=$1", [A]);
   assert.deepEqual(await markets(A), ["forex"]);
-  await db.query("UPDATE user_access SET plan='crypto',extra_markets='{forex}' WHERE user_id=$1", [A]);
+  await db.query("UPDATE user_access SET plan='all' WHERE user_id=$1", [A]);
   assert.deepEqual(await markets(A), ["crypto", "forex"]);
-  await grant(B, { plan: "pro", expires_at: new Date(Date.now() - 86_400_000).toISOString() });
-  assert.deepEqual(await markets(B), ["crypto"]);
-  await db.query("UPDATE user_access SET expires_at=NULL WHERE user_id=$1", [B]);
-  assert.deepEqual(await markets(B), ["crypto", "forex"]);
-  await db.query("UPDATE user_access SET plan='forex' WHERE user_id=$1", [B]);
+  await grant(B, { plan: "all", expires_at: new Date(Date.now() - 86_400_000).toISOString() });
+  assert.deepEqual(await markets(B), []);
+  await db.query("UPDATE user_access SET expires_at=NULL,plan='forex' WHERE user_id=$1", [B]);
+  assert.deepEqual(await markets(B), ["forex"]);
 
   await asUser(B);
   assert.deepEqual((await db.query("SELECT my_markets() AS m")).rows[0].m, ["forex"]);
   assert.equal((await db.query("SELECT has_market('crypto') AS h")).rows[0].h, false);
   assert.deepEqual((await db.query("SELECT user_id FROM user_access")).rows, [{ user_id: B }]);
   await assert.rejects(db.query("SELECT markets_of($1)", [A]), /permission denied/);
-  await assert.rejects(db.query("INSERT INTO user_access(user_id,role) VALUES($1,'owner')", [B]), /permission denied/);
-  await assert.rejects(db.query("UPDATE user_access SET role='owner' WHERE user_id=$1", [B]), /permission denied/);
+  await assert.rejects(db.query("INSERT INTO user_access(user_id,plan) VALUES($1,'all')", [B]), /permission denied/);
+  await assert.rejects(db.query("UPDATE user_access SET plan='all' WHERE user_id=$1", [B]), /permission denied/);
   await asUser(A);
   assert.deepEqual((await db.query("SELECT my_markets() AS m")).rows[0].m, ["crypto", "forex"]);
 });
@@ -165,7 +165,7 @@ test("ensure_fx_account: refuses non-entitled users; a forex account sits next t
 });
 
 test("commit_fx_user_run: own runs, cursor and ledger; the crypto wallet of the same user is unaffected", async () => {
-  await grant(A, { role: "owner" });
+  await grant(A, { plan: "all" });
   await accounts(A);
   await cryptoStage();
   await fxStage(FX1, HOUR);
@@ -194,7 +194,7 @@ test("commit_fx_user_run: own runs, cursor and ledger; the crypto wallet of the 
 });
 
 test("reports: paper_account_summary and paper_equity_series never mix markets; forex needs entitlement", async () => {
-  for (const user of [A, B]) await grant(user, { role: "owner" });
+  for (const user of [A, B]) await grant(user, { plan: "all" });
   for (const user of [A, B]) await accounts(user);
   await cryptoStage();
   await fxStage(FX1, HOUR);

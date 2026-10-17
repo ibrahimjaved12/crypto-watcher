@@ -17,33 +17,40 @@ const symbolsUrl = await moduleUrl("../src/lib/market/symbols.ts");
 const instrumentsUrl = await moduleUrl("../src/lib/market/instruments.ts", { "./symbols": symbolsUrl });
 const sel = await import(await moduleUrl("../src/lib/market/market-select.ts", { "./instruments": instrumentsUrl }));
 
-test("resolveMarket falls back to crypto unless the stored market is known and entitled", () => {
+test("resolveMarket keeps an openable stored market, else the first open one, else crypto", () => {
   for (const stored of [null, undefined, "", "stocks", 42, {}, ["forex"], "FOREX "])
     assert.equal(sel.resolveMarket(stored, ["crypto"]), "crypto", String(stored));
   assert.equal(sel.resolveMarket("forex", ["crypto"]), "crypto");
+  assert.equal(sel.resolveMarket("crypto", ["forex"]), "forex");
+  assert.equal(sel.resolveMarket(null, ["forex"]), "forex");
   assert.equal(sel.resolveMarket("forex", []), "crypto");
   assert.equal(sel.resolveMarket("forex", ["crypto", "forex"]), "forex");
-  assert.equal(sel.resolveMarket("forex", ["forex"]), "forex");
-  assert.equal(sel.resolveMarket("crypto", ["forex"]), "crypto");
 });
 
-test("canOpen: crypto always, forex only when listed", () => {
-  assert.equal(sel.canOpen("crypto", []), true);
-  assert.equal(sel.canOpen("crypto", ["forex"]), true);
+test("canOpen: only markets the label lists, crypto included", () => {
+  assert.equal(sel.canOpen("crypto", []), false);
+  assert.equal(sel.canOpen("crypto", ["forex"]), false);
+  assert.equal(sel.canOpen("crypto", ["crypto"]), true);
   assert.equal(sel.canOpen("forex", ["crypto"]), false);
   assert.equal(sel.canOpen("forex", ["forex"]), true);
 });
 
-test("normalizeEntitled keeps known markets once, in MARKETS order, and never adds crypto by itself", () => {
-  assert.deepEqual(sel.normalizeEntitled(null), ["crypto"]);
-  assert.deepEqual(sel.normalizeEntitled(undefined), ["crypto"]);
-  assert.deepEqual(sel.normalizeEntitled("forex"), ["crypto"]);
-  assert.deepEqual(sel.normalizeEntitled({ forex: true }), ["crypto"]);
+test("normalizeEntitled keeps known markets once, in MARKETS order; an unknown shape means no access", () => {
+  assert.deepEqual(sel.normalizeEntitled(null), []);
+  assert.deepEqual(sel.normalizeEntitled(undefined), []);
+  assert.deepEqual(sel.normalizeEntitled("forex"), []);
+  assert.deepEqual(sel.normalizeEntitled({ forex: true }), []);
   assert.deepEqual(sel.normalizeEntitled([]), []);
   assert.deepEqual(sel.normalizeEntitled(["forex"]), ["forex"]);
   assert.deepEqual(sel.normalizeEntitled(["stocks", 7, null, "forex"]), ["forex"]);
   assert.deepEqual(sel.normalizeEntitled(["forex", "crypto", "forex", "crypto"]), ["crypto", "forex"]);
-  assert.equal(sel.canOpen("crypto", sel.normalizeEntitled([])), true);
+});
+
+test("accessState maps the query status and the list", () => {
+  assert.equal(sel.accessState("loading", []), "loading");
+  assert.equal(sel.accessState("error", ["crypto"]), "error");
+  assert.equal(sel.accessState("ready", []), "none");
+  assert.equal(sel.accessState("ready", ["forex"]), "granted");
 });
 
 test("MARKET_META describes both markets", () => {

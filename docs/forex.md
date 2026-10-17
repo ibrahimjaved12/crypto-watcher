@@ -264,13 +264,17 @@ forex is an access rule.
   `paper_runs` rows with `market='forex'`, `fx_stage_run_id` set, `stage_run_id` NULL and run key
   `fx-hour:<ms>`. `paper_account_summary(p_market)` and `paper_equity_series(..., p_market)` default
   to `crypto` and never add the two markets together.
-- **Entitlements.** `plans` and `plan_markets` map a plan to markets (`free` and `crypto` give crypto,
-  `forex` gives forex, `pro` gives both); `user_access` holds a user's role (`owner`/`admin` see
-  both), plan, optional `extra_markets` and `expires_at` (an expired plan counts as `free`). No row
-  means crypto only, which is everyone's behaviour today. Users can read their own row and never
-  write it. `my_markets()` and `has_market(market)` are for the app; the fx tables' RLS uses
-  `has_market('forex')`. Grant with `npm run access:grant -- <email> --plan forex` (or `--role owner`,
-  `--market forex`, `--expires 2027-01-01`, `--revoke`), using the service-role env.
+- **Access labels (#411).** Nobody has access by default. Each user has at most one `user_access`
+  row with one label: `crypto`, `forex` or `all` (both), plus an optional `expires_at`; no row or an
+  expired row means no markets. `plans`/`plan_markets` map the label to markets. There are no roles.
+  Users can read their own row and never write it. `my_markets()` and `has_market(market)` are for
+  the app; the fx tables' RLS uses `has_market('forex')`. **Limit:** crypto data is gated in the app
+  only (the gate screen), not by database policy; forex is gated by both. Commands (service-role env
+  from the shell or `.env.production.local`):
+  - grant or change: `npm run access:grant -- <email> --label crypto|forex|all [--expires 2027-01-01]`
+    (omitting `--expires` clears it);
+  - revoke: `npm run access:grant -- <email> --revoke`;
+  - list: `npm run access:grant -- --list` (email, label, expiry; users without a row are not listed).
 - **Not done yet:** forex report RPCs (outcome/paired/non-trade reports), runner wiring, the
   operational candle tables, and a calendar table.
 
@@ -283,12 +287,14 @@ Code: `src/lib/market/market-select.ts` (pure rules), `src/lib/market/market-con
   screens are shown. The Forex identity is a teal primary and nebula (`:root[data-market="forex"]`,
   set on `<html>` and on the shell) on the same surfaces, plus a 2 px market line under the header
   and a small "Forex" chip beside the logo.
-- **Entitlement.** The provider reads `my_markets()` (react-query key `my-markets`, 5 min). While it
-  loads or fails, only crypto can be opened; the app never waits for it. A revoked plan snaps the
-  choice back to crypto.
-- **Locked state.** Without forex the Forex half stays visible but dimmed, with a lock and a dashed
-  outline. Activating it opens a short note ("Forex is not on your plan yet") and never switches. No
-  price, purchase button or link.
+- **Entitlement and gate.** The provider reads `my_markets()` (react-query key `my-markets`, 5 min).
+  While it loads, the signed-in app shows only a pulsing orb (no page content or queries mount). With
+  no access the gate shows "Access pending" (the two markets as locked chips, "Check again" and
+  "Sign out"); if the check fails it shows "Can't check access" with "Try again". A user with one
+  label starts on that market; a stored choice that is not openable snaps to the first open market.
+- **Locked state.** A market the label does not include stays visible in the toggle but dimmed, with
+  a lock and a dashed outline. Activating it opens a short note ("Forex isn't switched on for you",
+  "Ask the owner to add it.") and never switches. No price, purchase button or link.
 - **Storage.** The choice is kept in `localStorage` under `cw.market` (wrapped in try/catch) and
   shared across tabs through the `storage` event.
 - **What Forex shows today.** Market, Strategy Lab, Paper account and Alerts show a Forex landing
