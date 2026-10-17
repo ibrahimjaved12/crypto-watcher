@@ -60,6 +60,16 @@ class RowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bars.index_of(t + MINUTE)
 
+    def test_spread_uses_the_point_not_the_tick_size(self):
+        t = utc("2026-10-14T12:00")
+        gold = forex_instrument("XAUUSD", base="XAU", quote="USD")
+        venue = VenueSymbol("exness-mt5-demo", "XAUUSDm", "fx:XAUUSD", digits=2, tick_size=Fraction(5, 100))
+        rows = [row(t, venue="exness-mt5-demo", native_symbol="XAUUSDm", open=2650.0, high=2651.0, low=2649.0,
+                    close=2650.5, spread_points=10)]
+        bars = fx_bars_from_rows(gold, venue, FX_WEEK, rows)
+        self.assertEqual(bars.spread[0], 10_000_000)  # 10 points x 0.01 = 0.10, not 10 x 0.05
+        self.assertEqual(bars.tick, 5_000_000)  # the tick size stays the price increment
+
 
 class FlagTests(unittest.TestCase):
     def test_missing_open_closed_and_row_while_closed(self):

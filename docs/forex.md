@@ -168,6 +168,10 @@ crypto `BarSeries`/`CandleSeries`, which assume every minute exists).
   next candle follows in trading time and indicators never reset at a weekend (they reset on every
   invalid candle, and an EMA200 needs 402 consecutive valid candles). Only a minute missing while open
   makes its candle invalid.
+- Rows printed while the calendar says closed are **quarantined**: kept in the bars and counted, but
+  never part of a candle's OHLC or volume, and a bucket with no open minute is never a candle.
+- `spread_points` are MT5 points (`10^-digits`), which can differ from the tick size (the minimum
+  price change); the spread uses the point.
 - Candles that straddle a close or reopen are kept as `partial`; a partial candle ends at its last open
   minute, so a Friday signal is dated at the close, never inside the weekend. Buckets at the series
   edge that the series covers only partly are not built.

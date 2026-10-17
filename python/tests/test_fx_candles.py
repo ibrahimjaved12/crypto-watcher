@@ -7,7 +7,7 @@ import unittest
 from market_analysis.benchmark import ta_strategies as ta
 from market_analysis.benchmark.bars import MISSING
 from market_analysis.benchmark.candles import CandleSeries
-from market_analysis.fx.bars import FLAG_CLOSED, FLAG_MISSING_OPEN, FLAG_PRESENT, FxBarSeries
+from market_analysis.fx.bars import FLAG_CLOSED, FLAG_MISSING_OPEN, FLAG_PRESENT, FLAG_ROW_WHILE_CLOSED, FxBarSeries
 from market_analysis.fx.candles import build_fx_candles
 from market_analysis.trading_calendar import FX_WEEK
 
@@ -67,6 +67,33 @@ class CandleTests(unittest.TestCase):
         self.assertEqual(candles.close[0], MISSING)
         self.assertEqual(candles.column("volume"), [None, 120, 120, 120])
         self.assertEqual(candles.column("close")[0], None)
+
+    def test_rows_while_closed_are_quarantined(self):
+        saturday = utc("2026-10-17T12:00")
+        bars = series(utc("2026-10-16T19:00"), utc("2026-10-18T23:00"))
+        index = bars.index_of(saturday)
+        for name in ("open", "high", "low", "close"):
+            bars.__getattribute__(name)[index] = 999_000_000
+        bars.tick_volume[index] = 5
+        bars.flags[index] = FLAG_ROW_WHILE_CLOSED
+        candles = build_fx_candles(bars, 60, FX_WEEK)
+        self.assertNotIn(utc("2026-10-17T12:00"), candles.open_times)  # entirely closed bucket: no candle
+        self.assertEqual(len(candles), 4)
+        self.assertEqual(bars.anomalies()["row_while_closed"], 1)  # still visible for diagnostics
+
+        mixed = series(utc("2026-10-16T16:00"), utc("2026-10-17T00:00"))
+        after_close = mixed.index_of(utc("2026-10-16T21:30"))
+        for name in ("open", "high", "low", "close"):
+            mixed.__getattribute__(name)[after_close] = 999_000_000
+        mixed.tick_volume[after_close] = 5
+        mixed.flags[after_close] = FLAG_ROW_WHILE_CLOSED
+        four_hour = build_fx_candles(mixed, 240, FX_WEEK)
+        friday = four_hour.open_times.index(utc("2026-10-16T20:00"))
+        self.assertTrue(four_hour.valid[friday])
+        self.assertEqual(four_hour.high[friday], 108_000_000)  # the closed-market print never enters OHLC
+        self.assertEqual(four_hour.volume[friday], 120)
+        self.assertEqual(four_hour.quarantined[friday], 1)
+        self.assertEqual(four_hour.end_ms[friday], utc("2026-10-16T21:00"))
 
     def test_fall_back_reopen_bucket_is_partial(self):
         reopen = utc("2026-11-01T22:00")

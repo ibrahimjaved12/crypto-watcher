@@ -21,7 +21,7 @@ from .bars import FLAG_MISSING_OPEN, FLAG_PRESENT, FLAG_ROW_WHILE_CLOSED, FxBarS
 
 FX_TIMEFRAMES = (15, 60, 240)
 FX_CANDLE_ANCHOR_MS = 0
-_INT_COLUMNS = ("open_times", "open", "high", "low", "close", "volume", "taker_buy_volume", "end_ms")
+_INT_COLUMNS = ("open_times", "open", "high", "low", "close", "volume", "taker_buy_volume", "end_ms", "quarantined")
 
 
 @dataclass(frozen=True)
@@ -30,8 +30,10 @@ class FxCandleSeries:
 
     ``volume`` is the SUM OF TICK VOLUME (a count of price updates), not traded volume; forex CFDs have
     no central tape. ``taker_buy_volume`` is all ``MISSING``. ``partial`` marks a bucket that contains
-    closed minutes; its ``end_ms`` is the end of its last open (or printed) minute, so a signal on the
-    Friday close is dated at the close, never inside the weekend.
+    closed minutes; its ``end_ms`` is the end of its last open minute, so a signal on the Friday close
+    is dated at the close, never inside the weekend. ``quarantined`` counts rows printed while the
+    calendar says closed: they are kept in the bars for diagnostics but never enter OHLC or volume, and
+    a bucket with no open minute is not a candle even if it has such rows.
     """
 
     symbol: str
@@ -46,6 +48,7 @@ class FxCandleSeries:
     taker_buy_volume: List[int]
     partial: List[bool]
     end_ms: List[int]
+    quarantined: List[int]
 
     def __post_init__(self):
         if self.minutes not in FX_TIMEFRAMES:
@@ -90,30 +93,30 @@ def build_fx_candles(bars: FxBarSeries, minutes: int, calendar: TradingCalendar)
     last_minute = bars.end_ms - MINUTE_MS
     out = {name: [] for name in (*_INT_COLUMNS, "valid", "partial")}
     for bucket in range(first, last_minute + 1, step):
-        open_slots = present = 0
+        open_slots = present = quarantined = 0
         has_closed = missing_open = open_outside = False
-        last_active = None  # last minute that is open or has a row
+        last_open = None
         rows = []
         for minute in range(bucket, bucket + step, MINUTE_MS):
             if bars.start_ms <= minute < bars.end_ms:
                 index = (minute - bars.start_ms) // MINUTE_MS
                 flag = bars.flags[index]
                 is_open = flag in (FLAG_PRESENT, FLAG_MISSING_OPEN)
-                if flag in (FLAG_PRESENT, FLAG_ROW_WHILE_CLOSED):
+                if flag == FLAG_PRESENT:
                     present += 1
                     rows.append(index)
+                elif flag == FLAG_ROW_WHILE_CLOSED:
+                    quarantined += 1  # calendar/data conflict: kept in the bars, never TA input
                 missing_open = missing_open or flag == FLAG_MISSING_OPEN
-                if is_open or flag == FLAG_ROW_WHILE_CLOSED:
-                    last_active = minute
             else:
                 is_open = calendar.is_open(minute)
                 open_outside = open_outside or is_open
-                if is_open:
-                    last_active = minute
+            if is_open:
+                last_open = minute
             open_slots += is_open
             has_closed = has_closed or not is_open
-        if open_slots == 0 and present == 0:
-            continue  # closed market: no candle, indicators carry on
+        if open_slots == 0:
+            continue  # closed market: no candle (rows printed while closed stay quarantined in the bars)
         if open_outside:
             continue  # an edge bucket the series only partly covers is never built
         valid = not missing_open and present > 0
@@ -130,7 +133,8 @@ def build_fx_candles(bars: FxBarSeries, minutes: int, calendar: TradingCalendar)
         out["valid"].append(valid)
         out["taker_buy_volume"].append(MISSING)
         out["partial"].append(has_closed)
-        out["end_ms"].append(last_active + MINUTE_MS if has_closed else bucket + step)
+        out["end_ms"].append(last_open + MINUTE_MS if has_closed else bucket + step)
+        out["quarantined"].append(quarantined)
     return FxCandleSeries(bars.symbol, minutes, **out)
 
 

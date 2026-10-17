@@ -4,7 +4,9 @@ Unlike the crypto ``BarSeries`` (every minute expected, 24/7), a forex series kn
 is closed: a minute without a row while the calendar is closed is EXPECTED (``FLAG_CLOSED``), while a
 minute without a row while the calendar is open is real data loss (``FLAG_MISSING_OPEN``). A row
 stamped while the calendar says closed is kept and counted (``FLAG_ROW_WHILE_CLOSED``), never dropped.
-Prices are BID prices scaled to 10**8; ``spread`` is ask - bid in the same scale.
+Prices are BID prices scaled to 10**8; ``spread`` is ask - bid in the same scale. MT5 quotes the spread
+in POINTS (``SYMBOL_POINT = 10**-digits``), which can differ from the tick size
+(``SYMBOL_TRADE_TICK_SIZE``, the minimum price change): the spread uses the point, ``tick`` the tick size.
 """
 from __future__ import annotations
 
@@ -115,10 +117,10 @@ def fx_bars_from_rows(instrument: Instrument, venue_symbol: VenueSymbol, calenda
     the last row's minute (not aligned to any candle boundary)."""
     if venue_symbol.instrument_id != instrument.instrument_id:
         raise ValueError("venue symbol belongs to another instrument")
-    if venue_symbol.tick_size is None:
-        raise ValueError("tick size must come from the broker")
-    point = Fraction(venue_symbol.tick_size)
-    tick = point * _SCALE
+    if venue_symbol.tick_size is None or venue_symbol.digits is None:
+        raise ValueError("tick size and digits must come from the broker")
+    point = Fraction(1, 10 ** venue_symbol.digits)  # MT5 SYMBOL_POINT; spreads are quoted in points
+    tick = Fraction(venue_symbol.tick_size) * _SCALE
     if tick.denominator != 1 or tick < 1:
         raise ValueError("tick size must be a positive integer at 10**8")
     rows = list(rows)
