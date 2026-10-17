@@ -198,6 +198,28 @@ A signal failing a check is still built (its id exists) and kept in `suppressed`
 session tags: the "would have fired" log; nothing is dropped silently. Session tags are recorded for
 every signal. Placebo controls for forex come later (`placebo_not_supported_for_fx`).
 
+### Setups and resolution
+
+Code: `python/market_analysis/fx/setups.py` (geometry `fx-atr-v1`) and `python/market_analysis/fx/resolve.py`.
+`forward/setups.py` and `forward/outcomes.py` are unchanged; the separate geometry version keeps
+reports from ever mixing forex ATR setups with crypto sigma setups.
+
+- Geometry: stop distance = `k` × Wilder ATR(14) of the signal's own timeframe at the signal candle
+  (point-in-time), rounded **up** to whole ticks; target = `rr` × that distance in whole ticks;
+  default grid k = 2, rr ∈ {3/2, 2}. Both are measured from `p0` (long `bid_open + spread`, short
+  `bid_open`). A stop narrower than 5 spreads (UNVERIFIED placeholder) is refused (`G`).
+- Triggers on bid candles + the minute's spread: long stop `bid_low <= stop`, long target
+  `bid_high >= target`, short stop `bid_high + spread >= stop`, short target `bid_low + spread <= target`.
+  A gap through the stop fills from the worse open; stop and target in one minute is `ambiguous`
+  (pessimistic result reported, target result kept as `optimistic`); a minute missing while open is `X`.
+- Costs in R (1 R = |entry fill − stop|): the spread is already inside `p0`, so it shows up
+  symmetrically as a tighter stop and a harder target; slippage and round-trip commission are
+  `cost_ur`; swap at each rollover (×3 on the triple day) is `fund_ur`.
+- Time limit: 4 × horizon in open minutes, and the whole window must lie in one open session, so no
+  trade is truncated by a weekend or break; a closed minute inside a window is an error.
+- **Open research item:** port the crypto robust seasonal sigma to FX (session seasonality, weekend
+  handling) and compare it with the ATR geometry.
+
 ## Roadmap of PRs
 
 1. Foundation: instrument vocabulary and compatibility check (done).
