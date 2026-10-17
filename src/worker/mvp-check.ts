@@ -143,7 +143,7 @@ async function accountChecks(userId: string, label: string, all: { counts: Count
   });
 
   const { data: account, error: accountError } = await db.from("forward_wallet_accounts")
-    .select("account_id,config").eq("user_id", userId).maybeSingle();
+    .select("account_id,config").eq("user_id", userId).eq("market", "crypto").maybeSingle();
   if (accountError) throw new Error(`Forward wallet account read failed: ${accountError.message}`);
   const initial = Number(account?.config?.initial_balance_e8 ?? run?.wallet_config?.initial_balance_e8 ?? 100e8);
   const ledger = all.ledgers.find((row) => row.user_id === userId && row.paper_account === account?.account_id) ?? null;
