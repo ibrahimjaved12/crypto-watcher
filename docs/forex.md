@@ -49,6 +49,22 @@ same rules, same reason strings).
 
 ## Strategy compatibility
 
+### Declared strategies
+
+Code: `python/market_analysis/forward/strategy_capabilities.py`.
+
+| Strategy | Markets | Requires | Why |
+|---|---|---|---|
+| `ema_cross_20_50`, `ema_cross_50_200`, `rsi_14_reversion`, `macd_12_26_9`, `bollinger_20_2_reversion`, `keltner_breakout_20_14_2` | crypto, forex | OHLC | read only close/high/low and the candle count |
+| `doji_continuation_v1`, `doji_reversal_v1` | crypto | OHLC, real volume | paused, calibrated on crypto, marked unvalidated; relative volume gates every reading |
+
+- Placebos inherit the matched strategy's capabilities (random emission, same data needs).
+- Fail closed: an unknown strategy id has no capabilities and is refused (`no_capabilities_declared`).
+- Adding a strategy to `ta_strategies.STRATEGIES` requires adding its capabilities; the module fails at
+  import otherwise.
+
+### General rules
+
 - Data fields: `ohlc`, `volume_real`, `volume_tick`, `mark`, `funding`, `taker_flow`,
   `open_interest`, `spread`.
 - Provided per instrument:
