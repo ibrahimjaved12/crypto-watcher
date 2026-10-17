@@ -51,7 +51,11 @@ def _entry_check(bars: FxBarSeries, calendar: TradingCalendar, signal_ms: int, h
 
 def generate_fx_signals(instrument: Instrument, bars: FxBarSeries, candles: Dict[int, FxCandleSeries],
                         calendar: TradingCalendar, from_ms: int, to_ms: int, strategy_ids=None) -> FxSignalBatch:
-    """Signals for candle closes in ``(from_ms, to_ms]`` (and inside the bars), plus the suppressed ones."""
+    """Signals for candle closes in ``(from_ms, to_ms]`` within the bars, plus the suppressed ones.
+
+    ``candles`` may reach further back than ``bars`` (indicator warm-up); only closes from
+    ``bars.start_ms`` on are decisions.
+    """
     if type(from_ms) is not int or type(to_ms) is not int or to_ms < from_ms:
         raise ValueError("decision window must be integers with from_ms <= to_ms")
     if bars.instrument_id != instrument.instrument_id:
@@ -78,7 +82,11 @@ def generate_fx_signals(instrument: Instrument, bars: FxBarSeries, candles: Dict
     for item, why in refused.items():
         reasons[item] = "incompatible:" + ",".join(why)
 
-    last = min(to_ms, bars.end_ms - MINUTE_MS)  # the entry minute (open at signal_ms) must exist
+    # Decisions inside the minute bars only: older candles still warm the indicators, but their
+    # closes are not decisions here. A close exactly at bars.end_ms has no entry row yet: it is
+    # decided only when the market is closed there (so a Friday close is logged as suppressed);
+    # while open it waits for its entry minute.
+    last = min(to_ms, bars.end_ms)
     signals: List[Signal] = []
     suppressed: List[SuppressedSignal] = []
     sessions: Dict[str, Tuple[str, ...]] = {}
@@ -94,6 +102,8 @@ def generate_fx_signals(instrument: Instrument, bars: FxBarSeries, candles: Dict
         for index, side in enumerate(sides):
             end_ms = series.end_ms[index]
             if not side or not series.valid[index] or not from_ms < end_ms <= last:
+                continue
+            if end_ms < bars.start_ms or (end_ms == bars.end_ms and calendar.is_open(end_ms)):
                 continue
             signal = make_signal(strategy, bars.symbol, end_ms, side)
             tags = calendar.session_tags(end_ms)

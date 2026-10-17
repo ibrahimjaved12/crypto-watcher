@@ -26,7 +26,7 @@ def utc(text):
 START = utc("2026-10-04T21:00")  # a Sunday open: more than 102 hourly candles of warm-up before every case
 
 
-def fixture(end, jump_ms, drop=(), start=START):
+def fixture(end, jump_ms, drop=(), start=START, fall_ms=None):
     """Flat bid price, then a one-step jump at ``jump_ms`` (an exact EMA20/EMA50 cross on that candle)."""
     minutes = (end - start) // MINUTE
     columns = {name: array("q", [MISSING]) * minutes for name in ("open", "high", "low", "close", "spread", "tick_volume")}
@@ -40,6 +40,8 @@ def fixture(end, jump_ms, drop=(), start=START):
                 flags[offset] = FLAG_MISSING_OPEN
                 continue
             price = PRICE if minute < jump_ms else PRICE + JUMP
+            if fall_ms is not None and minute >= fall_ms:
+                price = PRICE - 5 * JUMP  # a deep fall: an exact EMA20/EMA50 cross down
             for name in ("open", "high", "low", "close"):
                 columns[name][offset] = price
             columns["spread"][offset], columns["tick_volume"][offset] = 1000, 1
@@ -90,6 +92,27 @@ class SignalTests(unittest.TestCase):
         self.assertEqual([(s.signal.signal_ms, s.reason) for s in batch.suppressed],
                          [(utc("2026-10-16T21:00"), "market_closed_at_entry")])
         self.assertEqual(batch.signals, [])
+
+    def test_bars_ending_exactly_at_the_friday_close_log_the_close_signal(self):
+        bars, candles = fixture(utc("2026-10-16T21:00"), jump_ms=utc("2026-10-16T20:00"))
+        self.assertEqual(bars.end_ms, utc("2026-10-16T21:00"))  # last row 20:59, as from the gateway
+        batch = run(bars, candles)
+        self.assertEqual([(s.signal.signal_ms, s.reason) for s in batch.suppressed],
+                         [(utc("2026-10-16T21:00"), "market_closed_at_entry")])
+
+    def test_open_close_at_the_bars_end_waits_for_its_entry_minute(self):
+        bars, candles = fixture(utc("2026-10-14T13:00"), jump_ms=utc("2026-10-14T12:00"))
+        batch = run(bars, candles)
+        self.assertEqual((batch.signals, batch.suppressed), ([], []))
+
+    def test_candles_older_than_the_bars_only_warm_up(self):
+        end, jump, fall = utc("2026-10-14T20:00"), utc("2026-10-14T12:00"), utc("2026-10-14T15:00")
+        _, long_candles = fixture(end, jump_ms=jump, fall_ms=fall)
+        short_bars, _ = fixture(end, jump_ms=jump, fall_ms=fall, start=utc("2026-10-14T14:00"))
+        batch = generate_fx_signals(EURUSD, short_bars, long_candles, FX_WEEK, START, end, [EMA])
+        # the 13:00 cross up is before the minute bars: no crash, no decision; the 16:00 cross down is emitted
+        self.assertEqual([(s.signal_ms, s.side) for s in batch.signals], [(utc("2026-10-14T16:00"), -1)])
+        self.assertEqual(batch.suppressed, [])
 
     def test_missing_entry_minute_is_suppressed(self):
         entry = utc("2026-10-12T10:00")
