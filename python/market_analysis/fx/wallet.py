@@ -206,6 +206,10 @@ def step(state: dict, events, config: FxWalletConfig = FxWalletConfig()) -> tupl
                 entry("close_fee", ms, -_round(commission(position) * E8), **base)
             state["used_margin_e8"] -= position["margin_e8"]
             del state["positions"][setup_id]
+            # A closed position's rollover keys can never matter again; prune them so the state stays small.
+            prefix = setup_id + "|"
+            state["swaps"] = [key for key in state["swaps"] if not key.startswith(prefix)]
+            swapped = {key for key in swapped if not key.startswith(prefix)}
             finish(setup_id)
         elif kind == "swap":
             rates = SwapRates(exact_from_str(event["long_per_unit"]), exact_from_str(event["short_per_unit"]))
