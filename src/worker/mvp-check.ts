@@ -108,7 +108,7 @@ async function accountChecks(userId: string, label: string, all: { counts: Count
   const checks: Check[] = [];
   const { data: runs } = await db.from("paper_runs")
     .select("status, reason, boundary_ms, reasons, freshness, wallet_config").eq("user_id", userId)
-    .order("boundary_ms", { ascending: false }).limit(1);
+    .eq("market", "crypto").order("boundary_ms", { ascending: false }).limit(1);
   const run = (runs?.[0] ?? null) as (RunRow & { wallet_config?: { initial_balance_e8?: number } | null }) | null;
   for (const check of checkLatestRun(run, Date.now())) checks.push({ ...check, name: p + check.name });
 

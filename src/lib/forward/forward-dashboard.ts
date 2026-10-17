@@ -154,6 +154,7 @@ export async function loadForwardDashboard(client: SupabaseClient) {
       .order("entry_ms", { ascending: false }).limit(100), "open setups"),
     rows<LatestRun>(from("paper_runs")
       .select("run_key, status, reason, boundary_ms, freshness, assumptions, created_at")
+      .eq("market", "crypto")
       .order("boundary_ms", { ascending: false })
       .order("created_at", { ascending: false }).limit(1), "runs"),
   ]);

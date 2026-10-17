@@ -29,7 +29,7 @@ before(async () => {
     "20261011130000_forward_sigma_state.sql", "20261011150000_forward_shared_stages.sql",
     "20261016180000_paper_ledger_order_kinds.sql", "20261016190000_paper_account_summary.sql",
     "20261018100000_forex_access_and_market_tables.sql",
-    "20261018110000_commit_user_run_market.sql"])
+    "20261018110000_commit_user_run_market.sql", "20261019090000_fx_stage_defaults_and_rls.sql"])
     await db.exec(await readFile(new URL(`../supabase/migrations/${file}`, import.meta.url), "utf8"));
 });
 beforeEach(() => db.exec(`RESET ROLE; SELECT set_config('request.jwt.claim.sub','',false);
@@ -219,4 +219,19 @@ test("reports: paper_account_summary and paper_equity_series never mix markets; 
   assert.deepEqual(await summary(), { lines: 2, trades: 1 });
   assert.deepEqual(await summary("'forex'"), { lines: 0, trades: 0 });
   assert.deepEqual(await balances(`${HOUR},NULL,'forex'`), []);
+});
+
+test("commit_fx_stage fills omitted sessions/detail defaults; RLS still splits entitled and other users", async () => {
+  const output = records(FX1);
+  const { sessions: _s, ...signal } = output.signals[0];
+  const { sessions: _t, detail: _d, ...suppressed } = output.suppressed[0];
+  await fxStage(FX1, HOUR, { ...output, signals: [signal], suppressed: [suppressed] });
+  assert.deepEqual((await db.query("SELECT sessions FROM fx_market_signals")).rows[0].sessions, []);
+  const row = (await db.query("SELECT sessions,detail FROM fx_market_suppressed")).rows[0];
+  assert.deepEqual([row.sessions, row.detail], [[], {}]);
+  await grant(A, { plan: "forex" });
+  await asUser(B);
+  assert.equal(await count("fx_market_signals"), 0);
+  await asUser(A);
+  assert.equal(await count("fx_market_signals"), 1);
 });
