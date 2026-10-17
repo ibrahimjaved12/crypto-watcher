@@ -181,6 +181,23 @@ crypto `BarSeries`/`CandleSeries`, which assume every minute exists).
   00:00, 04:00, ... UTC), which matches a broker whose MT5 server time is GMT+0. Compare a downloaded
   H4 bar with the 240-minute bucket before comparing with the broker's charts.
 
+### Signals
+
+Code: `python/market_analysis/fx/signals.py` (`generate_fx_signals`; the crypto `forward/signals.py` is
+unchanged). The forward baseline TA strategies run on trading-time candles; only strategies whose
+declared capabilities fit the instrument run, and the signal identity is the crypto one
+(`sha256(strategy_id|version|symbol|signal_ms|side)` with the plain symbol, e.g. `EURUSD`).
+
+A signal is a valid candle close, dated at that candle's real end. Entry checks, in order:
+1. the market is open at the signal time (else `market_closed_at_entry`);
+2. the entry minute has a row (else `entry_minute_missing`);
+3. the whole time-limit window (4 × horizon) lies in ONE continuous open run: no weekend, no daily
+   break, so no trade is truncated (else `window_exceeds_session`).
+
+A signal failing a check is still built (its id exists) and kept in `suppressed` with its reason and
+session tags: the "would have fired" log; nothing is dropped silently. Session tags are recorded for
+every signal. Placebo controls for forex come later (`placebo_not_supported_for_fx`).
+
 ## Roadmap of PRs
 
 1. Foundation: instrument vocabulary and compatibility check (done).
