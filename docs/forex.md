@@ -121,6 +121,23 @@ active. Crypto uses `AlwaysOpenCalendar`; forex CFDs use `FxWeekCalendar` (Sunda
 - Daily breaks and holidays for metals and oil CFDs are **not guessed**: they come from the
   broker's symbol sessions and are passed in as `daily_breaks` / `closures`.
 
+### News blackout
+
+Code: `python/market_analysis/news_blackout.py` (level 1: scheduled timing only; pure, no clock, no I/O).
+
+- Modes: `off` (no effect), `tag` (keep the entry and mark it), `suppress` (default: drop new entries
+  inside the window and log them as "would have fired", each with the events that decided it).
+- Window: `[event − before, event + after]`, inclusive. Defaults HIGH ±30 min, MEDIUM ±15 min, LOW 0,
+  and only HIGH events count (`min_impact`). All are **UNVERIFIED placeholders**.
+- Point in time: an event counts only if it was known at the decision time (`first_seen_ms <= ts`),
+  so a backtest never uses a schedule published later.
+- Mapping: FX pairs react to base and quote currency events; metals, energy and other indices to the
+  quote currency; gold also to `gold`-tagged events and oil to `oil`-tagged events (any currency);
+  DXY to its basket currencies (USD, EUR, JPY, GBP, CAD, SEK, CHF; weights not modelled). Crypto is
+  never blacked out.
+- **Not done yet:** calendar source choice (FMP vs ForexFactory feed), the `calendar_event` table, the
+  ingestion job that records the schedule from day one, and interpreting surprises or reactions.
+
 ## Roadmap of PRs
 
 1. Foundation: instrument vocabulary and compatibility check (done).
