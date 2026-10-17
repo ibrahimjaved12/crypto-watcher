@@ -20,12 +20,12 @@ import { supabase } from "@/integrations/supabase/client";
 import { useMarket } from "@/lib/market/market-context";
 
 const NAV = [
-  { to: "/dashboard", label: "Market", icon: LineChart },
-  { to: "/forward", label: "Strategy Lab", icon: FlaskConical },
-  { to: "/paper", label: "Paper account", icon: Wallet },
-  { to: "/alerts", label: "Alerts", icon: Bell },
-  { to: "/notes", label: "Notes", icon: NotebookPen },
-  { to: "/settings", label: "Control room", icon: SlidersHorizontal },
+  { to: "/dashboard", label: "Market", short: "Market", icon: LineChart },
+  { to: "/forward", label: "Strategy Lab", short: "Lab", icon: FlaskConical },
+  { to: "/paper", label: "Paper account", short: "Paper", icon: Wallet },
+  { to: "/alerts", label: "Alerts", short: "Alerts", icon: Bell },
+  { to: "/notes", label: "Notes", short: "Notes", icon: NotebookPen },
+  { to: "/settings", label: "Control room", short: "Control", icon: SlidersHorizontal },
 ] as const;
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -45,17 +45,16 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="min-h-screen" data-market={market}>
         <header className="sticky top-0 z-30 border-b border-border/60 bg-background/75 backdrop-blur-md">
           <div className="mx-auto max-w-6xl px-3 sm:px-4">
-            {/* Row 1 has a fixed height and nothing in it depends on the market, so a switch moves nothing. */}
+            {/* One row on every width; a fixed height and nothing in it depends on the market, so a switch moves nothing. */}
             <div className="flex h-12 flex-nowrap items-center gap-2 sm:gap-3">
               <Link
                 to="/dashboard"
                 aria-label="Crypto Watch"
                 className="flex shrink-0 items-center gap-2 font-display text-lg font-semibold"
               >
-                <span className="grid size-8 place-items-center rounded-xl bg-primary/12 ring-1 ring-primary/30">
-                  <Activity className="size-[18px] text-primary" aria-hidden />
-                </span>
-                <span className="hidden sm:inline">Crypto Watch</span>
+                {/* The logo never changes with the market: text-brand is not overridden by the forex theme. */}
+                <Activity className="size-5 text-brand" aria-hidden />
+                <span className="hidden lg:inline">Crypto Watch</span>
               </Link>
               <MarketToggle className="shrink-0" />
               <nav aria-label="Main" className="ml-auto hidden min-w-0 items-center gap-0.5 overflow-hidden sm:flex">
@@ -86,25 +85,30 @@ export function AppShell({ children }: { children: ReactNode }) {
                 </Button>
               </div>
             </div>
-            <nav aria-label="Main" className="grid grid-cols-6 gap-1 pb-1.5 sm:hidden">
-              {NAV.map(({ to, label, icon: Icon }) => (
-                <Link
-                  key={to}
-                  to={to}
-                  title={label}
-                  className="flex h-11 items-center justify-center rounded-xl text-muted-foreground transition-colors [&.active]:bg-primary/12 [&.active]:text-foreground [&.active]:shadow-[inset_0_-2px_0_var(--color-primary)]"
-                >
-                  <Icon className="size-5" aria-hidden />
-                  <span className="sr-only">{label}</span>
-                </Link>
-              ))}
-            </nav>
           </div>
           <div className="market-line" aria-hidden />
         </header>
+        {/* Phone navigation: a bottom tab bar within thumb reach. */}
+        <nav
+          aria-label="Main"
+          className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-6 border-t border-border/60 bg-background/85 pb-[env(safe-area-inset-bottom)] backdrop-blur-md sm:hidden"
+        >
+          {NAV.map(({ to, label, short, icon: Icon }) => (
+            <Link
+              key={to}
+              to={to}
+              title={label}
+              aria-label={label}
+              className="group flex h-14 flex-col items-center justify-center gap-0.5 text-muted-foreground transition-colors [&.active]:text-foreground [&.active]:shadow-[inset_0_2px_0_var(--color-primary)]"
+            >
+              <Icon className="size-5 group-[.active]:text-primary" aria-hidden />
+              <span className="text-[10px] leading-none">{short}</span>
+            </Link>
+          ))}
+        </nav>
         <main
           key={market}
-          className="mx-auto max-w-6xl px-4 py-6 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-200"
+          className="mx-auto max-w-6xl px-4 pt-6 pb-24 sm:pb-6 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-200"
         >
           <RunnerStatusNotice />
           {children}

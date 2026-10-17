@@ -295,13 +295,14 @@ Code: `src/lib/market/market-select.ts` (pure rules), `src/lib/market/market-con
 - **Locked state.** A market the label does not include stays visible in the toggle but dimmed, with
   a lock and a dashed outline. Activating it opens a short note ("Forex isn't switched on for you",
   "Ask the owner to add it.") and never switches. No price, purchase button or link.
-- **Stable header (#413).** Row 1 has a fixed height and nothing in it depends on the market: logo
-  mark, a fixed-width toggle (132 px phone, 148 px desktop, always icon + label), the desktop nav
-  (labels for every item from 1280 px, only the active item below that) and a runner status dot
-  (green online, amber degraded, red offline, muted unknown; label from 1280 px) with sign-out. On a
-  phone a second row holds six equal icon cells. Forex pages use the same eyebrows and titles as the
-  crypto pages and say nothing else about the mode; the teal theme carries it, and the market card's
-  "Data feed · Not connected" chip is the only place that says the feed is missing.
+- **Stable header (#413, #415).** One row on every width with a fixed height, and nothing in it
+  depends on the market: the logo (always the brand purple, `text-brand`; wordmark from 1024 px), a
+  fixed-width text-only toggle (120 px phone, 144 px desktop), the desktop nav (labels for every item
+  from 1280 px, only the active item below that), the runner status (an 8 px dot on a phone; from
+  768 px the Online/Offline pill, amber when degraded) and sign-out. On a phone the navigation is a
+  bottom tab bar. Forex pages use the same eyebrows and titles as the crypto pages and say nothing
+  else about the mode; the teal theme carries it, and the market card's "Data feed · Not connected"
+  chip is the only place that says the feed is missing.
 - **Storage.** The choice is kept in `localStorage` under `cw.market` (wrapped in try/catch) and
   shared across tabs through the `storage` event.
 - **What Forex shows today.** Market, Strategy Lab, Paper account and Alerts show a Forex landing

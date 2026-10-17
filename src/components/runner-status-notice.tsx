@@ -21,6 +21,12 @@ const TONE_TEXT: Record<Tone, string> = {
   bull: "text-bull",
   bear: "text-bear",
 };
+const TONE_PILL: Record<Tone, string> = {
+  muted: "md:border-border md:bg-muted",
+  warn: "md:border-warn/40 md:bg-warn/10",
+  bull: "md:border-bull/40 md:bg-bull/10",
+  bear: "md:border-bear/40 md:bg-bear/10",
+};
 
 /** One tone rule for the header dot and the notice: failed check muted, degraded amber, online green, else red. */
 function runnerTone(checkFailed: boolean, online: boolean, degraded: boolean): Tone {
@@ -44,7 +50,8 @@ export function RunnerStatusBadge() {
   const online = available && data?.reason !== "never-reported";
   const degraded = online && data?.state === "degraded";
   const tone = runnerTone(checkFailed, online, degraded);
-  const label = checkFailed ? "Status unknown" : degraded ? "Degraded" : online ? "Online" : "Offline";
+  // Only Status unknown / Online / Offline; a degraded runner is "Online" in amber (details in the notice and popover).
+  const label = checkFailed ? "Status unknown" : online ? "Online" : "Offline";
   const heartbeat = checkFailed
     ? "Couldn't check the runner"
     : data?.reason === "never-reported"
@@ -61,18 +68,21 @@ export function RunnerStatusBadge() {
             type="button"
             aria-label={`Runner ${label.toLowerCase()}; show service history`}
             className={cn(
-              "flex h-10 min-w-10 items-center justify-center gap-1.5 rounded-full px-2.5 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "grid size-10 place-items-center rounded-full font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:inline-flex md:size-auto md:items-center md:gap-1.5 md:border md:px-2 md:py-0.5 md:text-xs",
               TONE_TEXT[tone],
+              TONE_PILL[tone],
             )}
           >
-            <span className="relative grid size-2 place-items-center" aria-hidden>
+            {/* Phone: an 8 px dot in a 40 px hit area (online pings). From md: the original 6 px dot pill. */}
+            <span className="relative grid size-2 place-items-center md:hidden" aria-hidden>
               {tone === "bull" ? (
                 <span className="absolute inline-flex size-full rounded-full bg-current opacity-60 motion-safe:animate-ping" />
               ) : null}
-              <span className="relative size-2 rounded-full bg-current ring-2 ring-current/20" />
+              <span className="relative size-2 rounded-full bg-current" />
             </span>
+            <span className="hidden size-1.5 shrink-0 rounded-full bg-current md:inline-block" aria-hidden />
             <span className="sr-only">Runner </span>
-            <span className="sr-only xl:not-sr-only">{label}</span>
+            <span className="sr-only md:not-sr-only">{label}</span>
           </button>
         </PopoverTrigger>
         <PopoverContent
