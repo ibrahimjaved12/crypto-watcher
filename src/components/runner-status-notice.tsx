@@ -1,3 +1,6 @@
+import { ChevronDown, CircleHelp, TriangleAlert } from "lucide-react";
+import { useState } from "react";
+
 import { useRunnerStatus } from "@/lib/runner/use-runner-status";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { formatAgo, formatClock } from "@/lib/labels";
@@ -11,13 +14,37 @@ const RUNNER_SERVICES = [
   { key: "jobs", name: "On-demand jobs" },
 ] as const;
 
+type Tone = "muted" | "warn" | "bull" | "bear";
+const TONE_TEXT: Record<Tone, string> = {
+  muted: "text-muted-foreground",
+  warn: "text-warn",
+  bull: "text-bull",
+  bear: "text-bear",
+};
+
+/** One tone rule for the header dot and the notice: failed check muted, degraded amber, online green, else red. */
+function runnerTone(checkFailed: boolean, online: boolean, degraded: boolean): Tone {
+  if (checkFailed) return "muted";
+  if (online && degraded) return "warn";
+  return online ? "bull" : "bear";
+}
+
 export function RunnerStatusBadge() {
   const { data, available, checkFailed, isPending } = useRunnerStatus();
   const now = useNow();
   if (data?.configured === false) return null;
-  if (isPending) return <span className="text-xs text-muted-foreground">Connecting…</span>;
+  if (isPending) {
+    return (
+      <span role="status" className="grid size-10 place-items-center" aria-label="Runner connecting">
+        <span className="size-2 rounded-full bg-muted-foreground motion-safe:animate-pulse" aria-hidden />
+        <span className="sr-only">Connecting…</span>
+      </span>
+    );
+  }
   const online = available && data?.reason !== "never-reported";
-  const label = checkFailed ? "Status unknown" : online ? "Online" : "Offline";
+  const degraded = online && data?.state === "degraded";
+  const tone = runnerTone(checkFailed, online, degraded);
+  const label = checkFailed ? "Status unknown" : degraded ? "Degraded" : online ? "Online" : "Offline";
   const heartbeat = checkFailed
     ? "Couldn't check the runner"
     : data?.reason === "never-reported"
@@ -27,24 +54,25 @@ export function RunnerStatusBadge() {
         : null;
 
   return (
-    <div role="status" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+    <div role="status" className="flex shrink-0 items-center">
       <Popover>
         <PopoverTrigger asChild>
           <button
             type="button"
             aria-label={`Runner ${label.toLowerCase()}; show service history`}
             className={cn(
-              "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              checkFailed
-                ? "border-border bg-muted text-muted-foreground"
-                : online
-                  ? "border-bull/40 bg-bull/10 text-bull"
-                  : "border-bear/40 bg-bear/10 text-bear",
+              "flex h-10 min-w-10 items-center justify-center gap-1.5 rounded-full px-2.5 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              TONE_TEXT[tone],
             )}
           >
-            <span className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden />
+            <span className="relative grid size-2 place-items-center" aria-hidden>
+              {tone === "bull" ? (
+                <span className="absolute inline-flex size-full rounded-full bg-current opacity-60 motion-safe:animate-ping" />
+              ) : null}
+              <span className="relative size-2 rounded-full bg-current ring-2 ring-current/20" />
+            </span>
             <span className="sr-only">Runner </span>
-            {label}
+            <span className="sr-only xl:not-sr-only">{label}</span>
           </button>
         </PopoverTrigger>
         <PopoverContent
@@ -90,19 +118,6 @@ export function RunnerStatusBadge() {
           </ul>
         </PopoverContent>
       </Popover>
-      {checkFailed ? (
-        <span className="text-xs text-muted-foreground">Couldn't check the runner</span>
-      ) : data?.reason === "never-reported" ? (
-        <span className="text-xs text-muted-foreground">No heartbeat received yet</span>
-      ) : !available && data?.lastOnlineAt != null ? (
-        <time
-          className="text-xs text-muted-foreground"
-          dateTime={new Date(data.lastOnlineAt).toISOString()}
-          title={new Date(data.lastOnlineAt).toLocaleString()}
-        >
-          Last online {formatAgo(data.lastOnlineAt, now)}
-        </time>
-      ) : null}
     </div>
   );
 }
@@ -136,15 +151,39 @@ export function RunnerStatusNotice() {
     }
   }
 
+  const tone = checkFailed ? "muted" : available && data?.state === "degraded" ? "warn" : "bear";
+  return <NoticeBox tone={tone} message={message} />;
+}
+
+function NoticeBox({ tone, message }: { tone: "muted" | "warn" | "bear"; message: string }) {
+  const [open, setOpen] = useState(false);
+  const Icon = tone === "muted" ? CircleHelp : TriangleAlert;
   return (
     <div
       role="status"
       className={cn(
-        "mb-6 rounded-lg border px-4 py-3 text-sm leading-relaxed",
-        checkFailed ? "border-border bg-muted text-muted-foreground" : "border-bear/30 bg-bear/5",
+        "mb-4 flex items-start gap-2.5 rounded-lg border px-4 py-2.5 text-sm leading-relaxed sm:mb-6",
+        tone === "muted"
+          ? "border-border bg-muted text-muted-foreground"
+          : tone === "warn"
+            ? "border-warn/30 bg-warn/5"
+            : "border-bear/30 bg-bear/5",
       )}
     >
-      {message}
+      <Icon className={cn("mt-0.5 size-4 shrink-0", TONE_TEXT[tone])} aria-hidden />
+      <p id="runner-notice-text" className={cn("min-w-0 flex-1", !open && "max-sm:line-clamp-1")}>
+        {message}
+      </p>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls="runner-notice-text"
+        aria-label={open ? "Show less" : "Show the full message"}
+        onClick={() => setOpen((value) => !value)}
+        className="-my-2 -mr-2 grid size-10 shrink-0 place-items-center rounded-full text-muted-foreground hover:text-foreground sm:hidden"
+      >
+        <ChevronDown className={cn("size-4 transition-transform", open && "rotate-180")} aria-hidden />
+      </button>
     </div>
   );
 }

@@ -44,55 +44,68 @@ export function AppShell({ children }: { children: ReactNode }) {
     <TooltipProvider delayDuration={150}>
       <div className="min-h-screen" data-market={market}>
         <header className="sticky top-0 z-30 border-b border-border/60 bg-background/75 backdrop-blur-md">
-          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2 px-4 py-2.5">
-            <div className="flex w-full min-w-0 items-center gap-3 sm:w-auto">
+          <div className="mx-auto max-w-6xl px-3 sm:px-4">
+            {/* Row 1 has a fixed height and nothing in it depends on the market, so a switch moves nothing. */}
+            <div className="flex h-12 flex-nowrap items-center gap-2 sm:gap-3">
               <Link
                 to="/dashboard"
+                aria-label="Crypto Watch"
                 className="flex shrink-0 items-center gap-2 font-display text-lg font-semibold"
               >
-                <Activity className="size-5 text-primary" aria-hidden />
-                Crypto Watch
-              </Link>
-              {market === "forex" ? (
-                <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-primary/12 px-2 py-0.5 text-xs font-medium text-primary ring-1 ring-primary/30">
-                  <span className="size-1.5 rounded-full bg-primary" aria-hidden />
-                  Forex
+                <span className="grid size-8 place-items-center rounded-xl bg-primary/12 ring-1 ring-primary/30">
+                  <Activity className="size-[18px] text-primary" aria-hidden />
                 </span>
-              ) : null}
-              <RunnerStatusBadge />
+                <span className="hidden sm:inline">Crypto Watch</span>
+              </Link>
+              <MarketToggle className="shrink-0" />
+              <nav aria-label="Main" className="ml-auto hidden min-w-0 items-center gap-0.5 overflow-hidden sm:flex">
+                {NAV.map(({ to, label, icon: Icon }) => (
+                  <Link
+                    key={to}
+                    to={to}
+                    title={label}
+                    className="group flex min-h-10 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground [&.active]:bg-primary/12 [&.active]:text-foreground [&.active]:shadow-[inset_0_-2px_0_var(--color-primary)]"
+                  >
+                    <Icon className="size-4 shrink-0" aria-hidden />
+                    <span className="hidden whitespace-nowrap group-[.active]:inline xl:inline">{label}</span>
+                    <span className="sr-only group-[.active]:hidden xl:hidden">{label}</span>
+                  </Link>
+                ))}
+              </nav>
+              <div className="flex shrink-0 items-center gap-0.5 max-sm:ml-auto">
+                <RunnerStatusBadge />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-10"
+                  onClick={signOut}
+                  aria-label="Sign out"
+                  title="Sign out"
+                >
+                  <LogOut className="size-4" aria-hidden />
+                </Button>
+              </div>
             </div>
-            <MarketToggle variant="desktop" className="hidden sm:grid" />
-            <MarketToggle variant="mobile" className="sm:hidden" />
-            <nav
-              className="ml-auto flex w-full min-w-0 sm:w-auto items-center gap-0.5 overflow-x-auto"
-              aria-label="Main"
-            >
+            <nav aria-label="Main" className="grid grid-cols-6 gap-1 pb-1.5 sm:hidden">
               {NAV.map(({ to, label, icon: Icon }) => (
                 <Link
                   key={to}
                   to={to}
                   title={label}
-                  className="flex min-h-9 items-center gap-1.5 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground [&.active]:bg-accent [&.active]:text-foreground [&.active]:shadow-[inset_0_-2px_0_var(--color-primary)]"
+                  className="flex h-11 items-center justify-center rounded-xl text-muted-foreground transition-colors [&.active]:bg-primary/12 [&.active]:text-foreground [&.active]:shadow-[inset_0_-2px_0_var(--color-primary)]"
                 >
-                  <Icon className="size-4" aria-hidden />
-                  <span className="hidden lg:inline">{label}</span>
-                  <span className="sr-only lg:hidden">{label}</span>
+                  <Icon className="size-5" aria-hidden />
+                  <span className="sr-only">{label}</span>
                 </Link>
               ))}
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={signOut}
-                aria-label="Sign out"
-                title="Sign out"
-              >
-                <LogOut className="size-4" aria-hidden />
-              </Button>
             </nav>
           </div>
           <div className="market-line" aria-hidden />
         </header>
-        <main className="mx-auto max-w-6xl px-4 py-6">
+        <main
+          key={market}
+          className="mx-auto max-w-6xl px-4 py-6 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-200"
+        >
           <RunnerStatusNotice />
           {children}
         </main>

@@ -10,16 +10,25 @@ import { cn } from "@/lib/utils";
 
 const ICONS = { bitcoin: Bitcoin, globe: Globe } as const;
 
+/** True on devices with a hovering pointer; touch screens skip the tagline tooltip. */
+function canHover(): boolean {
+  try {
+    return window.matchMedia("(hover: hover)").matches;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Crypto/Forex segmented control (#374). Desktop: a compact 36 px pill in the header row. Mobile: its own
- * full-width 44 px row, always icon + label. A market the user may not open stays visible but locked; activating
- * it opens a short explanation and never switches.
+ * Crypto/Forex segmented control (#374, #413). One fixed size everywhere (labels never change its width, so nothing
+ * around it moves); always icon + label. A market the user may not open stays visible but locked; activating it
+ * opens a short explanation and never switches.
  */
-export function MarketToggle({ variant, className }: { variant: "desktop" | "mobile"; className?: string }) {
+export function MarketToggle({ className }: { className?: string }) {
   const { market, setMarket, canOpen } = useMarket();
   const refs = useRef<Record<Market, HTMLButtonElement | null>>({ crypto: null, forex: null });
-  const mobile = variant === "mobile";
   const index = MARKETS.indexOf(market);
+  const hover = canHover();
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -36,14 +45,13 @@ export function MarketToggle({ variant, className }: { variant: "desktop" | "mob
       aria-label="Market"
       onKeyDown={onKeyDown}
       className={cn(
-        "relative grid grid-cols-2 rounded-full border border-border/70 bg-background/40 p-0.5",
-        mobile ? "h-11 w-full" : "h-9 w-[168px] shrink-0",
+        "relative grid h-9 w-[132px] grid-cols-2 items-stretch rounded-full border border-border/70 bg-background/50 p-[3px] sm:w-[148px]",
         className,
       )}
     >
       <span
         aria-hidden
-        className="market-toggle__thumb pointer-events-none absolute inset-y-0.5 left-0.5 w-[calc(50%-2px)] rounded-full border border-primary/50 bg-primary/15 shadow-[0_0_14px_-4px_var(--color-primary)]"
+        className="market-toggle__thumb pointer-events-none absolute inset-y-[3px] left-[3px] w-[calc((100%-6px)/2)] rounded-full bg-primary/15 shadow-[0_0_12px_-4px_var(--color-primary)] ring-1 ring-inset ring-primary/45"
         style={{ transform: `translateX(${index * 100}%)` }}
       />
       {MARKETS.map((m) => {
@@ -63,19 +71,18 @@ export function MarketToggle({ variant, className }: { variant: "desktop" | "mob
             tabIndex={active ? 0 : -1}
             onClick={locked ? undefined : () => setMarket(m)}
             className={cn(
-              "relative z-10 flex items-center justify-center gap-1.5 rounded-full font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
-              mobile ? "min-h-11 text-sm" : "text-sm",
+              "relative z-10 flex h-full items-center justify-center gap-1.5 rounded-full text-[13px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
               active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
-              locked && "border border-dashed border-border opacity-55",
+              locked && "border border-dashed border-border opacity-60",
             )}
           >
-            <Icon className={locked ? "size-3.5" : "size-4"} aria-hidden />
+            <Icon className="size-3.5 shrink-0" aria-hidden />
             <span>{meta.label}</span>
             {locked ? <span className="sr-only">(locked)</span> : null}
           </button>
         );
         if (locked) return <LockedHalf key={m} market={m}>{button}</LockedHalf>;
-        if (mobile) return <Fragment key={m}>{button}</Fragment>;
+        if (!hover) return <Fragment key={m}>{button}</Fragment>;
         return (
           <Tooltip key={m}>
             <TooltipTrigger asChild>{button}</TooltipTrigger>
