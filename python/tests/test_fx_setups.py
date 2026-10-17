@@ -2,6 +2,7 @@
 
 from array import array
 from datetime import datetime, timezone
+from fractions import Fraction
 import unittest
 
 from market_analysis.benchmark.bars import MISSING
@@ -9,7 +10,7 @@ from market_analysis.forward.signals import FORWARD_STRATEGIES, make_signal
 from market_analysis.fx.bars import FLAG_CLOSED, FLAG_MISSING_OPEN, FLAG_PRESENT, FxBarSeries
 from market_analysis.fx.candles import build_fx_candles
 from market_analysis.fx.costs import FX_COST_MODEL_V1, with_multiplier
-from market_analysis.fx.setups import FX_GEOMETRY_PARAMS, build_fx_setups, fx_params_hash
+from market_analysis.fx.setups import FX_GEOMETRY_PARAMS, FxGeometryParams, build_fx_setups, fx_params_hash
 from market_analysis.trading_calendar import FX_WEEK
 
 MINUTE = 60_000
@@ -88,6 +89,14 @@ class GeometryTests(unittest.TestCase):
             bars = fixture()
             build_fx_setups(make_signal(STRATEGY, "EURUSD", SIGNAL_MS + MINUTE, 1),
                             {60: build_fx_candles(bars, 60, FX_WEEK)}, bars, FX_WEEK, FX_COST_MODEL_V1)
+
+    def test_short_with_a_non_positive_target_is_not_tradeable(self):
+        bars = fixture()
+        candles = {60: build_fx_candles(bars, 60, FX_WEEK)}
+        params = FxGeometryParams(rr_grid=(Fraction(600),))  # 600 x 200 ticks > the 1.08000 price
+        short = build_fx_setups(make_signal(STRATEGY, "EURUSD", SIGNAL_MS, -1), candles, bars, FX_WEEK,
+                                FX_COST_MODEL_V1, params)[0]
+        self.assertEqual((short.status, short.reason, short.target), ("N", "target_not_positive", None))
 
     def test_identity(self):
         first, second = setups(1)

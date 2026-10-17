@@ -3,7 +3,9 @@
 Triggers use BID candles plus the minute's spread (``fx.costs.stop_hit`` / ``target_hit``). A gap
 through the stop fills from the worse open; a target fills at the target. Both in one minute is
 ``ambiguous``: the pessimistic (stop) result is reported and the target result is kept only in
-``optimistic``. A minute missing while open ends the trade as ``X`` (no trustworthy price). The window
+``optimistic``, unless the minute OPENS beyond a barrier (bid open for a long exit, ask open for a
+short exit): that barrier was reached first. A minute missing while open (including the entry
+minute) ends the trade as ``X`` (no trustworthy price). The window
 lies in one open session by construction, so a closed minute inside it is an error, not an exit.
 
 Money is exact and in R (1 R = |entry fill - stop|), rounded half-even once per reported number:
@@ -21,7 +23,8 @@ from ..benchmark.canonical import exact_from_str, exact_to_str
 from ..forward.outcomes import Resolution
 from ..trading_calendar import TradingCalendar
 from .bars import FLAG_MISSING_OPEN, FLAG_PRESENT, FxBarSeries
-from .costs import (FxContract, FxCostModel, SwapRates, entry_fill_price, exit_price_at_market, market_exit_fill,
+from .costs import (FxContract, FxCostModel, SwapRates, entry_fill_price, entry_reference, exit_price_at_market,
+                    market_exit_fill,
                     stop_fill_price, stop_hit, target_fill_price, target_hit)
 from .setups import FxSetup
 
@@ -72,7 +75,15 @@ def resolve_fx_setup(setup: FxSetup, bars: FxBarSeries, calendar: TradingCalenda
         return FxResolution(setup.setup_id, "pending")
     side, stop, target = setup.side, setup.stop, setup.target
     e = bars.index_of(setup.entry_ms)
-    entry_fill = entry_fill_price(side, setup.p0, bars.spread[e], bars.high[e], bars.low[e], model)
+    if bars.flags[e] == FLAG_MISSING_OPEN:  # no trustworthy entry price: never invent a fill
+        return FxResolution(setup.setup_id, "X", resolved_through_ms=setup.entry_ms, exit_offset=0,
+                            exit_ms=setup.entry_ms)
+    if bars.flags[e] != FLAG_PRESENT:
+        raise ValueError("window crosses closed market")
+    p0 = entry_reference(side, bars.open[e], bars.spread[e])
+    if p0 != setup.p0:
+        raise ValueError("entry open/spread differ from the ones the setup was built on")
+    entry_fill = entry_fill_price(side, p0, bars.spread[e], bars.high[e], bars.low[e], model)
     if entry_fill != exact_from_str(setup.entry_fill):
         raise ValueError("entry minute differs from the one the setup was built on")
     available = min(setup.window_minutes, bars.minutes - e)
@@ -102,6 +113,12 @@ def resolve_fx_setup(setup: FxSetup, bars: FxBarSeries, calendar: TradingCalenda
         if flag != FLAG_PRESENT:
             raise ValueError("window crosses closed market")
         spread, high, low = bars.spread[i], bars.high[i], bars.low[i]
+        if j > 0:  # the open is the first executable price of a later minute: a gap decides the order
+            exit_open = bars.open[i] if side == 1 else bars.open[i] + spread  # long sells at bid, short buys at ask
+            if side * (exit_open - target) >= 0:
+                return done("T", j, Fraction(target), target_fill_price(target))
+            if side * (exit_open - stop) <= 0:
+                return done("S", j, *stop_exit(i))
         hit_stop = stop_hit(side, stop, spread, high, low)
         hit_target = target_hit(side, target, spread, high, low)
         if hit_stop and hit_target:

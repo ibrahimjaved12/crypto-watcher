@@ -162,6 +162,8 @@ def _levels(side: int, k: Fraction, rr: Fraction, geometry: dict, bars: FxBarSer
     if stop <= 0:
         return {**out, "d_ticks": d_ticks, "status": "N", "reason": "stop_not_positive"}
     target = p0 + side * ceil(rr * d_ticks) * tick
+    if target <= 0:  # a short with a wide stop or a large rr
+        return {**out, "d_ticks": d_ticks, "stop": stop, "status": "N", "reason": "target_not_positive"}
     fill = entry_fill_price(side, p0, spread0, bars.high[e], bars.low[e], model)
     return {**out, "d_ticks": d_ticks, "stop": stop, "target": target, "entry_fill": exact_to_str(fill),
             "risk_distance": exact_to_str(abs(fill - stop))}

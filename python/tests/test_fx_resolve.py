@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from fractions import Fraction
 import unittest
 
+from market_analysis.benchmark.bars import MISSING
 from market_analysis.fx.bars import FLAG_CLOSED, FLAG_MISSING_OPEN, FLAG_PRESENT, FxBarSeries
 from market_analysis.fx.costs import FxContract, FxCostModel, SwapRates
 from market_analysis.fx.resolve import FxResolution, resolve_fx_setup
@@ -75,6 +76,22 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(r.optimistic["net_ur"], 2_000_000)
 
 
+class GapTests(unittest.TestCase):
+    def test_gaps_decide_before_intrabar_ambiguity(self):
+        # long: opens above the target then trades below the stop -> target first
+        r = resolve(LONG, bars(240, overrides={1: (108_450_000, 108_450_000, 107_700_000, 107_700_000)}))
+        self.assertEqual((r.status, r.net_ur), ("T", 2_000_000))
+        # long: opens below the stop then trades above the target -> stop first, filled at the gap open
+        r = resolve(LONG, bars(240, overrides={1: (107_700_000, 108_500_000, 107_700_000, 108_500_000)}))
+        self.assertEqual((r.status, r.exit_ref_price), ("S", 107_700_000))
+        # short: ask opens below the target (bid 1.07580 + 0.00010) then above the stop -> target first
+        r = resolve(SHORT, bars(240, overrides={1: (107_580_000, 108_300_000, 107_580_000, 108_300_000)}))
+        self.assertEqual((r.status, r.net_ur), ("T", 2_000_000))
+        # short: ask opens above the stop (bid 1.08250 + 0.00010) then below the target -> stop first
+        r = resolve(SHORT, bars(240, overrides={1: (108_250_000, 108_250_000, 107_500_000, 107_500_000)}))
+        self.assertEqual((r.status, r.exit_ref_price), ("S", 108_260_000))
+
+
 class MoneyTests(unittest.TestCase):
     def test_commission(self):
         model = FxCostModel(version="zero-slip-commission", market_slip_spread_fraction=0, market_slip_range_mult=0,
@@ -100,6 +117,15 @@ class StateTests(unittest.TestCase):
         r = resolve(LONG, gap)
         self.assertEqual((r.status, r.exit_offset, r.net_ur, r.exit_ref_price), ("X", 2, None, None))
         self.assertEqual(resolve(LONG, bars(60, start=ENTRY - 60 * MINUTE)).status, "pending")
+        no_entry = bars(240)
+        no_entry.flags[0] = FLAG_MISSING_OPEN
+        for name in ("open", "high", "low", "close", "spread"):
+            getattr(no_entry, name)[0] = MISSING
+        r = resolve(LONG, no_entry)
+        self.assertEqual((r.status, r.exit_offset, r.entry_fill, r.net_ur), ("X", 0, None, None))
+        moved = bars(240, overrides={0: (108_001_000, 108_001_000, 108_000_000, 108_000_000)})
+        with self.assertRaisesRegex(ValueError, "entry open/spread"):
+            resolve(LONG, moved)  # a corrected entry open must not reuse the old p0
         partial = resolve(LONG, bars(100))
         self.assertEqual((partial.status, partial.resolved_through_ms), ("open", ENTRY + 99 * MINUTE))
         final = FxResolution("s", "T", net_ur=1)
