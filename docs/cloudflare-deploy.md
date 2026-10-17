@@ -20,7 +20,7 @@ access to this repository and select these settings:
 
 Use the Workers Free plan. No paid binding or account ID is required in the
 repository. Workers Builds manages its deployment API token in Cloudflare; do not
-put that token in Git. Set the variables below before starting/retrying the build.
+put that token in Git. Set the variables below before starting/retrying the build..
 
 ## Build variables
 
