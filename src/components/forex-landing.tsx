@@ -53,7 +53,7 @@ function zoneOffsetHours(timeZone: string | undefined, ms: number): number {
     minute: "numeric",
   }).formatToParts(ms))
     parts[part.type] = part.value;
-  const wall = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute));
+  const wall = Date.UTC(Number(parts["year"]), Number(parts["month"]) - 1, Number(parts["day"]), Number(parts["hour"]), Number(parts["minute"]));
   return (wall - Math.floor(ms / 60_000) * 60_000) / 3_600_000;
 }
 
