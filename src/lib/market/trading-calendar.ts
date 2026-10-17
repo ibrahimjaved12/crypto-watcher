@@ -111,12 +111,12 @@ export function fxNextOpenMs(ms: number): number {
   return isFxOpen(ms) ? ms : fxWeekWindow(ms)[0];
 }
 
-/** Conventional sessions active at `ms`; empty while the FX market is closed. */
+/** Conventional sessions active at `ms` (local Monday..Friday within the centre's hours); empty while closed. */
 export function fxSessionTags(ms: number): string[] {
   if (!isFxOpen(ms)) return [];
   return FX_SESSIONS.filter(([, timeZone, start, end]) => {
-    const hour = localParts(ms, timeZone).hour;
-    return start <= hour && hour < end;
+    const { hour, weekday } = localParts(ms, timeZone);
+    return weekday <= 4 && start <= hour && hour < end;
   }).map(([name]) => name);
 }
 

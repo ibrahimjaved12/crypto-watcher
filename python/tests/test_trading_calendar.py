@@ -77,6 +77,9 @@ class FxWeekTests(unittest.TestCase):
         self.assertEqual(calendar.open_until_ms(start - MINUTE_MS), start)
         self.assertEqual(calendar.next_open_ms(start), end)
         self.assertEqual(calendar.open_minutes(start - HOUR, end + HOUR), 120)
+        noon = utc("2026-10-13T12:00")
+        sub_minute = FxWeekCalendar(closures=((noon + 30_000, noon + 45_000),))
+        self.assertEqual(sub_minute.open_minutes(noon, noon + 2 * MINUTE_MS), 2)  # 12:00 and 12:01 are open
         with self.assertRaises(ValueError):
             FxWeekCalendar(closures=((end, start),))
         with self.assertRaises(ValueError):
@@ -112,6 +115,9 @@ class SessionTests(unittest.TestCase):
     def test_tags_and_dst_dependent_overlap(self):
         self.assertEqual(FX_WEEK.session_tags(utc("2026-10-14T12:00")), ("london", "new_york"))
         self.assertIn("sydney", FX_WEEK.session_tags(utc("2026-10-14T20:00")))
+        friday = utc("2026-10-16T20:00")  # FX open; Sydney is already Saturday 07:00
+        self.assertTrue(FX_WEEK.is_open(friday))
+        self.assertNotIn("sydney", FX_WEEK.session_tags(friday))
         self.assertEqual(FX_WEEK.session_tags(utc("2026-10-17T12:00")), ())
         self.assertEqual(self.overlap_minutes("2026-10-14"), 240)
         self.assertEqual(self.overlap_minutes("2026-10-26"), 300)  # only the EU has left DST

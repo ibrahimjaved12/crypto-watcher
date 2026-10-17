@@ -258,7 +258,11 @@ class FxWeekCalendar:
         return min(end for end in ends if end is not None)
 
     def open_minutes(self, start_ms: int, end_ms: int) -> int:
-        """Minute slots opening in ``[start_ms, end_ms)`` while open; O(number of open runs)."""
+        """Minute-aligned instants in ``[start_ms, end_ms)`` at which the market is open.
+
+        O(number of open runs). Runs may have sub-minute edges (closures take any ms), so each run
+        ``[t, e)`` counts the aligned instants inside it: ``ceil(e / MINUTE) - ceil(t / MINUTE)``.
+        """
         start, end = _check_range(start_ms, end_ms, aligned=True)
         total, t = 0, start
         while t < end:
@@ -266,7 +270,7 @@ class FxWeekCalendar:
             if t >= end:
                 break
             run_end = min(self.open_until_ms(t), end)
-            total += (run_end - t) // MINUTE_MS
+            total += -(-run_end // MINUTE_MS) - -(-t // MINUTE_MS)
             t = run_end
         return total
 
@@ -289,11 +293,19 @@ class FxWeekCalendar:
         return events
 
     def session_tags(self, ms: int) -> Tuple[str, ...]:
-        """Conventional trading-centre sessions active at ``ms``; ``()`` while the market is closed."""
+        """Conventional sessions active at ``ms``: a local Monday..Friday within the centre's hours.
+
+        ``()`` while the market is closed. Each centre's own weekday matters: Friday 20:00Z is
+        Saturday morning in Sydney, so Sydney is not tagged then.
+        """
         if not self.is_open(ms):
             return ()
-        return tuple(name for name, tz_name, start_hour, end_hour in SESSIONS
-                     if start_hour <= _local(ms, _zone(tz_name)).hour < end_hour)
+        tags = []
+        for name, tz_name, start_hour, end_hour in SESSIONS:
+            local = _local(ms, _zone(tz_name))
+            if local.weekday() <= 4 and start_hour <= local.hour < end_hour:
+                tags.append(name)
+        return tuple(tags)
 
 
 ALWAYS_OPEN = AlwaysOpenCalendar()

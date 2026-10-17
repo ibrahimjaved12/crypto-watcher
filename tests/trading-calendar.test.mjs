@@ -45,6 +45,8 @@ test("next open from the weekend", () => {
 test("sessions and the DST-dependent London/New York overlap", () => {
   assert.deepEqual(cal.fxSessionTags(utc("2026-10-14T12:00")), ["london", "new_york"]);
   assert.ok(cal.fxSessionTags(utc("2026-10-14T20:00")).includes("sydney"));
+  assert.equal(cal.isFxOpen(utc("2026-10-16T20:00")), true);
+  assert.ok(!cal.fxSessionTags(utc("2026-10-16T20:00")).includes("sydney")); // Saturday in Sydney
   assert.deepEqual(cal.fxSessionTags(utc("2026-10-17T12:00")), []);
   for (const [day, expected] of [["2026-10-14", 240], ["2026-10-26", 300], ["2026-11-03", 240]]) {
     const start = utc(`${day}T00:00`);
