@@ -7,7 +7,7 @@
     "node": ">=22.12.0 <23"
   },
   "scripts": {
-    "access:grant": "node scripts/grant-access.mjs",
+    "access:grant": "node --env-file=.env.production.local scripts/grant-access.mjs",
     "dev": "vite dev",
     "dev:local": "node scripts/dev-local.mjs",
     "dev:local:all": "node scripts/dev-local.mjs --with-operational",
