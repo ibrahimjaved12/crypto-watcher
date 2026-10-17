@@ -29,7 +29,8 @@ class CapabilityTests(unittest.TestCase):
         for name in ("doji_continuation_v1", "doji_reversal_v1"):
             self.assertTrue(check_compatibility(TA_CAPABILITIES[name], BTC).ok)
             result = check_compatibility(TA_CAPABILITIES[name], EUR)
-            self.assertEqual((result.ok, result.reasons), (False, ("market_not_supported:forex",)))
+            self.assertEqual((result.ok, result.reasons),
+                             (False, ("market_not_supported:forex", "missing_field:volume_real")))
             # regression: doji readings need relative volume, so OHLC-only data is refused
             ohlc_only = check_compatibility(TA_CAPABILITIES[name], BTC, provided=frozenset({DataField.OHLC}))
             self.assertEqual((ohlc_only.ok, ohlc_only.reasons), (False, ("missing_field:volume_real",)))
