@@ -64,6 +64,28 @@ same rules, same reason strings).
 - Volume: forex CFDs have tick volume only (no central tape). Strategies that need real traded
   volume are incompatible with forex CFDs.
 
+## Costs
+
+Code: `python/market_analysis/fx/costs.py` (exact `int`/`Fraction` maths; the Binance-perpetual
+`CostModel` in `benchmark/costs.py` is unchanged).
+
+- MT5 candles are **bid** candles and carry a `spread`; `ask = bid + spread`. A long buys at the ask
+  and sells at the bid; a short sells at the bid and buys at the ask.
+- Triggers on bid candles: long stop `bid_low <= stop`, long target `bid_high >= target`, short stop
+  `bid_high + spread >= stop`, short target `bid_low + spread <= target`.
+- Entry reference `p0` is the executable price before slippage (long `bid_open + spread`, short
+  `bid_open`); stop and target are measured from `p0`. A stop is exactly −1 R and a target +rr R
+  before slippage, commission and swap; the spread appears **symmetrically** as a tighter stop and a
+  harder target, never as a hidden P&L term.
+- Slippage = `cost_multiplier × max(fraction × spread, fraction × bar range)`; a gap through a stop
+  fills from the worse open. Commission is per lot and side (0 on a Standard account). Swap is
+  charged at each rollover from the trading calendar (×3 on the triple day) instead of funding; a
+  margin stop-out replaces liquidation.
+- **Placeholders (`ASSUMPTIONS_FX_V1`):** every `FxCostModel` default (slippage fractions,
+  commission 0, swap multiplier, leverage cap 100, stop-out level 50%, buffer 2) is UNVERIFIED.
+  Commission, swap rates, leverage and stop-out level are read from the demo account before any
+  result is trusted.
+
 ## Data policy
 
 - Costs differ per kind: crypto perpetual (funding + taker/maker), FX CFD (spread +
