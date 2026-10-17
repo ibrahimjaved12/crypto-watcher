@@ -176,7 +176,7 @@ export function createSharedRepository(client: SupabaseClient, traffic: HostedTr
       traffic.write(init);
       const { error: initError } = await client.rpc("ensure_forward_account", init);
       fail(initError, "account initialization");
-      const { data: account, error } = await client.from("forward_wallet_accounts").select("*").eq("user_id", userId).single();
+      const { data: account, error } = await client.from("forward_wallet_accounts").select("*").eq("user_id", userId).eq("market", "crypto").single();
       traffic.read(account);
       fail(error, "account read");
       if (!account) throw new Error("Forward wallet account missing after initialization");
@@ -211,7 +211,7 @@ export function createSharedRepository(client: SupabaseClient, traffic: HostedTr
     },
     async retryable(userId, boundary, status, reason) {
       const { data: account, error: accountError } = await client.from("forward_wallet_accounts")
-        .select("account_id").eq("user_id", userId).single();
+        .select("account_id").eq("user_id", userId).eq("market", "crypto").single();
       traffic.read(account);
       fail(accountError, "retry account read");
       if (!account) throw new Error("Forward retry wallet account missing");

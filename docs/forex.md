@@ -245,6 +245,35 @@ so the existing `paper_ledger` table can store it later.
 - Not done yet: mark-to-market equity, portfolio risk caps beyond total exposure, and wiring into
   any runner or the database.
 
+### Database
+
+Migration: `supabase/migrations/20261018100000_forex_access_and_market_tables.sql`; test
+`tests/forex-market-db.test.mjs`. The backend always computes and stores both markets; who may see
+forex is an access rule.
+
+- **Shared per-market facts.** `fx_market_stages`, `fx_market_signals`, `fx_market_suppressed`,
+  `fx_market_setups`, `fx_market_outcomes`, `fx_market_events` are append-only, shared by all
+  entitled users, and independent of the crypto `forward_market_*` tables. `commit_fx_stage` has its
+  own advisory lock (`forward-market-fx`) and its own stage cursor, so a forex stage and a crypto
+  stage for the same hour never collide or block each other. Forex symbols may be 3-16 characters
+  (DXY); setups carry `geometry_version` and the ATR fields (`p0`, `d_ticks`, spread) in `payload`.
+- **Per-user accounts per market.** `forward_wallet_accounts` is keyed by `(user_id, market)`; both
+  accounts of one user run at the same time. The crypto account id is unchanged; the forex account
+  id is `<user uuid>:forex`. `ensure_fx_account` and `commit_fx_user_run` use the lock key
+  `forward-wallet:<uuid>:forex`, so one user's two markets never block each other. Forex runs are
+  `paper_runs` rows with `market='forex'`, `fx_stage_run_id` set, `stage_run_id` NULL and run key
+  `fx-hour:<ms>`. `paper_account_summary(p_market)` and `paper_equity_series(..., p_market)` default
+  to `crypto` and never add the two markets together.
+- **Entitlements.** `plans` and `plan_markets` map a plan to markets (`free` and `crypto` give crypto,
+  `forex` gives forex, `pro` gives both); `user_access` holds a user's role (`owner`/`admin` see
+  both), plan, optional `extra_markets` and `expires_at` (an expired plan counts as `free`). No row
+  means crypto only, which is everyone's behaviour today. Users can read their own row and never
+  write it. `my_markets()` and `has_market(market)` are for the app; the fx tables' RLS uses
+  `has_market('forex')`. Grant with `npm run access:grant -- <email> --plan forex` (or `--role owner`,
+  `--market forex`, `--expires 2027-01-01`, `--revoke`), using the service-role env.
+- **Not done yet:** forex report RPCs (outcome/paired/non-trade reports), runner wiring, the
+  operational candle tables, and a calendar table.
+
 ## Roadmap of PRs
 
 1. Foundation: instrument vocabulary and compatibility check (done).

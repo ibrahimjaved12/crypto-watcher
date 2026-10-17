@@ -858,6 +858,14 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      my_markets: {
+        Args: Record<PropertyKey, never>
+        Returns: string[]
+      }
+      has_market: {
+        Args: { p_market: string }
+        Returns: boolean
+      }
       report_runner_health: {
         Args: {
           p_service: string
