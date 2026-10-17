@@ -316,7 +316,7 @@ npm run up -- --update-worker-secret
 
 To grant Crypto or Forex access:
 ```sh
-npm run access:grant -- ibrahimjaved730@gmail.com --label [label]
+npm run access:grant -- email@abc.com --label [label]
 ```
 Label can be: crypto, forex, all
 
