@@ -7,7 +7,7 @@ from market_analysis.forward.signals import FORWARD_STRATEGIES
 from market_analysis.forward.strategy_capabilities import (
     TA_CAPABILITIES, capabilities_for, compatibility_for, compatible_strategy_ids,
 )
-from market_analysis.instruments import check_compatibility, crypto_instrument, forex_instrument
+from market_analysis.instruments import DataField, check_compatibility, crypto_instrument, forex_instrument
 
 BTC = crypto_instrument("BTCUSDT")
 EUR = forex_instrument("EURUSD")
@@ -30,6 +30,11 @@ class CapabilityTests(unittest.TestCase):
             self.assertTrue(check_compatibility(TA_CAPABILITIES[name], BTC).ok)
             result = check_compatibility(TA_CAPABILITIES[name], EUR)
             self.assertEqual((result.ok, result.reasons), (False, ("market_not_supported:forex",)))
+            # regression: doji readings need relative volume, so OHLC-only data is refused
+            ohlc_only = check_compatibility(TA_CAPABILITIES[name], BTC, provided=frozenset({DataField.OHLC}))
+            self.assertEqual((ohlc_only.ok, ohlc_only.reasons), (False, ("missing_field:volume_real",)))
+        for name in ("ema_cross_20_50", "rsi_14_reversion"):  # baselines stay OHLC-only
+            self.assertEqual(TA_CAPABILITIES[name].requires, frozenset({DataField.OHLC}))
 
     def test_placebo_inherits_and_unknown_fails_closed(self):
         self.assertEqual(capabilities_for("placebo-v1:ema_cross_20_50:60"), capabilities_for("ema_cross_20_50:60"))

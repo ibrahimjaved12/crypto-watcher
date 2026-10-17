@@ -6,7 +6,8 @@ has no capabilities, so ``check_compatibility`` refuses it with ``no_capabilitie
 
 The six baseline TA rules read only close/high/low and the candle count (no volume, taker flow, mark
 or funding), so they need OHLC only and run on both markets. The doji variants are paused, were
-calibrated on crypto and are marked unvalidated, so they are declared crypto-only.
+calibrated on crypto and are marked unvalidated, so they are declared crypto-only; they also need real
+traded volume (relative volume gates every reading).
 """
 from __future__ import annotations
 
@@ -19,7 +20,10 @@ from .signals import FORWARD_STRATEGIES
 
 _BOTH = StrategyCapabilities(markets=frozenset({Market.CRYPTO, Market.FOREX}),
                              requires=frozenset({DataField.OHLC}))
-_CRYPTO_ONLY = StrategyCapabilities(markets=frozenset({Market.CRYPTO}), requires=frozenset({DataField.OHLC}))
+# The doji readings skip a candle when its relative volume is unavailable (features.rel_volume uses
+# current and historical candle volume), so real traded volume is required, not just OHLC.
+_DOJI = StrategyCapabilities(markets=frozenset({Market.CRYPTO}),
+                             requires=frozenset({DataField.OHLC, DataField.VOLUME_REAL}))
 
 _DECLARED = {
     "ema_cross_20_50": _BOTH,
@@ -28,8 +32,8 @@ _DECLARED = {
     "macd_12_26_9": _BOTH,
     "bollinger_20_2_reversion": _BOTH,
     "keltner_breakout_20_14_2": _BOTH,
-    "doji_continuation_v1": _CRYPTO_ONLY,
-    "doji_reversal_v1": _CRYPTO_ONLY,
+    "doji_continuation_v1": _DOJI,
+    "doji_reversal_v1": _DOJI,
 }
 
 
