@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { supabase } from "@/integrations/supabase/client";
-import type { Market } from "./instruments";
+import { MARKETS, type Market } from "./instruments";
 import { MARKET_STORAGE_KEY, canOpen as canOpenFor, normalizeEntitled, resolveMarket } from "./market-select";
 
 type MarketState = {
@@ -43,12 +43,16 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const query = useQuery({ queryKey: ["my-markets"], queryFn: loadMyMarkets, staleTime: 5 * 60_000, retry: 1 });
   const ready = query.isSuccess;
   const entitled = ready ? query.data : CRYPTO_ONLY;
-  const [market, setMarketState] = useState<Market>(() => resolveMarket(readStored(), entitled));
+  // While my_markets() is still loading, honour the stored choice (no crypto flash for Forex users; UI-only, RLS
+  // guards the data). Once it answers or fails, a choice that is not entitled snaps back to crypto. Clicks always
+  // use the real `entitled`, and this fallback never writes the stored value.
+  const open: readonly Market[] = ready || query.isError ? entitled : MARKETS;
+  const [market, setMarketState] = useState<Market>(() => resolveMarket(readStored(), open));
 
   // Re-resolve on every entitlement change: a revoked plan snaps back to crypto, a granted one restores the choice.
   useEffect(() => {
-    setMarketState(resolveMarket(readStored(), entitled));
-  }, [entitled]);
+    setMarketState(resolveMarket(readStored(), open));
+  }, [open]);
 
   // Two tabs agree on the market.
   useEffect(() => {
@@ -62,6 +66,9 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   // Portals (popovers, toasts) live outside the shell, so the accent is set on <html> too.
   useEffect(() => {
     document.documentElement.dataset["market"] = market;
+    return () => {
+      delete document.documentElement.dataset["market"];
+    };
   }, [market]);
 
   const setMarket = useCallback(
