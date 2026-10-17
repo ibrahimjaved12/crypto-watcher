@@ -80,10 +80,29 @@ same rules, same reason strings).
   `blackout(instrument, ts)`; `calendar_event` table in UTC; calendar history is recorded from
   day one.
 
+### Trading calendar
+
+`python/market_analysis/trading_calendar.py` (UI mirror: `src/lib/market/trading-calendar.ts`)
+answers, as pure functions over UTC epoch ms: is the market open, until when, when it next opens,
+how many open minutes a range has, when rollover is charged, and which conventional sessions are
+active. Crypto uses `AlwaysOpenCalendar`; forex CFDs use `FxWeekCalendar` (Sunday 17:00 to Friday
+17:00 New York); forex futures fail closed until their sessions are known.
+
+- 2026 vectors: normal week closes Fri 16 Oct 21:00Z and reopens Sun 18 Oct 21:00Z (48 h); US
+  fall-back closes Fri 30 Oct 21:00Z, reopens Sun 1 Nov 22:00Z (49 h); US spring-forward closes
+  Fri 6 Mar 22:00Z, reopens Sun 8 Mar 21:00Z (47 h). Every week window is 120 h (7200 minutes).
+- Rollover: 17:00 New York, Monday to Friday, never Sunday. Wednesday is charged three days by
+  default (Mon 1, Tue 1, Wed 3, Thu 1, Fri 1 = 7). A position entered exactly at the rollover
+  instant is not charged for it; one exiting exactly at it is.
+- Sessions (Sydney, Tokyo, London, New York) use conventional local hours, not exchange-official
+  ones. The London/New York overlap is 4 h, or 5 h in the week when only the EU has left DST.
+- Daily breaks and holidays for metals and oil CFDs are **not guessed**: they come from the
+  broker's symbol sessions and are passed in as `daily_breaks` / `closures`.
+
 ## Roadmap of PRs
 
-1. Foundation: instrument vocabulary and compatibility check (this PR, additive).
-2. Trading calendar (pure, DST-tested).
+1. Foundation: instrument vocabulary and compatibility check (done).
+2. Trading calendar (pure, DST-tested) (this PR adds it).
 3. Strategy capability declarations for the existing baseline strategies + cost-model protocol.
 4. `market` column migrations (additive).
 5. Bars adapter decoupling.
