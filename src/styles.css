@@ -249,3 +249,34 @@
   height: 1px;
   background-image: linear-gradient(90deg, transparent, oklch(0.78 0.14 292 / 0.6), oklch(0.82 0.12 192 / 0.5), transparent);
 }
+
+/* #374 Forex identity: teal primary on the same surfaces; the nebula's dominant glow swaps violet for teal. */
+:root[data-market="forex"] {
+  --primary: oklch(0.82 0.12 192);
+  --primary-foreground: oklch(0.17 0.04 200);
+  --ring: oklch(0.84 0.11 192);
+  --accent: oklch(0.28 0.05 206);
+  --chart-1: oklch(0.82 0.12 192);
+  --chart-2: oklch(0.78 0.14 292);
+  --gradient-hero:
+    radial-gradient(70% 55% at 12% -5%, oklch(0.45 0.1 200 / 0.3) 0%, transparent 70%),
+    radial-gradient(55% 45% at 95% 10%, oklch(0.42 0.14 292 / 0.2) 0%, transparent 70%),
+    radial-gradient(60% 50% at 70% 110%, oklch(0.4 0.09 215 / 0.18) 0%, transparent 70%);
+}
+
+/* 2 px line under the header, tinted by the current market. */
+.market-line {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--color-primary), transparent);
+  opacity: 0.7;
+}
+
+/* Market toggle thumb: slides with transform; still under reduced motion. */
+.market-toggle__thumb {
+  transition: transform 200ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .market-toggle__thumb {
+    transition: none;
+  }
+}

@@ -12,10 +12,12 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 
+import { MarketToggle } from "@/components/market-toggle";
 import { RunnerStatusBadge, RunnerStatusNotice } from "@/components/runner-status-notice";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { supabase } from "@/integrations/supabase/client";
+import { useMarket } from "@/lib/market/market-context";
 
 const NAV = [
   { to: "/dashboard", label: "Market", icon: LineChart },
@@ -29,6 +31,7 @@ const NAV = [
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { market } = useMarket();
 
   async function signOut() {
     await queryClient.cancelQueries();
@@ -39,7 +42,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="min-h-screen">
+      <div className="min-h-screen" data-market={market}>
         <header className="sticky top-0 z-30 border-b border-border/60 bg-background/75 backdrop-blur-md">
           <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2 px-4 py-2.5">
             <div className="flex w-full min-w-0 items-center gap-3 sm:w-auto">
@@ -50,8 +53,16 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <Activity className="size-5 text-primary" aria-hidden />
                 Crypto Watch
               </Link>
+              {market === "forex" ? (
+                <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-primary/12 px-2 py-0.5 text-xs font-medium text-primary ring-1 ring-primary/30">
+                  <span className="size-1.5 rounded-full bg-primary" aria-hidden />
+                  Forex
+                </span>
+              ) : null}
               <RunnerStatusBadge />
             </div>
+            <MarketToggle variant="desktop" className="hidden sm:grid" />
+            <MarketToggle variant="mobile" className="sm:hidden" />
             <nav
               className="ml-auto flex w-full min-w-0 sm:w-auto items-center gap-0.5 overflow-x-auto"
               aria-label="Main"
@@ -79,6 +90,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               </Button>
             </nav>
           </div>
+          <div className="market-line" aria-hidden />
         </header>
         <main className="mx-auto max-w-6xl px-4 py-6">
           <RunnerStatusNotice />

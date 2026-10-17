@@ -5,6 +5,7 @@ import { ArrowDownRight, ArrowUpRight, BellRing, ChevronRight, Download, FlaskCo
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
+import { ForexLanding } from "@/components/forex-landing";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -25,6 +26,7 @@ import { AlertChartPanel } from "@/components/alert-chart-panel";
 import { chartViewModel, type ChartMeta } from "@/lib/alert-charts/hosted";
 import { deleteAlertWithChart } from "@/lib/alert-charts/view.functions";
 import { WINDOW_LABELS } from "@/lib/market/symbols";
+import { useMarket } from "@/lib/market/market-context";
 
 export const Route = createFileRoute("/_authenticated/alerts")({
   head: () => ({
@@ -40,7 +42,7 @@ export const Route = createFileRoute("/_authenticated/alerts")({
       { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
-  component: AlertsPage,
+  component: AlertsPageRoute,
 });
 
 function toCsv(rows: AlertRow[]): string {
@@ -64,6 +66,18 @@ function toCsv(rows: AlertRow[]): string {
     header.join(","),
     ...rows.map((r) => header.map((k) => escape(r[k as keyof AlertRow])).join(",")),
   ].join("\n");
+}
+
+/** Forex has no data feed yet (#374): its own landing screen; the crypto page below is unchanged. */
+function AlertsPageRoute() {
+  const { market } = useMarket();
+  return market === "forex" ? (
+    <AppShell>
+      <ForexLanding page="alerts" />
+    </AppShell>
+  ) : (
+    <AlertsPage />
+  );
 }
 
 function AlertsPage() {
