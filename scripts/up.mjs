@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { parseEnv } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
+import { parseRunnerPublicUrl } from "./lib/runner-url.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const updateSecret = process.argv.includes("--update-worker-secret");
@@ -16,6 +17,9 @@ let backoff = 2_000;
 let publishedUrl;
 let startupHealthFailures = 0;
 let secretUpdates = Promise.resolve();
+// Fixed-URL mode (#308): a Tailscale Funnel address from RUNNER_PUBLIC_URL; null = quick-tunnel mode.
+let publicUrl = null;
+const fixedMonitor = new AbortController();
 
 function start(command, args, prefix) {
   if (shuttingDown) throw new Error("Shutdown is in progress.");
@@ -66,6 +70,7 @@ async function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   tunnel?.abort.abort();
+  fixedMonitor.abort();
   clearTimeout(restartTimer);
   log("Stopping tunnel and worker host; allowing up to 75 seconds for drain. Docker stack stays running.");
   for (const child of children) signal(child, "SIGTERM");
@@ -110,16 +115,29 @@ async function preflight() {
     log("docker context ls / docker context use default");
     log("For socket permissions, add your user to the docker group and log in again.");
   }
-  if (await command("cloudflared", ["--version"]) !== 0) {
-    failed = true;
-    log("cloudflared is missing or cannot run. Install the cloudflared package for your OS and put it on PATH.");
-  }
   let env;
   try {
     env = parseEnv(await readFile(resolve(root, ".env.production.local"), "utf8"));
   } catch {
     failed = true;
     log(".env.production.local is missing or unreadable. Complete the host setup in docs/worker-host.md.");
+  }
+  // The shell value takes precedence over the host file; the value is never logged here.
+  try {
+    publicUrl = parseRunnerPublicUrl(process.env.RUNNER_PUBLIC_URL ?? env?.RUNNER_PUBLIC_URL);
+  } catch (error) {
+    failed = true;
+    log(error.message);
+  }
+  if (publicUrl === null) {
+    if (await command("cloudflared", ["--version"]) !== 0) {
+      failed = true;
+      log("cloudflared is missing or cannot run. Install the cloudflared package for your OS and put it on PATH.");
+    }
+  } else if (await command("tailscale", ["version"]) !== 0) {
+    // The launcher never manages Tailscale: Funnel is started by hand once (docs/worker-host.md).
+    failed = true;
+    log("tailscale is missing or cannot run. Install Tailscale and sign in.");
   }
   for (const flag of ["RUNNER_GATEWAY_ENABLED", "RUNNER_JOBS_ENABLED"]) {
     if (env?.[flag] !== "true") {
@@ -138,6 +156,71 @@ async function preflight() {
     log("RUNNER_GATEWAY_PORT must use port 8787 for this launcher; correct the host file or shell override.");
   }
   if (failed) throw new Error("Preflight failed; no services were started.");
+}
+
+// Serialize writes so an older tunnel can never overwrite a newer URL. `current` is checked when
+// the queued write starts; the URL goes to Wrangler through stdin, never on a command line.
+function updateWorkerSecret(url, current) {
+  secretUpdates = secretUpdates.then(async () => {
+    if (shuttingDown || !current()) return;
+    const child = start("npx", ["wrangler", "secret", "put", "RUNNER_GATEWAY_URL"]);
+    child.stdin.end(`${url}\n`);
+    const timer = setTimeout(() => signal(child, "SIGKILL"), 120_000);
+    const result = await child.done;
+    clearTimeout(timer);
+    if (!alive(child)) children.delete(child);
+    if (!shuttingDown) log(result === 0
+      ? "RUNNER_GATEWAY_URL updated successfully."
+      : "RUNNER_GATEWAY_URL update failed. Check Wrangler login and Worker access, then retry.");
+  });
+  return secretUpdates;
+}
+
+// One /health attempt with the quick-tunnel settings: no redirects, at most 5 s.
+async function healthy(url, abortSignal) {
+  try {
+    const response = await fetch(`${url}/health`, {
+      redirect: "manual",
+      signal: AbortSignal.any([abortSignal, AbortSignal.timeout(5_000)]),
+    });
+    await response.body?.cancel();
+    return response.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+// Fixed-URL mode: nothing to restart (Funnel is managed by hand), so a failing URL never stops the
+// launcher. Startup polls every 3 s; after the first success, or after 90 s without one, every 30 s.
+// A line is logged only when the state changes.
+async function monitorPublicUrl(url) {
+  const pause = (ms) => sleep(ms, undefined, { signal: fixedMonitor.signal }).catch(() => {});
+  const notAnswering = "Public runner URL is not answering. Check: tailscale status, tailscale funnel status. The worker host keeps running.";
+  await pause(5_000);
+  const deadline = Date.now() + 90_000;
+  let announced = false;
+  let up = false;
+  let warned = false;
+  while (!shuttingDown) {
+    const attemptStarted = Date.now();
+    const ok = await healthy(url, fixedMonitor.signal);
+    if (shuttingDown) return;
+    if (ok && !announced) {
+      announced = true;
+      log(`Runner gateway is healthy: ${url}`);
+      if (updateSecret) await updateWorkerSecret(url, () => true);
+    } else if (ok && !up) {
+      log("Public runner URL is answering again.");
+    } else if (!ok && up) {
+      log(notAnswering);
+    } else if (!ok && !announced && !warned && Date.now() >= deadline) {
+      warned = true;
+      log(notAnswering);
+    }
+    up = ok;
+    const interval = announced || warned ? 30_000 : 3_000;
+    await pause(Math.max(0, interval - (Date.now() - attemptStarted)));
+  }
 }
 
 async function announceWhenHealthy(url, instance) {
@@ -159,22 +242,7 @@ async function announceWhenHealthy(url, instance) {
           publishedUrl = url;
           log(`Runner gateway is healthy: ${url}`);
           if (!updateSecret) log("Set RUNNER_GATEWAY_URL in Cloudflare to this URL.");
-          else {
-            // Serialize writes so an older tunnel can never overwrite a newer URL.
-            secretUpdates = secretUpdates.then(async () => {
-              if (shuttingDown || tunnel !== instance || instance.ended) return;
-              const child = start("npx", ["wrangler", "secret", "put", "RUNNER_GATEWAY_URL"]);
-              child.stdin.end(`${url}\n`);
-              const timer = setTimeout(() => signal(child, "SIGKILL"), 120_000);
-              const result = await child.done;
-              clearTimeout(timer);
-              if (!alive(child)) children.delete(child);
-              if (!shuttingDown) log(result === 0
-                ? "RUNNER_GATEWAY_URL updated successfully."
-                : "RUNNER_GATEWAY_URL update failed. Check Wrangler login and Worker access, then retry.");
-            });
-            await secretUpdates;
-          }
+          else await updateWorkerSecret(url, () => tunnel === instance && !instance.ended);
         }
         return;
       }
@@ -258,7 +326,8 @@ try {
         void shutdown(code);
       }
     });
-    startTunnel();
+    if (publicUrl === null) startTunnel();
+    else void monitorPublicUrl(publicUrl);
   }
 } catch (error) {
   log(error instanceof Error ? error.message : "Startup failed.");

@@ -188,7 +188,9 @@ timeout, sends no gateway secret, and polls every 30 seconds while configured.
 Keep the HTTPS tunnel and the host supervisor running for the gateway to remain
 reachable. Run forward and Run trend use `public.runner_jobs` in hosted Supabase; the
 host jobs runner consumes them without using the tunnel. Quick-tunnel URLs change
-on restart; update the Cloudflare runtime URL secret when that happens (see #308).
+on restart; update the Cloudflare runtime URL secret when that happens. A fixed URL avoids
+this: a Tailscale Funnel (fixed URL) or later an owned-domain Cloudflare tunnel; see the
+[stable URL setup](worker-host.md#stable-url-tailscale-funnel) (#308).
 
 ## After the first deployment
 
