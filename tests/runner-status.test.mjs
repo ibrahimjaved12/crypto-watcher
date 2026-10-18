@@ -277,7 +277,7 @@ test("the badge and notice use persisted last-seen data for ticking elapsed time
   const badge = await read("../src/components/runner-status-notice.tsx");
   assert.doesNotMatch(hook, /Date\.now\(|getQueryData|lastOnlineAt:/);
   assert.match(badge, /Last heartbeat \$\{formatClock\(data\.lastOnlineAt, now\)\}/);
-  assert.match(badge, /formatAgo\(data\.lastOnlineAt, now\) · \$\{formatClock\(data\.lastOnlineAt, now\)\}/);
+  assert.match(badge, /formatAgo\(data\.lastOnlineAt, now\)\} · \$\{formatClock\(data\.lastOnlineAt, now\)\}/);
   assert.match(badge, /const now = useNow\(\)/);
 });
 
