@@ -370,7 +370,43 @@ so the existing `paper_ledger` table can store it later.
 - Stop-out is **isolated per position** at the stored stop-out price, never losing more than that
   position's margin. The real account is cross-margin, so this is conservative.
 - Not done yet: mark-to-market equity, portfolio risk caps beyond total exposure, and wiring into
-  any runner or the database.
+  the runner and the database (the endpoint below is the Python side).
+
+Owner decisions (2026-10-19), as the wallet's defaults: **one position per setup** (every tradeable setup of
+every enabled strategy opens its own paper trade, including both `rr` setups of one signal); risk **1 %** of
+the balance per trade; start **1,000 USD**; total open notional capped at **10 x balance**
+(`max_exposure_multiple`); the position-count cap is effectively removed (`max_positions` default 1000, was
+6; the field and the `cap:max_positions` reason stay so it is configurable). A trade that cannot open is
+recorded as `rejected` with its reason (`below_min_lot`, `cap:total_exposure`, `insufficient_margin`,
+`no_admissible_leverage`, `no_contract`, `not_tradeable`).
+
+#### Wallet step endpoint (`POST /v1/fx/forward/wallet_step`, #445)
+
+`python/market_analysis/fx/wallet_step.py` (`fx_wallet_step`) applies the stage's shared events to ONE user's
+stored wallet state. Same service, token and error mapping as the stage endpoint (422 invalid input, 409
+evaluation failure). Request: `state` (the stored `wallet_state`, or `null` for a new account), `contracts`
+(`{symbol: {contract_size, tick_size, min_lot, lot_step, base, quote}}`), `events` (from the stage, shapes in
+the stage section; a supplied `liquidation` is refused), optional `config` (`initial_balance_e8`,
+`risk_fraction`, `max_positions`, `max_exposure_multiple`; exact strings and ints, the defaults above when
+absent), optional `cost_model` (as in the stage; it must be the one the stage used) and `symbols`: per symbol
+the `venue_symbol`, `quote_to_account` and the gateway `bars` rows of the window, which the stop-out scan
+needs. A symbol with an open position but no entry in `symbols` is refused (422); an entry with no rows means
+no minute traded. Response: `wallet_state`, `ledger` (this call's lines), `wallet_config` and `assumptions`.
+Unknown keys, floats in the money path and malformed state are rejected.
+
+**Stop-out is per user** (the stop-out price depends on the user's size and leverage), so it is computed here
+from the original state in passes, never in the shared stage and without changing `step()`:
+
+1. `step` over the events without liquidations tells which positions exist. A position that opens and closes
+   inside the batch is no longer in the returned state, so its stop-out price is rebuilt from its `open_fee`
+   line (leverage) with the same `stop_out_price` call `step` uses.
+2. `stop_out_events` scans the bars of every position (carried and opened in the batch) from its entry to its
+   close event's minute (the close's `ms` plays the resolution's exit).
+3. `step` over ALL events from the ORIGINAL state is the answer. `step` ignores a close for a position that was
+   already stopped out, and orders a liquidation before a close in the same minute. A liquidation frees margin,
+   which can let a later open of the batch succeed that pass 1 rejected; that position then needs scanning, so
+   the passes repeat until the liquidation set stops changing (at most 8 rounds, otherwise 409). The normal
+   case settles on the second round.
 
 ### Database
 

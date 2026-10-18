@@ -38,7 +38,7 @@ _EXIT_AFTER_OWN_OPEN = 4  # an exit in the same minute as its own open (entry-mi
 class FxWalletConfig:
     initial_balance_e8: int = 1000 * E8
     risk_fraction: Fraction = Fraction(1, 100)
-    max_positions: int = 6
+    max_positions: int = 1000  # effectively no position-count cap (owner, 2026-10-19); the reason stays configurable
     max_exposure_multiple: Fraction = Fraction(10)  # total open notional <= 10 x balance (UNVERIFIED placeholder)
     model: FxCostModel = FX_COST_MODEL_V1
     contracts: tuple = ()  # (symbol, FxContract) pairs
