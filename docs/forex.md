@@ -203,6 +203,30 @@ base (zero-based assumed), the record layout and price scaling (`POINT_DIVISORS`
 path is UTC, and the per-symbol divisors. **Also unchecked:** the host's terms of use and rate limits,
 which the owner must read before any bulk download. No importer exists yet.
 
+### Hourly market stage (`POST /v1/fx/forward/stage`, #397)
+
+`python/market_analysis/fx/stage.py` (`fx_market_stage`) evaluates ONE hourly forex market stage, stateless
+and pure, on the forward service. Request: `boundary_ms` (a UTC hour), `from_ms` (the last processed
+boundary; decisions are candle closes in `(from_ms, boundary_ms]`), optional `strategy_ids`,
+`calendar_events` (rows of `get_fx_calendar_events`) and `cost_model` (default `fx-cost-v1`), and per
+symbol: `venue_symbol` (`venue`, `native_symbol`, `digits`, `tick_size`), `contract` (`FxContract` fields),
+optional `swap_rates`, `quote_to_account`, `bars` (gateway rows, warm-up included) and `open_setups`
+(`{setup, previous}`). Unknown keys, floats in the money path and non-integer ints are rejected (422).
+Response: `stage` (= `commit_fx_stage`'s `p_stage`; the id is derived from boundary, params hash and
+symbols, so a replay is idempotent) and `signals`, `suppressed`, `setups`, `outcomes`, `events` (= its
+`p_records`, column names of the `fx_market_*` tables), plus `versions`, `params_hash` and
+`processed_to_ms`. Pipeline per symbol: bars -> 15/60/240 trading-time candles -> signals -> news
+blackout (`suppressed`, reason `news_blackout`) -> setups (`fx-atr-v1`) -> resolutions of new tradeable
+and saved open setups. Defaults (proposals, to confirm):
+
+- An `X` outcome (a minute missing while open, including the entry minute) is stored with
+  `payload.excluded_from_stats = true` and kept out of every statistic; no fill is invented.
+- `quote_to_account` is supplied by the caller as the MID price of the same feed's conversion pair
+  (1 when the quote currency is the account currency).
+- Contract specs (digits, tick size, contract size, lots, swaps) come from `fx_symbol_spec_observations`
+  (#432), never guessed.
+- No wallet events yet (`events` is empty): the per-user forex wallet is a later step.
+
 ### Hosted forex quotes
 
 The Worker cannot read the local operational database, so forex quotes reach it the same way crypto

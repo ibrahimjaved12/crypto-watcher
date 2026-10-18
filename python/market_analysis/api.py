@@ -18,6 +18,7 @@ from .api_models import (
     ForwardMarketRequest,
     ForwardWalletRequest,
     ForwardTrendRequest,
+    FxForwardStageRequest,
     FxCalendarParseRequest,
     MovementBoundaryRequest,
     MovementClassificationRequest,
@@ -36,6 +37,7 @@ from .forward.wallet_reconcile import reconcile
 from .forward.sigma_state import SigmaStateMismatch
 from .forward.trend_track import evaluate as forward_trend
 from .fx.calendar_feed import parse_ff_week
+from .fx.stage import FxStageInputError, fx_market_stage
 from .movement_service import MovementBoundaryService
 from .service import analyze_request
 from .slow_movement import evaluate_slow_movement
@@ -192,6 +194,18 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
             raise HTTPException(422, f"Invalid collector rows: {error.code}") from None
         except (ValueError, KeyError, TypeError, ZeroDivisionError):
             raise HTTPException(409, "Forward market evaluation could not be completed") from None
+
+    @app.post("/v1/fx/forward/stage", dependencies=[Depends(authorize)])
+    def fx_forward_stage_route(body: FxForwardStageRequest):
+        # One stateless hourly forex market stage (#397): the runner commits what it returns (commit_fx_stage).
+        try:
+            return fx_market_stage(body.stage_input())
+        except CollectorRowError as error:
+            raise HTTPException(422, f"Invalid forex bars: {error.code}") from None
+        except FxStageInputError as error:
+            raise HTTPException(422, f"Invalid forex stage request: {str(error)[:300]}") from None
+        except (ValueError, KeyError, TypeError, ZeroDivisionError):
+            raise HTTPException(409, "Forex stage could not be completed") from None
 
     @app.post("/v1/forward/wallet_step", dependencies=[Depends(authorize)])
     def forward_wallet_route(body: ForwardWalletRequest):

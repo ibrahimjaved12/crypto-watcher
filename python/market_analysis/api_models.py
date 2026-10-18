@@ -797,3 +797,22 @@ class FxCalendarParseRequest(InputModel):
     """One Forex Factory weekly feed (#401). Only the list shape is checked here; ``parse_ff_week``
     does the strict element validation."""
     payload: list[Any]
+
+
+class FxForwardStageRequest(InputModel):
+    """One hourly forex market stage (#397). Unknown top-level keys are rejected here; every value is kept
+    as sent (``Any``, no coercion) because ``fx.stage.fx_market_stage`` validates types strictly (ints must
+    be real ints, exact values exact strings)."""
+    boundary_ms: Any
+    from_ms: Any
+    symbols: Any
+    strategy_ids: Any = None
+    calendar_events: Any = None
+    cost_model: Any = None
+
+    def stage_input(self) -> dict:
+        request = {"boundary_ms": self.boundary_ms, "from_ms": self.from_ms, "symbols": self.symbols}
+        for name in ("strategy_ids", "calendar_events", "cost_model"):
+            if name in self.model_fields_set:
+                request[name] = getattr(self, name)
+        return request
