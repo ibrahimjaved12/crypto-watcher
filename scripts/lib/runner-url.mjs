@@ -1,9 +1,10 @@
-// Fixed public runner URL for `npm run up` (#308): a Tailscale Funnel address. Pure, no dependencies.
+// Fixed public runner URL for `npm run up` (#308, #431): a Tailscale Funnel address, required by the
+// launcher. Pure, no dependencies.
 const MESSAGE = "RUNNER_PUBLIC_URL must be an https://<machine>.<tailnet>.ts.net address with no path or port";
 const HOST = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+\.ts\.net$/;
 
 /**
- * Unset or empty -> null (quick-tunnel mode). Otherwise the normalized origin `https://host`.
+ * Unset or empty -> null (the caller treats that as missing). Otherwise the normalized origin `https://host`.
  * The error never echoes the value.
  */
 export function parseRunnerPublicUrl(value) {

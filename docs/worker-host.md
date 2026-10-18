@@ -142,93 +142,50 @@ Prerequisites: Node 22.12+, `npm ci`, and the Python environment
 6. **Start the host:** `npm run worker:host`.
 7. **Check:** `npm run mvp:check -- --mode production` (its `worker host` line, below).
 
-## One-command laptop startup (#308)
+## One-command laptop startup (#308, #431)
 
-After completing the host setup above, run `npm run up`. It requires Docker Engine
-running and accessible to your user, `cloudflared` on PATH (quick-tunnel mode) or
-`tailscale` on PATH (fixed-URL mode, see [Stable URL](#stable-url-tailscale-funnel)), the installed npm/Python
-dependencies, and both `RUNNER_GATEWAY_ENABLED=true` and `RUNNER_JOBS_ENABLED=true`
-in `.env.production.local`. The gateway must use port 8787. The launcher checks
-Docker and prints manual service, context and group-permission hints if needed;
-it never starts Docker, changes context, calls sudo, or launches Docker Desktop.
+After completing the host setup above, run `npm run up` (it takes no arguments). The gateway is
+reached at a fixed Tailscale Funnel address, `https://<machine>.<tailnet>.ts.net`. The launcher never
+installs, starts or configures Tailscale and never writes the Worker secret.
 
-`up` reuses `npm run dev:local:all -- --operational-only`. This mode checks the
-operational stack's status and exits successfully without changing anything if
-it is already running. Otherwise it starts only `operational-db/supabase`; it does
-not start the main/app database, the dev server, or other development services.
-It does not apply migrations or edit environment files. Docker failures exit
-non-zero. `npm run dev:local:all -- --help` lists the mode; without this flag the
-existing development startup behavior is unchanged.
+Requirements:
 
-The launcher then streams `npm run worker:host` output and starts
-`cloudflared tunnel --url http://127.0.0.1:8787`. It prints the public quick-tunnel
-URL after `/health` returns 200. The 90-second health window starts when the URL
-is captured, with a 5-second DNS grace period before the first request. Requests
-start every 3 seconds, or when the previous request finishes if it takes longer,
-with a 5-second per-request timeout capped by the remaining window.
-Set `RUNNER_GATEWAY_URL` in Cloudflare to that URL, or use
-`npm run up -- --update-worker-secret` to update it automatically after health
-passes. Automatic updates require Wrangler login and Worker access on this
-machine; the URL is passed to Wrangler through stdin, and neither Wrangler output
-nor the secret input is logged. The public URL is printed for use but never saved
-to a tracked file. No gateway authentication secret is changed.
+- Docker Engine running and accessible to your user. The launcher checks it and prints manual
+  service, context and group-permission hints if needed; it never starts Docker, changes context,
+  calls sudo, or launches Docker Desktop.
+- `tailscale` on PATH and signed in (`tailscale up`), with MagicDNS and HTTPS certificates enabled
+  in the Tailscale admin console.
+- Funnel started by hand once: `tailscale funnel --bg 8787` (the gateway port only).
+- `RUNNER_PUBLIC_URL=https://<machine>.<tailnet>.ts.net` in `.env.production.local` (a shell value
+  overrides the file). It is required: when it is missing, preflight fails with one line. It must
+  be exactly that origin (`https`, a `.ts.net` host, no port, path, query or credentials); an
+  invalid value fails preflight without printing it.
+- The Cloudflare secret `RUNNER_GATEWAY_URL` set once to the same value:
+  `npx wrangler secret put RUNNER_GATEWAY_URL` (paste the value when asked).
+- The installed npm/Python dependencies, and both `RUNNER_GATEWAY_ENABLED=true` and
+  `RUNNER_JOBS_ENABLED=true` in `.env.production.local`. The gateway must use port 8787.
 
-A tunnel exit triggers retries from 2 seconds up to 60 seconds, resetting after
-5 minutes of stable uptime, without restarting the host. Each new URL is checked
-and printed again, and the optional secret update repeats. A host exit stops the
-launcher. Before any URL has been published, a 90-second health timeout kills and
-restarts the tunnel with a fresh URL, up to two more times using the same backoff.
-Only after all three startup health windows fail does the launcher stop with exit
-code 1. After a URL has been published, a health timeout kills
-only that tunnel and retries with the same backoff; the host and collector keep
-running. Cloudflare API URLs in tunnel logs are ignored.
-On each health-window failure, the launcher reports the last HTTP status or
-network error and prints that tunnel's last 30 stdout/stderr lines prefixed
-`[up] [cloudflared]`. This buffer stays in memory, is never written to disk, and
-is not printed during normal operation.
-Ctrl+C/SIGTERM stops both children and allows up to 75 seconds for the
-host's job drain before forcing remaining processes to stop; the operational
-Docker stack stays running.
+What the launcher does:
 
-Quick-tunnel URLs change on restart, so the Worker's `RUNNER_GATEWAY_URL` goes stale and
-the dashboard shows a false "runner offline" notice. The fix is a fixed URL: a Tailscale
-Funnel (below) or later an owned-domain Cloudflare tunnel. In quick-tunnel mode, without
-the update flag, update the Cloudflare runtime URL secret after each URL change.
+1. `up` reuses `npm run dev:local:all -- --operational-only`. This mode checks the operational
+   stack's status and exits successfully without changing anything if it is already running.
+   Otherwise it starts only `operational-db/supabase`; it does not start the main/app database,
+   the dev server, or other development services. It does not apply migrations or edit
+   environment files. Docker failures exit non-zero.
+2. It streams `npm run worker:host` output. A host exit stops the launcher.
+3. After a 5-second grace it checks `<url>/health` every 3 seconds (no redirects, 5-second
+   timeout). On the first 200 it prints `Runner gateway is healthy: <url>` once. If there is no
+   success within 90 seconds it logs once that the public URL is not answering (check
+   `tailscale status` and `tailscale funnel status`), kills nothing and does not exit. From then on
+   it re-checks every 30 seconds and logs only when the state changes.
+4. Ctrl+C/SIGTERM stops the worker host and allows up to 75 seconds for its job drain before
+   forcing remaining processes to stop; the operational Docker stack stays running.
 
-### Stable URL (Tailscale Funnel)
+Limits: Funnel is a Tailscale beta with bandwidth limits; the laptop must be awake and online for
+the URL to answer; expose only the gateway port (8787), never an MT5 or any other port.
 
-A Tailscale Funnel gives the gateway a fixed `https://<machine>.<tailnet>.ts.net` address.
-The launcher never installs, starts or configures Tailscale; you set it up by hand once.
-
-One-time setup:
-
-1. Install Tailscale on this machine and sign in with `tailscale up`.
-2. In the Tailscale admin console, enable MagicDNS and HTTPS certificates for the tailnet
-   (Funnel needs both; the console may also ask you to allow Funnel for this machine).
-3. Run `tailscale funnel 8787` (the gateway port only). The address it prints is the fixed URL.
-4. Add `RUNNER_PUBLIC_URL=https://<machine>.<tailnet>.ts.net` to `.env.production.local`
-   (a shell value overrides the file). It must be exactly that origin: `https`, a `.ts.net`
-   host, no port, path, query or credentials; anything else fails preflight (the value is
-   never printed).
-5. Set the Cloudflare secret `RUNNER_GATEWAY_URL` to the same value once (or start once with
-   `npm run up -- --update-worker-secret`).
-
-What the launcher does in each mode:
-
-- **`RUNNER_PUBLIC_URL` unset (quick-tunnel mode):** everything above, unchanged.
-- **`RUNNER_PUBLIC_URL` set (fixed-URL mode):** preflight checks that `tailscale version` runs
-  instead of `cloudflared` (Docker, the two enabled flags and port 8787 are checked as before).
-  It starts only the worker host, never `cloudflared`, so there is no tunnel restart or backoff.
-  After a 5-second grace it checks `<url>/health` every 3 seconds (no redirects, 5-second
-  timeout). On the first 200 it prints `Runner gateway is healthy: <url>` once and, with
-  `--update-worker-secret`, writes the secret through the same Wrangler step as quick-tunnel
-  mode. If there is no success within 90 seconds it logs once that the public URL is not
-  answering (check `tailscale status` and `tailscale funnel status`), kills nothing and does
-  not exit. From then on, and after the first success, it re-checks every 30 seconds and logs
-  only when the state changes. A host exit still stops the launcher; Ctrl+C is unchanged.
-
-Limits: Funnel is a Tailscale beta with bandwidth limits; the laptop must be awake and online
-for the URL to answer; expose only the gateway port (8787), never an MT5 or any other port.
+The planned fallback is a Cloudflare named tunnel on an owned domain (see the optional Cloudflare
+Tunnel steps under the runner gateway below); it is not part of the launcher.
 
 ## Preflight
 
@@ -446,5 +403,5 @@ To reach it through an optional Cloudflare Tunnel:
 A VM with nginx can later replace the tunnel with the same URL contract.
 
 Keep the host running: with the flags on and the host off, buttons show runner offline.
-Quick-tunnel URLs change on restart; update the Cloudflare `RUNNER_GATEWAY_URL`
-runtime secret if using a quick tunnel (see #308). Never commit the URL or secret.
+The Cloudflare `RUNNER_GATEWAY_URL` runtime secret holds the fixed public gateway URL, set once
+(see [One-command laptop startup](#one-command-laptop-startup-308-431)). Never commit the URL or secret.
