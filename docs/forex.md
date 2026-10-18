@@ -233,9 +233,15 @@ symbol's bars newest page first (20000 bars, the maximum of `get_fx_bars`), then
 `FX_WARMUP_MINUTES` bars are loaded and the last page was full; a short page means the history ends.
 `FX_WARMUP_MINUTES` = 403 candles x 240 + 1440 = 98,160: the widest strategy, `ema_cross_50_200`, has
 `first_signal_index` 402, so it needs 403 candles of 240 open minutes, plus a day of margin. The total is
-capped at `FX_MAX_BARS_PER_SYMBOL` = 60,000 bars (a request-size bound), which is 250 candles: every
-strategy has enough history within the cap EXCEPT `ema_cross_50_200` on 240-minute candles, which keeps
-reporting `insufficient_history` until the cap is raised.
+capped at `FX_MAX_BARS_PER_SYMBOL` = 100,000 bars (#442), which is never below `FX_WARMUP_MINUTES`: the
+module refuses to load otherwise, so the cap cannot silently drop under the derived warm-up again (it was 60,000,
+only 250 candles, so `ema_cross_50_200` on 240-minute candles could not signal). The cap bounds the request: a
+row is about 205 bytes, so one symbol is about 20.5 MB and four symbols about 82 MB in one request to
+`/v1/fx/forward/stage`. The request timeout stays 120 s.
+
+Retention note: the local store keeps 140 days, about 144k open-market minutes, so 100,000 bars (the warm-up
+is 98,160) exist only after the collector has run for roughly 14 weeks of market time. Until then
+`ema_cross_50_200` on 240-minute candles correctly reports `insufficient_history`; nothing is filled in.
 
 ### Hosted forex quotes
 
