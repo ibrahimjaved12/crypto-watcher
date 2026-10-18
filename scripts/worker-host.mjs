@@ -453,6 +453,11 @@ async function main() {
   // operational database. Default off until forex runs.
   if (env.FX_CALENDAR_ENABLED === "true" && env.OPERATIONAL_DB_ENABLED === "true")
     specs.push(nodeJob("fx-calendar", "scripts/fx-calendar-fetcher.mjs"));
+  // Forex quote publisher (#433): non-essential sibling that publishes forex quotes to the hosted
+  // fx_market_quotes. Default off until the forex collector runs.
+  if (env.FX_QUOTE_PUBLISHER_ENABLED === "true" && env.OPERATIONAL_DB_ENABLED === "true" && env.SUPABASE_URL
+      && env.SUPABASE_SERVICE_ROLE_KEY)
+    specs.push(nodeJob("fx-quote-publisher", "scripts/fx-quote-publisher.mjs"));
   // Non-essential sibling: uses the host's existing restart/backoff/crash-loop policy.
   const universeSync = await importLib("/src/lib/market/collector-universe-sync.ts");
   if (universeSync.collectorUniverseSyncConfigured(env))
@@ -500,6 +505,7 @@ async function main() {
   log(`Preflight passed (${MODE}, hosted main Supabase). Starting ${specs.length} children.`);
   for (const name of ["fastapi-analysis", "fastapi-forward", "collector"]) launch(records.get(name));
   if (records.has("quote-publisher")) launch(records.get("quote-publisher"));
+  if (records.has("fx-quote-publisher")) launch(records.get("fx-quote-publisher"));
   if (records.has("collector-universe-sync")) launch(records.get("collector-universe-sync"));
   if (records.has("runner-gateway")) launch(records.get("runner-gateway"));
   if (records.has("alert-charts")) launch(records.get("alert-charts"));

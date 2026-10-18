@@ -74,6 +74,48 @@ export type Database = {
         }
         Relationships: []
       }
+      fx_market_quotes: {
+        Row: {
+          symbol: string
+          instrument_id: string
+          venue: string
+          bid: number
+          ask: number
+          spread_points: number
+          digits: number
+          changes: Json
+          chart: Json
+          last_bar_at: string
+          published_at: string
+        }
+        Insert: {
+          symbol: string
+          instrument_id: string
+          venue: string
+          bid: number
+          ask: number
+          spread_points: number
+          digits: number
+          changes: Json
+          chart: Json
+          last_bar_at: string
+          published_at?: string
+        }
+        Update: {
+          symbol?: string
+          instrument_id?: string
+          venue?: string
+          bid?: number
+          ask?: number
+          spread_points?: number
+          digits?: number
+          changes?: Json
+          chart?: Json
+          last_bar_at?: string
+          published_at?: string
+        }
+        Relationships: []
+      }
       runner_jobs: {
         Row: {
           id: string
@@ -875,6 +917,12 @@ export type Database = {
         Returns: undefined
       }
       publish_market_quotes: {
+        Args: {
+          p_quotes: Json
+        }
+        Returns: number
+      }
+      publish_fx_market_quotes: {
         Args: {
           p_quotes: Json
         }
