@@ -62,7 +62,7 @@ that until the tool proves it makes money.
   realistic futures costs (fees, funding, slippage, liquidation).
 - Later: ML/AI layers, only if they measurably beat simple baselines out of sample.
 
-Forex is in scope as a second market next to crypto (#374): CFD-style spot and futures, same repo and name, dashboard Crypto/Forex toggle, backend computes both. Design and decisions: docs/forex.md.
+Forex is in scope as a second market next to crypto (#374): CFD-style spot and futures, same repo and name, dashboard Crypto/Forex toggle, backend computes both. Approved scope: section 6; design and decisions: docs/forex.md.
 
 ## 3. Current priorities (set 2026-10-07)
 
@@ -75,6 +75,10 @@ Forex is in scope as a second market next to crypto (#374): CFD-style spot and f
    **email/WhatsApp/notification delivery**, other backlog polish. The market-wide breadth alert
    needs research first (#373). Multi-day trend families (#222) are in the backlog. Paper trading
    (#36, #38) stays in the backlog until a few strategies survive costs (owner decisions 2026-10-16).
+
+4. **Forex (#374)**, in parallel and owner-led on strategies (section 6): the open items are the MT5
+   collector and gateway (#394), the paper wallet, the `All` medium/high calendar fan-out rule, the Forex
+   Factory terms of use, and keeping CI under budget as the forex suites grow (#406).
 
 Project is roughly 20% complete; things proceed incrementally and in parallel.
 
@@ -111,7 +115,35 @@ Keep price types and contract identity explicit when a fallback is used.
 Binance is blocked from Cloudflare Worker egress; the machine publishes Binance quotes to hosted `market_quotes` and the Worker only reads them (#323). Kraken/OKX are a temporary Worker fallback, removed after 30 days of machine uptime (#339).
 Setup charts are rendered on the owner's machine from windows captured at event time; movement-alert charts also have a private hosted copy shown on the Alerts page (#299, #298; docs/alert-charts.md).
 
-## 6. Working rules for Claude Code
+## 6. Forex (owner-approved scope; details and status in docs/forex.md, tracked in #374)
+
+Approved decisions and facts. Anything marked UNVERIFIED in the code or docs stays unverified here.
+
+- **Two markets, Crypto and Forex.** The Crypto/Forex toggle in the header is UI-only. Entitlement to a
+  market comes from the plan (`has_market()`, `my_markets()`). Each market has its own paper account
+  (`forward_wallet_accounts` per market) and its own tables (`fx_market_*`).
+- **Data is free:** Exness MT5 demo for CFDs and PMEX MT5 demo for futures. Real-money trading
+  automation is parked and out of scope.
+- **The owner leads forex strategy work.** Claude does not invent strategies or tune parameters on its own;
+  it builds tooling, data hygiene and honest tests of the owner's ideas.
+- **News blackout filter.** The Forex Factory weekly feed (via the calendar fetcher, medium and high impact
+  only) suppresses signals near events; suppressed signals are logged with the reason, never dropped
+  silently. The feed's terms of use have NOT been checked, so `FX_CALENDAR_ENABLED` stays off until the
+  owner confirms.
+- **Wallet defaults (proposals pending the wallet PR, not decisions):** 1,000 USD starting balance, 1% risk
+  per trade, total exposure cap of 10x balance, rejected trades recorded with a reason; the position-count cap
+  is being removed.
+- **Where things run.** The laptop worker host runs the forex children (`fx-calendar`,
+  `fx-quote-publisher`, `forex-hourly`), each off by default behind `FX_CALENDAR_ENABLED`,
+  `FX_QUOTE_PUBLISHER_ENABLED` and `FX_HOURLY_ENABLED`, set in the host's `.env.production.local` only (never
+  a Cloudflare variable). The MT5 collector and gateway (#394) do not exist yet.
+- **Two databases.** The local operational Supabase holds bars, calendar, specs and collector health; the
+  hosted main Supabase holds `fx_market_*` and accounts.
+- **Runner access.** The runner is reached through a fixed Tailscale Funnel address (`RUNNER_PUBLIC_URL` on
+  the host; `RUNNER_GATEWAY_URL` and `RUNNER_GATEWAY_SECRET` as Cloudflare runtime secrets and
+  `RUNNER_GATEWAY_ENABLED` as a runtime variable). The quick tunnel was removed (#431).
+
+## 7. Working rules for Claude Code
 
 - Implement; do not research. Research and decisions happen in chat.
 - Do not run tests, local servers or other token-heavy extras on your own (GitHub checks cover
@@ -122,14 +154,14 @@ Setup charts are rendered on the owner's machine from windows captured at event 
 - Never invent prices, news, or certainty. The repo is public: no secrets, no private notes.
 - Python CI budget: the whole Python job must finish in under 2 minutes wall-clock. New test modules should stay under ~10 s; heavier statistical acceptance tests use tests/slow.py and run in slow-tests.yml; update python/tests/shards.json if a module exceeds ~40 s.
 
-## 7. Known drift under review (2026-10-07)
+## 8. Known drift under review (2026-10-07)
 
 - #31 contains an illustrative support-bounce example only; no real strategies are chosen.
 - Roughly 30 closed tickets are replay/state-classifier/study machinery; setups, outcomes,
   paper trading, dashboard and backtests (#30-#33, #36, #38) are all still open.
 - Lovable-era tickets #49, #51 and #41 (closed 2026-10-13; their bodies still describe Lovable-era plans): pending owner decision.
 
-## 8. Open decisions
+## 9. Open decisions
 
 - Research and tracking tickets: #180 (strategy research + benchmark).
 
@@ -138,3 +170,6 @@ Setup charts are rendered on the owner's machine from windows captured at event 
 - Always-on host: not needed during development (decided 2026-10-13); revisit at about 80% completion.
 - Doji work: paused by the owner on 2026-10-16; see #361-#366 (resume order in the #364 comments).
 - Django vs FastAPI stays FastAPI unless reopened.
+- Forex (#374, section 6): the MT5 collector and gateway (#394); the paper wallet and its defaults; the rule for
+  `All`-currency medium/high calendar events (today such a row stops the parse; it needs a fan-out decision);
+  the Forex Factory feed's terms of use (`FX_CALENDAR_ENABLED` stays off until confirmed); the CI budget (#406).
