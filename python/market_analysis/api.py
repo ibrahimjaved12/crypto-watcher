@@ -18,6 +18,7 @@ from .api_models import (
     ForwardMarketRequest,
     ForwardWalletRequest,
     ForwardTrendRequest,
+    FxCalendarParseRequest,
     MovementBoundaryRequest,
     MovementClassificationRequest,
     MovementHistoryRegistrationRequest,
@@ -34,6 +35,7 @@ from .forward.wallet import WalletConfig, initial_state, wallet_step
 from .forward.wallet_reconcile import reconcile
 from .forward.sigma_state import SigmaStateMismatch
 from .forward.trend_track import evaluate as forward_trend
+from .fx.calendar_feed import parse_ff_week
 from .movement_service import MovementBoundaryService
 from .service import analyze_request
 from .slow_movement import evaluate_slow_movement
@@ -230,6 +232,19 @@ def create_app(token=None, analyzer=analyze_request, analysis_timeout=18):
             return forward_trend(**body.evaluate_input())
         except ValueError:
             raise HTTPException(409, "Forward trend evaluation could not be completed") from None
+
+    @app.post("/v1/fx/calendar/parse", dependencies=[Depends(authorize)])
+    def fx_calendar_parse(body: FxCalendarParseRequest):
+        # Economic calendar feed (#401): stateless, one weekly feed in, record_fx_calendar rows out.
+        # The parser's message names an element index and a rule, never the payload; nothing is logged.
+        try:
+            week = parse_ff_week(body.payload)
+        except ValueError as error:
+            raise HTTPException(422, str(error)[:300]) from None
+        except Exception:
+            raise HTTPException(500, "Calendar parse failed") from None
+        return {"schema_version": 1, "rows": week.rows, "covered_to_ms": week.covered_to_ms,
+                "skipped_holidays": week.skipped_holidays, "skipped_all_low": week.skipped_all_low}
 
     return app
 

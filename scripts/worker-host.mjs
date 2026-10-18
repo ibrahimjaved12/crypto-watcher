@@ -449,6 +449,10 @@ async function main() {
   // artifact keeps no main-database credential. It needs the hosted service credentials to publish.
   if (env.MARKET_QUOTE_PUBLISHER_ENABLED !== "false" && env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY)
     specs.push(nodeJob("quote-publisher", "scripts/market-quote-publisher.mjs"));
+  // Economic calendar fetcher (#401): non-essential sibling that keeps the news-blackout calendar fresh in the
+  // operational database. Default off until forex runs.
+  if (env.FX_CALENDAR_ENABLED === "true" && env.OPERATIONAL_DB_ENABLED === "true")
+    specs.push(nodeJob("fx-calendar", "scripts/fx-calendar-fetcher.mjs"));
   // Non-essential sibling: uses the host's existing restart/backoff/crash-loop policy.
   const universeSync = await importLib("/src/lib/market/collector-universe-sync.ts");
   if (universeSync.collectorUniverseSyncConfigured(env))
@@ -507,6 +511,8 @@ async function main() {
   if (records.has("runner-jobs")) void startAfterPython(records.get("runner-jobs"), urls, pythonNames);
   // TA calls the analysis service, so the scheduler also waits for both health endpoints.
   if (records.has("monitor-scheduler")) void startAfterPython(records.get("monitor-scheduler"), urls, pythonNames);
+  // The calendar fetcher parses through the analysis service, so it waits for it too.
+  if (records.has("fx-calendar")) void startAfterPython(records.get("fx-calendar"), urls, pythonNames);
 }
 
 // SIGHUP is what a closed terminal sends; without it the children would outlive the host.

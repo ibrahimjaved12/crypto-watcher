@@ -791,3 +791,9 @@ class SlowMovementRequest(InputModel):
         if len(names) != len(set(names)):
             raise ValueError("slow movement symbols must be unique")
         return self
+
+
+class FxCalendarParseRequest(InputModel):
+    """One Forex Factory weekly feed (#401). Only the list shape is checked here; ``parse_ff_week``
+    does the strict element validation."""
+    payload: list[Any]
