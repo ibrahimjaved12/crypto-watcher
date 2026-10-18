@@ -855,10 +855,11 @@ test("forex repository methods map camel-case bars and options onto the fx RPCs"
   assert.equal(calls.length, 1, "an empty batch makes no call");
 
   assert.deepEqual(await store.getFxBars("mt5-demo", "fx:EURUSD"), [gatewayRow]);
-  assert.deepEqual(calls[1][1], { p_venue: "mt5-demo", p_instrument_id: "fx:EURUSD", p_from_ms: null, p_limit: 1000 });
-  await store.getFxBars("mt5-demo", "fx:EURUSD", { fromMs: 1_800_000_000_000, limit: 5000 });
+  assert.deepEqual(calls[1][1], { p_venue: "mt5-demo", p_instrument_id: "fx:EURUSD", p_from_ms: null, p_limit: 1000,
+    p_to_ms: null });
+  await store.getFxBars("mt5-demo", "fx:EURUSD", { fromMs: 1_800_000_000_000, toMs: 1_800_000_600_000, limit: 5000 });
   assert.deepEqual(calls[2][1], { p_venue: "mt5-demo", p_instrument_id: "fx:EURUSD",
-    p_from_ms: 1_800_000_000_000, p_limit: 5000 });
+    p_from_ms: 1_800_000_000_000, p_limit: 5000, p_to_ms: 1_800_000_600_000 });
 
   await store.recordFxCollectorHealth([{ venue: "mt5-demo", instrumentId: "fx:EURUSD", status: "MARKET_CLOSED",
     lastBarOpenTime: 1_800_000_000_000, lagMs: null, errorMessage: null }]);

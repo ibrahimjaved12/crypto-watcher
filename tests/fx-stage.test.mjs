@@ -185,3 +185,98 @@ test("an unsupported swap mode or other broker currencies refuse that symbol onl
   assert.match(result.failed["EURUSD"], /swap mode 4 is not supported yet/);
   assert.match(result.failed["GBPUSD"], /broker currencies USD\/USD differ from GBP\/USD/);
 });
+
+// ---------------------------------------------------------------- bar paging (#440)
+
+/** A store with `count` contiguous 1m bars ending at BOUNDARY that honours limit, fromMs and the EXCLUSIVE toMs. */
+function pagedStore(count, { overlap = false } = {}) {
+  const all = Array.from({ length: count }, (_, i) => bar("fx:EURUSD", BOUNDARY - (count - 1 - i) * MIN));
+  const calls = [];
+  return {
+    calls,
+    deps: { store: { async getFxBars(venue, instrumentId, options = {}) {
+      calls.push(options);
+      let rows = all;
+      if (options.fromMs !== undefined) rows = rows.filter((row) => row.open_time_ms >= options.fromMs);
+      if (options.toMs !== undefined) rows = rows.filter((row) => (overlap ? row.open_time_ms <= options.toMs : row.open_time_ms < options.toMs));
+      return rows.slice(-(options.limit ?? 1000));
+    } } },
+  };
+}
+const times = (rows) => rows.map((row) => row.open_time_ms);
+
+test("warm-up constants: 403 candles of 240 minutes plus a day, capped at 60000 bars", () => {
+  assert.equal(fx.FX_WARMUP_CANDLES_240, 403);
+  assert.equal(fx.FX_WARMUP_MINUTES, 403 * 240 + 1440);
+  assert.equal(fx.FX_MAX_BARS_PER_SYMBOL, 60_000);
+  assert.equal(fx.FX_BAR_PAGE_SIZE, 20_000);
+});
+
+test("paging stops when the history ends (a short page)", async () => {
+  const { deps, calls } = pagedStore(45_000);
+  const bars = await fx.readBarsPaged(deps, VENUE, "fx:EURUSD", 60_000);
+  assert.equal(bars.length, 45_000);
+  assert.equal(calls.length, 3, "20000 + 20000 + a short 5000");
+  assert.deepEqual(times(bars), Array.from({ length: 45_000 }, (_, i) => BOUNDARY - (44_999 - i) * MIN), "oldest first, contiguous");
+  // A single short page is one read.
+  const small = pagedStore(1_500);
+  assert.equal((await fx.readBarsPaged(small.deps, VENUE, "fx:EURUSD", 60_000)).length, 1_500);
+  assert.equal(small.calls.length, 1);
+  // History that is an exact multiple of the page size costs one extra (empty) read, then ends.
+  const exact = pagedStore(40_000);
+  assert.equal((await fx.readBarsPaged(exact.deps, VENUE, "fx:EURUSD", 60_000)).length, 40_000);
+  assert.equal(exact.calls.length, 3);
+  assert.deepEqual(await fx.readBarsPaged(pagedStore(0).deps, VENUE, "fx:EURUSD", 60_000), []);
+});
+
+test("paging stops at neededBars and keeps the newest of them", async () => {
+  const { deps, calls } = pagedStore(100_000);
+  const bars = await fx.readBarsPaged(deps, VENUE, "fx:EURUSD", 30_000);
+  assert.equal(calls.length, 2, "two pages reach 30000");
+  assert.equal(bars.length, 30_000);
+  assert.equal(bars.at(-1).open_time_ms, BOUNDARY);
+  assert.equal(bars[0].open_time_ms, BOUNDARY - 29_999 * MIN);
+  // Within one page nothing more is read.
+  const one = pagedStore(100_000);
+  assert.equal((await fx.readBarsPaged(one.deps, VENUE, "fx:EURUSD", 5_000)).length, 5_000);
+  assert.equal(one.calls.length, 1);
+});
+
+test("toMs is exclusive: each page starts before the oldest row of the previous one and no row repeats", async () => {
+  const { deps, calls } = pagedStore(50_000);
+  const bars = await fx.readBarsPaged(deps, VENUE, "fx:EURUSD", 60_000);
+  assert.deepEqual(calls[0], { limit: 20_000 });
+  assert.deepEqual(calls[1], { limit: 20_000, toMs: BOUNDARY - 19_999 * MIN });
+  assert.deepEqual(calls[2], { limit: 20_000, toMs: BOUNDARY - 39_999 * MIN });
+  assert.equal(new Set(times(bars)).size, bars.length);
+  assert.equal(bars.length, 50_000);
+});
+
+test("duplicate open times are dropped, and a page of only duplicates ends the paging", async () => {
+  // A store whose upper bound is inclusive repeats the boundary row of every page.
+  const overlap = pagedStore(45_000, { overlap: true });
+  const bars = await fx.readBarsPaged(overlap.deps, VENUE, "fx:EURUSD", 60_000);
+  assert.equal(new Set(times(bars)).size, bars.length);
+  assert.equal(bars.length, 45_000);
+  // A store that ignores toMs entirely returns the same full page: no endless loop.
+  const stuck = { store: { async getFxBars() { return Array.from({ length: 20_000 }, (_, i) => bar("fx:EURUSD", BOUNDARY - (19_999 - i) * MIN)); } } };
+  assert.equal((await fx.readBarsPaged(stuck, VENUE, "fx:EURUSD", 60_000)).length, 20_000);
+});
+
+test("the cap holds at 60000 bars whatever is asked", async () => {
+  const { deps, calls } = pagedStore(100_000);
+  const bars = await fx.readBarsPaged(deps, VENUE, "fx:EURUSD", 500_000);
+  assert.equal(bars.length, 60_000);
+  assert.equal(calls.length, 3);
+  assert.equal(bars.at(-1).open_time_ms, BOUNDARY);
+  // The stage asks for the full warm-up and so is bounded by the cap too.
+  const long = fakeDeps({ bars: { "fx:EURUSD": undefined } });
+  const all = Array.from({ length: 100_000 }, (_, i) => bar("fx:EURUSD", BOUNDARY - (99_999 - i) * MIN));
+  long.deps.store.getFxBars = async (venue, instrumentId, options = {}) => {
+    let rows = all;
+    if (options.toMs !== undefined) rows = rows.filter((row) => row.open_time_ms < options.toMs);
+    return rows.slice(-(options.limit ?? 1000));
+  };
+  assert.equal((await fx.runFxHourly(long.deps)).status, "ok");
+  assert.equal(long.calls.stage[0].symbols[0].bars.length, 60_000);
+});

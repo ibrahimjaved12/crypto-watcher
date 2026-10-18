@@ -25,8 +25,24 @@ export const FX_HEALTH_MAX_AGE_MS = 5 * MINUTE_MS;
 export const FX_LIVE_BAR_MAX_LAG_MS = 2 * MINUTE_MS;
 /** The decision window never reaches further back than this (catch-up after refusals or downtime). */
 export const FX_MAX_CATCHUP_MS = DAY_MS;
-/** History per symbol: get_fx_bars returns at most 20000 newest bars (about 2.8 trading weeks). */
-export const FX_BAR_HISTORY_LIMIT = 20_000;
+/** One get_fx_bars page: the function's own maximum. A page shorter than this means the history ends. */
+export const FX_BAR_PAGE_SIZE = 20_000;
+/**
+ * Minute bars of warm-up one symbol needs for the 240-minute strategies (#440). Derived from
+ * python/market_analysis/benchmark/ta_strategies.py `first_signal_index`: the widest strategy,
+ * `ema_cross_50_200`, has index 402 (`ema_warmup(200)` = 2 * 201), and a signal needs MORE candles than that,
+ * so 403 candles. A forex bar exists only while the market is open and a 240-minute candle holds 240 open
+ * minutes, so 403 candles are 403 * 240 bars; plus a margin of one day (1440) for the decision window and the
+ * entry minutes of open setups. The next widest, `ema_cross_20_50`, needs 103 candles (24,720 bars).
+ */
+export const FX_WARMUP_CANDLES_240 = 402 + 1;
+export const FX_WARMUP_MINUTES = FX_WARMUP_CANDLES_240 * 240 + 1440;
+/**
+ * Hard cap on bars sent per symbol (the request body to /v1/fx/forward/stage grows with it). It is BELOW
+ * FX_WARMUP_MINUTES: ema_cross_50_200 on 240-minute candles still lacks history (60000 bars are 250
+ * candles); every other strategy has enough (see the PR for #440).
+ */
+export const FX_MAX_BARS_PER_SYMBOL = 60_000;
 export const FX_CALENDAR_SOURCE = "forexfactory";
 const LOG = "[forex-hourly]";
 const OK_HEALTH = new Set(["LIVE", "MARKET_CLOSED"]);
@@ -166,6 +182,31 @@ function previousResolution(stored: { payload: unknown }[]): Record<string, unkn
   return resolution;
 }
 
+/**
+ * The newest `neededBars` bars of a series, oldest first (capped at FX_MAX_BARS_PER_SYMBOL). Reads the newest
+ * page, then, while the total is below `neededBars` and the last page was full, the next older page with
+ * `toMs` = the oldest open time of the previous page (EXCLUSIVE, so no row repeats); a short page means the
+ * history ends. Duplicate open times are dropped defensively.
+ */
+export async function readBarsPaged(
+  deps: Pick<FxStageDeps, "store">, venue: string, instrumentId: string, neededBars: number,
+): Promise<FxGatewayRow[]> {
+  const wanted = Math.min(Math.max(1, Math.floor(neededBars)), FX_MAX_BARS_PER_SYMBOL);
+  const seen = new Set<number>();
+  let bars: FxGatewayRow[] = [];
+  let toMs: number | undefined;
+  for (;;) {
+    const page = await deps.store.getFxBars(venue, instrumentId,
+      toMs === undefined ? { limit: FX_BAR_PAGE_SIZE } : { limit: FX_BAR_PAGE_SIZE, toMs });
+    const fresh = page.filter((row) => !seen.has(row.open_time_ms));
+    for (const row of fresh) seen.add(row.open_time_ms);
+    bars = [...fresh, ...bars];
+    if (page.length < FX_BAR_PAGE_SIZE || fresh.length === 0 || bars.length >= wanted) break;
+    toMs = page[0]!.open_time_ms;
+  }
+  return bars.length > wanted ? bars.slice(bars.length - wanted) : bars;
+}
+
 async function symbolInput(deps: FxStageDeps, spec: FxSymbolSpec, specs: FxSymbolSpec[],
                            saved: Record<string, unknown>[], outcomes: Map<string, { payload: unknown }[]>) {
   const symbol = spec.instrumentId.split(":")[1] ?? "";
@@ -173,7 +214,7 @@ async function symbolInput(deps: FxStageDeps, spec: FxSymbolSpec, specs: FxSymbo
   if (!expected) throw new Error("not a supported forex symbol");
   if (expected.base !== spec.baseCurrency || expected.quote !== spec.profitCurrency)
     throw new Error(`broker currencies ${spec.baseCurrency}/${spec.profitCurrency} differ from ${expected.base}/${expected.quote}`);
-  const bars = await deps.store.getFxBars(spec.venue, spec.instrumentId, { limit: FX_BAR_HISTORY_LIMIT });
+  const bars = await readBarsPaged(deps, spec.venue, spec.instrumentId, FX_WARMUP_MINUTES);
   if (!bars.length) throw new Error("no bars");
   if (bars.some((row) => row.native_symbol !== spec.nativeSymbol)) throw new Error("bars carry another native symbol than the spec");
   const first = bars[0]!.open_time_ms;
