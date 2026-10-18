@@ -30,5 +30,6 @@
     "SUPABASE_URL": "https://xshzjhocpcenuumdrhdh.supabase.co"
   },
   // Preserve the publishable key and other dashboard runtime variables.
-  "keep_vars": true
+  "keep_vars": true,
+  "preview_urls": true
 }
