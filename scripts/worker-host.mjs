@@ -458,6 +458,10 @@ async function main() {
   if (env.FX_QUOTE_PUBLISHER_ENABLED === "true" && env.OPERATIONAL_DB_ENABLED === "true" && env.SUPABASE_URL
       && env.SUPABASE_SERVICE_ROLE_KEY)
     specs.push(nodeJob("fx-quote-publisher", "scripts/fx-quote-publisher.mjs"));
+  // Hourly forex market stage (#397): a forex child; it calls the Python forward service, so it waits for both
+  // health endpoints like forward-hourly. Default off until the MT5 collector writes bars.
+  if (env.FX_HOURLY_ENABLED === "true" && env.OPERATIONAL_DB_ENABLED === "true")
+    specs.push(nodeJob("forex-hourly", "scripts/forex-hourly.mjs"));
   // Non-essential sibling: uses the host's existing restart/backoff/crash-loop policy.
   const universeSync = await importLib("/src/lib/market/collector-universe-sync.ts");
   if (universeSync.collectorUniverseSyncConfigured(env))
@@ -519,6 +523,7 @@ async function main() {
   if (records.has("monitor-scheduler")) void startAfterPython(records.get("monitor-scheduler"), urls, pythonNames);
   // The calendar fetcher parses through the analysis service, so it waits for it too.
   if (records.has("fx-calendar")) void startAfterPython(records.get("fx-calendar"), urls, pythonNames);
+  if (records.has("forex-hourly")) void startAfterPython(records.get("forex-hourly"), urls, pythonNames);
 }
 
 // SIGHUP is what a closed terminal sends; without it the children would outlive the host.

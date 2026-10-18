@@ -395,6 +395,23 @@ test("the worker host line ignores forex children; the forex children line cover
     { level: "WARN", detail: "status stale; see the worker host line" });
 });
 
+test("forex-hourly (#397) is a forex child: never a crypto exit, its own mvp:check line", () => {
+  const set = (states) => Object.entries(states).map(([name, state]) => ({ name, state }));
+  assert.equal(w.isForexChild("forex-hourly"), true);
+  assert.equal(w.isForexChild("forward-hourly"), false, "the crypto forward job is not forex");
+  const crypto = { "fastapi-analysis": "running", "fastapi-forward": "running", collector: "running", "forward-hourly": "running", "forward-trend": "running" };
+  // A looping forex-hourly never stops the host, and the crypto rules are unchanged.
+  assert.deepEqual(w.exitDecision(set({ ...crypto, "forex-hourly": "crash-loop" }), null, 0), { reason: null, allDownSinceMs: null });
+  assert.match(w.exitDecision(set({ ...crypto, "forward-hourly": "crash-loop", "forward-trend": "crash-loop", "forex-hourly": "running" }), null, 0).reason,
+    /both forward jobs/);
+  const now = Date.parse("2026-10-10T12:00:00Z");
+  const child = (name, state) => ({ name, state, pid: 1, restartCount: 0, lastRestartAt: null, lastExit: null, nextRestartAt: null });
+  const file = JSON.stringify(w.buildStatus({ supervisorPid: 1, startedAtMs: now - 3_600_000, nowMs: now - 1_000, shuttingDown: false,
+    children: [child("collector", "running"), child("forward-hourly", "running"), child("forex-hourly", "crash-loop")] }));
+  assert.equal(w.classifyWorkerHost(file, now).level, "PASS");
+  assert.deepEqual(w.classifyForexChildren(file, now), { level: "FAIL", detail: "forex crash loop, restarts stopped: forex-hourly" });
+});
+
 test("the status parser rejects other shapes and the exit text names signal or code", () => {
   assert.equal(w.parseStatus("null"), null);
   assert.equal(w.parseStatus(JSON.stringify({ schema: 2 })), null);
