@@ -23,9 +23,9 @@ const db = new PGlite();
 before(async () => {
   await db.exec(`CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS;
     GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;`);
-  // The baseline and every later operational migration, in file-name order (the new one last).
+  // The baseline and every later operational migration, in file-name order.
   const files = (await readdir(MIGRATIONS)).filter((name) => name.endsWith(".sql")).sort();
-  assert.equal(files.at(-1), "20261019120000_fx_bars.sql");
+  assert.ok(files.includes("20261019120000_fx_bars.sql"));
   for (const file of files) await db.exec(await readFile(new URL(file, MIGRATIONS), "utf8"));
 });
 beforeEach(() => db.exec(`RESET ROLE; TRUNCATE ${FX_TABLES.join(", ")} RESTART IDENTITY;`));
@@ -107,8 +107,9 @@ test("a conflicting offer keeps the stored bar, is recorded once and never fails
   assert.equal(await count("fx_bar_conflicts"), 1);
   await record([bar(target, { tick_volume: 99 })]);
   assert.equal(await count("fx_bar_conflicts"), 2);
-  assert.deepEqual((await db.query("SELECT differing_fields FROM fx_bar_conflicts WHERE conflict_id = 2")).rows[0]
-    .differing_fields, ["tick_volume"]);
+  // ON CONFLICT DO NOTHING still draws an identity value, so take the newest row, not conflict_id = 2.
+  assert.deepEqual((await db.query("SELECT differing_fields FROM fx_bar_conflicts ORDER BY conflict_id DESC LIMIT 1"))
+    .rows[0].differing_fields, ["tick_volume"]);
   assert.equal(await count("fx_recent_bars"), 4);
 
   // Conflicts feed the counters only; the measured status is unchanged.
@@ -160,33 +161,37 @@ test("retention deletes bars older than the window but keeps the newest 2000 of 
   const recent = Math.floor(now / MINUTE) * MINUTE - MINUTE;
   const cutoffOpen = Math.floor(now / MINUTE) * MINUTE - days * DAY;
 
-  // EURUSD straddles the cutoff and has 2000 recent bars: only the bars whose minute ended before the
-  // cutoff go; the oldest kept bar opens exactly at the cutoff minute.
-  await record(series(1000, cutoffOpen + 499 * MINUTE), days);
-  await record(series(1000, recent - 1000 * MINUTE), days);
-  await record(series(1000, recent), days);
-  const eur = (await db.query("SELECT count(*)::int AS n, min(open_time) AS oldest FROM fx_recent_bars WHERE instrument_id = $1",
-    [EURUSD])).rows[0];
-  assert.equal(eur.n, 2500);
-  assert.equal(new Date(eur.oldest).getTime(), cutoffOpen);
+  const kept = async (instrumentId) => {
+    const row = (await db.query("SELECT count(*)::int AS n, min(open_time) AS oldest FROM fx_recent_bars WHERE instrument_id = $1",
+      [instrumentId])).rows[0];
+    return [row.n, new Date(row.oldest).getTime()];
+  };
 
-  // GBPUSD has 1500 bars far older than the window and 1000 recent ones: the 2000-bar floor keeps
-  // the newest 1000 old bars (a long closure or outage never empties the runner's warm-up).
-  const oldEnd = cutoffOpen - 10 * DAY;
-  await record(series(1000, oldEnd - 500 * MINUTE, GBPUSD), days);
-  await record(series(500, oldEnd, GBPUSD), days);
-  assert.equal(await count("fx_recent_bars", "instrument_id = $1", [GBPUSD]), 1500, "below the floor nothing goes");
-  await record(series(1000, recent, GBPUSD), days);
-  const gbp = (await db.query("SELECT count(*)::int AS n, min(open_time) AS oldest FROM fx_recent_bars WHERE instrument_id = $1",
-    [GBPUSD])).rows[0];
-  assert.equal(gbp.n, 2000);
-  assert.equal(new Date(gbp.oldest).getTime(), oldEnd - 999 * MINUTE);
-  assert.equal(await count("fx_recent_bars", "instrument_id = $1", [EURUSD]), 2500, "series are independent");
+  // One EURUSD series exercises both rules with 2600 rows. 1000 bars straddle the cutoff (500 end
+  // before it), then 1000 recent bars: 2000 in all, so the floor keeps everything.
+  await record(series(1000, cutoffOpen + 499 * MINUTE), days);
+  await record(series(1000, recent - 600 * MINUTE), days);
+  assert.deepEqual(await kept(EURUSD), [2000, cutoffOpen - 500 * MINUTE], "at the floor nothing goes");
+  // 200 more recent bars: the floor (2000th newest) is now cutoffOpen - 300 min, so only the 200 bars
+  // below it go; 300 bars older than the window stay because they are among the newest 2000 (a long
+  // closure or outage never empties the runner's warm-up).
+  await record(series(200, recent - 400 * MINUTE), days);
+  assert.deepEqual(await kept(EURUSD), [2000, cutoffOpen - 300 * MINUTE], "the floor keeps old bars");
+  // 400 more: the floor moves past the cutoff, so the window decides: every bar whose minute ended
+  // before the cutoff goes and the oldest kept bar opens exactly at the cutoff minute.
+  await record(series(400, recent), days);
+  assert.deepEqual(await kept(EURUSD), [2100, cutoffOpen], "the window bounds the deletion");
+
+  // Series are independent: three ancient GBPUSD bars are below their own floor and stay.
+  const ancient = cutoffOpen - 10 * DAY;
+  await record(series(3, ancient, GBPUSD), days);
+  await record([bar(recent, {}, GBPUSD)], days);
+  assert.deepEqual(await kept(GBPUSD), [4, ancient - 2 * MINUTE]);
 
   const coverage = await call("SELECT get_fx_bar_coverage()");
   assert.deepEqual(coverage, [
-    { venue: VENUE, instrument_id: EURUSD, bar_count: 2500, oldest_open_time_ms: cutoffOpen, newest_open_time_ms: recent },
-    { venue: VENUE, instrument_id: GBPUSD, bar_count: 2000, oldest_open_time_ms: oldEnd - 999 * MINUTE,
+    { venue: VENUE, instrument_id: EURUSD, bar_count: 2100, oldest_open_time_ms: cutoffOpen, newest_open_time_ms: recent },
+    { venue: VENUE, instrument_id: GBPUSD, bar_count: 4, oldest_open_time_ms: ancient - 2 * MINUTE,
       newest_open_time_ms: recent },
   ]);
 });

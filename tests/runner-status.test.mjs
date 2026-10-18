@@ -270,12 +270,15 @@ test("health reporting uses the database clock and preserves last seen after an 
   assert.match(sql, /last_seen_at = CASE WHEN EXCLUDED\.status <> 'offline'\s+THEN EXCLUDED\.last_seen_at ELSE runner_health\.last_seen_at END/i);
 });
 
-test("the badge uses persisted last-seen data for ticking elapsed time and its absolute tooltip", async () => {
+test("the badge and notice use persisted last-seen data for ticking elapsed time and the absolute time", async () => {
+  // Since the header design pass (#413, #415) the badge has no inline "last online" label with a tooltip:
+  // the popover shows the absolute heartbeat time and the notice shows elapsed and absolute time.
   const hook = await read("../src/lib/runner/use-runner-status.ts");
   const badge = await read("../src/components/runner-status-notice.tsx");
   assert.doesNotMatch(hook, /Date\.now\(|getQueryData|lastOnlineAt:/);
-  assert.match(badge, /new Date\(data\.lastOnlineAt\)\.toLocaleString\(\)/);
-  assert.match(badge, /formatAgo\(data\.lastOnlineAt, now\)/);
+  assert.match(badge, /Last heartbeat \$\{formatClock\(data\.lastOnlineAt, now\)\}/);
+  assert.match(badge, /formatAgo\(data\.lastOnlineAt, now\) · \$\{formatClock\(data\.lastOnlineAt, now\)\}/);
+  assert.match(badge, /const now = useNow\(\)/);
 });
 
 test("runner history distinguishes never reported, failed checks and known machine history", () => {

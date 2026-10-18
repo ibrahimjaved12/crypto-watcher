@@ -12,6 +12,8 @@ import type {
   ForwardMinuteRow,
   FxBar,
   FxBarCoverage,
+  FxCalendarEventRow,
+  FxCalendarSourceStatus,
   FxCollectorHealthRow,
   FxGatewayRow,
   FxSubscription,
@@ -182,6 +184,18 @@ const disabledStore: OperationalStore = {
   },
   async releaseFxCollectorLease() {},
   async getFxBarCoverage() {
+    return [];
+  },
+  async recordFxCalendar() {
+    throw new Error("Operational forex calendar storage is disabled");
+  },
+  async recordFxCalendarFetch() {
+    throw new Error("Operational forex calendar storage is disabled");
+  },
+  async getFxCalendarEvents() {
+    return [];
+  },
+  async getFxCalendarStatus() {
     return [];
   },
 };
@@ -700,6 +714,54 @@ export function createOperationalStore(
       const { data, error } = await client.rpc("get_fx_bar_coverage");
       rpcError(error, "forex bar coverage read");
       return Array.isArray(data) ? (data as FxBarCoverage[]) : [];
+    },
+    async recordFxCalendar(rows) {
+      // record_fx_calendar takes 1..2000 items per call; observations are idempotent, so a chunk
+      // that fails can be retried as a whole.
+      let inserted = 0;
+      for (let i = 0; i < rows.length; i += 2000) {
+        const { data, error } = await client.rpc("record_fx_calendar", {
+          p_rows: rows.slice(i, i + 2000).map((row) => ({
+            source: row.source,
+            source_event_key: row.sourceEventKey,
+            event_ts: new Date(row.eventTs).toISOString(),
+            currency: row.currency,
+            impact: row.impact,
+            title: row.title,
+            ...(row.detail === undefined ? {} : { detail: row.detail }),
+          })),
+        });
+        rpcError(error, "forex calendar write");
+        inserted += Number(data ?? 0);
+      }
+      return inserted;
+    },
+    async recordFxCalendarFetch(result) {
+      const { error } = await client.rpc("record_fx_calendar_fetch", {
+        p_source: result.source,
+        p_status: result.status,
+        p_event_count: result.eventCount,
+        p_covered_to:
+          result.status === "ok" ? new Date(result.coveredTo).toISOString() : null,
+        p_error: result.error ?? null,
+      });
+      rpcError(error, "forex calendar fetch log write");
+    },
+    async getFxCalendarEvents(fromMs, toMs, asOfMs) {
+      const { data, error } = await client.rpc("get_fx_calendar_events", {
+        p_from_ms: fromMs,
+        p_to_ms: toMs,
+        p_as_of_ms: asOfMs ?? null,
+      });
+      rpcError(error, "forex calendar read");
+      if (!Array.isArray(data)) throw new Error("Invalid forex calendar response");
+      return data as FxCalendarEventRow[];
+    },
+    async getFxCalendarStatus() {
+      const { data, error } = await client.rpc("get_fx_calendar_status");
+      rpcError(error, "forex calendar status read");
+      if (!Array.isArray(data)) throw new Error("Invalid forex calendar status response");
+      return data as FxCalendarSourceStatus[];
     },
     async stageDurableResult(input) {
       const { error } = await client.rpc("stage_durable_result", {

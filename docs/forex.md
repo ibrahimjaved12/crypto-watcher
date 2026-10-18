@@ -115,8 +115,8 @@ Code: `python/market_analysis/fx/costs.py` (exact `int`/`Fraction` maths; the Bi
 - Forex candle anchors differ from crypto's UTC anchors; this belongs to the calendar PR.
 - News blackout filter (v1 feature): modes `off` / `tag` / `suppress`. Default suppresses new
   entries inside the window and logs "would have fired" signals. Pure function
-  `blackout(instrument, ts)`; `calendar_event` table in UTC; calendar history is recorded from
-  day one.
+  `blackout(instrument, ts)`; calendar observations in UTC (`fx_calendar_observations`, see News
+  blackout below); calendar history is recorded from day one.
 
 ### Trading calendar
 
@@ -151,8 +151,27 @@ Code: `python/market_analysis/news_blackout.py` (level 1: scheduled timing only;
   quote currency; gold also to `gold`-tagged events and oil to `oil`-tagged events (any currency);
   DXY to its basket currencies (USD, EUR, JPY, GBP, CAD, SEK, CHF; weights not modelled). Crypto is
   never blacked out.
-- **Not done yet:** calendar source choice (FMP vs ForexFactory feed), the `calendar_event` table, the
-  ingestion job that records the schedule from day one, and interpreting surprises or reactions.
+- Storage (#401 part 1): the local operational database, `20261019130000_fx_calendar.sql`.
+  `fx_calendar_observations` is append-only and kept forever: one row per distinct
+  `(source, source_event_key, event_ts, impact, title)` with `first_seen_at`, the time this store
+  first saw it. A rescheduled, re-rated or re-titled event is a **new observation** (new row, new
+  `first_seen_at`), never an update, so the schedule can be replayed as it looked at any time.
+  `get_fx_calendar_events(from_ms, to_ms, as_of_ms)` (at most 120 days) returns exactly the
+  `CalendarEvent` shape, point in time by `first_seen_at <= as_of_ms`; `event_id` is
+  `source:key:ts_ms`, so a rescheduled event is its own event with its own `first_seen_ms`, and the
+  new time blacks out only from when it was known. A re-rating at the same time gets the suffix
+  `:o<observation_id>` (event ids must be unique). The superseded time is not retracted: it stays
+  blacked out (conservative). `python/market_analysis/fx/calendar_rows.py` maps the rows
+  (`calendar_events_from_rows`, strict: a malformed row raises).
+- Fail closed: if the feed silently stopped, the blackout would quietly switch itself off. Every
+  fetch is logged in `fx_calendar_fetches` (90 days; an ok fetch records `covered_to`, the end of the
+  range its response covers), and `calendar_coverage(status, now, needed_to)` refuses, in this order,
+  with `calendar_never_fetched` (no ok fetch), `calendar_stale` (latest ok older than 6 h,
+  **UNVERIFIED placeholder**) or `calendar_horizon_short` (its `covered_to` is before the needed
+  horizon). A later error does not hide a fresh ok fetch.
+- **Not done yet:** the live fetcher (#401 part 2: source choice, FMP vs ForexFactory feed, its
+  format and schedule; a headless child with operational credentials only, like the crypto
+  collector), and interpreting surprises or reactions.
 
 ### Bars and candles
 
