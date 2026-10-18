@@ -191,6 +191,20 @@ Code: `python/market_analysis/news_blackout.py` (level 1: scheduled timing only;
   relying on it.**
 - **Not done yet:** interpreting surprises or reactions.
 
+### Hosted forex quotes
+
+The Worker cannot read the local operational database, so forex quotes reach it the same way crypto
+quotes do (#323): the worker-host child `fx-quote-publisher` (#433;
+`src/lib/fx/fx-quote-publisher.server.ts`, off unless `FX_QUOTE_PUBLISHER_ENABLED=true`) reads the
+subscribed instruments, their completed 1m BID bars and the broker's symbol specs every minute and
+upserts one row per symbol into the hosted `fx_market_quotes` (`publish_fx_market_quotes`,
+forward-only by `last_bar_at`). Only users entitled to forex (`has_market('forex')`) can read the
+table; anon gets nothing. A row has the bid (the newest bar's close), the ask = bid +
+`spread_points` x the broker's point (computed on integer points), the spread, percent changes over
+5/15/60/240/1440 minutes (null when the reference bar is more than 60 minutes older than its target,
+e.g. across the weekend) and 24 h of 15-minute bid closes. A symbol without a spec is skipped and
+logged once.
+
 ### Bars and candles
 
 Contract specs (digits, point, tick, contract size, lots, currencies, swaps) live in the operational
