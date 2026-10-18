@@ -816,3 +816,22 @@ class FxForwardStageRequest(InputModel):
             if name in self.model_fields_set:
                 request[name] = getattr(self, name)
         return request
+
+
+class FxWalletStepRequest(InputModel):
+    """One per-user forex wallet step (#445). Like ``FxForwardStageRequest``: unknown top-level keys are
+    rejected here and every value is kept as sent (``Any``); ``fx.wallet_step.fx_wallet_step`` validates
+    strictly (real ints, exact strings)."""
+    state: Any
+    contracts: Any
+    events: Any
+    config: Any = None
+    symbols: Any = None
+    cost_model: Any = None
+
+    def step_input(self) -> dict:
+        request = {"state": self.state, "contracts": self.contracts, "events": self.events}
+        for name in ("config", "symbols", "cost_model"):
+            if name in self.model_fields_set:
+                request[name] = getattr(self, name)
+        return request

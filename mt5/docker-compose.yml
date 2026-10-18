@@ -1,7 +1,7 @@
 services:
   mt5:
     # Unpinned on purpose while we test; pin the tag if the spike (#393) passes.
-    image: gmag11/metatrader5_vnc
+    image: gmag11/metatrader5_vnc:2.1
     container_name: crypto-watcher-mt5
     restart: "no"
     volumes: ["./config:/config"]
