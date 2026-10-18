@@ -135,6 +135,19 @@ class StepTests(unittest.TestCase):
         capped = fx_wallet_step(body(events[:2], config={"max_positions": 1}))
         self.assertEqual([l.get("reason") for l in capped["ledger"]], [None, "cap:max_positions"])
 
+    def test_decimal_and_unreduced_exact_strings_are_normalized_for_the_wallet(self):
+        # The wallet parses canonical text only; the endpoint accepts any exact decimal or fraction string.
+        plain = fx_wallet_step(body([open_event(setup()), close_event("a", FILL + 400_000)]))
+        loose = [{**open_event(setup()), "quote_to_account": "1.00"},
+                 {**close_event("a", FILL + 400_000), "exit_fill": "108410000.0", "quote_to_account": "2/2"},
+                 {"type": "swap", "ms": T0 + MINUTE, "symbol": "EURUSD", "multiplier": 1, "quote_to_account": "1.0",
+                  "long_per_unit": "-0.000073", "short_per_unit": "0.000021"}]
+        request = body(loose)
+        request["symbols"][0]["quote_to_account"] = "1.000"
+        out = fx_wallet_step(request)
+        self.assertEqual([(l["type"], l["amount_e8"]) for l in out["ledger"] if l["type"] != "funding"], types(plain))
+        self.assertEqual([l["amount_e8"] for l in out["ledger"] if l["type"] == "funding"], [-36_500_000])  # 5000 x -0.000073
+
     def test_input_is_strict(self):
         def refused(request, pattern):
             with self.assertRaisesRegex(FxStageInputError, pattern):

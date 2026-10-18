@@ -234,7 +234,8 @@ and saved open setups. Defaults (proposals, to confirm):
   this stage and was not final in its `previous`; `swap` (`ms` = the rollover instant, the symbol's
   `long_per_unit` / `short_per_unit`, `multiplier` 1 or 3) for each rollover in `(from_ms, processed_to_ms]`
   that some non-`X` setup entered before and had not exited before, only when the symbol has `swap_rates`.
-  All values are the request's exact strings. A resolution `X` has no trustworthy price, so it emits no
+  The money values are the request's exact strings in canonical form (`-0.000073` becomes `-73/1000000`),
+  which is what the wallet parses; the wallet-step endpoint also normalizes any exact decimal or fraction string. A resolution `X` has no trustworthy price, so it emits no
   `open` and no `close` and stays excluded from stats (a position opened in an earlier stage that later
   turns `X` therefore cannot be closed by the wallet yet). `sequence` counts per symbol from 0 in the order
   `(ms, swap < close < open, setup_id)`, so a replay is byte-identical, and the stage id does not depend on
