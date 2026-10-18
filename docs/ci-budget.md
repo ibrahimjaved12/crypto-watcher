@@ -92,7 +92,7 @@ liquidation), wallet maths, the hidden-stretch guard, stale-data handling, candl
 that cannot fail, or recomputes its expectation with the code under test, is weak: give it an
 independent expected value or delete it.
 
-## Proposed replacement for the CI bullets in `CLAUDE.md` section 6 (proposal; CLAUDE.md is not edited here)
+## Proposed replacement for the CI bullets in `CLAUDE.md` section 7 (proposal; CLAUDE.md is not edited here)
 
 > - Python CI budget: `Tests` is one job (about 2 billed minutes per PR). New tests go to the `core`
 >   tier by default and should stay under ~10 s; the research cluster is the `study` tier in

@@ -11,6 +11,8 @@ same repo and name, a dashboard Crypto/Forex toggle, the backend computes both) 
 tracked in [#374](https://github.com/ibrahimjaved12/crypto-watcher/issues/374); design in
 [Forex](forex.md). The owner's intent lives in [`CLAUDE.md`](../CLAUDE.md) and is the source of
 truth; issues and docs are hypotheses, not requirements.
+Forex scope: [`CLAUDE.md`](../CLAUDE.md) section 6; the machine-side processes (forex children, runner
+access) are in [Worker host](worker-host.md).
 
 Crypto Watch identifies and evaluates **conditional futures-trade opportunities
 and profitability after costs**. The initial target is **Binance USDⓈ-M,
@@ -30,6 +32,8 @@ virtual-wallet trader, execution costs, accounting, and historical/live paper ru
 The [implementation and deployment roadmap](roadmap.md) links the ordered
 GitHub issues and their dependencies, distinguishing current, proposed, and
 conditional decisions.
+For the second market see [Forex](forex.md) (design, status, what is unverified) and, for what runs on the
+owner's machine, [Worker host](worker-host.md).
 
 <!-- TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days -->
 The alert path tries public futures REST data in order: **Binance USDⓈ-M,
