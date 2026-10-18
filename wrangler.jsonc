@@ -31,5 +31,23 @@
   },
   // Preserve the publishable key and other dashboard runtime variables.
   "keep_vars": true,
-  "preview_urls": true
+  "preview_urls": true,
+  "previews": {
+    "vars": {
+      "ALLOW_HOSTED_SUPABASE": "true",
+      "APP_PROFILE": "production",
+      "BINANCE_COLLECTOR_ENABLED": "false",
+      "MARKET_DEGRADED_FALLBACK_ENABLED": "true",
+      "MACHINE_ONLY_ENABLED": "false",
+      "OPERATIONAL_DB_ENABLED": "false",
+      "PYTHON_ANALYSIS_ENABLED": "false",
+      "RUNNER_GATEWAY_ENABLED": "true",
+      "RUNNER_JOBS_ENABLED": "true",
+      "SCHEDULED_MONITOR_ENABLED": "false",
+      "SUPABASE_URL": "https://xshzjhocpcenuumdrhdh.supabase.co"
+    },
+    "placement": {
+      "region": "aws:eu-central-1"
+    }
+  }
 }
