@@ -38,11 +38,15 @@ export const FX_BAR_PAGE_SIZE = 20_000;
 export const FX_WARMUP_CANDLES_240 = 402 + 1;
 export const FX_WARMUP_MINUTES = FX_WARMUP_CANDLES_240 * 240 + 1440;
 /**
- * Hard cap on bars sent per symbol (the request body to /v1/fx/forward/stage grows with it). It is BELOW
- * FX_WARMUP_MINUTES: ema_cross_50_200 on 240-minute candles still lacks history (60000 bars are 250
- * candles); every other strategy has enough (see the PR for #440).
+ * Hard cap on bars sent per symbol (the request body to /v1/fx/forward/stage grows with it: about 205 bytes
+ * per row, so about 20.5 MB per symbol and about 82 MB for four). It must never be below FX_WARMUP_MINUTES
+ * (98,160), or ema_cross_50_200 on 240-minute candles reports insufficient_history forever (#442 raised it
+ * from 60,000, which was only 250 candles). The invariant is enforced at module load below.
  */
-export const FX_MAX_BARS_PER_SYMBOL = 60_000;
+export const FX_MAX_BARS_PER_SYMBOL = 100_000;
+if (FX_MAX_BARS_PER_SYMBOL < FX_WARMUP_MINUTES) {
+  throw new Error(`FX_MAX_BARS_PER_SYMBOL (${FX_MAX_BARS_PER_SYMBOL}) is below FX_WARMUP_MINUTES (${FX_WARMUP_MINUTES})`);
+}
 export const FX_CALENDAR_SOURCE = "forexfactory";
 const LOG = "[forex-hourly]";
 const OK_HEALTH = new Set(["LIVE", "MARKET_CLOSED"]);

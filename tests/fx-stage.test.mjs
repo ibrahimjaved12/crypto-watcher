@@ -205,10 +205,10 @@ function pagedStore(count, { overlap = false } = {}) {
 }
 const times = (rows) => rows.map((row) => row.open_time_ms);
 
-test("warm-up constants: 403 candles of 240 minutes plus a day, capped at 60000 bars", () => {
+test("warm-up constants: 403 candles of 240 minutes plus a day, capped at 100000 bars", () => {
   assert.equal(fx.FX_WARMUP_CANDLES_240, 403);
   assert.equal(fx.FX_WARMUP_MINUTES, 403 * 240 + 1440);
-  assert.equal(fx.FX_MAX_BARS_PER_SYMBOL, 60_000);
+  assert.equal(fx.FX_MAX_BARS_PER_SYMBOL, 100_000);
   assert.equal(fx.FX_BAR_PAGE_SIZE, 20_000);
 });
 
@@ -263,20 +263,38 @@ test("duplicate open times are dropped, and a page of only duplicates ends the p
   assert.equal((await fx.readBarsPaged(stuck, VENUE, "fx:EURUSD", 60_000)).length, 20_000);
 });
 
-test("the cap holds at 60000 bars whatever is asked", async () => {
-  const { deps, calls } = pagedStore(100_000);
+test("the cap holds at 100000 bars whatever is asked", async () => {
+  const { deps, calls } = pagedStore(150_000);
   const bars = await fx.readBarsPaged(deps, VENUE, "fx:EURUSD", 500_000);
-  assert.equal(bars.length, 60_000);
-  assert.equal(calls.length, 3);
+  assert.equal(bars.length, 100_000);
+  assert.equal(calls.length, 5);
   assert.equal(bars.at(-1).open_time_ms, BOUNDARY);
   // The stage asks for the full warm-up and so is bounded by the cap too.
   const long = fakeDeps({ bars: { "fx:EURUSD": undefined } });
-  const all = Array.from({ length: 100_000 }, (_, i) => bar("fx:EURUSD", BOUNDARY - (99_999 - i) * MIN));
+  const all = Array.from({ length: 150_000 }, (_, i) => bar("fx:EURUSD", BOUNDARY - (149_999 - i) * MIN));
   long.deps.store.getFxBars = async (venue, instrumentId, options = {}) => {
     let rows = all;
     if (options.toMs !== undefined) rows = rows.filter((row) => row.open_time_ms < options.toMs);
     return rows.slice(-(options.limit ?? 1000));
   };
   assert.equal((await fx.runFxHourly(long.deps)).status, "ok");
-  assert.equal(long.calls.stage[0].symbols[0].bars.length, 60_000);
+  // FX_WARMUP_MINUTES (98,160) is below the cap, so the stage reads exactly the warm-up.
+  assert.equal(long.calls.stage[0].symbols[0].bars.length, fx.FX_WARMUP_MINUTES);
+});
+
+test("the cap is never below the derived warm-up (#442)", () => {
+  assert.ok(fx.FX_MAX_BARS_PER_SYMBOL >= fx.FX_WARMUP_MINUTES);
+  assert.ok(fx.FX_MAX_BARS_PER_SYMBOL >= fx.FX_WARMUP_CANDLES_240 * 240, "403 candles of 240 open minutes");
+});
+
+test("a symbol with exactly FX_WARMUP_MINUTES bars of history is read completely", async () => {
+  const exact = pagedStore(fx.FX_WARMUP_MINUTES);
+  const bars = await fx.readBarsPaged(exact.deps, VENUE, "fx:EURUSD", fx.FX_WARMUP_MINUTES);
+  assert.equal(bars.length, fx.FX_WARMUP_MINUTES);
+  assert.equal(bars[0].open_time_ms, BOUNDARY - (fx.FX_WARMUP_MINUTES - 1) * MIN);
+  assert.equal(bars.at(-1).open_time_ms, BOUNDARY);
+  assert.equal(exact.calls.length, 5, "four full pages and a short one of 18160");
+  // Asking for the cap on the same history returns the same bars, not fewer.
+  const capped = pagedStore(fx.FX_WARMUP_MINUTES);
+  assert.equal((await fx.readBarsPaged(capped.deps, VENUE, "fx:EURUSD", fx.FX_MAX_BARS_PER_SYMBOL)).length, fx.FX_WARMUP_MINUTES);
 });

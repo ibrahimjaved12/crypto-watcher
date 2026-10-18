@@ -205,6 +205,32 @@ class WarmupTests(unittest.TestCase):
         self.assertIsNone(self.reason(4))  # about 120 candles
 
 
+EMA200 = "ema_cross_50_200:240"
+
+
+class Warmup200Tests(unittest.TestCase):
+    """#442: ema_cross_50_200 on 240-minute candles needs 403 candles (96,720 open minutes, about 13.4 FX weeks).
+    14 weeks (about 420 candles) are enough, 10 weeks (about 300) are not. Rows are built once by arithmetic
+    (14 weeks x 7,200 open minutes = 100,800 rows, the size of the runner's 100,000-bar cap) and sliced."""
+
+    BOUNDARY = utc("2026-08-28T20:00")  # Friday of the last summer week; the 14 weeks start Sunday 2026-05-24 21:00 UTC
+    ROWS = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ROWS = [row for row in weekly_rows(utc("2026-05-24T21:00"), 14) if row["open_time_ms"] <= cls.BOUNDARY]
+
+    def reason(self, weeks):
+        rows = self.ROWS[-weeks * 7200:]
+        request = {"boundary_ms": self.BOUNDARY, "from_ms": self.BOUNDARY - HOUR, "strategy_ids": [EMA200],
+                   "symbols": [symbol(rows)]}
+        return fx_market_stage(request)["stage"]["payload"]["reasons"]["EURUSD"].get(EMA200)
+
+    def test_ten_weeks_are_not_enough_and_fourteen_weeks_are(self):
+        self.assertEqual(self.reason(10), "insufficient_history")
+        self.assertIsNone(self.reason(14))
+
+
 class EndpointTests(unittest.TestCase):
     def post(self, body, token=TOKEN):
         app = create_app(TOKEN)
