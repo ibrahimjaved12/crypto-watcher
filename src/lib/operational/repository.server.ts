@@ -10,6 +10,11 @@ import type {
   CollectorStorageDiagnostics,
   ForwardDailyBar,
   ForwardMinuteRow,
+  FxBar,
+  FxBarCoverage,
+  FxCollectorHealthRow,
+  FxGatewayRow,
+  FxSubscription,
   OperationalCheckpoint,
   OperationalMonitorRun,
   OperationalStore,
@@ -151,6 +156,34 @@ const disabledStore: OperationalStore = {
   async listMarketMovementEvents() {
     return [];
   },
+  async recordFxBars() {
+    throw new Error("Operational forex collector ownership is disabled");
+  },
+  async getFxBars() {
+    return [];
+  },
+  async recordFxCollectorHealth() {
+    throw new Error("Operational forex collector ownership is disabled");
+  },
+  async getFxCollectorHealth() {
+    return [];
+  },
+  async assignFxSubscriptions() {
+    throw new Error("Operational forex collector subscriptions are disabled");
+  },
+  async getFxSubscriptions() {
+    return [];
+  },
+  async claimFxCollectorLease() {
+    return false;
+  },
+  async renewFxCollectorLease() {
+    return false;
+  },
+  async releaseFxCollectorLease() {},
+  async getFxBarCoverage() {
+    return [];
+  },
 };
 
 function nativeSymbol(source: string, symbol: string) {
@@ -204,8 +237,10 @@ export function createOperationalStore(
   client: RpcClient,
   options: {
     candleRetentionDays: number;
-    /** 1m collector candle retention (#239 forward engine); default 62, enforced 31..90 in SQL. */
+    /** 1m collector candle retention (#239 forward engine); default 140, enforced 31..200 in SQL. */
     minuteCandleRetentionDays?: number;
+    /** Forex 1m bar retention (#395); default 140, enforced 31..200 in SQL. */
+    fxBarRetentionDays?: number;
     monitorRunRetentionDays: number;
     outboxMaxAttempts: number;
   },
@@ -564,6 +599,107 @@ export function createOperationalStore(
         p_instance_id: instanceId,
       });
       rpcError(error, "collector lease release");
+    },
+    async recordFxBars(bars: FxBar[]) {
+      if (bars.length === 0) return [];
+      const { data, error } = await client.rpc("record_fx_bars", {
+        p_rows: bars.map((bar) => ({
+          venue: bar.venue,
+          instrument_id: bar.instrumentId,
+          symbol: bar.symbol,
+          native_symbol: bar.nativeSymbol,
+          open_time: new Date(bar.openTime).toISOString(),
+          open: bar.open,
+          high: bar.high,
+          low: bar.low,
+          close: bar.close,
+          spread_points: bar.spreadPoints,
+          tick_volume: bar.tickVolume,
+          transport: bar.transport,
+          received_at: new Date(bar.receivedAt).toISOString(),
+        })),
+        p_retention_days: options.fxBarRetentionDays ?? 140,
+      });
+      rpcError(error, "forex bar write");
+      return ((data ?? []) as Array<{ bar_identity: string }>).map((row) => row.bar_identity);
+    },
+    async getFxBars(venue, instrumentId, { fromMs, limit = 1000 } = {}) {
+      const { data, error } = await client.rpc("get_fx_bars", {
+        p_venue: venue,
+        p_instrument_id: instrumentId,
+        p_from_ms: fromMs ?? null,
+        p_limit: limit,
+      });
+      rpcError(error, "forex bar read");
+      if (!Array.isArray(data)) throw new Error("Invalid forex bar response");
+      return data as FxGatewayRow[];
+    },
+    async recordFxCollectorHealth(rows) {
+      if (rows.length === 0) return;
+      const { error } = await client.rpc("record_fx_collector_health", {
+        p_rows: rows.map((row) => ({
+          venue: row.venue,
+          instrument_id: row.instrumentId,
+          status: row.status,
+          last_bar_open_time:
+            row.lastBarOpenTime === null ? null : new Date(row.lastBarOpenTime).toISOString(),
+          lag_ms: row.lagMs,
+          error_message: row.errorMessage,
+        })),
+      });
+      rpcError(error, "forex collector health write");
+    },
+    async getFxCollectorHealth() {
+      const { data, error } = await client.rpc("get_fx_collector_health");
+      rpcError(error, "forex collector health read");
+      return Array.isArray(data) ? (data as FxCollectorHealthRow[]) : [];
+    },
+    async assignFxSubscriptions(instruments) {
+      const { error } = await client.rpc("assign_fx_subscriptions", {
+        p_instruments: instruments.map((item) => ({
+          venue: item.venue,
+          instrument_id: item.instrumentId,
+          native_symbol: item.nativeSymbol,
+        })),
+      });
+      rpcError(error, "forex subscription assign");
+    },
+    async getFxSubscriptions() {
+      const { data, error } = await client.rpc("get_fx_subscriptions");
+      rpcError(error, "forex subscription read");
+      if (!Array.isArray(data)) return [];
+      return (data as Array<Record<string, unknown>>).map((item) => ({
+        venue: String(item["venue"]),
+        instrumentId: String(item["instrument_id"]),
+        nativeSymbol: String(item["native_symbol"]),
+      }) satisfies FxSubscription);
+    },
+    async claimFxCollectorLease(instanceId, leaseSeconds = 60) {
+      const { data, error } = await client.rpc("claim_fx_collector_lease", {
+        p_instance_id: instanceId,
+        p_lease_seconds: leaseSeconds,
+      });
+      rpcError(error, "forex collector lease claim");
+      return data === true;
+    },
+    async renewFxCollectorLease(instanceId, leaseSeconds = 60) {
+      const { data, error } = await client.rpc("renew_fx_collector_lease", {
+        p_instance_id: instanceId,
+        p_lease_seconds: leaseSeconds,
+      });
+      rpcError(error, "forex collector lease renewal");
+      return data === true;
+    },
+    async releaseFxCollectorLease(instanceId) {
+      const { error } = await client.rpc("release_fx_collector_lease", {
+        p_instance_id: instanceId,
+      });
+      rpcError(error, "forex collector lease release");
+    },
+    async getFxBarCoverage() {
+      const { data, error } = await client.rpc("get_fx_bar_coverage");
+      rpcError(error, "forex bar coverage read");
+      return Array.isArray(data) ? (data as FxBarCoverage[]) : [];
     },
     async stageDurableResult(input) {
       const { error } = await client.rpc("stage_durable_result", {

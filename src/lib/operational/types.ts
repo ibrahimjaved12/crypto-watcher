@@ -106,6 +106,83 @@ export type CollectorStorageDiagnostics = {
   newest_candle_at: string | null;
 };
 
+/** Completed 1-minute forex BID bar from the MT5 gateway (#395); the row contract is fx/bars.py. */
+export type FxBar = {
+  venue: string;
+  instrumentId: string;
+  symbol: string;
+  nativeSymbol: string;
+  /** UTC minute boundary (ms); the bar covers [openTime, openTime + 1 minute). */
+  openTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  /** ask - bid in MT5 points (SYMBOL_POINT = 10**-digits). */
+  spreadPoints: number;
+  tickVolume: number;
+  transport: "poll" | "history" | "stream";
+  receivedAt: number;
+};
+
+/** One stored bar exactly as get_fx_bars returns it: the gateway row shape fx_bars_from_rows accepts. */
+export type FxGatewayRow = {
+  time_basis: "utc";
+  venue: string;
+  instrument_id: string;
+  symbol: string;
+  native_symbol: string;
+  transport: "poll" | "history" | "stream";
+  open_time_ms: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  spread_points: number;
+  tick_volume: number;
+  received_at_ms: number;
+};
+
+/** A closed market is MARKET_CLOSED, never STALE; LOGIN_FAILED covers an expired demo account or a bad password. */
+export type FxCollectorHealthStatus =
+  | "LIVE" | "RECOVERING" | "STALE" | "UNAVAILABLE" | "MARKET_CLOSED" | "LOGIN_FAILED";
+
+export type FxCollectorHealthRow = {
+  venue: string;
+  instrument_id: string;
+  status: FxCollectorHealthStatus;
+  last_bar_open_time_ms: number | null;
+  lag_ms: number | null;
+  error_message: string | null;
+  /** Bar conflicts in the last 24 h. Reported only; never degrades `status`. */
+  conflict_count_24h: number;
+  last_conflict_at_ms: number | null;
+  updated_at_ms: number;
+};
+
+export type FxCollectorHealthInput = {
+  venue: string;
+  instrumentId: string;
+  status: FxCollectorHealthStatus;
+  lastBarOpenTime: number | null;
+  lagMs: number | null;
+  errorMessage: string | null;
+};
+
+export type FxSubscription = {
+  venue: string;
+  instrumentId: string;
+  nativeSymbol: string;
+};
+
+export type FxBarCoverage = {
+  venue: string;
+  instrument_id: string;
+  bar_count: number;
+  oldest_open_time_ms: number;
+  newest_open_time_ms: number;
+};
+
 export type OperationalCheckpoint = {
   userId: string;
   instrumentId: string;
@@ -286,4 +363,21 @@ export interface OperationalStore {
     events: readonly PersistedMarketMovementEvent[],
   ): Promise<MarketEpisodePersistenceStatus[]>;
   listMarketMovementEvents(episodeId: string): Promise<PersistedMarketMovementEvent[]>;
+  /** Completed forex minutes (#395). Stored bars are immutable; returns `venue|instrument_id|open_ms` of new bars. */
+  recordFxBars(bars: FxBar[]): Promise<string[]>;
+  /** Newest `limit` bars (default 1000, max 20000) with open time >= `fromMs`, oldest first, as stored. */
+  getFxBars(
+    venue: string,
+    instrumentId: string,
+    options?: { fromMs?: number; limit?: number },
+  ): Promise<FxGatewayRow[]>;
+  recordFxCollectorHealth(rows: FxCollectorHealthInput[]): Promise<void>;
+  getFxCollectorHealth(): Promise<FxCollectorHealthRow[]>;
+  assignFxSubscriptions(instruments: FxSubscription[]): Promise<void>;
+  getFxSubscriptions(): Promise<FxSubscription[]>;
+  claimFxCollectorLease(instanceId: string, leaseSeconds?: number): Promise<boolean>;
+  renewFxCollectorLease(instanceId: string, leaseSeconds?: number): Promise<boolean>;
+  releaseFxCollectorLease(instanceId: string): Promise<void>;
+  /** Stored range per series; what is missing needs the trading calendar and is not decided here. */
+  getFxBarCoverage(): Promise<FxBarCoverage[]>;
 }

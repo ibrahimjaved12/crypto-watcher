@@ -823,3 +823,59 @@ test("settle reconciliation appends a later REST copy without changing provision
     await db.exec("ROLLBACK");
   }
 });
+
+test("forex repository methods map camel-case bars and options onto the fx RPCs", async () => {
+  const { createOperationalStore } = await import(
+    await moduleUrl("../src/lib/operational/repository.server.ts", repositoryStubs));
+  const calls = [];
+  const gatewayRow = { time_basis: "utc", venue: "mt5-demo", instrument_id: "fx:EURUSD", symbol: "EURUSD",
+    native_symbol: "EURUSD", transport: "poll", open_time_ms: 1_800_000_000_000, open: 1.0825, high: 1.0831,
+    low: 1.0822, close: 1.0829, spread_points: 12, tick_volume: 57, received_at_ms: 1_800_000_061_500 };
+  const client = {
+    async rpc(name, args) {
+      calls.push([name, args]);
+      const data = { record_fx_bars: [{ bar_identity: "mt5-demo|fx:EURUSD|1800000000000" }],
+        get_fx_bars: [gatewayRow], claim_fx_collector_lease: true,
+        get_fx_subscriptions: [{ venue: "mt5-demo", instrument_id: "fx:EURUSD", native_symbol: "EURUSD" }] }[name];
+      return { data: data ?? null, error: null };
+    },
+  };
+  const store = createOperationalStore(client, {
+    candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10, fxBarRetentionDays: 90,
+  });
+  assert.deepEqual(await store.recordFxBars([{ venue: "mt5-demo", instrumentId: "fx:EURUSD", symbol: "EURUSD",
+    nativeSymbol: "EURUSD", openTime: 1_800_000_000_000, open: 1.0825, high: 1.0831, low: 1.0822, close: 1.0829,
+    spreadPoints: 12, tickVolume: 57, transport: "poll", receivedAt: 1_800_000_061_500 }]),
+  ["mt5-demo|fx:EURUSD|1800000000000"]);
+  assert.deepEqual(calls[0], ["record_fx_bars", { p_rows: [{ venue: "mt5-demo", instrument_id: "fx:EURUSD",
+    symbol: "EURUSD", native_symbol: "EURUSD", open_time: "2027-01-15T08:00:00.000Z", open: 1.0825, high: 1.0831,
+    low: 1.0822, close: 1.0829, spread_points: 12, tick_volume: 57, transport: "poll",
+    received_at: "2027-01-15T08:01:01.500Z" }], p_retention_days: 90 }]);
+  assert.deepEqual(await store.recordFxBars([]), []);
+  assert.equal(calls.length, 1, "an empty batch makes no call");
+
+  assert.deepEqual(await store.getFxBars("mt5-demo", "fx:EURUSD"), [gatewayRow]);
+  assert.deepEqual(calls[1][1], { p_venue: "mt5-demo", p_instrument_id: "fx:EURUSD", p_from_ms: null, p_limit: 1000 });
+  await store.getFxBars("mt5-demo", "fx:EURUSD", { fromMs: 1_800_000_000_000, limit: 5000 });
+  assert.deepEqual(calls[2][1], { p_venue: "mt5-demo", p_instrument_id: "fx:EURUSD",
+    p_from_ms: 1_800_000_000_000, p_limit: 5000 });
+
+  await store.recordFxCollectorHealth([{ venue: "mt5-demo", instrumentId: "fx:EURUSD", status: "MARKET_CLOSED",
+    lastBarOpenTime: 1_800_000_000_000, lagMs: null, errorMessage: null }]);
+  assert.deepEqual(calls[3], ["record_fx_collector_health", { p_rows: [{ venue: "mt5-demo",
+    instrument_id: "fx:EURUSD", status: "MARKET_CLOSED", last_bar_open_time: "2027-01-15T08:00:00.000Z",
+    lag_ms: null, error_message: null }] }]);
+  await store.assignFxSubscriptions([{ venue: "mt5-demo", instrumentId: "fx:EURUSD", nativeSymbol: "EURUSD" }]);
+  assert.deepEqual(calls[4], ["assign_fx_subscriptions", { p_instruments: [{ venue: "mt5-demo",
+    instrument_id: "fx:EURUSD", native_symbol: "EURUSD" }] }]);
+  assert.deepEqual(await store.getFxSubscriptions(),
+    [{ venue: "mt5-demo", instrumentId: "fx:EURUSD", nativeSymbol: "EURUSD" }]);
+  assert.equal(await store.claimFxCollectorLease(worker), true);
+  assert.deepEqual(calls.at(-1), ["claim_fx_collector_lease", { p_instance_id: worker, p_lease_seconds: 60 }]);
+  assert.equal(await store.renewFxCollectorLease(worker, 90), false);
+  assert.deepEqual(calls.at(-1), ["renew_fx_collector_lease", { p_instance_id: worker, p_lease_seconds: 90 }]);
+  await store.releaseFxCollectorLease(worker);
+  assert.deepEqual(calls.at(-1), ["release_fx_collector_lease", { p_instance_id: worker }]);
+  assert.deepEqual(await store.getFxBarCoverage(), []);
+  assert.deepEqual(await store.getFxCollectorHealth(), []);
+});

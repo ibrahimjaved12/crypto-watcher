@@ -6,6 +6,7 @@ export type OperationalDbConfig =
       serviceRoleKey: string;
       candleRetentionDays: number;
       minuteCandleRetentionDays: number;
+      fxBarRetentionDays: number;
       monitorRunRetentionDays: number;
       outboxMaxAttempts: number;
     };
@@ -88,6 +89,9 @@ export function operationalDbConfig(
       31,
       200,
     ),
+    // Forex 1m bars (#395), enforced by record_fx_bars (31..200, default 140); the newest 2000
+    // bars of each series are kept regardless.
+    fxBarRetentionDays: boundedInteger(env["OPERATIONAL_FX_BAR_RETENTION_DAYS"], 140, 31, 200),
     monitorRunRetentionDays: boundedInteger(
       env["OPERATIONAL_MONITOR_RUN_RETENTION_DAYS"],
       30,
