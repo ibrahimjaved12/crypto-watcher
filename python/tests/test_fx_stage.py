@@ -13,7 +13,11 @@ import unittest
 import httpx
 
 from market_analysis.api import create_app
-from market_analysis.fx.stage import FxStageInputError, fx_market_stage
+from fractions import Fraction
+
+from market_analysis.fx.costs import FxContract
+from market_analysis.fx.stage import FxStageInputError, fx_market_stage, stage_id
+from market_analysis.fx.wallet import FxWalletConfig, initial_state, step
 from market_analysis.trading_calendar import FX_WEEK
 
 MINUTE = 60_000
@@ -95,7 +99,9 @@ class StageTests(unittest.TestCase):
         self.assertEqual(set(stage), {"id", "boundary_ms", "versions", "params_hash", "payload", "freshness"})
         self.assertEqual((stage["boundary_ms"], stage["params_hash"]), (BOUNDARY, out["params_hash"]))
         self.assertEqual(out["processed_to_ms"], BOUNDARY)
-        self.assertEqual(out["events"], [])
+        # Wallet events (#444): one open per new tradeable setup, nothing else while they are unresolved.
+        self.assertEqual([(e["type"], e["ms"]) for e in out["events"]], [("open", setup["entry_ms"])] * 2)
+        self.assertEqual(out["stage"]["payload"]["counts"]["EURUSD"]["events"], 2)
 
     def test_a_friday_close_signal_is_suppressed_market_closed_at_entry(self):
         jump = utc("2026-10-16T20:45")
@@ -229,6 +235,128 @@ class Warmup200Tests(unittest.TestCase):
     def test_ten_weeks_are_not_enough_and_fourteen_weeks_are(self):
         self.assertEqual(self.reason(10), "insufficient_history")
         self.assertIsNone(self.reason(14))
+
+
+def with_spike(bars, at_ms, high=1.2):
+    """The same bars with one minute's bid high far above every target (flat open, so only the target is hit)."""
+    return [{**row, "high": high} if row["open_time_ms"] == at_ms else row for row in bars]
+
+
+def event_view(out):
+    return [(e["type"], e["ms"], e["sequence"]) for e in out["events"]]
+
+
+class EventTests(unittest.TestCase):
+    """#444: wallet events for the per-user wallet, with the shapes ``wallet.step`` reads."""
+
+    SPIKE = SIGNAL + 20 * MINUTE
+
+    def resolved(self):
+        return fx_market_stage(request(bars=with_spike(rows(START, BOUNDARY, JUMP), self.SPIKE)))
+
+    def test_open_events_carry_the_setup_the_quote_and_the_commit_columns(self):
+        out = fx_market_stage(request())
+        by_id = {s["setup_id"]: s for s in out["setups"]}
+        opens = out["events"]
+        self.assertEqual([e["setup"]["setup_id"] for e in opens], sorted(by_id))  # ordered by setup_id
+        for index, event in enumerate(opens):
+            self.assertEqual(set(event), {"type", "ms", "setup", "quote_to_account", "symbol", "sequence",
+                                          "stage_run_id"})
+            self.assertEqual((event["type"], event["symbol"], event["sequence"], event["quote_to_account"]),
+                             ("open", "EURUSD", index, "1"))
+            self.assertEqual(event["stage_run_id"], out["stage"]["id"])
+            self.assertEqual(event["setup"], by_id[event["setup"]["setup_id"]]["payload"])
+            self.assertEqual((event["ms"], event["setup"]["status"]), (event["setup"]["entry_ms"], "T"))
+        self.assertEqual([e["type"] for e in out["events"]], ["open", "open"])  # unresolved: no close, no swap
+
+    def test_a_setup_resolved_final_in_the_same_request_gives_open_then_close_with_exit_fill(self):
+        out = self.resolved()
+        self.assertEqual([o["status"] for o in out["outcomes"]], ["T", "T"])
+        self.assertEqual([e["type"] for e in out["events"]], ["open", "open", "close", "close"])
+        self.assertEqual([e["sequence"] for e in out["events"]], [0, 1, 2, 3])
+        payloads = {o["setup_id"]: o["payload"] for o in out["outcomes"]}
+        for event in out["events"][2:]:
+            self.assertEqual(set(event), {"type", "ms", "setup_id", "quote_to_account", "exit_fill", "outcome",
+                                          "symbol", "sequence", "stage_run_id"})
+            self.assertEqual((event["ms"], event["outcome"]), (self.SPIKE, "T"))
+            self.assertEqual(event["exit_fill"], payloads[event["setup_id"]]["exit_fill"])
+            self.assertIsInstance(event["exit_fill"], str)
+        self.assertEqual(out["stage"]["payload"]["counts"]["EURUSD"]["events"], 4)
+
+    def test_a_saved_setup_closes_once_and_never_opens_again(self):
+        first = fx_market_stage(request())
+        saved = [{"setup": setup["payload"], "previous": None} for setup in first["setups"]]
+        later = utc("2026-10-13T08:00")
+        bars = with_spike(rows(START, later, JUMP), self.SPIKE)
+        out = fx_market_stage(request(bars=bars, boundary=later, from_ms=BOUNDARY, open_setups=saved))
+        self.assertEqual([(e["type"], e["ms"]) for e in out["events"]], [("close", self.SPIKE)] * 2)
+        # A saved setup whose previous resolution was already final emits nothing: its close went out before.
+        done = [{"setup": setup["payload"], "previous": {"setup_id": setup["setup_id"], "status": "S"}}
+                for setup in first["setups"]]
+        again = fx_market_stage(request(bars=bars, boundary=later, from_ms=BOUNDARY, open_setups=done))
+        self.assertEqual(again["events"], [])
+
+    def test_an_x_outcome_emits_no_events(self):
+        gap = fx_market_stage(request(bars=rows(START, BOUNDARY, JUMP, drop={SIGNAL + 15 * MINUTE})))
+        self.assertEqual({o["status"] for o in gap["outcomes"]}, {"X"})
+        self.assertEqual(gap["events"], [])
+        first = fx_market_stage(request())
+        saved = [{"setup": setup["payload"], "previous": None} for setup in first["setups"]]
+        later = utc("2026-10-13T08:00")
+        out = fx_market_stage(request(bars=rows(START, later, JUMP, drop={SIGNAL}), boundary=later,
+                                      from_ms=BOUNDARY, open_setups=saved))
+        self.assertEqual({o["status"] for o in out["outcomes"]}, {"X"})
+        self.assertEqual(out["events"], [])
+
+    def swap_request(self, day, with_rates=True, jump_hour="20:00"):
+        jump, boundary = utc(f"{day}T{jump_hour}"), utc(f"{day}T21:00")
+        req = request(bars=rows(START, boundary, jump), boundary=boundary, from_ms=boundary - HOUR)
+        if not with_rates:
+            del req["symbols"][0]["swap_rates"]
+        return req, boundary
+
+    def test_a_rollover_inside_the_window_gives_a_swap_with_its_multiplier_only_with_rates(self):
+        # Tuesday: the setups open at 20:15 and are still open at the 17:00 New York rollover (21:00 UTC).
+        req, rollover = self.swap_request("2026-10-13")
+        out = fx_market_stage(req)
+        self.assertEqual([e["type"] for e in out["events"]], ["open", "open", "swap"])
+        swap = out["events"][2]
+        self.assertEqual((swap["ms"], swap["multiplier"], swap["symbol"], swap["sequence"]), (rollover, 1, "EURUSD", 2))
+        self.assertEqual((swap["long_per_unit"], swap["short_per_unit"], swap["quote_to_account"]),
+                         ("-0.000073", "0.000021", "1"))
+        # Wednesday is the triple-swap day.
+        wed, rollover = self.swap_request("2026-10-14")
+        triple = fx_market_stage(wed)["events"][-1]
+        self.assertEqual((triple["type"], triple["ms"], triple["multiplier"]), ("swap", rollover, 3))
+        # No swap rates: no swap event (the opens stay).
+        bare, _ = self.swap_request("2026-10-13", with_rates=False)
+        self.assertEqual([e["type"] for e in fx_market_stage(bare)["events"]], ["open", "open"])
+        # No position can cross the rollover (the cross happened hours earlier): nothing.
+        quiet, _ = self.swap_request("2026-10-13", jump_hour="06:00")
+        self.assertEqual(fx_market_stage(quiet)["events"], [])
+
+    def test_a_replay_is_byte_identical_and_the_stage_id_ignores_events(self):
+        def run():
+            return fx_market_stage(request(bars=with_spike(rows(START, BOUNDARY, JUMP), self.SPIKE)))
+        first = json.dumps(run(), sort_keys=True)
+        self.assertEqual(first, json.dumps(run(), sort_keys=True))
+        out = json.loads(first)
+        self.assertEqual(out["stage"]["id"], stage_id(BOUNDARY, out["params_hash"], ["EURUSD"]))
+        # The same stage without the spike has no closes but the very same id.
+        self.assertEqual(fx_market_stage(request())["stage"]["id"], out["stage"]["id"])
+
+    def test_the_events_feed_the_wallet_step(self):
+        contract = FxContract(Fraction(100000), Fraction("0.00001"), Fraction("0.01"), Fraction("0.01"), "EUR", "USD")
+        cfg = FxWalletConfig(contracts=(("EURUSD", contract),))
+        swap_req, _ = self.swap_request("2026-10-13")
+        for out in (self.resolved(), fx_market_stage(swap_req)):
+            state, ledger = step(initial_state(cfg), out["events"], cfg)
+            self.assertTrue(ledger)
+            self.assertEqual(cfg.initial_balance_e8 + sum(line["amount_e8"] for line in ledger), state["balance_e8"])
+        # With the closes in the same batch every setup is finished (traded or rejected with a reason).
+        state, ledger = step(initial_state(cfg), self.resolved()["events"], cfg)
+        self.assertEqual(sorted(state["done"]), sorted(e["setup"]["setup_id"] for e in self.resolved()["events"][:2]))
+        self.assertEqual(state["positions"], {})
 
 
 class EndpointTests(unittest.TestCase):
