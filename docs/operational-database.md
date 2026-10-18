@@ -259,6 +259,43 @@ market-wide pattern chart is found by any account's id), `record_alert_chart_cap
 failure counts in `get_alert_chart_diagnostics`. The pending expiry is an application setting passed to
 `claim_alert_chart` (default 7 days).
 
+## Forex bars (#395, part of #374)
+
+`20261019120000_fx_bars.sql` adds the forex collector's tables next to the crypto collector ones
+(no crypto object is changed). The forex collector (#394) polls the MT5 gateway and writes
+**completed** 1-minute BID bars only (never the forming minute); the forex runner (#397) reads them.
+
+- `fx_recent_bars`: one row per `(venue, instrument_id, open_time)`, `instrument_id` like
+  `fx:EURUSD` or `fut:...`, UTC minute open time (the close is always `open_time + 1 minute`), BID
+  OHLC, `spread_points` (ask - bid in MT5 points, `SYMBOL_POINT = 10**-digits`), `tick_volume`,
+  `transport` (`poll`, `history`, `stream`) and `received_at`. Forex has no real volume, no quote
+  volume and no source event time. Stored bars are immutable.
+- `fx_bar_conflicts`: append-only evidence (UPDATE/DELETE fail with SQLSTATE `55000`). An offer for
+  a stored minute with other values is never written to `fx_recent_bars`, never fails its batch and
+  is recorded once per distinct offer (`fxbar-v1` hash, `fx_bar_hash`). Nothing reconciles forex
+  bars yet.
+- `fx_collector_health`: one row per `(venue, instrument_id)`. Status is `LIVE`, `RECOVERING`,
+  `STALE`, `UNAVAILABLE`, `MARKET_CLOSED` or `LOGIN_FAILED`. A closed market is `MARKET_CLOSED`,
+  never `STALE`; `LOGIN_FAILED` is how an expired demo account or a wrong password shows. Conflicts
+  only feed `conflict_count_24h`/`last_conflict_at`.
+- `fx_subscriptions` (`fx-shared`, an array of `{venue, instrument_id, native_symbol}`; instruments
+  no longer assigned get `UNAVAILABLE` health) and `fx_collector_leases` (`fx-mt5-gateway`, same
+  lease semantics as the crypto collector).
+
+The row contract is `python/market_analysis/fx/bars.py` (`fx_bars_from_rows`, `_check_row`).
+`get_fx_bars(venue, instrument_id, from_ms, limit)` returns the newest `limit` bars (1-20000,
+default 1000) from `from_ms`, oldest first, each exactly in the gateway row shape that
+`fx_bars_from_rows` consumes (`time_basis: "utc"`, `open_time_ms`, prices as JSON numbers,
+`spread_points`, `tick_volume`, `transport`, `received_at_ms`). `get_fx_bar_coverage()` reports the
+count and the oldest/newest open time per series; it does not decide what is missing, which needs
+the trading calendar (a missing minute while the market is closed is expected).
+
+Retention is `OPERATIONAL_FX_BAR_RETENTION_DAYS`, **140 days** by default (allowed 31-200, enforced
+by `record_fx_bars` and `operationalDbConfig`): a bar whose minute ended before the cutoff is deleted
+unless it is among the newest 2000 bars of its series, so a long closure or outage never empties
+the runner's warm-up. All tables and functions are service-role only. Apply it with
+`npx supabase migration up --local --workdir operational-db`; it is additive and needs no reset.
+
 ## Cutover and rollback
 
 Deploy the operational baseline and credentials first, then start the collector worker and switch
