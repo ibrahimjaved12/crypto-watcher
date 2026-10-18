@@ -30,6 +30,7 @@ gateway and jobs runner, the movement-state publisher, alert charts and the moni
 | `monitor-scheduler` | `node scripts/monitor-scheduler.mjs --mode production` (`npm run monitor-scheduler`; only when the hosted credentials are set, `OPERATIONAL_DB_ENABLED=true` and `MONITOR_SCHEDULER_ENABLED` is not `false`; non-essential; starts after both Python `/health` endpoints answer because TA calls Python; runs the scheduled monitoring pass (movement alerts and completed-candle TA for every watching user) at each interval boundary plus 8 s, default every 60 s (`MONITOR_SCHEDULER_INTERVAL_SECONDS`, 30–3600; intervals over 60 s round up to whole minutes); passes never overlap; logs only a failed pass or a pass that saved alerts or TA; finishes the current pass on SIGTERM) |
 | `fx-calendar` | `node scripts/fx-calendar-fetcher.mjs --mode production` (`npm run fx:calendar`; only when `FX_CALENDAR_ENABLED=true` and `OPERATIONAL_DB_ENABLED=true`; non-essential; starts after both Python `/health` endpoints answer because it parses through `/v1/fx/calendar/parse`; keeps the forex economic calendar fresh, see [Economic calendar](#economic-calendar-fx-calendar)) |
 | `fx-quote-publisher` | `node scripts/fx-quote-publisher.mjs --mode production` (`npm run fx:quote`; only when `FX_QUOTE_PUBLISHER_ENABLED=true`, `OPERATIONAL_DB_ENABLED=true` and the hosted credentials are set; non-essential; default off until the forex collector runs; every minute after a 3 s settle it publishes one batch of forex quotes from the operational bars and symbol specs to the hosted `fx_market_quotes`, see [forex](forex.md#hosted-forex-quotes)) |
+| `forex-hourly` | `node scripts/forex-hourly.mjs --mode production` (`npm run forex:hourly`; only when `FX_HOURLY_ENABLED=true` (default off; keep it off until the MT5 forex collector writes bars) and `OPERATIONAL_DB_ENABLED=true`; a forex child; starts after both Python `/health` endpoints answer; once per completed hour, 3 minutes after it, evaluates one forex market stage through `/v1/fx/forward/stage` and commits it with `commit_fx_stage`; refuses the stage (`skipped_stale`, nothing committed) on a missing symbol spec, stale collector health or calendar coverage short of the boundary plus 16 hours; see [forex](forex.md#hourly-market-stage-post-v1fxforwardstage-397)) |
 
 The jobs are launched with `node` directly rather than through `npm`, so the supervisor owns the real
 process (no wrapper to signal through). `--workers 1` is explicit because uvicorn otherwise takes its
@@ -145,8 +146,8 @@ Prerequisites: Node 22.12+, `npm ci`, and the Python environment
 
 ### Forex crash domain (#396)
 
-`fx-calendar` and `fx-quote-publisher` are forex children (`FOREX_CHILDREN` in `src/lib/worker-host.ts`;
-`forex-collector` and `forex-hourly` are reserved for #394 and #397). They never keep the host alive and
+`fx-calendar`, `fx-quote-publisher` and `forex-hourly` are forex children (`FOREX_CHILDREN` in
+`src/lib/worker-host.ts`; `forex-collector` is reserved for #394). They never keep the host alive and
 never stop it: the "every child down for 60 s" exit counts only the other children, so a dead crypto
 stack still exits while forex runs, and a dead forex stack never stops crypto. The `worker host` line of
 `mvp:check` ignores them too; they get their own `forex children` line, shown only when the status file

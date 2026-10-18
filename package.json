@@ -21,6 +21,7 @@
     "market-quote-publisher": "node scripts/market-quote-publisher.mjs",
     "fx:calendar": "node scripts/fx-calendar-fetcher.mjs",
     "fx:quote": "node scripts/fx-quote-publisher.mjs",
+    "forex:hourly": "node scripts/forex-hourly.mjs",
     "collector-universe-sync": "node scripts/collector-universe-sync.mjs",
     "forward:run": "node scripts/forward-run.mjs",
     "forward:trend": "node scripts/forward-run.mjs --trend",

@@ -5,7 +5,7 @@ export function pythonServiceConfig(path: string, env: Env = process.env) {
   const token = env["PYTHON_ANALYSIS_TOKEN"] ?? "";
   if (!/^[A-Za-z0-9_-]{32,256}$/.test(token)) throw new Error("token");
   const origin = new URL(
-    (path.startsWith("/v1/forward/") ? env["PYTHON_FORWARD_URL"] : undefined) ??
+    (path.startsWith("/v1/forward/") || path.startsWith("/v1/fx/forward/") ? env["PYTHON_FORWARD_URL"] : undefined) ??
       env["PYTHON_ANALYSIS_URL"] ??
       "",
   );

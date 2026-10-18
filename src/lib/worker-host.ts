@@ -23,8 +23,8 @@ export const ESSENTIAL_CHILD = "collector";
 export const FORWARD_CHILDREN = ["forward-hourly", "forward-trend"] as const;
 /**
  * The forex crash domain (#396): these children never keep the host alive and never stop it, and they get
- * their own `forex children` line in mvp:check. `forex-collector` (#394) and `forex-hourly` (#397) are
- * reserved names; they are not spawned yet.
+ * their own `forex children` line in mvp:check. `forex-hourly` (#397) is spawned when FX_HOURLY_ENABLED=true;
+ * `forex-collector` (#394) is a reserved name, not spawned yet.
  */
 export const FOREX_CHILDREN = ["fx-calendar", "fx-quote-publisher", "forex-collector", "forex-hourly"] as const;
 export const isForexChild = (name: string) => (FOREX_CHILDREN as readonly string[]).includes(name);
