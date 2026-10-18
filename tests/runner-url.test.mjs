@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 import { parseRunnerPublicUrl } from "../scripts/lib/runner-url.mjs";
 
-test("unset or empty selects quick-tunnel mode", () => {
+test("unset or empty returns null (missing)", () => {
   assert.equal(parseRunnerPublicUrl(undefined), null);
   assert.equal(parseRunnerPublicUrl(null), null);
   assert.equal(parseRunnerPublicUrl(""), null);
@@ -45,12 +45,16 @@ test("anything else is rejected without echoing the value", () => {
   }
 });
 
-test("the launcher validates in preflight and skips cloudflared in fixed-URL mode", async () => {
+test("the launcher requires the fixed URL and has no tunnel or secret-writing path", async () => {
   const { readFile } = await import("node:fs/promises");
   const up = await readFile(new URL("../scripts/up.mjs", import.meta.url), "utf8");
   assert.match(up, /parseRunnerPublicUrl\(process\.env\.RUNNER_PUBLIC_URL \?\? env\?\.RUNNER_PUBLIC_URL\)/);
   assert.match(up, /command\("tailscale", \["version"\]\)/);
-  assert.match(up, /if \(publicUrl === null\) startTunnel\(\);\s+else void monitorPublicUrl\(publicUrl\);/);
-  // One secret-update step for both modes.
-  assert.equal(up.match(/"secret", "put", "RUNNER_GATEWAY_URL"/g).length, 1);
+  assert.ok(up.includes(
+    "RUNNER_PUBLIC_URL is missing. Set it to your Tailscale Funnel address (see docs/worker-host.md).",
+  ));
+  assert.ok(up.includes('"Usage: npm run up"'));
+  for (const stale of ["cloudflared", "trycloudflare", "update-worker-secret", "wrangler"]) {
+    assert.ok(!up.toLowerCase().includes(stale), stale);
+  }
 });

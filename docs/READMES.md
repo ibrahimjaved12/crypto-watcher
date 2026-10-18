@@ -305,14 +305,15 @@ sudo systemctl start docker
 ```
 Then:
 ```sh
-npm run up -- --update-worker-secret
+npm run up
 ```
-1. Checks that Docker, cloudflared and your .env.production.local flags are fine.
+1. Checks Docker, tailscale, `RUNNER_PUBLIC_URL` (your Tailscale Funnel address) and your .env.production.local flags.
 2. Starts the local operational Supabase if it isn’t running.
 3. Starts worker:host: the Python services, the collector, the forward jobs, the gateway and the jobs runner.
-4. Starts a Cloudflare quick tunnel to the gateway and waits until its /health answers.
-5. Writes the new tunnel URL into the Worker’s RUNNER_GATEWAY_URL secret, so the live site can reach your laptop.
-6. Restarts the tunnel if it dies (the URL changes, and it updates the secret again). Ctrl+C shuts everything down cleanly.
+4. Checks that the fixed Funnel URL's /health answers and prints one healthy line (or a warning if it does not; nothing is killed).
+5. Ctrl+C shuts everything down cleanly.
+
+One-time setup (Funnel and the Worker's `RUNNER_GATEWAY_URL` secret): see docs/worker-host.md, "One-command laptop startup".
 
 To grant Crypto or Forex access:
 ```sh

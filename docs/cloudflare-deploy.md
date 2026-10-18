@@ -185,12 +185,12 @@ offline notice and the action returns a message asking you to start
 `npm run worker:host` and retry. An interrupted response from a reached gateway
 shows a timeout retry message. The status check uses `/health` with a two-second
 timeout, sends no gateway secret, and polls every 30 seconds while configured.
-Keep the HTTPS tunnel and the host supervisor running for the gateway to remain
+Keep the Tailscale Funnel and the host supervisor running for the gateway to remain
 reachable. Run forward and Run trend use `public.runner_jobs` in hosted Supabase; the
-host jobs runner consumes them without using the tunnel. Quick-tunnel URLs change
-on restart; update the Cloudflare runtime URL secret when that happens. A fixed URL avoids
-this: a Tailscale Funnel (fixed URL) or later an owned-domain Cloudflare tunnel; see the
-[stable URL setup](worker-host.md#stable-url-tailscale-funnel) (#308).
+host jobs runner consumes them without using the gateway URL. `RUNNER_GATEWAY_URL` is the fixed
+Funnel address (`https://<machine>.<tailnet>.ts.net`), set once; a Cloudflare named tunnel on an
+owned domain is the planned fallback. See the
+[laptop startup](worker-host.md#one-command-laptop-startup-308-431) (#308, #431).
 
 ## After the first deployment
 
