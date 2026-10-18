@@ -193,6 +193,11 @@ Code: `python/market_analysis/news_blackout.py` (level 1: scheduled timing only;
 
 ### Bars and candles
 
+Contract specs (digits, point, tick, contract size, lots, currencies, swaps) live in the operational
+table `fx_symbol_spec_observations` (#432; decision 3 of #397 settled: a table, written once per
+change by the gateway); `python/market_analysis/fx/specs_rows.py` builds `VenueSymbol` and
+`FxContract` from it.
+
 Code: `python/market_analysis/fx/bars.py`, `python/market_analysis/fx/candles.py` (separate from the
 crypto `BarSeries`/`CandleSeries`, which assume every minute exists).
 
