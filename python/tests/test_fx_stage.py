@@ -72,7 +72,8 @@ class StageTests(unittest.TestCase):
         signal = out["signals"][0]
         self.assertEqual(set(signal), {"signal_id", "strategy_id", "version", "symbol", "instrument_id", "signal_ms",
                                        "side", "horizon_min", "sessions", "candle_version"})
-        self.assertIn("london", signal["sessions"])  # 06:15 UTC on a Tuesday in BST
+        # 06:15 UTC on a Tuesday in October: Tokyo (00:00-09:00 UTC) is open, London (07:00-16:00 UTC) is not yet.
+        self.assertEqual(signal["sessions"], ["tokyo"])
         self.assertEqual(out["suppressed"], [])
         # One setup per (k, rr) of the default grid (k 2; rr 3/2 and 2), all tradeable.
         self.assertEqual([s["status"] for s in out["setups"]], ["T", "T"])
