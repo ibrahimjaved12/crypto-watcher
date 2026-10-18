@@ -319,6 +319,82 @@ test("mvp:check worker host line: missing WARN, fresh+running PASS, stale or cra
   assert.equal(w.classifyWorkerHost(file(-200_000, running), now).level, "FAIL", "a future timestamp is not fresh");
 });
 
+test("forex children are their own crash domain in the exit rules (#396)", () => {
+  const set = (states) => Object.entries(states).map(([name, state]) => ({ name, state }));
+  const crypto = { "fastapi-analysis": "running", "fastapi-forward": "running", collector: "running", "forward-hourly": "running", "forward-trend": "running" };
+  const forex = { "fx-calendar": "running", "fx-quote-publisher": "running" };
+  const cryptoDown = Object.fromEntries(Object.keys(crypto).map((n) => [n, "backoff"]));
+  const forexDown = Object.fromEntries(Object.keys(forex).map((n) => [n, "backoff"]));
+  assert.deepEqual([...w.FOREX_CHILDREN], ["fx-calendar", "fx-quote-publisher", "forex-collector", "forex-hourly"]);
+  assert.equal(w.isForexChild("fx-calendar"), true);
+  assert.equal(w.isForexChild("collector"), false);
+
+  // Every crypto child down with the forex children running still exits after 60 s.
+  const first = w.exitDecision(set({ ...cryptoDown, ...forex }), null, 10_000);
+  assert.deepEqual(first, { reason: null, allDownSinceMs: 10_000 });
+  assert.match(w.exitDecision(set({ ...cryptoDown, ...forex }), first.allDownSinceMs, 70_000).reason, /every child has been down/);
+  // A forex child coming up neither resets nor extends the timer.
+  assert.deepEqual(w.exitDecision(set({ ...cryptoDown, ...forex, "fx-calendar": "running" }), 10_000, 40_000),
+    { reason: null, allDownSinceMs: 10_000 });
+
+  // Every forex child down (or looping) with crypto running never exits and never starts the timer.
+  for (const states of [forexDown, { "fx-calendar": "crash-loop", "fx-quote-publisher": "crash-loop" }]) {
+    for (const nowMs of [0, 60_000, 3_600_000]) {
+      assert.deepEqual(w.exitDecision(set({ ...crypto, ...states }), null, nowMs), { reason: null, allDownSinceMs: null });
+    }
+  }
+  // With no non-forex child the rule does not fire.
+  assert.deepEqual(w.exitDecision(set(forexDown), null, 0), { reason: null, allDownSinceMs: null });
+  assert.deepEqual(w.exitDecision(set(forexDown), 0, 3_600_000), { reason: null, allDownSinceMs: null });
+  // The essential and forward rules are unchanged.
+  assert.match(w.exitDecision(set({ ...crypto, ...forex, collector: "crash-loop" }), null, 0).reason, /collector/);
+});
+
+test("the worker host line ignores forex children; the forex children line covers them (#396)", () => {
+  const now = Date.parse("2026-10-10T12:00:00Z");
+  const child = (name, state, restartCount = 0, extra = {}) =>
+    ({ name, state, pid: 1, restartCount, lastRestartAt: null, lastExit: null, nextRestartAt: null, ...extra });
+  const file = (ageMs, children) =>
+    JSON.stringify(w.buildStatus({ supervisorPid: 1, startedAtMs: now - 3_600_000, nowMs: now - ageMs, shuttingDown: false, children }));
+  const crypto = ["collector", "forward-hourly", "forward-trend"].map((n) => child(n, "running", 1));
+  const forex = [child("fx-calendar", "running", 2), child("fx-quote-publisher", "running", 3)];
+
+  // Counts and states of the worker host line are crypto only.
+  const pass = w.classifyWorkerHost(file(1_000, [...crypto, ...forex]), now);
+  assert.equal(pass.level, "PASS");
+  assert.match(pass.detail, /^3 children running, 3 restart\(s\) since start/);
+  for (const broken of [
+    child("fx-calendar", "crash-loop", 9),
+    child("fx-calendar", "backoff", 1, { downSince: new Date(now - 2 * 3_600_000).toISOString() }),
+    child("fx-calendar", "waiting"),
+  ]) {
+    assert.equal(w.classifyWorkerHost(file(1_000, [...crypto, broken, forex[1]]), now).level, "PASS", broken.state);
+  }
+  // A crypto problem still fails as before; the stale rule is unchanged.
+  assert.equal(w.classifyWorkerHost(file(1_000, [child("collector", "crash-loop"), ...forex]), now).level, "FAIL");
+  assert.equal(w.classifyWorkerHost(file(200_000, [...crypto, ...forex]), now).level, "FAIL");
+
+  // The forex children line.
+  assert.equal(w.classifyForexChildren(null, now), null, "no status file");
+  assert.equal(w.classifyForexChildren("{not json", now), null, "unreadable: the worker host line reports it");
+  assert.equal(w.classifyForexChildren(file(1_000, crypto), now), null, "forex stack off: no line");
+  assert.deepEqual(w.classifyForexChildren(file(1_000, [...crypto, ...forex]), now),
+    { level: "PASS", detail: "2 forex children running, 5 restart(s) since start" });
+  const backoff = w.classifyForexChildren(file(1_000, [...crypto, child("fx-calendar", "backoff"), forex[1]]), now);
+  assert.equal(backoff.level, "WARN");
+  assert.match(backoff.detail, /not running: fx-calendar backoff/);
+  const loop = w.classifyForexChildren(file(1_000, [...crypto, child("fx-quote-publisher", "crash-loop"), forex[0]]), now);
+  assert.deepEqual(loop, { level: "FAIL", detail: "forex crash loop, restarts stopped: fx-quote-publisher" });
+  const down = child("fx-calendar", "backoff", 4, { downSince: new Date(now - 3_600_000).toISOString() });
+  assert.deepEqual(w.classifyForexChildren(file(1_000, [...crypto, down, forex[1]]), now),
+    { level: "FAIL", detail: "forex down for more than an hour: fx-calendar" });
+  const almost = { ...down, downSince: new Date(now - 59 * 60_000).toISOString() };
+  assert.equal(w.classifyForexChildren(file(1_000, [...crypto, almost, forex[1]]), now).level, "WARN");
+  // A stale status is a WARN here, never a second FAIL for the same cause.
+  assert.deepEqual(w.classifyForexChildren(file(200_000, [...crypto, ...forex]), now),
+    { level: "WARN", detail: "status stale; see the worker host line" });
+});
+
 test("the status parser rejects other shapes and the exit text names signal or code", () => {
   assert.equal(w.parseStatus("null"), null);
   assert.equal(w.parseStatus(JSON.stringify({ schema: 2 })), null);

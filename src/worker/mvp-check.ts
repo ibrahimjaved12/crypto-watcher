@@ -35,7 +35,7 @@ import { publishFreshnessChecks } from "../lib/market/published-quotes";
 import { readCollectorUniverse } from "../lib/market/collector-subscriptions.server";
 import { collectorLogMessage } from "../lib/market/collector-logging";
 import { getOperationalStore } from "../lib/operational/repository.server";
-import { STATUS_FILE_NAME, classifyWorkerHost } from "../lib/worker-host";
+import { STATUS_FILE_NAME, classifyForexChildren, classifyWorkerHost } from "../lib/worker-host";
 import { hostedDatabaseSizeCheck } from "./hosted-db-size";
 import { classifyAlertCharts } from "../lib/alert-charts/check";
 import { alertChartsConfig } from "../lib/alert-charts/config";
@@ -223,6 +223,19 @@ function workerHostCheck(): Check {
   return { name: "worker host", ...classifyWorkerHost(raw, Date.now()) };
 }
 
+// #396: the forex children's own line, shown only when the status file lists a forex child.
+function forexChildrenCheck(): Check | null {
+  const path = resolve(process.cwd(), STATUS_FILE_NAME);
+  let raw: string | null = null;
+  try {
+    if (existsSync(path)) raw = readFileSync(path, "utf8");
+  } catch {
+    return null; // the worker host line already reports an unreadable file
+  }
+  const result = classifyForexChildren(raw, Date.now());
+  return result ? { name: "forex children", ...result } : null;
+}
+
 // #323: the Worker's price cards read the quotes the machine publishes. Production mode only, where the
 // hosted project is the one the deployed Worker reads; WARN when a symbol's newest published_at is older
 // than 10 minutes (the publisher is down, or the symbol is not collected).
@@ -276,6 +289,8 @@ async function main() {
   checks.push(await hostedDatabaseSizeCheck());
   checks.push(await pythonCheck());
   checks.push(workerHostCheck());
+  const forexChildren = forexChildrenCheck();
+  if (forexChildren) checks.push(forexChildren);
   if (productionMode) {
     checks.push(...(await publishedQuoteChecks()));
     checks.push(await collectorUniverseCheck());

@@ -21,6 +21,13 @@ export const STATUS_FRESH_MS = 120_000;
 export const DOWN_FAIL_MS = 3_600_000;
 export const ESSENTIAL_CHILD = "collector";
 export const FORWARD_CHILDREN = ["forward-hourly", "forward-trend"] as const;
+/**
+ * The forex crash domain (#396): these children never keep the host alive and never stop it, and they get
+ * their own `forex children` line in mvp:check. `forex-collector` (#394) and `forex-hourly` (#397) are
+ * reserved names; they are not spawned yet.
+ */
+export const FOREX_CHILDREN = ["fx-calendar", "fx-quote-publisher", "forex-collector", "forex-hourly"] as const;
+export const isForexChild = (name: string) => (FOREX_CHILDREN as readonly string[]).includes(name);
 /** Every child down for this long makes the supervisor exit. */
 export const ALL_DOWN_GRACE_MS = 60_000;
 export const SHUTDOWN_HARD_DEADLINE_MS = 15_000;
@@ -439,7 +446,8 @@ export function isStatusFresh(status: WorkerHostStatus, nowMs: number): boolean 
  * The `worker host` line of `mvp:check`. `raw` is the status file text, or null when it does not
  * exist. Missing = host not used (WARN); stale, unreadable or any child in a crash loop = FAIL;
  * fresh with all children running = PASS; fresh otherwise (a child waiting, backing off or
- * stopping) = WARN.
+ * stopping) = WARN. Forex children (#396) are not counted here; they have their own line
+ * (`classifyForexChildren`), so a forex crash loop never fails the crypto stack.
  */
 export function classifyWorkerHost(
   raw: string | null,
@@ -450,11 +458,12 @@ export function classifyWorkerHost(
   const status = parseStatus(raw);
   if (!status || status.children.length === 0)
     return { level: "FAIL", detail: `${STATUS_FILE_NAME} is unreadable or lists no children` };
-  const looping = status.children.filter((child) => child.state === "crash-loop").map((child) => child.name);
+  const children = status.children.filter((child) => !isForexChild(child.name));
+  const looping = children.filter((child) => child.state === "crash-loop").map((child) => child.name);
   const ageS = Math.round((nowMs - Date.parse(status.updatedAt)) / 1000);
   if (looping.length)
     return { level: "FAIL", detail: `crash loop, restarts stopped: ${looping.join(", ")}${isStatusFresh(status, nowMs) ? "" : ` (status also stale, ${ageS}s old)`}` };
-  const downTooLong = status.children
+  const downTooLong = children
     .filter((child) => child.downSince && nowMs - Date.parse(child.downSince) >= DOWN_FAIL_MS)
     .map((child) => child.name);
   if (downTooLong.length)
@@ -467,14 +476,43 @@ export function classifyWorkerHost(
           ? `status timestamp is ${-ageS}s in the future (check the clock/NTP)`
           : `status stale: last update ${ageS}s ago (host stopped or hung)`,
     };
-  const notRunning = status.children.filter((child) => child.state !== "running");
-  const restarts = status.children.reduce((sum, child) => sum + child.restartCount, 0);
+  const notRunning = children.filter((child) => child.state !== "running");
+  const restarts = children.reduce((sum, child) => sum + child.restartCount, 0);
   if (notRunning.length || status.shuttingDown)
     return {
       level: "WARN",
       detail: `not running: ${notRunning.map((child) => `${child.name} ${child.state}`).join(", ") || "host shutting down"}`,
     };
-  return { level: "PASS", detail: `${status.children.length} children running, ${restarts} restart(s) since start, updated ${ageS}s ago` };
+  return { level: "PASS", detail: `${children.length} children running, ${restarts} restart(s) since start, updated ${ageS}s ago` };
+}
+
+/**
+ * The `forex children` line of `mvp:check` (#396), or null when there is nothing to show: no status
+ * file, an unreadable one (the worker host line reports that), or no forex child (the forex stack is
+ * off). A forex crash loop or a forex child down for an hour is FAIL; a stale status is only WARN
+ * (the worker host line already fails for it); a forex child not running is WARN.
+ */
+export function classifyForexChildren(
+  raw: string | null,
+  nowMs: number,
+): { level: "PASS" | "WARN" | "FAIL"; detail: string } | null {
+  if (raw === null) return null;
+  const status = parseStatus(raw);
+  if (!status) return null;
+  const forex = status.children.filter((child) => isForexChild(child.name));
+  if (forex.length === 0) return null;
+  const looping = forex.filter((child) => child.state === "crash-loop").map((child) => child.name);
+  if (looping.length) return { level: "FAIL", detail: `forex crash loop, restarts stopped: ${looping.join(", ")}` };
+  const downTooLong = forex
+    .filter((child) => child.downSince && nowMs - Date.parse(child.downSince) >= DOWN_FAIL_MS)
+    .map((child) => child.name);
+  if (downTooLong.length) return { level: "FAIL", detail: `forex down for more than an hour: ${downTooLong.join(", ")}` };
+  if (!isStatusFresh(status, nowMs)) return { level: "WARN", detail: "status stale; see the worker host line" };
+  const notRunning = forex.filter((child) => child.state !== "running");
+  if (notRunning.length)
+    return { level: "WARN", detail: `not running: ${notRunning.map((child) => `${child.name} ${child.state}`).join(", ")}` };
+  const restarts = forex.reduce((sum, child) => sum + child.restartCount, 0);
+  return { level: "PASS", detail: `${forex.length} forex children running, ${restarts} restart(s) since start` };
 }
 
 // ── Orphans and exit rules ─────────────────────────────────────────────────────────────────────
@@ -499,8 +537,10 @@ export function recordedPids(
 /**
  * When the supervisor must give up and exit non-zero (so systemd/pm2 can restart it cleanly): the
  * collector in a crash loop (the collector policy never reaches it; kept as a guard), both forward
- * jobs in a crash loop, or every child not running for `ALL_DOWN_GRACE_MS`. `allDownSinceMs` is the
- * caller-held tracker; pass back what this returns.
+ * jobs in a crash loop, or every non-forex child not running for `ALL_DOWN_GRACE_MS`. Forex children
+ * (#396) never start, reset or extend that timer: a dead forex stack never stops crypto, and running
+ * forex children never keep a dead crypto stack alive. `allDownSinceMs` is the caller-held tracker;
+ * pass back what this returns.
  */
 export function exitDecision(
   children: readonly { name: string; state: ChildRunState }[],
@@ -512,7 +552,8 @@ export function exitDecision(
     return { reason: `${ESSENTIAL_CHILD} is in a crash loop`, allDownSinceMs };
   if (FORWARD_CHILDREN.every((name) => state(name) === "crash-loop"))
     return { reason: "both forward jobs are in a crash loop", allDownSinceMs };
-  if (children.length && children.every((child) => child.state !== "running")) {
+  const domain = children.filter((child) => !isForexChild(child.name));
+  if (domain.length && domain.every((child) => child.state !== "running")) {
     const since = allDownSinceMs ?? nowMs;
     if (nowMs - since >= ALL_DOWN_GRACE_MS)
       return { reason: `every child has been down for ${ALL_DOWN_GRACE_MS / 1000}s`, allDownSinceMs: since };
