@@ -180,9 +180,16 @@ Code: `python/market_analysis/news_blackout.py` (level 1: scheduled timing only;
   empty result is a failed fetch. `covered_to` is the end of the feed's own week (next Sunday 00:00
   New York), so the horizon check needs next week's feed too; the live fetcher (#401 part 2b)
   fetches both.
-- **Not done yet:** the live fetcher (#401 part 2: source choice, FMP vs ForexFactory feed, its
-  format and schedule; a headless child with operational credentials only, like the crypto
-  collector), and interpreting surprises or reactions.
+- Freshness end to end (#401 part 2b): the worker-host child `fx-calendar`
+  (`src/lib/fx/calendar-fetcher.server.ts`; off unless `FX_CALENDAR_ENABLED=true`) fetches this
+  week's and then next week's feed every 2 h, parses them through the analysis service and writes
+  observations plus a fetch-log row; `calendar_coverage` then fails closed on the latest ok fetch
+  (never fetched, older than 6 h, or `covered_to` short of the needed horizon). Next week is always
+  fetched last, because `get_fx_calendar_status` reports the `covered_to` of the LATEST ok fetch,
+  not the maximum. The schedule, backoffs, feed addresses and user agent are UNVERIFIED
+  placeholders. **The feed's terms of use have not been checked: the owner must read them before
+  relying on it.**
+- **Not done yet:** interpreting surprises or reactions.
 
 ### Bars and candles
 

@@ -19,6 +19,7 @@
     "monitor-scheduler": "node scripts/monitor-scheduler.mjs",
     "collector:worker": "node scripts/collector-worker.mjs",
     "market-quote-publisher": "node scripts/market-quote-publisher.mjs",
+    "fx:calendar": "node scripts/fx-calendar-fetcher.mjs",
     "collector-universe-sync": "node scripts/collector-universe-sync.mjs",
     "forward:run": "node scripts/forward-run.mjs",
     "forward:trend": "node scripts/forward-run.mjs --trend",

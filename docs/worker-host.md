@@ -28,12 +28,24 @@ gateway and jobs runner, the movement-state publisher, alert charts and the moni
 | `movement-state-publisher` | `node scripts/movement-state-publisher.mjs --mode production` (`npm run movement-state-publisher`; only when the operational DB is enabled and `MOVEMENT_STATE_HOSTED_URL` or `ALERT_CHART_HOSTED_URL` is set, and `MOVEMENT_STATE_PUBLISH_ENABLED` is not `false`; non-essential; publishes the engine's persisted state to the hosted copy through the site hook every 30 s at most, using `RUNNER_GATEWAY_SECRET`; see [market movement engine](market-movement-engine.md#published-copy-for-the-deployed-site-market_state_published)). It also computes and publishes "Longer moves" (`slow-movement-v1`) once per 15-minute boundary, 20 s after it (up to 3 attempts 30 s apart, Python `/v1/movement/slow`); `SLOW_MOVEMENT_ENABLED=false` turns that part off; see [slow movement](slow-movement.md) |
 | `alert-charts` | `node scripts/alert-charts.mjs --mode production` (`npm run alert-charts`; only when `ALERT_CHART_DIR` is set and `ALERT_CHARTS_ENABLED` is not `false`; non-essential; needs `python/requirements-machine.txt`; pending jobs wait up to 7 days, unlike the 15-minute `runner_jobs` rule, because the window is stored; see [alert charts](alert-charts.md)) |
 | `monitor-scheduler` | `node scripts/monitor-scheduler.mjs --mode production` (`npm run monitor-scheduler`; only when the hosted credentials are set, `OPERATIONAL_DB_ENABLED=true` and `MONITOR_SCHEDULER_ENABLED` is not `false`; non-essential; starts after both Python `/health` endpoints answer because TA calls Python; runs the scheduled monitoring pass (movement alerts and completed-candle TA for every watching user) at each interval boundary plus 8 s, default every 60 s (`MONITOR_SCHEDULER_INTERVAL_SECONDS`, 30–3600; intervals over 60 s round up to whole minutes); passes never overlap; logs only a failed pass or a pass that saved alerts or TA; finishes the current pass on SIGTERM) |
+| `fx-calendar` | `node scripts/fx-calendar-fetcher.mjs --mode production` (`npm run fx:calendar`; only when `FX_CALENDAR_ENABLED=true` and `OPERATIONAL_DB_ENABLED=true`; non-essential; starts after both Python `/health` endpoints answer because it parses through `/v1/fx/calendar/parse`; keeps the forex economic calendar fresh, see [Economic calendar](#economic-calendar-fx-calendar)) |
 
 The jobs are launched with `node` directly rather than through `npm`, so the supervisor owns the real
 process (no wrapper to signal through). `--workers 1` is explicit because uvicorn otherwise takes its
 worker count from `WEB_CONCURRENCY`, and movement sessions are process-local: the analysis service must
 stay one process. The FastAPI children do not receive the Supabase or operational credentials, only
-their token. The forward jobs, `runner-jobs` and `monitor-scheduler` start only after **both** `/health` endpoints answer.
+their token. The forward jobs, `runner-jobs`, `monitor-scheduler` and `fx-calendar` start only after **both** `/health` endpoints answer.
+
+### Economic calendar (`fx-calendar`)
+
+Default off until forex runs (`FX_CALENDAR_ENABLED=true` turns it on). It downloads the Forex Factory
+weekly feeds, has the analysis service parse them strictly (`POST /v1/fx/calendar/parse`) and appends
+the observations and one fetch-log row per attempt to the operational database (#401). Each cycle
+fetches this week, waits 30 s, then fetches next week, and repeats every 2 h plus up to 10 min of
+jitter; the first pass runs 5 s after start-up. A 404 for next week means "not published yet" (no
+error, logged once). A 429 honours `Retry-After` (at most 6 h), otherwise waits 30 min doubling to 6 h;
+any other failure waits 5 min doubling to 1 h and resets after a success. Error rows carry a short
+fixed reason, never the URL, body or headers. All schedule values are UNVERIFIED placeholders.
 The collector starts immediately so the 1m history does not gap while Python warms up. History is
 never seeded by the host.
 
