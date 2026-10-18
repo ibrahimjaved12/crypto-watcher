@@ -36,3 +36,7 @@ operational-db/supabase/.branches/
 *.njsproj
 *.sln
 *.sw?
+
+# MT5 spike (#393): browser-screen password and the Wine prefix with the broker login session
+mt5/.env
+mt5/config/
