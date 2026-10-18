@@ -1,0 +1,43 @@
+name: Dukascopy tick probe
+run-name: "Dukascopy tick probe"
+
+# Probe-only (scripts/research/dukascopy_probe.py, docs/forex.md "Historical data"): checks the month base,
+# price scaling and time base of the Dukascopy hourly tick files on a handful of 2024 hours and prints
+# aggregate evidence (HTTP statuses, byte sizes, tick counts, times, a few raw integers, decoded min/max
+# and median spread, minute-bar counts). At most 40 requests, 1.5 s apart, no retries; a 403/429/503
+# stops it. It publishes and stores nothing (no release, no artifact, no secrets).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dukascopy-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Dukascopy tick probe
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Probe the tick files
+        env:
+          DUKASCOPY_PROBE_SUMMARY: ${{ runner.temp }}/dukascopy-probe-summary.md
+        run: python scripts/research/dukascopy_probe.py
+      - name: Summary
+        if: always()
+        env:
+          DUKASCOPY_PROBE_SUMMARY: ${{ runner.temp }}/dukascopy-probe-summary.md
+        run: |
+          if [ -f "$DUKASCOPY_PROBE_SUMMARY" ]; then
+            cat "$DUKASCOPY_PROBE_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi

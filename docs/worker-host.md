@@ -143,6 +143,16 @@ Prerequisites: Node 22.12+, `npm ci`, and the Python environment
 6. **Start the host:** `npm run worker:host`.
 7. **Check:** `npm run mvp:check -- --mode production` (its `worker host` line, below).
 
+### Forex crash domain (#396)
+
+`fx-calendar` and `fx-quote-publisher` are forex children (`FOREX_CHILDREN` in `src/lib/worker-host.ts`;
+`forex-collector` and `forex-hourly` are reserved for #394 and #397). They never keep the host alive and
+never stop it: the "every child down for 60 s" exit counts only the other children, so a dead crypto
+stack still exits while forex runs, and a dead forex stack never stops crypto. The `worker host` line of
+`mvp:check` ignores them too; they get their own `forex children` line, shown only when the status file
+lists a forex child: FAIL on a forex crash loop or a forex child down for an hour, WARN when one is not
+running or the status is stale (the worker host line already fails for that), PASS otherwise.
+
 ## One-command laptop startup (#308, #431)
 
 After completing the host setup above, run `npm run up` (it takes no arguments). The gateway is

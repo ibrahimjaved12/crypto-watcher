@@ -191,6 +191,18 @@ Code: `python/market_analysis/news_blackout.py` (level 1: scheduled timing only;
   relying on it.**
 - **Not done yet:** interpreting surprises or reactions.
 
+### Historical data (Dukascopy, research)
+
+Forex research (placebo controls, sigma, cost calibration; #402) needs years of free history in the same
+shape as the live bars. Dukascopy publishes hourly tick files; `python/market_analysis/fx/dukascopy.py`
+(#402 part 1) is a pure decoder (`hour_url`, `decode_bi5` with exact `Fraction` prices, `bars_from_ticks`
+producing `fx_bars_from_rows`-shaped rows with `transport: "history"`), and the manual workflow
+`dukascopy-probe.yml` (`scripts/research/dukascopy_probe.py`) checks its assumptions against a handful
+of 2024 hours and prints only aggregate evidence. **UNVERIFIED until the probe has run:** the URL month
+base (zero-based assumed), the record layout and price scaling (`POINT_DIVISORS`), that the hour in the
+path is UTC, and the per-symbol divisors. **Also unchecked:** the host's terms of use and rate limits,
+which the owner must read before any bulk download. No importer exists yet.
+
 ### Hosted forex quotes
 
 The Worker cannot read the local operational database, so forex quotes reach it the same way crypto

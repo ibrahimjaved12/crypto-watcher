@@ -35,7 +35,7 @@ const STATE_WORD: Record<FxQuoteState, string> = { live: "live", stale: "delayed
 export type FxQuoteTileProps = {
   symbol: string;
   /** Human name for wider screens (Gold, WTI crude, EUR / USD). */
-  name?: string;
+  name?: string | undefined;
   assetClass: AssetClass;
   quote: FxQuote | null;
   state: FxQuoteState;
@@ -43,7 +43,7 @@ export type FxQuoteTileProps = {
 
 function ariaLabel({ symbol, quote, state }: FxQuoteTileProps): string {
   if (!quote || state === "none") return `${symbol}, no data yet`;
-  const change = quote.changes[FX_TILE_CHANGE_WINDOW];
+  const change = quote.changes[FX_TILE_CHANGE_WINDOW] ?? null;
   const move = formatChange(change);
   const trend = move === null ? "" : `, 1 hour ${change! >= 0 ? "up" : "down"} ${move}`;
   return `${symbol} bid ${formatPrice(quote.bid, quote.digits)} ask ${formatPrice(quote.ask, quote.digits)} spread ${
@@ -55,7 +55,7 @@ export function FxQuoteTile(props: FxQuoteTileProps) {
   const style = CLASS_STYLE[assetClass] ?? CLASS_STYLE.fx!;
   const Icon = style.icon;
   const hasQuote = quote !== null && state !== "none";
-  const change = hasQuote ? quote.changes[FX_TILE_CHANGE_WINDOW] : null;
+  const change = hasQuote ? (quote.changes[FX_TILE_CHANGE_WINDOW] ?? null) : null;
   const tone = changeTone(change);
   return (
     <article
