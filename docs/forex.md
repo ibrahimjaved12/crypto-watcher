@@ -169,6 +169,17 @@ Code: `python/market_analysis/news_blackout.py` (level 1: scheduled timing only;
   with `calendar_never_fetched` (no ok fetch), `calendar_stale` (latest ok older than 6 h,
   **UNVERIFIED placeholder**) or `calendar_horizon_short` (its `covered_to` is before the needed
   horizon). A later error does not hide a fresh ok fetch.
+- Feed parser (#401 part 2a): `python/market_analysis/fx/calendar_feed.py` (`parse_ff_week`, pure).
+  The Forex Factory weekly feed is a JSON list of `title`, `country`, `date` (ISO 8601 with the New
+  York offset), `impact` (`Low`, `Medium`, `High`, `Holiday`), `forecast`, `previous`, with no event
+  id. Holidays and `All` rows with low impact are skipped and counted; a medium/high `All` row
+  raises (a market-wide event is never dropped silently, it needs an owner decision). The key is
+  `currency|title|week_sunday|n` (New York Sunday-week, `n` = ordinal by time among same currency
+  and title), so a time change within the week is a new observation of the same event, while an
+  event moved across a Sunday boundary becomes a new event. Every event must lie in one week, and an
+  empty result is a failed fetch. `covered_to` is the end of the feed's own week (next Sunday 00:00
+  New York), so the horizon check needs next week's feed too; the live fetcher (#401 part 2b)
+  fetches both.
 - **Not done yet:** the live fetcher (#401 part 2: source choice, FMP vs ForexFactory feed, its
   format and schedule; a headless child with operational credentials only, like the crypto
   collector), and interpreting surprises or reactions.
