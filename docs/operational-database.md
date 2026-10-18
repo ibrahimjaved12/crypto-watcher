@@ -296,6 +296,14 @@ unless it is among the newest 2000 bars of its series, so a long closure or outa
 the runner's warm-up. All tables and functions are service-role only. Apply it with
 `npx supabase migration up --local --workdir operational-db`; it is additive and needs no reset.
 
+## Forex economic calendar (#401)
+
+`20261019130000_fx_calendar.sql` adds `fx_calendar_observations` (append-only, kept forever, point
+in time by `first_seen_at`; a reschedule or re-rating is a new row) and the fetch log
+`fx_calendar_fetches` (90 days), with `record_fx_calendar`, `record_fx_calendar_fetch`,
+`get_fx_calendar_events` and `get_fx_calendar_status`. Service-role only. The rules and the
+fail-closed coverage check are in [forex](forex.md#news-blackout).
+
 ## Cutover and rollback
 
 Deploy the operational baseline and credentials first, then start the collector worker and switch

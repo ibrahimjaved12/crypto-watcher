@@ -879,3 +879,41 @@ test("forex repository methods map camel-case bars and options onto the fx RPCs"
   assert.deepEqual(await store.getFxBarCoverage(), []);
   assert.deepEqual(await store.getFxCollectorHealth(), []);
 });
+
+test("forex calendar repository methods map observations, fetch results and reads onto the calendar RPCs", async () => {
+  const { createOperationalStore } = await import(
+    await moduleUrl("../src/lib/operational/repository.server.ts", repositoryStubs));
+  const calls = [];
+  const client = {
+    async rpc(name, args) {
+      calls.push([name, args]);
+      const data = { record_fx_calendar: 2, get_fx_calendar_events: [], get_fx_calendar_status: [] }[name];
+      return { data: data ?? null, error: null };
+    },
+  };
+  const store = createOperationalStore(client, {
+    candleRetentionDays: 7, monitorRunRetentionDays: 30, outboxMaxAttempts: 10,
+  });
+  const base = { source: "test-feed", sourceEventKey: "nfp", eventTs: 1_800_000_000_000, currency: "USD",
+    impact: "high", title: "Non-Farm Payrolls" };
+  assert.equal(await store.recordFxCalendar([base, { ...base, sourceEventKey: "cpi", detail: { forecast: "0.2%" } }]), 2);
+  assert.deepEqual(calls[0], ["record_fx_calendar", { p_rows: [
+    { source: "test-feed", source_event_key: "nfp", event_ts: "2027-01-15T08:00:00.000Z", currency: "USD",
+      impact: "high", title: "Non-Farm Payrolls" },
+    { source: "test-feed", source_event_key: "cpi", event_ts: "2027-01-15T08:00:00.000Z", currency: "USD",
+      impact: "high", title: "Non-Farm Payrolls", detail: { forecast: "0.2%" } },
+  ] }]);
+  assert.equal(await store.recordFxCalendar([]), 0);
+  assert.equal(calls.length, 1, "an empty list makes no call");
+  await store.recordFxCalendarFetch({ source: "test-feed", status: "ok", eventCount: 40, coveredTo: 1_800_000_000_000 });
+  assert.deepEqual(calls[1], ["record_fx_calendar_fetch", { p_source: "test-feed", p_status: "ok", p_event_count: 40,
+    p_covered_to: "2027-01-15T08:00:00.000Z", p_error: null }]);
+  await store.recordFxCalendarFetch({ source: "test-feed", status: "error", eventCount: 0, error: "HTTP 503" });
+  assert.deepEqual(calls[2][1], { p_source: "test-feed", p_status: "error", p_event_count: 0, p_covered_to: null,
+    p_error: "HTTP 503" });
+  assert.deepEqual(await store.getFxCalendarEvents(1, 2), []);
+  assert.deepEqual(calls[3], ["get_fx_calendar_events", { p_from_ms: 1, p_to_ms: 2, p_as_of_ms: null }]);
+  await store.getFxCalendarEvents(1, 2, 3);
+  assert.equal(calls[4][1].p_as_of_ms, 3);
+  assert.deepEqual(await store.getFxCalendarStatus(), []);
+});

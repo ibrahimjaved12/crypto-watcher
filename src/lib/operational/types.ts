@@ -183,6 +183,45 @@ export type FxBarCoverage = {
   newest_open_time_ms: number;
 };
 
+/** One economic calendar observation as the fetcher records it (#401). A reschedule or re-rating is a new observation. */
+export type FxCalendarObservation = {
+  source: string;
+  sourceEventKey: string;
+  /** Scheduled event time, UTC epoch ms. */
+  eventTs: number;
+  currency: string;
+  impact: "low" | "medium" | "high";
+  title: string;
+  /** forecast/previous/actual as the source gives them; not used by the blackout filter. */
+  detail?: Record<string, unknown>;
+};
+
+/** One fetch attempt for the fail-closed coverage check; an ok fetch says how far its response covers. */
+export type FxCalendarFetchResult =
+  | { source: string; status: "ok"; eventCount: number; coveredTo: number; error?: string | null }
+  | { source: string; status: "error"; eventCount: number; coveredTo?: null; error: string | null };
+
+/** Exactly a news_blackout.CalendarEvent, as get_fx_calendar_events returns it (point in time by first_seen_ms). */
+export type FxCalendarEventRow = {
+  event_id: string;
+  ts_ms: number;
+  currency: string;
+  impact: "low" | "medium" | "high";
+  title: string;
+  first_seen_ms: number;
+  source: string;
+  tags: string[];
+};
+
+/** One source's fetch history from get_fx_calendar_status (null when there is none). */
+export type FxCalendarSourceStatus = {
+  source: string;
+  last_ok_ms: number | null;
+  last_ok_covered_to_ms: number | null;
+  last_error_ms: number | null;
+  last_error: string | null;
+};
+
 export type OperationalCheckpoint = {
   userId: string;
   instrumentId: string;
@@ -380,4 +419,10 @@ export interface OperationalStore {
   releaseFxCollectorLease(instanceId: string): Promise<void>;
   /** Stored range per series; what is missing needs the trading calendar and is not decided here. */
   getFxBarCoverage(): Promise<FxBarCoverage[]>;
+  /** Append calendar observations (#401); known ones are skipped. Returns the number of new observations. */
+  recordFxCalendar(rows: FxCalendarObservation[]): Promise<number>;
+  recordFxCalendarFetch(result: FxCalendarFetchResult): Promise<void>;
+  /** Events with time in [fromMs, toMs] (at most 120 days); with `asOfMs` only those first seen by then. */
+  getFxCalendarEvents(fromMs: number, toMs: number, asOfMs?: number): Promise<FxCalendarEventRow[]>;
+  getFxCalendarStatus(): Promise<FxCalendarSourceStatus[]>;
 }
