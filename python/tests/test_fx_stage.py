@@ -169,6 +169,41 @@ class StageTests(unittest.TestCase):
                 fx_market_stage(item)
 
 
+EMA240 = "ema_cross_20_50:240"
+
+
+def weekly_rows(first_sunday, weeks):
+    """Every open minute of ``weeks`` consecutive FX weeks from the Sunday 21:00 UTC open (summer time:
+    open Sunday 21:00 to Friday 21:00 UTC), flat price. Built by arithmetic, not per-minute calendar calls."""
+    out = []
+    for week in range(weeks):
+        open_ms = first_sunday + week * 7 * 24 * HOUR
+        for minute in range(open_ms, open_ms + 120 * HOUR, MINUTE):
+            out.append({"time_basis": "utc", "venue": "test-venue", "native_symbol": "EURUSDm", "transport": "poll",
+                        "open_time_ms": minute, "open": PRICE, "high": PRICE, "low": PRICE, "close": PRICE,
+                        "spread_points": 1, "tick_volume": 1})
+    return out
+
+
+class WarmupTests(unittest.TestCase):
+    """#440: a 240-minute strategy needs 103 candles (24,720 open minutes) before it can signal, which only a
+    paged bar read can supply; with that much history it no longer reports insufficient_history."""
+
+    FIRST_SUNDAY = utc("2026-08-02T21:00")  # four summer weeks end Friday 2026-08-28 21:00 UTC
+    BOUNDARY = utc("2026-08-28T20:00")
+
+    def reason(self, weeks):
+        rows = [row for row in weekly_rows(self.FIRST_SUNDAY + (4 - weeks) * 7 * 24 * HOUR, weeks)
+                if row["open_time_ms"] <= self.BOUNDARY]
+        request = {"boundary_ms": self.BOUNDARY, "from_ms": self.BOUNDARY - HOUR, "strategy_ids": [EMA240],
+                   "symbols": [symbol(rows)]}
+        return fx_market_stage(request)["stage"]["payload"]["reasons"]["EURUSD"].get(EMA240)
+
+    def test_two_weeks_are_not_enough_and_four_weeks_are(self):
+        self.assertEqual(self.reason(2), "insufficient_history")  # about 60 candles
+        self.assertIsNone(self.reason(4))  # about 120 candles
+
+
 class EndpointTests(unittest.TestCase):
     def post(self, body, token=TOKEN):
         app = create_app(TOKEN)

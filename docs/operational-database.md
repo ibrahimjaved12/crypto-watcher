@@ -283,8 +283,10 @@ failure counts in `get_alert_chart_diagnostics`. The pending expiry is an applic
   lease semantics as the crypto collector).
 
 The row contract is `python/market_analysis/fx/bars.py` (`fx_bars_from_rows`, `_check_row`).
-`get_fx_bars(venue, instrument_id, from_ms, limit)` returns the newest `limit` bars (1-20000,
-default 1000) from `from_ms`, oldest first, each exactly in the gateway row shape that
+`get_fx_bars(venue, instrument_id, from_ms, limit, to_ms)` returns the newest `limit` bars (1-20000,
+default 1000) from `from_ms` (inclusive) up to `to_ms` (EXCLUSIVE, optional; `20261020100000_fx_bars_paging.sql`,
+#440), oldest first, so a reader pages backwards by passing the oldest `open_time_ms` of the previous page as
+`to_ms`; each bar is exactly in the gateway row shape that
 `fx_bars_from_rows` consumes (`time_basis: "utc"`, `open_time_ms`, prices as JSON numbers,
 `spread_points`, `tick_volume`, `transport`, `received_at_ms`). `get_fx_bar_coverage()` reports the
 count and the oldest/newest open time per series; it does not decide what is missing, which needs

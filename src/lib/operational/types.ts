@@ -435,11 +435,14 @@ export interface OperationalStore {
   listMarketMovementEvents(episodeId: string): Promise<PersistedMarketMovementEvent[]>;
   /** Completed forex minutes (#395). Stored bars are immutable; returns `venue|instrument_id|open_ms` of new bars. */
   recordFxBars(bars: FxBar[]): Promise<string[]>;
-  /** Newest `limit` bars (default 1000, max 20000) with open time >= `fromMs`, oldest first, as stored. */
+  /**
+   * Newest `limit` bars (default 1000, max 20000) with open time >= `fromMs` and < `toMs` (EXCLUSIVE; page
+   * backwards by passing the oldest open time of the previous page), oldest first, as stored.
+   */
   getFxBars(
     venue: string,
     instrumentId: string,
-    options?: { fromMs?: number; limit?: number },
+    options?: { fromMs?: number; toMs?: number; limit?: number },
   ): Promise<FxGatewayRow[]>;
   recordFxCollectorHealth(rows: FxCollectorHealthInput[]): Promise<void>;
   getFxCollectorHealth(): Promise<FxCollectorHealthRow[]>;

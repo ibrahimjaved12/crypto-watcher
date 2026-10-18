@@ -53,8 +53,8 @@ async function record(rows, retentionDays) {
 }
 const count = async (table, where = "true", args = []) =>
   (await db.query(`SELECT count(*)::int AS n FROM ${table} WHERE ${where}`, args)).rows[0].n;
-const getBars = async (instrumentId, fromMs = null, limit = 1000) =>
-  (await db.query("SELECT get_fx_bars($1, $2, $3, $4) AS rows", [VENUE, instrumentId, fromMs, limit])).rows[0].rows;
+const getBars = async (instrumentId, fromMs = null, limit = 1000, toMs = null) =>
+  (await db.query("SELECT get_fx_bars($1, $2, $3, $4, $5) AS rows", [VENUE, instrumentId, fromMs, limit, toMs])).rows[0].rows;
 const health = async (rows) => db.query("SELECT record_fx_collector_health($1)", [JSON.stringify(rows)]);
 const LAST_BAR = Date.UTC(2026, 9, 19, 11, 59);
 const healthRow = (status, extra = {}) => ({ venue: VENUE, instrument_id: EURUSD, status,
@@ -222,6 +222,42 @@ test("get_fx_bars returns the newest bars oldest first in the exact gateway row 
   assert.deepEqual(fromLimited.map((row) => row.open_time_ms), [end - MINUTE, end]);
   assert.deepEqual(await getBars("fx:USDJPY"), []);
   for (const limit of [0, 20001]) await assert.rejects(getBars(EURUSD, null, limit), /Invalid fx bar request/);
+});
+
+test("get_fx_bars p_to_ms is an exclusive upper bound, so a caller can page backwards without repeats (#440)", async () => {
+  const end = recentMinute();
+  await record(series(25, end));
+  const times = (rows) => rows.map((row) => row.open_time_ms);
+  const first = await getBars(EURUSD, null, 10);
+  assert.deepEqual(times(first), Array.from({ length: 10 }, (_, i) => end - (9 - i) * MINUTE));
+  // Page 2 starts strictly before the oldest open time of page 1: that minute is not returned again.
+  const second = await getBars(EURUSD, null, 10, first[0].open_time_ms);
+  assert.deepEqual(times(second), Array.from({ length: 10 }, (_, i) => end - (19 - i) * MINUTE));
+  assert.ok(!times(second).includes(first[0].open_time_ms));
+  const third = await getBars(EURUSD, null, 10, second[0].open_time_ms);
+  assert.equal(third.length, 5, "a short page means the history ends");
+  assert.deepEqual(times([...third, ...second, ...first]), Array.from({ length: 25 }, (_, i) => end - (24 - i) * MINUTE));
+  // The bound is exclusive at the exact open time, combines with p_from_ms, and NULL means no bound.
+  assert.deepEqual(times(await getBars(EURUSD, null, 1000, end)).at(-1), end - MINUTE);
+  assert.deepEqual(times(await getBars(EURUSD, end - 3 * MINUTE, 1000, end - MINUTE)), [end - 3 * MINUTE, end - 2 * MINUTE]);
+  assert.deepEqual(await getBars(EURUSD, null, 10, end - 24 * MINUTE), []);
+  assert.equal((await getBars(EURUSD, null, 1000, null)).length, 25);
+  // The old four-argument call still works through the defaults.
+  assert.equal((await db.query("SELECT jsonb_array_length(get_fx_bars($1, $2)) AS n", [VENUE, EURUSD])).rows[0].n, 25);
+  await assert.rejects(getBars(EURUSD, null, 20001, end), /Invalid fx bar request/);
+});
+
+test("the old four-argument get_fx_bars is gone and the new signature is service-role only (#440)", async () => {
+  const signatures = (await db.query(
+    "SELECT pg_get_function_identity_arguments(oid) AS args FROM pg_proc WHERE proname = 'get_fx_bars'")).rows;
+  assert.equal(signatures.length, 1, "no overload left behind");
+  assert.match(signatures[0].args, /p_to_ms bigint/);
+  await db.exec("SET ROLE authenticated");
+  try {
+    await assert.rejects(getBars(EURUSD, null, 10, 1), /permission denied/);
+  } finally {
+    await db.exec("RESET ROLE");
+  }
 });
 
 test("collector health upserts, accepts MARKET_CLOSED and LOGIN_FAILED, rejects unknown status", async () => {

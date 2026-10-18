@@ -644,12 +644,13 @@ export function createOperationalStore(
       rpcError(error, "forex bar write");
       return ((data ?? []) as Array<{ bar_identity: string }>).map((row) => row.bar_identity);
     },
-    async getFxBars(venue, instrumentId, { fromMs, limit = 1000 } = {}) {
+    async getFxBars(venue, instrumentId, { fromMs, toMs, limit = 1000 } = {}) {
       const { data, error } = await client.rpc("get_fx_bars", {
         p_venue: venue,
         p_instrument_id: instrumentId,
         p_from_ms: fromMs ?? null,
         p_limit: limit,
+        p_to_ms: toMs ?? null,
       });
       rpcError(error, "forex bar read");
       if (!Array.isArray(data)) throw new Error("Invalid forex bar response");

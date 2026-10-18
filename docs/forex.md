@@ -227,6 +227,16 @@ and saved open setups. Defaults (proposals, to confirm):
   (#432), never guessed.
 - No wallet events yet (`events` is empty): the per-user forex wallet is a later step.
 
+Bar history for the stage (#440): the runner (`readBarsPaged` in `src/lib/fx/fx-stage.server.ts`) reads each
+symbol's bars newest page first (20000 bars, the maximum of `get_fx_bars`), then keeps reading older pages
+(`to_ms` = the oldest `open_time_ms` of the previous page, exclusive, so no row repeats) while fewer than
+`FX_WARMUP_MINUTES` bars are loaded and the last page was full; a short page means the history ends.
+`FX_WARMUP_MINUTES` = 403 candles x 240 + 1440 = 98,160: the widest strategy, `ema_cross_50_200`, has
+`first_signal_index` 402, so it needs 403 candles of 240 open minutes, plus a day of margin. The total is
+capped at `FX_MAX_BARS_PER_SYMBOL` = 60,000 bars (a request-size bound), which is 250 candles: every
+strategy has enough history within the cap EXCEPT `ema_cross_50_200` on 240-minute candles, which keeps
+reporting `insufficient_history` until the cap is raised.
+
 ### Hosted forex quotes
 
 The Worker cannot read the local operational database, so forex quotes reach it the same way crypto
