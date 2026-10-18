@@ -15,8 +15,17 @@ The response holds the records ``commit_fx_stage`` takes (``stage`` = ``p_stage`
 ``(boundary_ms, params_hash, symbols)``, so a replayed request produces the same stage (and the database's
 commit returns the existing one). Money stays exact: prices are scaled ints (10**8), outcomes integer
 micro-R; contract, swap and quote-to-account values travel as exact decimal or fraction strings. Anything
-unsupported raises ``FxStageInputError`` (a ``ValueError``); nothing is skipped silently. Wallet events
-are not produced yet (no per-user wallet; ``events`` is empty).
+unsupported raises ``FxStageInputError`` (a ``ValueError``); nothing is skipped silently.
+
+Wallet events (#444) are the shared, user-independent facts the per-user wallet (``fx/wallet.py``) consumes:
+``open`` for every NEW tradeable setup, ``close`` (with the resolution's ``exit_fill`` and ``outcome``) for
+every resolution that became final in this stage, and ``swap`` for every rollover instant in
+``(from_ms, processed_to]`` that some open position can cross (only when the symbol has ``swap_rates``). A
+resolution ``X`` has no trustworthy price, so it emits no ``open`` and no ``close``: it stays excluded from
+stats. Liquidation events are NOT produced here; they depend on each user's position size and are computed
+per user by the wallet-step endpoint (#445). Each event is the wallet's own event dict plus ``symbol``, a
+per-symbol ``sequence`` (ordered by ``(ms, swap < close < open, setup_id)``, so a replay is byte-identical) and
+``stage_run_id`` (the stage id: ``commit_fx_stage`` stores the whole item and checks it).
 """
 from __future__ import annotations
 
@@ -174,6 +183,40 @@ def _outcome_record(resolution: FxResolution) -> dict:
             "payload": {**record, "excluded_from_stats": resolution.status == "X"}}
 
 
+_EVENT_ORDER = {"swap": 0, "close": 1, "open": 2}
+
+
+def _wallet_events(symbol: str, calendar, resolved: list, new_ids: set, quote_text: str, swap_text,
+                   from_ms: int, processed_to_ms: int) -> List[dict]:
+    """The wallet events of one symbol (see the module docstring), numbered ``sequence`` 0.. in a fixed order.
+
+    ``quote_text`` and ``swap_text`` are the request's own exact strings (what the wallet parses). A swap is
+    emitted for a rollover instant only if some non-X setup entered before it and is not yet finally exited
+    before it (an exit exactly at the instant is charged, like the resolver). The window ends at the last
+    processed minute, so a rollover is never announced before the bars that decide who held through it."""
+    events = []
+    for setup, previous, resolution in resolved:
+        if resolution.status == "X":
+            continue  # no trustworthy price: no wallet trade exists
+        if setup.setup_id in new_ids:
+            events.append({"type": "open", "ms": setup.entry_ms, "setup": setup.to_dict(),
+                           "quote_to_account": quote_text})
+        if resolution.final and not (previous is not None and previous.final):
+            events.append({"type": "close", "ms": resolution.exit_ms, "setup_id": setup.setup_id,
+                           "quote_to_account": quote_text, "exit_fill": resolution.exit_fill,
+                           "outcome": resolution.status})
+    if swap_text is not None and processed_to_ms > from_ms:
+        for instant, multiplier in calendar.rollover_events(from_ms, processed_to_ms):
+            if any(r.status != "X" and setup.entry_ms < instant and (not r.final or r.exit_ms >= instant)
+                   for setup, _previous, r in resolved):
+                events.append({"type": "swap", "ms": instant, "long_per_unit": swap_text["long_per_unit"],
+                               "short_per_unit": swap_text["short_per_unit"], "quote_to_account": quote_text,
+                               "multiplier": multiplier})
+    events.sort(key=lambda ev: (ev["ms"], _EVENT_ORDER[ev["type"]],
+                                ev.get("setup_id") or ev.get("setup", {}).get("setup_id") or ""))
+    return [{**event, "symbol": symbol, "sequence": index} for index, event in enumerate(events)]
+
+
 def _open_setups(name: str, items, symbol: str) -> list:
     if not isinstance(items, list):
         _fail(f"{name} must be a list")
@@ -261,16 +304,21 @@ def _symbol_stage(item: dict, *, boundary_ms: int, from_ms: int, strategy_ids, m
                 new.append((setup, None))
     suppressed.sort(key=lambda record: (record["signal_ms"], record["strategy_id"], record["side"]))
 
-    outcomes = []
+    outcomes, resolved = [], []
     for setup, previous in saved + new:
         if setup.entry_ms < bars.start_ms:
             _fail(f"{symbol}: bars start after the entry of open setup {setup.setup_id}")
         resolution = resolve_fx_setup(setup, bars, calendar, model, contract, rates=rates,
                                       quote_to_account=quote_to_account, previous=previous)
         outcomes.append(_outcome_record(resolution))
+        resolved.append((setup, previous, resolution))
+    processed_to_ms = min(boundary_ms, bars.end_ms - MINUTE_MS)
+    swap_text = item.get("swap_rates")
+    events = _wallet_events(symbol, calendar, resolved, {setup.setup_id for setup, _ in new},
+                            item["quote_to_account"], swap_text if rates is not None else None,
+                            from_ms, processed_to_ms)
     return {"symbol": symbol, "signals": signals, "suppressed": suppressed, "setups": setups, "outcomes": outcomes,
-            "reasons": dict(sorted(batch.reasons.items())),
-            "processed_to_ms": min(boundary_ms, bars.end_ms - MINUTE_MS)}
+            "events": events, "reasons": dict(sorted(batch.reasons.items())), "processed_to_ms": processed_to_ms}
 
 
 def fx_market_stage(request: dict) -> dict:
@@ -312,7 +360,7 @@ def fx_market_stage(request: dict) -> dict:
                          "processed_to_ms": processed,
                          "reasons": {result["symbol"]: result["reasons"] for result in per_symbol},
                          "counts": {result["symbol"]: {name: len(result[name]) for name in
-                                                       ("signals", "suppressed", "setups", "outcomes")}
+                                                       ("signals", "suppressed", "setups", "outcomes", "events")}
                                     for result in per_symbol}},
              "freshness": {}}
     return {
@@ -325,7 +373,7 @@ def fx_market_stage(request: dict) -> dict:
         "suppressed": [record for result in per_symbol for record in result["suppressed"]],
         "setups": [record for result in per_symbol for record in result["setups"]],
         "outcomes": [record for result in per_symbol for record in result["outcomes"]],
-        "events": [],
+        "events": [{**event, "stage_run_id": stage["id"]} for result in per_symbol for event in result["events"]],
     }
 
 

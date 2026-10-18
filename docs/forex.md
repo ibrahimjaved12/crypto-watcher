@@ -225,7 +225,21 @@ and saved open setups. Defaults (proposals, to confirm):
   (1 when the quote currency is the account currency).
 - Contract specs (digits, tick size, contract size, lots, swaps) come from `fx_symbol_spec_observations`
   (#432), never guessed.
-- No wallet events yet (`events` is empty): the per-user forex wallet is a later step.
+- Wallet events (#444). `events` holds the shared facts the per-user wallet (`fx/wallet.py`, `step()`)
+  consumes, in its own shapes plus `symbol`, `sequence` and `stage_run_id` (the stage id;
+  `commit_fx_stage` stores the whole item and rejects one whose `stage_run_id` differs):
+  `open` (`ms` = the entry minute, the tradeable `setup`, `quote_to_account`) for every NEW tradeable
+  setup; `close` (`ms` = the exit minute, `setup_id`, `exit_fill`, `outcome` = the resolution status, which
+  includes `ambiguous`, whose pessimistic stop fill is the exit) for every resolution that became final in
+  this stage and was not final in its `previous`; `swap` (`ms` = the rollover instant, the symbol's
+  `long_per_unit` / `short_per_unit`, `multiplier` 1 or 3) for each rollover in `(from_ms, processed_to_ms]`
+  that some non-`X` setup entered before and had not exited before, only when the symbol has `swap_rates`.
+  All values are the request's exact strings. A resolution `X` has no trustworthy price, so it emits no
+  `open` and no `close` and stays excluded from stats (a position opened in an earlier stage that later
+  turns `X` therefore cannot be closed by the wallet yet). `sequence` counts per symbol from 0 in the order
+  `(ms, swap < close < open, setup_id)`, so a replay is byte-identical, and the stage id does not depend on
+  events. **Liquidation events are not produced here**: they depend on each user's position size and are
+  computed in the wallet-step endpoint (#445).
 
 Bar history for the stage (#440): the runner (`readBarsPaged` in `src/lib/fx/fx-stage.server.ts`) reads each
 symbol's bars newest page first (20000 bars, the maximum of `get_fx_bars`), then keeps reading older pages
