@@ -1,11 +1,9 @@
+import { useQuery } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import {
-  ArrowDownUp,
-  ArrowLeftRight,
   Bell,
   BellRing,
   CandlestickChart,
-  Coins,
-  Droplet,
   FlaskConical,
   Moon,
   Plug,
@@ -15,16 +13,21 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { FxQuoteTile, FxQuoteTileSkeleton } from "@/components/market/fx-quote-tile";
 import { EmptyState, PageHeader } from "@/components/plain";
+import { automaticQueryOptions } from "@/lib/activity-controls";
+import { getForexQuotes } from "@/lib/forex-market.functions";
 import { formatCountdown } from "@/lib/market/countdown";
-import { FOREX_DEFAULTS, type AssetClass, type Instrument } from "@/lib/market/instruments";
+import { fxFeedState, fxQuoteState, type FxFeedState, type FxQuote } from "@/lib/market/fx-quotes";
+import { FOREX_DEFAULTS, type Instrument } from "@/lib/market/instruments";
 import { FX_SESSIONS, fxNextOpenMs, fxSessionTags, fxWeekWindow, isFxOpen } from "@/lib/market/trading-calendar";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
 
 /**
- * Forex screens before the data feed exists (#374). Only the trading calendar and session clock are real; there
- * are no prices, charts, signals or accounts, and nothing here pretends otherwise.
+ * Forex screens (#374). The trading calendar, the session clock and, on the Market page, the published quotes
+ * (#398: bid, ask, spread, 1h change and a 24 h sparkline from `fx_market_quotes`) are real; there are no
+ * charts, signals or accounts yet, and nothing here pretends otherwise.
  */
 type ForexPage = "market" | "paper" | "alerts" | "lab" | "control";
 /** Same eyebrow and title as each crypto page: the teal theme alone says which market is shown. */
@@ -64,13 +67,10 @@ const SESSION_LABELS: Record<string, string> = {
   london: "London",
   new_york: "New York",
 };
-const CLASS_STYLE: Partial<Record<AssetClass, { icon: LucideIcon; chip: string }>> = {
-  metal: { icon: Coins, chip: "bg-warn/15 text-warn ring-warn/30" },
-  energy: { icon: Droplet, chip: "bg-chart-2/15 text-chart-2 ring-chart-2/30" },
-  fx: { icon: ArrowLeftRight, chip: "bg-primary/15 text-primary ring-primary/30" },
-};
+/** UNVERIFIED placeholder: the Market page polls the published quotes every 15 s (the publisher writes once a
+ * minute, so a new bar shows within about 15 s of its publication). */
+const QUOTE_REFRESH_MS = 15_000;
 const COMING: readonly { icon: LucideIcon; title: string }[] = [
-  { icon: ArrowDownUp, title: "Bid, ask, spread" },
   { icon: CandlestickChart, title: "Session-aware charts" },
   { icon: Wallet, title: "Separate USD account" },
 ];
@@ -107,27 +107,68 @@ function localHour(ms: number): number {
   return (((new Date(ms).getUTCHours() + new Date(ms).getUTCMinutes() / 60 + zoneOffsetHours(undefined, ms)) % 24) + 24) % 24;
 }
 
+/** The default instruments first, then any other published symbol, each with its quote and state. */
+function tileRows(quotes: readonly FxQuote[], now: number, open: boolean) {
+  const bySymbol = new Map(quotes.map((quote) => [quote.symbol, quote]));
+  const symbolOf = (instrument: Instrument) => instrument.instrumentId.split(":")[1] ?? instrument.display;
+  const defaults = FOREX_DEFAULTS.map((instrument) => {
+    const symbol = symbolOf(instrument);
+    const quote = bySymbol.get(symbol) ?? null;
+    return {
+      symbol,
+      name: instrument.display !== symbol ? instrument.display : `${instrument.base} / ${instrument.quote}`,
+      assetClass: instrument.assetClass,
+      quote,
+      state: fxQuoteState(quote, now, open),
+    };
+  });
+  const known = new Set(defaults.map((row) => row.symbol));
+  const extras = quotes
+    .filter((quote) => !known.has(quote.symbol))
+    .sort((a, b) => a.symbol.localeCompare(b.symbol))
+    .map((quote) => ({ symbol: quote.symbol, name: undefined, assetClass: "fx" as const, quote,
+      state: fxQuoteState(quote, now, open) }));
+  return [...defaults, ...extras];
+}
+
 export function ForexLanding({ page }: { page: ForexPage }) {
   const now = useNow(30_000);
   const meta = PAGES[page];
   const empty = EMPTY[page];
+  const loadQuotes = useServerFn(getForexQuotes);
+  const automatic = automaticQueryOptions(import.meta.env["VITE_MARKET_AUTO_REFRESH_ENABLED"]);
+  // Read once whenever the Market page is shown; poll every 15 s only where automatic refresh is enabled.
+  const quotes = useQuery({
+    queryKey: ["forex-quotes"],
+    queryFn: () => loadQuotes(),
+    enabled: page === "market",
+    refetchInterval: page === "market" && automatic.enabled ? QUOTE_REFRESH_MS : false,
+    ...(automatic.enabled ? {} : { retry: false as const }),
+  });
+  const open = isFxOpen(now);
+  const tiles = tileRows(quotes.data?.quotes ?? [], now, open);
+  const feed: FeedChipState = quotes.isError
+    ? "unavailable"
+    : quotes.isPending
+      ? "loading"
+      : fxFeedState(tiles.map((tile) => tile.state), open);
   return (
     <div className="space-y-6 overflow-x-clip">
       <PageHeader eyebrow={meta.eyebrow} title={meta.title} subtitle={meta.subtitle} />
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
-        <MarketStateCard now={now} />
+        <MarketStateCard now={now} feed={page === "market" ? feed : null} />
         {page === "market" ? <SessionStrip now={now} /> : null}
         {page === "control" ? <PipelineCard /> : null}
         {empty ? <EmptyState icon={empty.icon} title={empty.title} body={empty.body} className="panel rounded-2xl" /> : null}
       </div>
       {page === "market" ? (
         <>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            {FOREX_DEFAULTS.map((instrument) => (
-              <InstrumentTile key={instrument.instrumentId} instrument={instrument} />
-            ))}
+          <div className="grid grid-cols-2 gap-2.5 sm:gap-3 lg:grid-cols-4" aria-busy={quotes.isPending}>
+            {quotes.isPending
+              ? FOREX_DEFAULTS.map((instrument) => <FxQuoteTileSkeleton key={instrument.instrumentId} />)
+              : tiles.map((tile) => <FxQuoteTile key={tile.symbol} {...tile} />)}
           </div>
-          <div className="grid grid-cols-3 gap-2 sm:gap-3">
+          <div className="grid grid-cols-2 gap-2 sm:gap-3">
             {COMING.map(({ icon: Icon, title }) => (
               <div
                 key={title}
@@ -146,7 +187,30 @@ export function ForexLanding({ page }: { page: ForexPage }) {
   );
 }
 
-function MarketStateCard({ now }: { now: number }) {
+type FeedChipState = FxFeedState | "loading" | "unavailable";
+const FEED_CHIP: Record<Exclude<FeedChipState, "loading">, { text: string; tone: string; dot: string }> = {
+  live: { text: "Live", tone: "bg-bull/15 text-bull", dot: "bg-bull" },
+  delayed: { text: "Delayed", tone: "bg-warn/15 text-warn", dot: "border-2 border-warn" },
+  none: { text: "No data", tone: "bg-muted text-muted-foreground", dot: "bg-current" },
+  closed: { text: "Closed", tone: "bg-muted text-muted-foreground", dot: "" },
+  unavailable: { text: "Unavailable", tone: "bg-muted text-muted-foreground", dot: "bg-current" },
+};
+
+/** The data-feed chip: same shape as NotYetChip, tone from the quotes; a skeleton of the same size while loading. */
+function FeedChip({ state, className }: { state: FeedChipState; className?: string }) {
+  if (state === "loading") {
+    return <span aria-hidden className={cn("inline-block h-5 w-16 shrink-0 rounded-full bg-muted motion-safe:animate-pulse", className)} />;
+  }
+  const chip = FEED_CHIP[state];
+  return (
+    <span className={cn("inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs", chip.tone, className)}>
+      {state === "closed" ? <Moon className="size-3" aria-hidden /> : <span className={cn("size-1.5 rounded-full", chip.dot)} aria-hidden />}
+      {chip.text}
+    </span>
+  );
+}
+
+function MarketStateCard({ now, feed }: { now: number; feed: FeedChipState | null }) {
   const open = isFxOpen(now);
   const next = open ? fxWeekWindow(now)[1] : fxNextOpenMs(now);
   return (
@@ -175,11 +239,13 @@ function MarketStateCard({ now }: { now: number }) {
           <span className="num">{whenFormat.format(next)}</span>
         </p>
       </div>
-      <div className="mt-auto flex items-center gap-2 border-t border-border/60 pt-3 text-sm">
-        <Plug className="size-4 text-muted-foreground" aria-hidden />
-        <span>Data feed</span>
-        <NotYetChip text="Not connected" className="ml-auto" />
-      </div>
+      {feed ? (
+        <div className="mt-auto flex items-center gap-2 border-t border-border/60 pt-3 text-sm">
+          <Plug className="size-4 text-muted-foreground" aria-hidden />
+          <span>Data feed</span>
+          <FeedChip state={feed} className="ml-auto" />
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -250,29 +316,5 @@ function SessionStrip({ now }: { now: number }) {
       </div>
       <p className="sr-only">Active now: {active.size ? [...active].map((n) => SESSION_LABELS[n] ?? n).join(", ") : "none"}</p>
     </section>
-  );
-}
-
-function InstrumentTile({ instrument }: { instrument: Instrument }) {
-  const symbol = instrument.instrumentId.split(":")[1] ?? instrument.display;
-  const style = CLASS_STYLE[instrument.assetClass] ?? CLASS_STYLE.fx!;
-  const Icon = style.icon;
-  const name = instrument.display !== symbol ? instrument.display : `${instrument.base} / ${instrument.quote}`;
-  return (
-    <div className="panel flex min-w-0 flex-col gap-3 overflow-hidden rounded-2xl border border-border p-3 sm:p-4">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="truncate font-display text-lg font-semibold">{symbol}</p>
-          <p className="truncate text-xs text-muted-foreground">{name}</p>
-        </div>
-        <span className={cn("grid size-8 shrink-0 place-items-center rounded-xl ring-1 sm:size-9", style.chip)}>
-          <Icon className="size-4" aria-hidden />
-        </span>
-      </div>
-      <svg viewBox="0 0 100 20" preserveAspectRatio="none" className="h-5 w-full text-muted-foreground/50" aria-hidden>
-        <line x1="0" y1="10" x2="100" y2="10" stroke="currentColor" strokeWidth="1.5" strokeDasharray="4 4" vectorEffect="non-scaling-stroke" />
-      </svg>
-      <p className="text-xs text-muted-foreground">No data yet</p>
-    </div>
   );
 }

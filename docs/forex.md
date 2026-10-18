@@ -205,6 +205,11 @@ table; anon gets nothing. A row has the bid (the newest bar's close), the ask = 
 e.g. across the weekend) and 24 h of 15-minute bid closes. A symbol without a spec is skipped and
 logged once.
 
+The forex Market page (#398) reads them with the user's own client (`getForexQuotes`; RLS decides) and
+shows one tile per instrument: live (bar at most 3 minutes old while the market is open), delayed (older;
+amber edge), closed (the last price, desaturated) or no data. The 3-minute limit and the 15 s refresh are
+UNVERIFIED placeholders.
+
 ### Bars and candles
 
 Contract specs (digits, point, tick, contract size, lots, currencies, swaps) live in the operational
