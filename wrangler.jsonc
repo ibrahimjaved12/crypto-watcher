@@ -3,7 +3,6 @@
   "name": "crypto-watcher",
   "compatibility_date": "2026-10-06",
   "compatibility_flags": ["nodejs_compat"],
-  // Nitro emits the Worker and static assets separately.
   "main": ".output/server/index.mjs",
   "assets": {
     "binding": "ASSETS",
@@ -11,15 +10,11 @@
   },
   "no_bundle": true,
   "rules": [{ "type": "ESModule", "globs": ["**/*.mjs", "**/*.js"] }],
-  // Experiment: run the Worker near this cloud region to see whether Binance stops returning 403.
   "placement": { "region": "aws:eu-central-1" },
   "vars": {
     "ALLOW_HOSTED_SUPABASE": "true",
     "APP_PROFILE": "production",
     "BINANCE_COLLECTOR_ENABLED": "false",
-    // TEMPORARY degraded-mode fallback (#323): remove after the machine has run 24/7 for 30 days
-    // Set false here and deploy to serve only machine-published quotes, including stale/empty states.
-    // keep_vars does not preserve dashboard overrides of this config-defined variable.
     "MARKET_DEGRADED_FALLBACK_ENABLED": "true",
     "MACHINE_ONLY_ENABLED": "false",
     "OPERATIONAL_DB_ENABLED": "false",
@@ -29,7 +24,24 @@
     "SCHEDULED_MONITOR_ENABLED": "false",
     "SUPABASE_URL": "https://xshzjhocpcenuumdrhdh.supabase.co"
   },
-  // Preserve the publishable key and other dashboard runtime variables.
   "keep_vars": true,
-  "preview_urls": true
+  "preview_urls": true,
+  "previews": {
+    "vars": {
+      "ALLOW_HOSTED_SUPABASE": "true",
+      "APP_PROFILE": "production",
+      "BINANCE_COLLECTOR_ENABLED": "false",
+      "MARKET_DEGRADED_FALLBACK_ENABLED": "true",
+      "MACHINE_ONLY_ENABLED": "false",
+      "OPERATIONAL_DB_ENABLED": "false",
+      "PYTHON_ANALYSIS_ENABLED": "false",
+      "RUNNER_GATEWAY_ENABLED": "true",
+      "RUNNER_JOBS_ENABLED": "true",
+      "SCHEDULED_MONITOR_ENABLED": "false",
+      "SUPABASE_URL": "https://xshzjhocpcenuumdrhdh.supabase.co"
+    },
+    "placement": {
+      "region": "aws:eu-central-1"
+    }
+  }
 }
