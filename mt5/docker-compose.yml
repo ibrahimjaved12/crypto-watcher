@@ -1,8 +1,12 @@
-   services:
-     mt5:
-       image: gmag11/metatrader5_vnc
-       volumes: ["./config:/config"]
-       ports: ["3000:3000", "8001:8001"]
-       environment:
-         - CUSTOM_USER=me
-         - PASSWORD=pick-something-long
+services:
+  mt5:
+    # Unpinned on purpose while we test; pin the tag if the spike (#393) passes.
+    image: gmag11/metatrader5_vnc
+    container_name: crypto-watcher-mt5
+    restart: "no"
+    volumes: ["./config:/config"]
+    # Loopback only: 8001 is an RPyC bridge that allows code execution in the container.
+    ports: ["127.0.0.1:3000:3000", "127.0.0.1:8001:8001"]
+    environment:
+      - CUSTOM_USER=${MT5_VNC_USER:-mt5}
+      - PASSWORD=${MT5_VNC_PASSWORD:?Set MT5_VNC_PASSWORD in mt5/.env}
