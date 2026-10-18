@@ -304,6 +304,21 @@ in time by `first_seen_at`; a reschedule or re-rating is a new row) and the fetc
 `get_fx_calendar_events` and `get_fx_calendar_status`. Service-role only. The rules and the
 fail-closed coverage check are in [forex](forex.md#news-blackout).
 
+## Forex symbol specs (#432)
+
+`20261019140000_fx_symbol_specs.sql` adds `fx_symbol_spec_observations`: the broker's contract
+details per `(venue, instrument_id)` (digits, point, tick size and value, contract size, lot min/max/
+step, base/profit/margin currency, account currency, trade mode, swap mode, long/short swaps and the
+triple-swap day). It is append-only (UPDATE/DELETE fail with `55000`) and versioned: the database
+computes `spec_hash` (sha256 of every economic field, not `native_symbol`) and stores a spec only
+when that hash is new for the instrument. `point` must equal `10^-digits`. **`tick_value` is in the
+account currency** (MT5 reports it that way), so `account_currency` is stored with it.
+`record_fx_symbol_specs(p_rows)` (1 to 500 items, every column, JSON numbers, no other key, one
+generic error) returns the number of new observations; `get_fx_symbol_specs(p_as_of_ms)` returns
+the latest observation per instrument at or before that time (null = now). Service-role only.
+Limit: a spec that changes back to an earlier value (A, B, A) is not stored again, so the latest
+read stays at B.
+
 ## Cutover and rollback
 
 Deploy the operational baseline and credentials first, then start the collector worker and switch

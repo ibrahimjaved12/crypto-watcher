@@ -222,6 +222,37 @@ export type FxCalendarSourceStatus = {
   last_error: string | null;
 };
 
+/**
+ * One forex symbol contract spec from the broker (#432); never guessed. `tickValue` is in
+ * `accountCurrency` (MT5 reports it in the account currency). On reads, `specHash` is the stored
+ * version identity and `observedAt` is epoch ms; on writes the database computes the hash.
+ */
+export type FxSymbolSpec = {
+  venue: string;
+  instrumentId: string;
+  nativeSymbol: string;
+  digits: number;
+  point: number;
+  tickSize: number;
+  tickValue: number;
+  contractSize: number;
+  volumeMin: number;
+  volumeMax: number;
+  volumeStep: number;
+  /** Not always an ISO currency (XAU, USOIL). */
+  baseCurrency: string;
+  profitCurrency: string;
+  marginCurrency: string;
+  accountCurrency: string;
+  tradeMode: number;
+  swapMode: number;
+  swapLong: number;
+  swapShort: number;
+  swapRollover3days: number;
+  specHash: string;
+  observedAt: number;
+};
+
 export type OperationalCheckpoint = {
   userId: string;
   instrumentId: string;
@@ -425,4 +456,8 @@ export interface OperationalStore {
   /** Events with time in [fromMs, toMs] (at most 120 days); with `asOfMs` only those first seen by then. */
   getFxCalendarEvents(fromMs: number, toMs: number, asOfMs?: number): Promise<FxCalendarEventRow[]>;
   getFxCalendarStatus(): Promise<FxCalendarSourceStatus[]>;
+  /** Append broker contract specs (#432); an unchanged spec is skipped. Returns the number of new observations. */
+  recordFxSymbolSpecs(specs: Omit<FxSymbolSpec, "observedAt" | "specHash">[]): Promise<number>;
+  /** The latest spec per (venue, instrument) observed at or before `asOfMs` (default now). */
+  getFxSymbolSpecs(asOfMs?: number): Promise<FxSymbolSpec[]>;
 }

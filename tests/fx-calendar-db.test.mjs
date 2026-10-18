@@ -21,7 +21,7 @@ before(async () => {
   // The baseline and every later operational migration (forex bars included), in file-name order.
   const files = (await readdir(MIGRATIONS)).filter((name) => name.endsWith(".sql")).sort();
   assert.ok(files.includes("20261019120000_fx_bars.sql"));
-  assert.equal(files.at(-1), "20261019130000_fx_calendar.sql");
+  assert.ok(files.includes("20261019130000_fx_calendar.sql"));
   for (const file of files) await db.exec(await readFile(new URL(file, MIGRATIONS), "utf8"));
 });
 beforeEach(() => db.exec(`RESET ROLE; TRUNCATE ${TABLES.join(", ")} RESTART IDENTITY;`));

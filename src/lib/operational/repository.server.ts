@@ -14,6 +14,7 @@ import type {
   FxBarCoverage,
   FxCalendarEventRow,
   FxCalendarSourceStatus,
+  FxSymbolSpec,
   FxCollectorHealthRow,
   FxGatewayRow,
   FxSubscription,
@@ -196,6 +197,12 @@ const disabledStore: OperationalStore = {
     return [];
   },
   async getFxCalendarStatus() {
+    return [];
+  },
+  async recordFxSymbolSpecs() {
+    throw new Error("Operational forex symbol specs storage is disabled");
+  },
+  async getFxSymbolSpecs() {
     return [];
   },
 };
@@ -762,6 +769,69 @@ export function createOperationalStore(
       rpcError(error, "forex calendar status read");
       if (!Array.isArray(data)) throw new Error("Invalid forex calendar status response");
       return data as FxCalendarSourceStatus[];
+    },
+    async recordFxSymbolSpecs(specs) {
+      // record_fx_symbol_specs takes 1..500 items per call; an unchanged spec is skipped, so a chunk
+      // that fails can be retried as a whole.
+      let inserted = 0;
+      for (let i = 0; i < specs.length; i += 500) {
+        const { data, error } = await client.rpc("record_fx_symbol_specs", {
+          p_rows: specs.slice(i, i + 500).map((spec) => ({
+            venue: spec.venue,
+            instrument_id: spec.instrumentId,
+            native_symbol: spec.nativeSymbol,
+            digits: spec.digits,
+            point: spec.point,
+            tick_size: spec.tickSize,
+            tick_value: spec.tickValue,
+            contract_size: spec.contractSize,
+            volume_min: spec.volumeMin,
+            volume_max: spec.volumeMax,
+            volume_step: spec.volumeStep,
+            base_currency: spec.baseCurrency,
+            profit_currency: spec.profitCurrency,
+            margin_currency: spec.marginCurrency,
+            account_currency: spec.accountCurrency,
+            trade_mode: spec.tradeMode,
+            swap_mode: spec.swapMode,
+            swap_long: spec.swapLong,
+            swap_short: spec.swapShort,
+            swap_rollover3days: spec.swapRollover3days,
+          })),
+        });
+        rpcError(error, "forex symbol spec write");
+        inserted += Number(data ?? 0);
+      }
+      return inserted;
+    },
+    async getFxSymbolSpecs(asOfMs) {
+      const { data, error } = await client.rpc("get_fx_symbol_specs", { p_as_of_ms: asOfMs ?? null });
+      rpcError(error, "forex symbol spec read");
+      if (!Array.isArray(data)) throw new Error("Invalid forex symbol specs response");
+      return (data as Array<Record<string, unknown>>).map((row) => ({
+        venue: row["venue"] as string,
+        instrumentId: row["instrument_id"] as string,
+        nativeSymbol: row["native_symbol"] as string,
+        digits: Number(row["digits"]),
+        point: Number(row["point"]),
+        tickSize: Number(row["tick_size"]),
+        tickValue: Number(row["tick_value"]),
+        contractSize: Number(row["contract_size"]),
+        volumeMin: Number(row["volume_min"]),
+        volumeMax: Number(row["volume_max"]),
+        volumeStep: Number(row["volume_step"]),
+        baseCurrency: row["base_currency"] as string,
+        profitCurrency: row["profit_currency"] as string,
+        marginCurrency: row["margin_currency"] as string,
+        accountCurrency: row["account_currency"] as string,
+        tradeMode: Number(row["trade_mode"]),
+        swapMode: Number(row["swap_mode"]),
+        swapLong: Number(row["swap_long"]),
+        swapShort: Number(row["swap_short"]),
+        swapRollover3days: Number(row["swap_rollover3days"]),
+        specHash: row["spec_hash"] as string,
+        observedAt: Number(row["observed_at_ms"]),
+      }) satisfies FxSymbolSpec);
     },
     async stageDurableResult(input) {
       const { error } = await client.rpc("stage_durable_result", {
