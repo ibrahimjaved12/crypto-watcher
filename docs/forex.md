@@ -257,6 +257,40 @@ Retention note: the local store keeps 140 days, about 144k open-market minutes, 
 is 98,160) exist only after the collector has run for roughly 14 weeks of market time. Until then
 `ema_cross_50_200` on 240-minute candles correctly reports `insufficient_history`; nothing is filled in.
 
+### Per-user pass (#446)
+
+`src/lib/fx/fx-user.server.ts`, run by the `forex-hourly` child right after the market stage (the same loop,
+so it only runs while `FX_HOURLY_ENABLED=true`, which is still off). It mirrors the crypto user stage
+(`runHourlyForAccounts`, `runUserStage`, the shared repository) without touching it.
+
+1. `fx_entitled_users()` (service role only) lists the users whose plan, role or extra markets include forex
+   (`markets_of` is the single source). A user without a `user_access` row is crypto only.
+2. Per user, `ensure_fx_account(user, boundary)` creates the forex row of `forward_wallet_accounts` (idempotent;
+   `market = 'forex'`, start boundary = the current hour). The account stores its config; the migration
+   `20261020110000_fx_user_runner.sql` writes the defaults there (also for an account created earlier with
+   the empty default): **1,000 USD**, **1 %** risk per trade, `max_positions` **1000**, total open notional
+   **10 x** balance. The runner sends only these four keys to the wallet endpoint.
+3. The account's cursor is its latest `ok` forex `paper_runs` row (`consumed_boundary_ms`, never below the
+   start boundary) and its state is that row's `wallet_state`. Stages in `(cursor, boundary]` are read oldest
+   first (at most 48 per pass) with their events ordered by `(ms, symbol, sequence)`.
+4. Each stage goes to `POST /v1/fx/forward/wallet_step` with the stored state, config, the contracts (latest
+   symbol specs) and, for every symbol with a carried position or an open event, the 1-minute bars from the
+   minute after the cursor (or the position's entry, if earlier) through the stage's boundary minute, for the
+   per-user stop-out scan. An `open` event from before the account's start is not its trade and is dropped.
+5. `commit_fx_user_run(user, stage, run, ledger, expected_run_id)` stores the run (trigger, status, processed
+   cursor, versions, params hash, wallet config and state, assumptions, reasons, freshness) and the ledger and
+   moves the cursor atomically. A `40001` ("Wallet changed") is retried once from a fresh read of the account.
+
+**Never on partial inputs.** A missing symbol spec, a bar window the store cannot return whole (a full page),
+an invalid or refused wallet answer, or a **gap** inserts a retryable `paper_runs` audit row (`market =
+'forex'`, `run_key = 'fx-hour:<boundary>'`, status `skipped_stale`, so it does not take the hourly claim) and
+the cursor does not move; the account counts as failed (non-zero exit), the others continue. A *gap* means a
+stage whose decision window starts after the account's cursor (`payload.from_ms` > cursor): decisions in
+between were never made by any stage (the stage's catch-up is bounded to a day), so applying it would silently
+skip open/close/swap events. The account then stops until the owner decides; hours without a stage are not a
+gap, because a later stage's window reaches back to the last complete one. No stage for the boundary yet means
+the account waits. A replay consumes nothing (`already_done`).
+
 ### Hosted forex quotes
 
 The Worker cannot read the local operational database, so forex quotes reach it the same way crypto

@@ -154,7 +154,7 @@ function swapRates(spec: FxSymbolSpec): { long_per_unit: string; short_per_unit:
 }
 
 /** 1 when the quote currency is the account currency, else the mid of the same feed's conversion pair. */
-async function quoteToAccount(deps: FxStageDeps, spec: FxSymbolSpec, specs: FxSymbolSpec[]): Promise<string> {
+export async function quoteToAccount(deps: { store: Pick<OperationalStore, "getFxBars"> }, spec: FxSymbolSpec, specs: FxSymbolSpec[]): Promise<string> {
   const quote = spec.profitCurrency;
   const account = spec.accountCurrency;
   if (quote === account) return "1";
@@ -169,7 +169,7 @@ async function quoteToAccount(deps: FxStageDeps, spec: FxSymbolSpec, specs: FxSy
   throw new Error(`no conversion price from ${quote} to ${account} on ${spec.venue}`);
 }
 
-function gatewayRow(row: FxGatewayRow) {
+export function gatewayRow(row: FxGatewayRow) {
   return { time_basis: row.time_basis, venue: row.venue, native_symbol: row.native_symbol, transport: row.transport,
     open_time_ms: row.open_time_ms, open: row.open, high: row.high, low: row.low, close: row.close,
     spread_points: row.spread_points, tick_volume: row.tick_volume };
@@ -211,6 +211,18 @@ export async function readBarsPaged(
   return bars.length > wanted ? bars.slice(bars.length - wanted) : bars;
 }
 
+/** The venue_symbol record of the Python forex endpoints (stage and wallet step). */
+export function fxVenueSymbol(spec: FxSymbolSpec) {
+  return { venue: spec.venue, native_symbol: spec.nativeSymbol, digits: spec.digits, tick_size: exactDecimal(spec.tickSize) };
+}
+
+/** The contract record of the Python forex endpoints, as exact decimal strings. */
+export function fxContract(spec: FxSymbolSpec) {
+  return { contract_size: exactDecimal(spec.contractSize), tick_size: exactDecimal(spec.tickSize),
+    min_lot: exactDecimal(spec.volumeMin), lot_step: exactDecimal(spec.volumeStep), base: spec.baseCurrency,
+    quote: spec.profitCurrency };
+}
+
 async function symbolInput(deps: FxStageDeps, spec: FxSymbolSpec, specs: FxSymbolSpec[],
                            saved: Record<string, unknown>[], outcomes: Map<string, { payload: unknown }[]>) {
   const symbol = spec.instrumentId.split(":")[1] ?? "";
@@ -228,11 +240,8 @@ async function symbolInput(deps: FxStageDeps, spec: FxSymbolSpec, specs: FxSymbo
   });
   return {
     symbol,
-    venue_symbol: { venue: spec.venue, native_symbol: spec.nativeSymbol, digits: spec.digits,
-      tick_size: exactDecimal(spec.tickSize) },
-    contract: { contract_size: exactDecimal(spec.contractSize), tick_size: exactDecimal(spec.tickSize),
-      min_lot: exactDecimal(spec.volumeMin), lot_step: exactDecimal(spec.volumeStep), base: spec.baseCurrency,
-      quote: spec.profitCurrency },
+    venue_symbol: fxVenueSymbol(spec),
+    contract: fxContract(spec),
     swap_rates: swapRates(spec),
     quote_to_account: await quoteToAccount(deps, spec, specs),
     bars: bars.map(gatewayRow),
