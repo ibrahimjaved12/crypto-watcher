@@ -6,40 +6,67 @@ import {
   runFxHourly,
   type HostedFxStageClient,
 } from "../lib/fx/fx-stage.server";
+import {
+  createFxWalletCall,
+  createHostedFxUser,
+  runFxUsers,
+  type HostedFxUserClient,
+} from "../lib/fx/fx-user.server";
 import { getOperationalStore } from "../lib/operational/repository.server";
 import { pythonServiceConfig } from "../lib/python-service.server";
 
 // Hourly forex market stage runner (#397), a forex child of the worker host (off unless FX_HOURLY_ENABLED=true).
 // It runs a few minutes after each completed hour (the forex collector must have stored the boundary minute),
 // reads the local operational store and the hosted open setups, asks the Python forward service for the stage
-// and commits it with commit_fx_stage. No per-user wallet work. `--once` runs a single pass and exits 1 when a
-// symbol was refused or the pass failed.
+// and commits it with commit_fx_stage. Then the per-user pass (#446): every forex-entitled account consumes the
+// committed stages after its cursor through POST /v1/fx/forward/wallet_step. One failing account never stops the
+// others. `--once` runs a single pass and exits 1 when a symbol was refused, the stage failed or an account failed.
 const OFFSET_MS = 3 * 60_000;
 
 function deps() {
   const store = getOperationalStore();
   if (!store.enabled) throw new Error("The operational database is disabled (OPERATIONAL_DB_ENABLED=true is required)");
-  let config: { url: string; token: string };
+  let stage: { url: string; token: string };
+  let wallet: { url: string; token: string };
   try {
-    config = pythonServiceConfig("/v1/fx/forward/stage");
+    stage = pythonServiceConfig("/v1/fx/forward/stage");
+    wallet = pythonServiceConfig("/v1/fx/forward/wallet_step");
   } catch {
     throw new Error("The Python forward service is not configured");
   }
+  const log = (line: string) => console.log(line);
+  const error = (line: string) => console.error(line);
   return {
-    now: () => Date.now(),
-    store,
-    hosted: createHostedFxStage(supabaseAdmin as unknown as HostedFxStageClient),
-    callStage: createFxStageCall(config),
-    log: (line: string) => console.log(line),
-    error: (line: string) => console.error(line),
+    stage: {
+      now: () => Date.now(),
+      store,
+      hosted: createHostedFxStage(supabaseAdmin as unknown as HostedFxStageClient),
+      callStage: createFxStageCall(stage),
+      log,
+      error,
+    },
+    users: {
+      now: () => Date.now(),
+      store,
+      hosted: createHostedFxUser(supabaseAdmin as unknown as HostedFxUserClient),
+      callWallet: createFxWalletCall(wallet),
+      log,
+      error,
+    },
   };
 }
 
 async function once(): Promise<void> {
-  const result = await runFxHourly(deps());
+  const { stage, users } = deps();
+  const result = await runFxHourly(stage);
+  // The user pass runs whatever the stage did: older committed stages may still be waiting to be consumed.
+  const accounts = await runFxUsers(users, result.boundary);
   const refused = Object.keys(result.failed);
+  const problems = [];
   if (result.status === "failed" || refused.length)
-    throw new Error(`forex stage ${result.status}; refused: ${refused.join(", ") || "none"}`);
+    problems.push(`forex stage ${result.status}; refused: ${refused.join(", ") || "none"}`);
+  if (accounts.failed) problems.push(`${accounts.failed} of ${accounts.users} forex account(s) failed`);
+  if (problems.length) throw new Error(problems.join("; "));
 }
 
 async function loop(): Promise<never> {

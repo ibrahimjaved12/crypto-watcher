@@ -52,6 +52,10 @@ class _Exit:
     exit_ms: int
 
 
+def _canonical(name: str, value, *, positive: bool = False) -> str:
+    return exact_to_str(_exact(name, value, positive=positive))
+
+
 def _config(record, contracts: dict, model) -> FxWalletConfig:
     record = _keys("config", {} if record is None else record, set(), _CONFIG_KEYS)
     defaults = FxWalletConfig()
@@ -117,7 +121,9 @@ def _events(items) -> List[dict]:
         if missing:
             raise FxStageInputError(f"events[{index}] ({kind}): missing {sorted(missing)}")
         _int(f"events[{index}].ms", item.get("ms"))
-        _exact(f"events[{index}].quote_to_account", item["quote_to_account"], positive=True)
+        # The wallet parses canonical exact text only ("-73/1000000", not "-0.000073"): normalize on a copy.
+        item = {**item, "quote_to_account": _canonical(f"events[{index}].quote_to_account",
+                                                       item["quote_to_account"], positive=True)}
         if kind == "open":
             setup = _keys(f"events[{index}].setup", item["setup"], _SETUP_KEYS)
             try:
@@ -126,11 +132,11 @@ def _events(items) -> List[dict]:
                 raise FxStageInputError(f"events[{index}].setup: {error}") from None
         elif kind == "close":
             _text(f"events[{index}].setup_id", item["setup_id"])
-            _exact(f"events[{index}].exit_fill", item["exit_fill"], positive=True)
+            item["exit_fill"] = _canonical(f"events[{index}].exit_fill", item["exit_fill"], positive=True)
         else:
             _text(f"events[{index}].symbol", item["symbol"])
-            _exact(f"events[{index}].long_per_unit", item["long_per_unit"])
-            _exact(f"events[{index}].short_per_unit", item["short_per_unit"])
+            item["long_per_unit"] = _canonical(f"events[{index}].long_per_unit", item["long_per_unit"])
+            item["short_per_unit"] = _canonical(f"events[{index}].short_per_unit", item["short_per_unit"])
             _int(f"events[{index}].multiplier", item["multiplier"])
         out.append(item)
     return out
@@ -148,11 +154,11 @@ def _series(items) -> dict:
         symbol = _text("symbols[].symbol", item["symbol"])
         if symbol in out:
             raise FxStageInputError(f"duplicate symbol {symbol}")
-        _exact(f"{symbol}.quote_to_account", item["quote_to_account"], positive=True)
+        quote_text = _canonical(f"{symbol}.quote_to_account", item["quote_to_account"], positive=True)
         if not isinstance(item["bars"], list):
             raise FxStageInputError(f"{symbol}.bars must be a list")
         if not item["bars"]:
-            out[symbol] = (None, item["quote_to_account"])
+            out[symbol] = (None, quote_text)
             continue
         instrument = instrument_for(symbol)
         venue = _keys(f"{symbol}.venue_symbol", item["venue_symbol"], _VENUE_KEYS)
@@ -161,8 +167,7 @@ def _series(items) -> dict:
                                    _int(f"{symbol}.digits", venue["digits"]),
                                    _exact(f"{symbol}.venue_symbol.tick_size", venue["tick_size"], positive=True),
                                    None)
-        out[symbol] = (fx_bars_from_rows(instrument, venue_symbol, calendar_for(instrument), item["bars"]),
-                       item["quote_to_account"])
+        out[symbol] = (fx_bars_from_rows(instrument, venue_symbol, calendar_for(instrument), item["bars"]), quote_text)
     return out
 
 

@@ -323,7 +323,7 @@ class EventTests(unittest.TestCase):
         swap = out["events"][2]
         self.assertEqual((swap["ms"], swap["multiplier"], swap["symbol"], swap["sequence"]), (rollover, 1, "EURUSD", 2))
         self.assertEqual((swap["long_per_unit"], swap["short_per_unit"], swap["quote_to_account"]),
-                         ("-0.000073", "0.000021", "1"))
+                         ("-73/1000000", "21/1000000", "1"))  # canonical text: what wallet.step parses
         # Wednesday is the triple-swap day.
         wed, rollover = self.swap_request("2026-10-14")
         triple = fx_market_stage(wed)["events"][-1]

@@ -37,6 +37,7 @@ import uuid
 from typing import Dict, List, Optional
 
 from .. import data_lake
+from ..benchmark.canonical import exact_to_str
 from ..forward.bars_adapter import MINUTE_MS
 from ..forward.outcomes import FINAL
 from ..instruments import FOREX_DEFAULTS, FOREX_OPTIONAL, Instrument, VenueSymbol, forex_instrument
@@ -190,10 +191,14 @@ def _wallet_events(symbol: str, calendar, resolved: list, new_ids: set, quote_te
                    from_ms: int, processed_to_ms: int) -> List[dict]:
     """The wallet events of one symbol (see the module docstring), numbered ``sequence`` 0.. in a fixed order.
 
-    ``quote_text`` and ``swap_text`` are the request's own exact strings (what the wallet parses). A swap is
+    ``quote_text`` and ``swap_text`` are the request's exact strings, written in canonical form. A swap is
     emitted for a rollover instant only if some non-X setup entered before it and is not yet finally exited
     before it (an exit exactly at the instant is charged, like the resolver). The window ends at the last
     processed minute, so a rollover is never announced before the bars that decide who held through it."""
+    # The wallet parses canonical exact text only ("-73/1000000", not "-0.000073"), so normalize the request's.
+    quote_text = exact_to_str(Fraction(quote_text))
+    if swap_text is not None:
+        swap_text = {name: exact_to_str(Fraction(swap_text[name])) for name in ("long_per_unit", "short_per_unit")}
     events = []
     for setup, previous, resolution in resolved:
         if resolution.status == "X":
