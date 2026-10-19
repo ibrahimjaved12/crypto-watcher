@@ -26,7 +26,9 @@ export const FX_LIVE_MAX_LAG_MS = 3 * MINUTE_MS;
 export const FX_STALE_LAG_MS = 10 * MINUTE_MS;
 export const FX_SPEC_INTERVAL_MS = 6 * 3_600_000;
 export const FX_SPEC_BATCH = 50;
-export const FX_DEFAULT_BACKFILL_DAYS = 5;
+/** 0: the gateway answers 503 offset_unknown for any range no offset observation covers, so a history backfill
+ * only works once the owner has set the gateway's MT5_SERVER_UTC_OFFSET_SECONDS override. */
+export const FX_DEFAULT_BACKFILL_DAYS = 0;
 export const FX_DEFAULT_VENUE = "exness-mt5-demo";
 
 export type GatewayReply = { status: number; body: unknown };
@@ -39,8 +41,8 @@ export type FxCollectorDeps = {
   now(): number;
   /** The lease owner: a UUID (claim_fx_collector_lease takes one). */
   instanceId: string;
-  /** The account currency of the demo account: the gateway never reads account data, so the owner supplies it. */
-  accountCurrency?: string | undefined;
+  /** The account currency of the demo account (FX_ACCOUNT_CURRENCY, default USD): the gateway never reads account data. */
+  accountCurrency: string;
   backfillDays?: number;
   log(line: string): void;
   error(line: string): void;
@@ -52,13 +54,12 @@ export type FxCollectorState = {
   nextSpecsAt: number;
   /** Symbols already reported as having a missing or incomplete spec (once per process). */
   warnedSpecs: Set<string>;
-  warnedNoCurrency: boolean;
   /** The "another collector owns the store" line has been logged (it is repeated only after a change). */
   warnedLease: boolean;
 };
 
 export function newFxCollectorState(): FxCollectorState {
-  return { leased: false, nextSpecsAt: 0, warnedSpecs: new Set(), warnedNoCurrency: false, warnedLease: false };
+  return { leased: false, nextSpecsAt: 0, warnedSpecs: new Set(), warnedLease: false };
 }
 
 export type FxPassResult = {
@@ -103,7 +104,14 @@ const NUMBER_FIELDS = ["point", "trade_tick_size", "trade_tick_value", "trade_co
 const INT_FIELDS = ["digits", "trade_mode", "swap_mode", "swap_rollover3days"] as const;
 const TEXT_FIELDS = ["currency_base", "currency_profit", "currency_margin"] as const;
 
-/** The gateway's spec -> the spec store's row, or the reason it is incomplete. */
+/**
+ * The ONE mapping from the gateway's MT5 field names to the spec store's (FxSymbolSpec; python specs_rows.py):
+ * trade_tick_size -> tick_size, trade_tick_value -> tick_value, trade_contract_size -> contract_size,
+ * currency_base -> base_currency, currency_profit -> profit_currency, currency_margin -> margin_currency,
+ * the rest keep their names (digits, point, volume_*, trade_mode, swap_*). `venue`, `instrument_id` and
+ * `native_symbol` come from the subscription, `account_currency` from FX_ACCOUNT_CURRENCY. A missing or wrong
+ * field makes the spec incomplete (reported, never filled with a guess).
+ */
 export function specFromGateway(sub: FxSubscription, raw: unknown, accountCurrency: string):
   { spec: Omit<FxSymbolSpec, "observedAt" | "specHash"> } | { problem: string } {
   if (!object(raw)) return { problem: "the terminal does not know the symbol" };
@@ -135,13 +143,6 @@ async function refreshSpecs(deps: FxCollectorDeps, state: FxCollectorState, subs
   const now = deps.now();
   if (now < state.nextSpecsAt || subs.length === 0) return;
   const currency = deps.accountCurrency;
-  if (!currency || !/^[A-Z]{3}$/.test(currency)) {
-    if (!state.warnedNoCurrency) {
-      state.warnedNoCurrency = true;
-      deps.error(`${LOG} FX_ACCOUNT_CURRENCY is not set: symbol specs are not recorded (the gateway does not read account data)`);
-    }
-    return;
-  }
   const rows: Omit<FxSymbolSpec, "observedAt" | "specHash">[] = [];
   const reported: string[] = [];
   try {
@@ -190,7 +191,8 @@ async function collectSymbol(deps: FxCollectorDeps, sub: FxSubscription, newestS
   const outcome: SymbolOutcome = { stored: 0, skipped: 0, newestOpen: newestStored, problem: null, backfilling: false };
   const toMs = Math.floor(now / MINUTE_MS) * MINUTE_MS; // exclusive: the minute in progress is not closed
   const days = deps.backfillDays ?? FX_DEFAULT_BACKFILL_DAYS;
-  let from = newestStored !== null ? newestStored + MINUTE_MS : toMs - days * DAY_MS;
+  // First run: `days` back, but at least the last closed minute (0 days = start with the current minute's predecessor).
+  let from = newestStored !== null ? newestStored + MINUTE_MS : toMs - Math.max(days * DAY_MS, MINUTE_MS);
   // Nothing to read when the whole span lies in a closed market (the gateway has no minutes there).
   if (from >= toMs || fxNextOpenMs(from) >= toMs) return outcome;
   for (let page = 0; from < toMs; page++) {

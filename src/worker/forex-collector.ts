@@ -31,15 +31,18 @@ try {
   if (!url || !token) throw new Error("FX_GATEWAY_URL and FX_GATEWAY_TOKEN are required");
   const backfillText = env["FX_BACKFILL_DAYS"]?.trim();
   const backfillDays = backfillText ? Number(backfillText) : FX_DEFAULT_BACKFILL_DAYS;
-  if (!Number.isInteger(backfillDays) || backfillDays < 1 || backfillDays > 30)
-    throw new Error("FX_BACKFILL_DAYS must be a whole number of days between 1 and 30");
+  if (!Number.isInteger(backfillDays) || backfillDays < 0 || backfillDays > 30)
+    throw new Error("FX_BACKFILL_DAYS must be a whole number of days between 0 and 30");
+
+  const accountCurrency = (env["FX_ACCOUNT_CURRENCY"]?.trim() || "USD").toUpperCase();
+  if (!/^[A-Z]{3}$/.test(accountCurrency)) throw new Error("FX_ACCOUNT_CURRENCY must be a three-letter currency code");
 
   const collector = startFxCollector({
     store,
     gateway: createGatewayClient({ url, token }),
     now: () => Date.now(),
     instanceId: randomUUID(), // the lease owner id is a UUID
-    accountCurrency: env["FX_ACCOUNT_CURRENCY"]?.trim().toUpperCase() || undefined,
+    accountCurrency,
     backfillDays,
     log: (line) => console.log(line),
     error: (line) => console.error(line),

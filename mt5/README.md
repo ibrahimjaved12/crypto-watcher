@@ -129,7 +129,8 @@ FX_COLLECTOR_ENABLED=true
 FX_GATEWAY_URL=http://<the VM's host-only address>:8002   # no path, no credentials
 FX_GATEWAY_TOKEN=<the gateway's MT5_GATEWAY_TOKEN>
 FX_SUBSCRIPTIONS=fx:EURUSD=EURUSD,fx:XAUUSD=XAUUSD       # instrument id = the broker's native name (UNVERIFIED suffixes)
-FX_ACCOUNT_CURRENCY=<three letters, the demo account's currency>
+FX_ACCOUNT_CURRENCY=<three letters, the demo account's currency; default USD>
+FX_BACKFILL_DAYS=0                                        # keep 0 unless the gateway has the offset override
 ```
 
 Seed the instruments once with `npm run forex:collector -- --subscribe --mode production`, then start the
@@ -137,3 +138,9 @@ host. The collector asks for recent minutes only (the gateway needs a known cloc
 serves), so until the gateway has detected its offset (or the owner has set the override) the collector's
 health shows `UNAVAILABLE` with `offset_unknown`. If the terminal is signed out, `/health` says so and the
 health is `LOGIN_FAILED`.
+
+`FX_BACKFILL_DAYS` defaults to **0** (the first run fetches only the last closed minute): without the
+gateway's `MT5_SERVER_UTC_OFFSET_SECONDS` override, a history range is answered `503 offset_unknown`, because
+detection only covers the minutes since it started. The collector treats that answer as "wait" (health
+`UNAVAILABLE`, retried at the next pass). Set the override once the broker's offset is verified, then raise
+`FX_BACKFILL_DAYS`.

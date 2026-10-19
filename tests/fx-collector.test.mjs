@@ -281,7 +281,7 @@ test("specs are recorded at start and again after 6 hours, mapped to the spec st
   assert.equal(w.calls.specs.length, 2, "again after 6 hours");
 });
 
-test("a missing or incomplete spec is reported once per process and not recorded; a missing account currency records none", async () => {
+test("a missing or incomplete spec is reported once per process and not recorded; the account currency is the configured one", async () => {
   const gateway = fakeGateway({ "/v1/specs": () => ({ status: 200, body: { specs: {
     EURUSD: goodSpec(), XAUUSD: goodSpec({ volume_step: null }), } } }) });
   const w = world({ gateway });
@@ -297,10 +297,10 @@ test("a missing or incomplete spec is reported once per process and not recorded
   const bad = world({ gateway: fakeGateway({ "/v1/specs": () => ({ status: 200, body: { specs: { EURUSD: goodSpec({ point: 0.0001 }), XAUUSD: goodSpec() } } }) }) });
   await fx.runFxCollectorPass(bad.deps, bad.state);
   assert.deepEqual(bad.calls.specs[0].map((s) => s.instrumentId), ["fx:XAUUSD"], "a point that is not 10**-digits is refused");
-  const noCurrency = world({ accountCurrency: undefined });
-  await fx.runFxCollectorPass(noCurrency.deps, noCurrency.state);
-  assert.equal(noCurrency.calls.specs.length, 0);
-  assert.equal(noCurrency.calls.errors.filter((l) => l.includes("FX_ACCOUNT_CURRENCY")).length, 1);
+  // The account currency is FX_ACCOUNT_CURRENCY's, whatever the instrument.
+  const eur = world({ accountCurrency: "EUR" });
+  await fx.runFxCollectorPass(eur.deps, eur.state);
+  assert.ok(eur.calls.specs[0].every((spec) => spec.accountCurrency === "EUR"));
   // A failing spec request is retried at the next pass and does not stop the bars.
   const failing = world({ gateway: fakeGateway({ "/v1/specs": () => ({ status: 502, body: { error: "mt5_error" } }) }) });
   await fx.runFxCollectorPass(failing.deps, failing.state);
@@ -347,4 +347,54 @@ test("the gateway client sends the bearer token, never follows redirects and che
   for (const url of ["ftp://x", "http://u:p@x:1", "http://x:1/path", "http://x:1/?a=1", "not a url"])
     assert.throws(() => fx.createGatewayClient({ url, token }, send), Error, url);
   assert.throws(() => fx.createGatewayClient({ url: "http://x:1", token: "short" }, send), /FX_GATEWAY_TOKEN/);
+});
+
+test("the gateway's MT5 spec fields map to the spec store's names in one function; a missing field is incomplete, never filled", () => {
+  const sub = SUBS[0];
+  const built = fx.specFromGateway(sub, goodSpec(), "GBP");
+  assert.deepEqual(built.spec, { venue: VENUE, instrumentId: "fx:EURUSD", nativeSymbol: "EURUSD", digits: 5,
+    point: 0.00001, tickSize: 0.00001, tickValue: 1, contractSize: 100000, volumeMin: 0.01, volumeMax: 200,
+    volumeStep: 0.01, baseCurrency: "EUR", profitCurrency: "USD", marginCurrency: "EUR", accountCurrency: "GBP",
+    tradeMode: 4, swapMode: 1, swapLong: -7.3, swapShort: 2.1, swapRollover3days: 3 });
+  // Distinct values prove each source field lands in its target.
+  const distinct = fx.specFromGateway(sub, goodSpec({ trade_tick_size: 0.5, trade_tick_value: 2, trade_contract_size: 7,
+    currency_base: "AAA", currency_profit: "BBB", currency_margin: "CCC" }), "USD").spec;
+  assert.deepEqual([distinct.tickSize, distinct.tickValue, distinct.contractSize, distinct.baseCurrency,
+    distinct.profitCurrency, distinct.marginCurrency], [0.5, 2, 7, "AAA", "BBB", "CCC"]);
+  // Every field is required: absent or null or the wrong type is a problem naming it.
+  for (const name of Object.keys(goodSpec())) {
+    for (const bad of [null, undefined, "x"]) {
+      const raw = goodSpec(); if (bad === undefined) delete raw[name]; else raw[name] = bad;
+      if (bad === "x" && ["currency_base", "currency_profit", "currency_margin"].includes(name)) continue;
+      const result = fx.specFromGateway(sub, raw, "USD");
+      assert.match(result.problem ?? "", new RegExp(name), `${name} = ${String(bad)}`);
+      assert.equal(result.spec, undefined);
+    }
+  }
+  assert.match(fx.specFromGateway(sub, null, "USD").problem, /does not know/);
+});
+
+test("FX_BACKFILL_DAYS defaults to 0: the first run asks for the last closed minute only", async () => {
+  assert.equal(fx.FX_DEFAULT_BACKFILL_DAYS, 0);
+  const w = world({ subs: [SUBS[0]] });
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.deepEqual(w.gateway.bars(), [`/v1/bars?symbol=EURUSD&from_ms=${TO - MIN}&to_ms=${TO}`]);
+  assert.equal(healthOf(w)["fx:EURUSD"].status, "LIVE");
+});
+
+test("503 offset_unknown is a wait: UNAVAILABLE with the code, nothing stored, the same range retried at the next pass", async () => {
+  let known = false;
+  const gateway = fakeGateway({ "/v1/bars": (url) => known
+    ? { status: 200, body: { bars: rowsFor("EURUSD", Number(url.searchParams.get("from_ms")), Number(url.searchParams.get("to_ms"))) } }
+    : { status: 503, body: { error: "offset_unknown" } } });
+  const w = world({ subs: SUBS, gateway, backfillDays: 5 });
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.equal(w.calls.bars.length, 0);
+  assert.deepEqual(w.calls.health.at(-1).map((r) => [r.status, r.errorMessage]), [["UNAVAILABLE", "offset_unknown"], ["UNAVAILABLE", "offset_unknown"]]);
+  assert.equal(gateway.bars().length, 2, "each symbol was tried once, none abandoned");
+  known = true;
+  w.time.now += MIN;
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.equal(healthOf(w)["fx:EURUSD"].status, "LIVE");
+  assert.equal(gateway.bars()[2].includes(`from_ms=${TO + MIN - 5 * 86_400_000}`), true, "the retry asks for the same backfill start (shifted by the clock)");
 });
