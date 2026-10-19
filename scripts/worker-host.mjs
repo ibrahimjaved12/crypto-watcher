@@ -458,6 +458,12 @@ async function main() {
   if (env.FX_QUOTE_PUBLISHER_ENABLED === "true" && env.OPERATIONAL_DB_ENABLED === "true" && env.SUPABASE_URL
       && env.SUPABASE_SERVICE_ROLE_KEY)
     specs.push(nodeJob("fx-quote-publisher", "scripts/fx-quote-publisher.mjs"));
+  // Forex collector (#453): a forex child that polls the MT5 gateway (#452) over HTTP and writes the local
+  // operational database. It needs no Python service and no hosted credential. Default off; it also needs a running
+  // terminal and gateway, and FX_SUBSCRIPTIONS seeded once with `npm run forex:collector -- --subscribe`.
+  if (env.FX_COLLECTOR_ENABLED === "true" && env.OPERATIONAL_DB_ENABLED === "true" && env.FX_GATEWAY_URL?.trim()
+      && env.FX_GATEWAY_TOKEN?.trim())
+    specs.push(nodeJob("forex-collector", "scripts/forex-collector.mjs"));
   // Hourly forex market stage (#397): a forex child; it calls the Python forward service, so it waits for both
   // health endpoints like forward-hourly. Default off until the MT5 collector writes bars.
   if (env.FX_HOURLY_ENABLED === "true" && env.OPERATIONAL_DB_ENABLED === "true")
@@ -510,6 +516,7 @@ async function main() {
   for (const name of ["fastapi-analysis", "fastapi-forward", "collector"]) launch(records.get(name));
   if (records.has("quote-publisher")) launch(records.get("quote-publisher"));
   if (records.has("fx-quote-publisher")) launch(records.get("fx-quote-publisher"));
+  if (records.has("forex-collector")) launch(records.get("forex-collector"));
   if (records.has("collector-universe-sync")) launch(records.get("collector-universe-sync"));
   if (records.has("runner-gateway")) launch(records.get("runner-gateway"));
   if (records.has("alert-charts")) launch(records.get("alert-charts"));

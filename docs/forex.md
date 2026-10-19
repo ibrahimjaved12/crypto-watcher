@@ -292,6 +292,44 @@ skip open/close/swap events. The account then stops until the owner decides; hou
 gap, because a later stage's window reaches back to the last complete one. No stage for the boundary yet means
 the account waits. A replay consumes nothing (`already_done`).
 
+### Forex collector (#453)
+
+`src/lib/fx/fx-collector.server.ts`, the worker-host child `forex-collector` (`npm run forex:collector`; off unless
+`FX_COLLECTOR_ENABLED=true`, with `OPERATIONAL_DB_ENABLED`, `FX_GATEWAY_URL` and `FX_GATEWAY_TOKEN`; no Python
+service and no hosted credential). It polls the MT5 gateway (`mt5/gateway`, #452) over HTTP and writes only the
+local operational database. It still needs a running, signed-in terminal and the gateway; neither exists on the
+host by default.
+
+- **Lease.** `claimFxCollectorLease` (90 s) at the first pass, renewed every pass, released on shutdown; a
+  collector without the lease does nothing and tries again at the next pass.
+- **Subscriptions.** `npm run forex:collector -- --subscribe` reads `FX_SUBSCRIPTIONS`
+  (`fx:EURUSD=EURUSD,fx:XAUUSD=XAUUSD`: instrument id = broker native name; venue `FX_VENUE`, default
+  `exness-mt5-demo`), replaces the stored instrument set and exits. The real native names (the Exness demo may add
+  a suffix such as `m`: UNVERIFIED) are supplied by the owner.
+- **Pass.** Once a minute at the boundary + 1 s, per symbol: `/v1/bars` from the newest stored minute + 1 (from
+  `getFxBarCoverage`; on the first run `FX_BACKFILL_DAYS` back, **default 0**: just the last closed minute) up to the last closed minute, in
+  pages of at most 5000 minutes (at most 4 pages per pass; the rest follows next pass and shows as RECOVERING),
+  written in batches of 1000 rows (the store's limit). `transport` is `poll` for a span of at most 10 minutes,
+  else `history`. A span entirely inside a closed market is not requested. A row that fails the local checks
+  (non-integer spread or volume, off-minute, wrong symbol or basis, inconsistent OHLC, outside the page) is
+  counted, logged and never stored.
+- **Specs.** At start and every 6 hours: `/v1/specs` for the subscribed symbols, mapped to the spec store's
+  fields in one mapping function (`specFromGateway`: `trade_tick_size` -> `tick_size`, `currency_base` ->
+  `base_currency`, ...). The gateway never reads account data, so `account_currency` comes from
+  `FX_ACCOUNT_CURRENCY` (default `USD`: set the real one, it drives the quote conversion). A symbol whose spec is missing, incomplete or whose `point` is not
+  `10**-digits` is reported once per process and not recorded.
+- **Offset.** The gateway answers `503 offset_unknown` for any range no clock-offset observation covers (unless
+  its `MT5_SERVER_UTC_OFFSET_SECONDS` override is set). That is a wait, not a failure: the symbol's health is
+  `UNAVAILABLE` with the code and the same range is asked again at the next pass. So `FX_BACKFILL_DAYS` is 0 unless
+  the owner has set the gateway's override; only then is a longer backfill sensible.
+- **Health** after every pass, per instrument: `LOGIN_FAILED` when `/health` says the terminal is not
+  connected; `UNAVAILABLE` when the gateway is unreachable or answers 503 (`offset_unknown`) or 409
+  (`offset_changed`) (the code is the error message); `MARKET_CLOSED` when the FX week is closed; otherwise
+  `RECOVERING` while pages remain, `LIVE` when the newest bar closed at most 3 minutes ago, `RECOVERING` up to 10
+  minutes, `STALE` beyond (and with no bars). `lag_ms` is now minus the newest bar's close. Gap fill is not a
+  separate step: a minute the gateway did not return (or a skipped row) leaves a hole behind the newest stored
+  minute that this resume rule does not revisit; the stage still reports it as a missing minute (outcome `X`).
+
 ### Hosted forex quotes
 
 The Worker cannot read the local operational database, so forex quotes reach it the same way crypto
