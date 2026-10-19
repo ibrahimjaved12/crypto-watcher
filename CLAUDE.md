@@ -76,9 +76,10 @@ Forex is in scope as a second market next to crypto (#374): CFD-style spot and f
    needs research first (#373). Multi-day trend families (#222) are in the backlog. Paper trading
    (#36, #38) stays in the backlog until a few strategies survive costs (owner decisions 2026-10-16).
 
-4. **Forex (#374)**, in parallel and owner-led on strategies (section 6): the open items are the MT5
-   collector and gateway (#394), the paper wallet, the `All` medium/high calendar fan-out rule, the Forex
-   Factory terms of use, and keeping CI under budget as the forex suites grow (#406).
+4. **Forex (#374)**, in parallel and owner-led on strategies (section 6): the open items are a signed-in MT5
+   terminal with the gateway running (the code exists, #452 and #453, but nothing is running), the `All`
+   medium/high calendar fan-out rule, the Forex Factory terms of use, and keeping CI under budget as the forex
+   suites grow (#406).
 
 Project is roughly 20% complete; things proceed incrementally and in parallel.
 
@@ -130,13 +131,15 @@ Approved decisions and facts. Anything marked UNVERIFIED in the code or docs sta
   only) suppresses signals near events; suppressed signals are logged with the reason, never dropped
   silently. The feed's terms of use have NOT been checked, so `FX_CALENDAR_ENABLED` stays off until the
   owner confirms.
-- **Wallet defaults (proposals pending the wallet PR, not decisions):** 1,000 USD starting balance, 1% risk
-  per trade, total exposure cap of 10x balance, rejected trades recorded with a reason; the position-count cap
-  is being removed.
+- **Wallet (owner decisions, 2026-10-19):** one position per setup (every tradeable setup of every enabled
+  strategy opens its own paper trade, including both `rr` setups of one signal); 1% risk per trade; 1,000 USD
+  start; total open notional capped at 10x balance; the position-count cap defaults to 1000 (effectively none,
+  still configurable); a trade that cannot open is recorded as rejected with its reason.
 - **Where things run.** The laptop worker host runs the forex children (`fx-calendar`,
-  `fx-quote-publisher`, `forex-hourly`), each off by default behind `FX_CALENDAR_ENABLED`,
-  `FX_QUOTE_PUBLISHER_ENABLED` and `FX_HOURLY_ENABLED`, set in the host's `.env.production.local` only (never
-  a Cloudflare variable). The MT5 collector and gateway (#394) do not exist yet.
+  `fx-quote-publisher`, `forex-collector`, `forex-hourly`), each off by default behind `FX_CALENDAR_ENABLED`,
+  `FX_QUOTE_PUBLISHER_ENABLED`, `FX_COLLECTOR_ENABLED` and `FX_HOURLY_ENABLED`, set in the host's
+  `.env.production.local` only (never a Cloudflare variable). The collector child (#453) exists but is off and
+  still needs a running, signed-in MT5 terminal and the gateway (#452, in `mt5/gateway`); neither runs yet.
 - **Two databases.** The local operational Supabase holds bars, calendar, specs and collector health; the
   hosted main Supabase holds `fx_market_*` and accounts.
 - **Runner access.** The runner is reached through a fixed Tailscale Funnel address (`RUNNER_PUBLIC_URL` on
@@ -170,6 +173,7 @@ Approved decisions and facts. Anything marked UNVERIFIED in the code or docs sta
 - Always-on host: not needed during development (decided 2026-10-13); revisit at about 80% completion.
 - Doji work: paused by the owner on 2026-10-16; see #361-#366 (resume order in the #364 comments).
 - Django vs FastAPI stays FastAPI unless reopened.
-- Forex (#374, section 6): the MT5 collector and gateway (#394); the paper wallet and its defaults; the rule for
-  `All`-currency medium/high calendar events (today such a row stops the parse; it needs a fan-out decision);
-  the Forex Factory feed's terms of use (`FX_CALENDAR_ENABLED` stays off until confirmed); the CI budget (#406).
+- Forex (#374, section 6): running the MT5 terminal and gateway (the collector child and the gateway code exist,
+  #452 and #453); the rule for `All`-currency medium/high calendar events (today such a row stops the parse; it
+  needs a fan-out decision); the Forex Factory feed's terms of use (`FX_CALENDAR_ENABLED` stays off until
+  confirmed); the CI budget (#406).

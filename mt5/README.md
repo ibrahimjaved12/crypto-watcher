@@ -118,3 +118,22 @@ MT5 returns "server time" as plain numbers; converting to UTC needs the broker s
 - That `terminal_info().connected` means "connected to the broker's trade server".
 - That a quarter-hour grid is right for the Exness demo server (its offset is not known here).
 - The `mt5linux` backend's object types (rates may arrive as plain tuples or numpy rows).
+
+### How the collector reaches the gateway (#453)
+
+The forex collector (`npm run forex:collector`, a worker-host child) is the gateway's only client. On the
+host set, in `.env.production.local` only (never a Cloudflare variable):
+
+```sh
+FX_COLLECTOR_ENABLED=true
+FX_GATEWAY_URL=http://<the VM's host-only address>:8002   # no path, no credentials
+FX_GATEWAY_TOKEN=<the gateway's MT5_GATEWAY_TOKEN>
+FX_SUBSCRIPTIONS=fx:EURUSD=EURUSD,fx:XAUUSD=XAUUSD       # instrument id = the broker's native name (UNVERIFIED suffixes)
+FX_ACCOUNT_CURRENCY=<three letters, the demo account's currency>
+```
+
+Seed the instruments once with `npm run forex:collector -- --subscribe --mode production`, then start the
+host. The collector asks for recent minutes only (the gateway needs a known clock offset for the range it
+serves), so until the gateway has detected its offset (or the owner has set the override) the collector's
+health shows `UNAVAILABLE` with `offset_unknown`. If the terminal is signed out, `/health` says so and the
+health is `LOGIN_FAILED`.

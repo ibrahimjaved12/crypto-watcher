@@ -412,6 +412,23 @@ test("forex-hourly (#397) is a forex child: never a crypto exit, its own mvp:che
   assert.deepEqual(w.classifyForexChildren(file, now), { level: "FAIL", detail: "forex crash loop, restarts stopped: forex-hourly" });
 });
 
+test("forex-collector (#453) is a forex child: a crash loop never exits the host and shows on the forex line", () => {
+  const set = (states) => Object.entries(states).map(([name, state]) => ({ name, state }));
+  assert.equal(w.isForexChild("forex-collector"), true);
+  const crypto = { "fastapi-analysis": "running", "fastapi-forward": "running", collector: "running", "forward-hourly": "running", "forward-trend": "running" };
+  assert.deepEqual(w.exitDecision(set({ ...crypto, "forex-collector": "crash-loop" }), null, 0), { reason: null, allDownSinceMs: null });
+  // Running forex-collector never keeps a dead crypto stack alive.
+  const down = Object.fromEntries(Object.keys(crypto).map((n) => [n, "backoff"]));
+  const first = w.exitDecision(set({ ...down, "forex-collector": "running" }), null, 10_000);
+  assert.match(w.exitDecision(set({ ...down, "forex-collector": "running" }), first.allDownSinceMs, 70_000).reason, /every child has been down/);
+  const now = Date.parse("2026-10-10T12:00:00Z");
+  const child = (name, state) => ({ name, state, pid: 1, restartCount: 0, lastRestartAt: null, lastExit: null, nextRestartAt: null });
+  const file = JSON.stringify(w.buildStatus({ supervisorPid: 1, startedAtMs: now - 3_600_000, nowMs: now - 1_000, shuttingDown: false,
+    children: [child("collector", "running"), child("forward-hourly", "running"), child("forex-collector", "crash-loop")] }));
+  assert.equal(w.classifyWorkerHost(file, now).level, "PASS");
+  assert.deepEqual(w.classifyForexChildren(file, now), { level: "FAIL", detail: "forex crash loop, restarts stopped: forex-collector" });
+});
+
 test("the status parser rejects other shapes and the exit text names signal or code", () => {
   assert.equal(w.parseStatus("null"), null);
   assert.equal(w.parseStatus(JSON.stringify({ schema: 2 })), null);

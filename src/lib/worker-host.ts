@@ -24,7 +24,8 @@ export const FORWARD_CHILDREN = ["forward-hourly", "forward-trend"] as const;
 /**
  * The forex crash domain (#396): these children never keep the host alive and never stop it, and they get
  * their own `forex children` line in mvp:check. `forex-hourly` (#397) is spawned when FX_HOURLY_ENABLED=true;
- * `forex-collector` (#394) is a reserved name, not spawned yet.
+ * `forex-collector` (#453) polls the MT5 gateway and is spawned when FX_COLLECTOR_ENABLED=true (with the
+ * operational database, FX_GATEWAY_URL and FX_GATEWAY_TOKEN); it needs no Python service.
  */
 export const FOREX_CHILDREN = ["fx-calendar", "fx-quote-publisher", "forex-collector", "forex-hourly"] as const;
 export const isForexChild = (name: string) => (FOREX_CHILDREN as readonly string[]).includes(name);
