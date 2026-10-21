@@ -1,40 +1,17 @@
 import { createFileRoute } from "@tanstack/react-router";
 
 import { AppShell } from "@/components/app-shell";
-import { ForexLanding } from "@/components/forex-landing";
-import { PaperAccountView, SimulatedBanner } from "@/components/paper-account";
-import { PageHeader } from "@/components/plain";
+import { PaperAccountView } from "@/components/paper-account";
+import { FxPaperAccountView } from "@/components/paper/fx-paper-account";
 import { useMarket } from "@/lib/market/market-context";
 
 export const Route = createFileRoute("/_authenticated/paper")({
   head: () => ({ meta: [{ title: "Paper account — Crypto Watch" }] }),
-  component: PaperPageRoute,
+  component: PaperPage,
 });
 
-/** Forex has no data feed yet (#374): its own landing screen; the crypto page below is unchanged. */
-function PaperPageRoute() {
-  const { market } = useMarket();
-  return market === "forex" ? (
-    <AppShell>
-      <ForexLanding page="paper" />
-    </AppShell>
-  ) : (
-    <PaperPage />
-  );
-}
-
+/** One account per market (#454): the toggle picks which one is shown; the two are never summed. */
 function PaperPage() {
-  return (
-    <AppShell>
-      <div className="space-y-6">
-        <PageHeader
-          eyebrow="Simulated · fake money"
-          title="Paper account"
-          subtitle="The simulated futures wallet: what it holds, what it did, and what it was not allowed to do."
-        />
-        <SimulatedBanner />
-        <PaperAccountView />
-      </div>
-    </AppShell>
-  );
+  const { market } = useMarket();
+  return <AppShell>{market === "forex" ? <FxPaperAccountView /> : <PaperAccountView />}</AppShell>;
 }

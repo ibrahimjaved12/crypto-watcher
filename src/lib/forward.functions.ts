@@ -104,7 +104,14 @@ const logInput = z.object({
   cursor: z.string().max(100).nullable().default(null),
   filters: forwardFiltersSchema,
 });
-const exportInput = z.object({ kind: z.enum(["signals", "outcomes", "ledger"]), filters: forwardFiltersSchema });
+// The ledger is the only log with a forex twin (the Paper account page's export); the default stays crypto.
+const exportInput = z
+  .object({
+    kind: z.enum(["signals", "outcomes", "ledger"]),
+    filters: forwardFiltersSchema,
+    market: z.enum(["crypto", "forex"]).default("crypto"),
+  })
+  .refine((input) => input.market === "crypto" || input.kind === "ledger", { message: "Only the ledger exists for forex" });
 
 /** Results by strategy (n, mean, SE, matched random-timing control, non-trades) for the filters. */
 export const getForwardReport = createServerFn({ method: "POST" })
@@ -123,7 +130,8 @@ export const getForwardLog = createServerFn({ method: "POST" })
 export const exportForwardLogCsv = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((input: unknown) => exportInput.parse(input))
-  .handler(async ({ context, data }) => exportForwardLog(context.supabase as never, data.kind, data.filters));
+  .handler(async ({ context, data }) =>
+    exportForwardLog(context.supabase as never, data.kind, data.filters, data.market));
 
 /** On-demand daily trend track run for the signed-in account (#239 P14); the daily job uses the same path. */
 export const runForwardTrendNow = createServerFn({ method: "POST" })

@@ -13,6 +13,8 @@ export const EXPORT_PAGE_SIZE = 1000;
 export const EXPORT_MAX_ROWS = 50_000;
 
 export type LogKind = "signals" | "outcomes" | "ledger";
+/** Same as `paper/paper-view.ts` FOREX_ACCOUNT_SUFFIX: a forex paper account id is `<user uuid>:forex`. */
+const FOREX_ACCOUNT_SUFFIX = ":forex";
 export type LogRow = Record<string, string | number | null>;
 export type SignalRow = {
   signal_id: string; strategy_id: string; version: string; symbol: string; signal_ms: number; side: number;
@@ -41,6 +43,8 @@ type Query = PromiseLike<Result> & {
   in(column: string, values: readonly unknown[]): Query;
   gte(column: string, value: unknown): Query;
   lt(column: string, value: unknown): Query;
+  like(column: string, pattern: string): Query;
+  not(column: string, operator: string, value: unknown): Query;
   or(filter: string): Query;
   order(column: string, options: { ascending: boolean }): Query;
   limit(count: number): Query;
@@ -73,9 +77,16 @@ export async function loadForwardLogPage(
   filters: ForwardFilters,
   cursor: string | null,
   pageSize = LOG_PAGE_SIZE,
+  market: "crypto" | "forex" = "crypto",
 ): Promise<LogPage> {
   if (cursor !== null && !isValidCursor(kind, cursor)) throw new Error("Invalid log cursor");
+  if (market === "forex" && kind !== "ledger") throw new Error("Only the ledger log exists for forex");
   let query = (client.from(SOURCE[kind]) as unknown as Query).select(COLUMNS[kind].join(","));
+  // A user has one paper account per market (#454) and both write paper_ledger; the forex one is `<uuid>:forex`.
+  if (kind === "ledger")
+    query = market === "forex"
+      ? query.like("paper_account", `%${FOREX_ACCOUNT_SUFFIX}`)
+      : query.not("paper_account", "like", `%${FOREX_ACCOUNT_SUFFIX}`);
   const time = TIME_COLUMN[kind];
   const { fromMs, toMs } = rangeMs(filters);
   if (fromMs !== null) query = query.gte(time, fromMs);
@@ -113,12 +124,13 @@ export async function exportForwardLog(
   client: SupabaseClient,
   kind: LogKind,
   filters: ForwardFilters,
+  market: "crypto" | "forex" = "crypto",
 ): Promise<{ csv: string; rows: number; truncated: boolean }> {
   const lines: unknown[][] = [];
   let cursor: string | null = null;
   let truncated = false;
   do {
-    const page: LogPage = await loadForwardLogPage(client, kind, filters, cursor, EXPORT_PAGE_SIZE);
+    const page: LogPage = await loadForwardLogPage(client, kind, filters, cursor, EXPORT_PAGE_SIZE, market);
     for (const row of page.rows) lines.push(COLUMNS[kind].map((column) => row[column] ?? null));
     cursor = page.nextCursor;
     if (lines.length >= EXPORT_MAX_ROWS) {

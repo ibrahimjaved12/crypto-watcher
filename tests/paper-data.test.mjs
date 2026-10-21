@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import ts from "../node_modules/typescript/lib/typescript.js";
+
+import { createModuleLoader } from "./module-loader.mjs";
 
 // #36 Part 3: the Paper account loaders, against a small in-memory stand-in for the Supabase client.
-const source = await readFile(new URL("../src/lib/paper/paper-data.ts", import.meta.url), "utf8");
-const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } });
-const m = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
+const m = await import(createModuleLoader(import.meta.url)("../src/lib/paper/paper-data.ts"));
 
 const OR_CLOSED = "payload->>position_event.is.null,payload->>position_event.eq.closed";
 const compare = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
@@ -81,7 +79,8 @@ test("the account read takes the latest OK run, converts SQL numbers and the pri
   assert.deepEqual(data.equity, [{ ms: 3_600_000, balance_e8: 10_000_000_000 }]);
   assert.deepEqual(data.positionMeta, { p1: { strategy_id: "macd_12_26_9:60", horizon_min: 60 } }, "only the open positions' setups");
   assert.deepEqual(data.quotes, [{ symbol: "BTCUSDT", price: 100.5, published_at: "2026-10-16T10:00:00Z" }]);
-  assert.deepEqual(hourly.calls.rpc[1], ["paper_equity_series", { p_bucket_ms: 3_600_000, p_from_ms: null }]);
+  assert.deepEqual(hourly.calls.rpc[0], ["paper_account_summary", { p_market: "crypto" }]);
+  assert.deepEqual(hourly.calls.rpc[1], ["paper_equity_series", { p_bucket_ms: 3_600_000, p_from_ms: null, p_market: "crypto" }]);
 
   const daily = client({ tables, rpc: { paper_account_summary: [{ ...summaryRow, first_ms: "0", last_ms: String(61 * 86_400_000) }],
     paper_equity_series: [] } });
@@ -149,4 +148,88 @@ test("rejections and the ledger page newest first, scoped to the account", async
   assert.deepEqual(m.toSummary({}).trades, 0);
   assert.equal(m.isValidCursor("12"), true);
   assert.equal(m.isValidCursor("-1"), false);
+});
+
+// #454: one account per market. The forex reads use the forex account only and never the crypto rows.
+const DAY = 86_400_000;
+const NOW = Date.parse("2026-10-22T12:00:00Z");
+const TODAY = NOW - (NOW % DAY);
+
+test("the forex account read: no account, an account without runs, and a full account scoped to forex", async () => {
+  const none = client({ tables: { forward_wallet_accounts: [{ account_id: "u", market: "crypto", config: {} }] } });
+  const empty = await m.loadFxPaperAccount(none, NOW);
+  assert.deepEqual([empty.market, empty.accountId, empty.run, empty.summary, empty.equity], ["forex", null, null, null, []]);
+  assert.deepEqual(none.calls.rpc, [], "no account: no totals are read, so nothing can look like a zero result");
+
+  const accounts = [{ account_id: "u", market: "crypto", config: {} }, { account_id: "u:forex", market: "forex", config: { risk_fraction: "1/100" } }];
+  const waiting = client({ tables: { forward_wallet_accounts: accounts,
+    paper_runs: [{ status: "ok", market: "crypto", paper_account: "u", boundary_ms: 900, wallet_state: {} }] } });
+  const pending = await m.loadFxPaperAccount(waiting, NOW);
+  assert.deepEqual([pending.accountId, pending.run, pending.accountConfig], ["u:forex", null, { risk_fraction: "1/100" }],
+    "the crypto run is never read as the forex wallet");
+  assert.deepEqual(waiting.calls.rpc, []);
+
+  const tables = {
+    forward_wallet_accounts: accounts,
+    paper_runs: [
+      { status: "ok", market: "crypto", paper_account: "u", boundary_ms: 900, created_at: "z", wallet_state: {} },
+      { status: "ok", market: "forex", paper_account: "u:forex", boundary_ms: 500, created_at: "a", wallet_config: { version: "fx-wallet-v1" },
+        wallet_state: { balance_e8: 1, used_margin_e8: 0, positions: { f1: { symbol: "EURUSD" } } } },
+      { status: "skipped_stale", market: "forex", paper_account: "u:forex", boundary_ms: 600, created_at: "b", wallet_state: {} },
+    ],
+    fx_market_quotes: [{ symbol: "EURUSD", bid: "1.081", ask: 1.0812, digits: 5, published_at: "t" }],
+    fx_market_setups: [{ setup_id: "f1", strategy_id: "macd_12_26_9", horizon_min: 60 }],
+    forward_market_setups: [{ setup_id: "f1", strategy_id: "wrong-table", horizon_min: 15 }],
+    paper_ledger: [
+      { seq: 1, ms: TODAY - 5000, paper_account: "u:forex", balance_e8: 111 },
+      { seq: 2, ms: TODAY - 10, paper_account: "u", balance_e8: 999 },
+      { seq: 3, ms: TODAY + 10, paper_account: "u:forex", balance_e8: 222 },
+    ],
+  };
+  const full = client({ tables, rpc: { paper_account_summary: [summaryRow], paper_equity_series: [] } });
+  const data = await m.loadFxPaperAccount(full, NOW);
+  assert.deepEqual([data.accountId, data.run.boundary_ms, data.run.wallet_config.version], ["u:forex", 500, "fx-wallet-v1"]);
+  assert.deepEqual(data.positionMeta, { f1: { strategy_id: "macd_12_26_9", horizon_min: 60 } }, "forex setups, not crypto ones");
+  assert.deepEqual(data.quotes, [{ symbol: "EURUSD", bid: 1.081, ask: 1.0812, digits: 5, published_at: "t" }]);
+  assert.equal(data.dayStartBalanceE8, 111, "the forex account's last line before 00:00 UTC");
+  assert.deepEqual(full.calls.rpc.map(([name, args]) => [name, args.p_market]),
+    [["paper_account_summary", "forex"], ["paper_equity_series", "forex"]]);
+});
+
+test("list reads refuse an account of the other market and read forex facts from the forex tables", async () => {
+  const stub = client({ tables: { paper_ledger: ledger, forward_market_setups: setups } });
+  await assert.rejects(m.loadPaperTrades(stub, "u:forex", null, 2, "crypto"), /does not belong/);
+  await assert.rejects(m.loadPaperLedger(stub, "acct", null, 2, "forex"), /does not belong/);
+  await assert.rejects(m.loadPaperRejected(stub, "acct", null, 2, "forex"), /does not belong/);
+  assert.deepEqual(stub.calls.from, [], "refused before any query");
+
+  const fxLedger = [
+    { seq: 1, setup_id: "x1", type: "open_fee", ms: 1, paper_account: "u:forex", payload: { units: "10000" } },
+    { seq: 2, setup_id: "x1", type: "pnl", ms: 2, paper_account: "u:forex", payload: { outcome: "T" } },
+    { seq: 3, setup_id: "x1", type: "close_fee", ms: 2, paper_account: "u:forex", payload: {} },
+    { seq: 4, setup_id: "x2", type: "rejected", ms: 3, paper_account: "u:forex", payload: { reason: "insufficient_margin" } },
+    { seq: 9, setup_id: "c1", type: "pnl", ms: 4, paper_account: "u", payload: { outcome: "S" } },
+  ];
+  const fxTables = {
+    paper_ledger: fxLedger,
+    fx_market_setups: [
+      { setup_id: "x1", strategy_id: "ema_cross_20_50", side: 1, horizon_min: 60, payload: { entry_fill: "108000000", stop: 107900000, target: 108200000 } },
+      { setup_id: "x2", strategy_id: "rsi_14_reversion", side: -1, horizon_min: 15, payload: {} },
+    ],
+    fx_market_outcomes: [
+      { setup_id: "x1", final: false, payload: { exit_fill: "999" } },
+      { setup_id: "x1", final: true, payload: { exit_fill: "108200000" } },
+    ],
+  };
+  const fxStub = client({ tables: fxTables });
+  const trades = await m.loadPaperTrades(fxStub, "u:forex", null, 5, "forex");
+  assert.deepEqual(trades.lines.map((line) => line.seq), [1, 2, 3], "the crypto account's line is not on the forex page");
+  assert.deepEqual(trades.facts.x1, { strategy_id: "ema_cross_20_50", side: 1, horizon_min: 60, entry_fill: "108000000",
+    stop: 107900000, target: 108200000, exit_fill: "108200000" });
+  assert.deepEqual(trades.strategies, { x1: "ema_cross_20_50" });
+  assert.ok(!fxStub.calls.from.includes("forward_market_setups"));
+  const rejected = await m.loadPaperRejected(fxStub, "u:forex", null, 5, "forex");
+  assert.deepEqual([rejected.lines.map((line) => line.seq), rejected.facts.x2.side, rejected.facts.x2.exit_fill], [[4], -1, null]);
+  const lines = await m.loadPaperLedger(fxStub, "u:forex", null, 50, "forex");
+  assert.deepEqual(lines.lines.map((line) => line.seq), [4, 3, 2, 1]);
 });

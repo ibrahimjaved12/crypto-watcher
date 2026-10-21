@@ -541,12 +541,43 @@ Code: `src/lib/market/market-select.ts` (pure rules), `src/lib/market/market-con
   chip is the only place that says the feed is missing.
 - **Storage.** The choice is kept in `localStorage` under `cw.market` (wrapped in try/catch) and
   shared across tabs through the `storage` event.
-- **What Forex shows today.** Market, Strategy Lab, Paper account and Alerts show a Forex landing
-  screen. Its real parts are the open/closed state with the next open or close time, and the four
+- **What Forex shows today.** Market, Strategy Lab and Alerts show a Forex landing screen; the Paper
+  account shows the forex paper account (below). Its real parts are the open/closed state with the next open or close time, and the four
   sessions in the viewer's time zone, both from the trading calendar mirror. It also shows tiles for
   the default instruments with "No data yet" and no numbers, and a footnote that nothing here is a
   price or a signal. Notes and Control room are market-neutral. Every forex price, chart and account
   screen arrives with its data feed and runner.
+
+### Paper account (forex)
+
+Code: `src/components/paper/fx-paper-account.tsx` (page), `src/lib/paper/fx-paper.ts` (pure view models),
+`src/lib/paper/paper-data.ts` (`loadFxPaperAccount` and the list loaders with `market`), shared layout in
+`src/components/paper/paper-kit.tsx`; tests `tests/fx-paper.test.mjs`, `tests/paper-data.test.mjs` (#454).
+
+- **One market at a time, never summed.** The page follows the Crypto/Forex toggle. Forex reads the account row
+  `forward_wallet_accounts` (`market='forex'`, id `<uuid>:forex`), its latest OK `paper_runs` row with
+  `market='forex'`, and `paper_account_summary('forex')` / `paper_equity_series(..., 'forex')`. Every list read
+  (closed, rejected, ledger) names its market and is refused if the account id belongs to the other one; the
+  react-query keys start with `["paper", market, …]`. The Strategy Lab ledger log and the CSV export exclude
+  `%:forex` accounts for crypto and read only them for forex. No migration was needed.
+- **Headline.** Balance (USD), total P&L (balance − starting balance) and today's P&L (balance − the last ledger
+  balance before 00:00 UTC). Tiles: equity, margin used (with free margin), open risk (loss if every stop is hit
+  from its entry fill) and costs (commission + swap). Equity and unrealized P&L value longs at the published bid
+  and shorts at the ask from `fx_market_quotes`, converted at the position's entry rate (exact for USD-quoted
+  symbols, approximate for USDJPY); a position without a quote is left out and counted, never valued at zero.
+- **Lists.** Open (lots = units / contract size, entry → bid/ask, stop, target, stop-out, margin, leverage, risk),
+  Closed (lots, entry → exit from the final `fx_market_outcomes` row, reason: target, stop, time, stop-out, net R
+  and USD), Rejected (each `fx/wallet.py` reason with a label and an icon) and Ledger (`open_fee`, `pnl`,
+  `close_fee`, `funding` shown as **Swap**, `liquidation` shown as **Stop-out**, `rejected`). R = net ÷ the risk
+  budget at entry (risk fraction × the balance just before the opening commission). A stop-out has no stored exit
+  price, so its exit shows "—".
+- **States.** No forex entitlement → "No forex access"; entitled but no account row → "No forex account yet"; an
+  account without an OK run → "Waiting for forex data" (the Market page's quiet chip); a run older than two hours
+  → an amber "Stale" pill with the time of that run. Zeros are never shown as results.
+- **Layout.** Desktop (≥ 1024 px): a wide equity card (curve, range chips, drawdown strip) beside a stack of
+  tiles, then sticky Open / Closed / Rejected / Ledger tabs over tables with sticky headers. Phone: a full-bleed
+  hero with the curve and an icon range menu, a sideways-snapping tile row, a segmented control pinned under
+  the header and two-line cards. The crypto Paper account uses the same kit.
 
 ## Roadmap of PRs
 
