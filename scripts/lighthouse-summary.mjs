@@ -92,7 +92,15 @@ function metricCell(metric) {
   if (typeof metric?.text !== "string" || !metric.text) return "—";
   const text = escapeHtml(metric.text.replace(/\s/g, ""));
   if (!text) return "—";
-  return typeof metric.score === "number" && metric.score < 0.5 ? `<b>${text}</b>` : text;
+  const band =
+    typeof metric.score !== "number"
+      ? ""
+      : metric.score >= 0.9
+        ? "🟢"
+        : metric.score >= 0.5
+          ? "🟠"
+          : "🔴";
+  return band ? `${band}&nbsp;${text}` : text;
 }
 
 const lines = [
@@ -160,7 +168,7 @@ for (const [device, heading] of DEVICES) {
 }
 
 lines.push(
-  "<sub>LCP Largest Contentful Paint · TBT Total Blocking Time · CLS Cumulative Layout Shift · FCP First Contentful Paint · SI Speed Index · Bold = poor</sub>",
+  "<sub>LCP Largest Contentful Paint · TBT Total Blocking Time · CLS Cumulative Layout Shift · FCP First Contentful Paint · SI Speed Index · Dots = Lighthouse metric score</sub>",
   "",
 );
 lines.push(`[Full reports](${runUrl}) · Scores can vary a few points between runs`);

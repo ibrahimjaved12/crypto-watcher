@@ -54,10 +54,10 @@ reports, final screenshots (all pages except Settings, which shows the account e
 run artifact, `lighthouse-reports` (14 days). The step summary also lists the run time per run.
 
 The comment has one table per device with Page, Performance, Accessibility, Best Practices and a "Performance
-Metrics" group (LCP, TBT, CLS, FCP, SI), a group row per market, compact values and a legend line. The metrics
-carry no colour dots because those narrow columns would otherwise widen the table past a normal comment width,
-so poor values (Lighthouse's red band) are bold instead. It is an HTML table because Markdown cannot group
-header cells. The Performance score weights those metrics 25/30/25/10/10 (LCP/TBT/CLS/FCP/SI).
+Metrics" group (LCP, TBT, CLS, FCP, SI), a group row per market, compact values and a legend line. Metric
+values use red/orange/green dots to show their Lighthouse score band and are not bolded. It is an HTML table
+because Markdown cannot group header cells. The Performance score weights those metrics 25/30/25/10/10
+(LCP/TBT/CLS/FCP/SI).
 Lighthouse, puppeteer-core and chrome-launcher versions are pinned so scores stay comparable between PRs and
 must be bumped deliberately. A failed page records its reason in the run log and `scores.json`.
 
