@@ -14,7 +14,7 @@ async function moduleUrl(path, imports = {}) {
 }
 const filters = await moduleUrl("../src/lib/forward/forward-filters.ts", { zod: import.meta.resolve("zod") });
 const report = await moduleUrl("../src/lib/forward/forward-report.ts");
-const { loadForwardDashboard } = await import(await moduleUrl("../src/lib/forward/forward-dashboard.ts", {
+const { loadForwardDashboard, loadForwardLogPage } = await import(await moduleUrl("../src/lib/forward/forward-dashboard.ts", {
   "./forward-filters": filters, "./forward-report": report,
 }));
 
@@ -73,4 +73,40 @@ test("forward origin isolates forward calls without moving stateful movement cal
   assert.equal(pythonServiceConfig("/v1/forward/evaluate", { ...env, PYTHON_FORWARD_URL: undefined }).url,
     "http://127.0.0.1:8000/v1/forward/evaluate");
   assert.throws(() => pythonServiceConfig("/v1/forward/evaluate", { ...env, PYTHON_FORWARD_URL: "http://public.example" }));
+});
+
+// #454: a user has a crypto and a forex paper account, both in paper_ledger; the ledger log never mixes them.
+test("the ledger log is scoped to one market's paper account", async () => {
+  const rows = [
+    { seq: 1, paper_account: "u", ms: 1 },
+    { seq: 2, paper_account: "u:forex", ms: 2 },
+    { seq: 3, paper_account: "u", ms: 3 },
+  ];
+  const calls = [];
+  const client = {
+    from(table) {
+      const keep = [];
+      const query = {
+        select() { return query; },
+        like(column, pattern) { calls.push(["like", column, pattern]); keep.push((r) => r[column].endsWith(pattern.slice(1))); return query; },
+        not(column, op, pattern) { calls.push(["not", column, op, pattern]); keep.push((r) => !r[column].endsWith(pattern.slice(1))); return query; },
+        lt(column, value) { keep.push((r) => r[column] < value); return query; },
+        order() { return query; },
+        limit() { return query; },
+        then(resolve) {
+          assert.equal(table, "paper_ledger");
+          const out = rows.filter((r) => keep.every((k) => k(r))).sort((a, b) => b.seq - a.seq);
+          return Promise.resolve({ data: out, error: null }).then(resolve);
+        },
+      };
+      return query;
+    },
+  };
+  const none = { families: [], horizons: [], sides: [], symbols: [], rr: [] };
+  const crypto = await loadForwardLogPage(client, "ledger", none, null);
+  assert.deepEqual(crypto.rows.map((r) => r.seq), [3, 1], "the default (crypto) leaves the forex account out");
+  const forex = await loadForwardLogPage(client, "ledger", none, null, 50, "forex");
+  assert.deepEqual(forex.rows.map((r) => r.seq), [2]);
+  assert.deepEqual(calls, [["not", "paper_account", "like", "%:forex"], ["like", "paper_account", "%:forex"]]);
+  await assert.rejects(loadForwardLogPage(client, "signals", none, null, 50, "forex"), /Only the ledger/);
 });

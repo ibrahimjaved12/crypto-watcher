@@ -29,16 +29,11 @@ import { cn } from "@/lib/utils";
  * (#398: bid, ask, spread, 1h change and a 24 h sparkline from `fx_market_quotes`) are real; there are no
  * charts, signals or accounts yet, and nothing here pretends otherwise.
  */
-type ForexPage = "market" | "paper" | "alerts" | "lab" | "control";
+type ForexPage = "market" | "alerts" | "lab" | "control";
 /** Same eyebrow and title as each crypto page: the teal theme alone says which market is shown. */
 const PAGES: Record<ForexPage, { eyebrow: string; title: string; subtitle: string }> = {
   market: { eyebrow: "Live market", title: "Market", subtitle: "Prices, spreads and trading sessions for your forex pairs." },
   lab: { eyebrow: "Forward test", title: "Strategy Lab", subtitle: "Strategies are tested here with fake money and realistic fees." },
-  paper: {
-    eyebrow: "Simulated · fake money",
-    title: "Paper account",
-    subtitle: "The simulated forex wallet: what it holds, what it did, and what it was not allowed to do.",
-  },
   alerts: { eyebrow: "Mission log", title: "Alerts", subtitle: "Every forex alert your rules raise will be logged here." },
   control: {
     eyebrow: "Settings & health",
@@ -47,7 +42,6 @@ const PAGES: Record<ForexPage, { eyebrow: string; title: string; subtitle: strin
   },
 };
 const EMPTY: Partial<Record<ForexPage, { icon: LucideIcon; title: string; body: string }>> = {
-  paper: { icon: Wallet, title: "No forex trades yet", body: "Your separate USD paper account appears with the first forex trade." },
   alerts: { icon: BellRing, title: "No forex alerts yet", body: "Alerts from your forex rules will be logged here." },
   lab: {
     icon: FlaskConical,
