@@ -160,9 +160,9 @@ async function main() {
             },
             device === "desktop" ? desktopConfig : undefined,
           ).catch((error) => {
-          callFailed = true;
-          errorName = typeof error?.name === "string" ? error.name : null;
-          return undefined;
+            callFailed = true;
+            errorName = typeof error?.name === "string" ? error.name : null;
+            return undefined;
           });
           const seconds = secondsSince(started);
           const lhr = result?.lhr;

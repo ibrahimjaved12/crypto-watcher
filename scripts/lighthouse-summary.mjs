@@ -1,6 +1,6 @@
 // Sticky PR comment for the Lighthouse workflow (#463): reads the new scores.json shape written by
-// lighthouse-run.mjs and prints one Mobile and one Desktop table (crypto rows, then forex, in PAGES order).
-// With --timing it prints only the collapsed run-time block for the step summary.
+// lighthouse-run.mjs and prints one compact HTML table per device, with market group rows and grouped
+// performance metric headers. With --timing it prints only the collapsed run-time block for the step summary.
 import { readFile } from "node:fs/promises";
 
 function getArgument(name) {
@@ -32,7 +32,6 @@ const DEVICES = [
   ["mobile", "📱 Mobile"],
   ["desktop", "🖥️ Desktop"],
 ];
-const CATEGORIES = ["accessibility", "bestPractices", "performance"];
 const METRICS = [
   "largestContentfulPaint",
   "totalBlockingTime",
@@ -75,17 +74,25 @@ if (timing) {
   process.exit(0);
 }
 
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"]/g, (character) => {
+    const entities = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+    return entities[character];
+  });
+}
+
 function scoreCell(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "⚠️ failed";
   const rounded = Math.max(0, Math.min(100, Math.round(value)));
   const band = rounded >= 90 ? "🟢" : rounded >= 50 ? "🟠" : "🔴";
-  return `${band} ${rounded}`;
+  return `${band}&nbsp;${escapeHtml(rounded)}`;
 }
 
 function metricCell(metric) {
   if (typeof metric?.text !== "string" || !metric.text) return "—";
-  const band = metric.score >= 0.9 ? "🟢" : metric.score >= 0.5 ? "🟠" : "🔴";
-  return `${band} ${metric.text}`;
+  const text = escapeHtml(metric.text.replace(/\s/g, ""));
+  if (!text) return "—";
+  return typeof metric.score === "number" && metric.score < 0.5 ? `<b>${text}</b>` : text;
 }
 
 const lines = [
@@ -118,28 +125,44 @@ for (const [device, heading] of DEVICES) {
   lines.push(
     `#### ${heading}`,
     "",
-    "| Page | Accessibility | Best Practices | Performance | Largest Contentful Paint | Total Blocking Time | Cumulative Layout Shift | First Contentful Paint | Speed Index |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "<table>",
+    "<thead>",
+    '<tr><th rowspan="2" align="left">Page</th><th rowspan="2">Performance</th><th rowspan="2">Accessibility</th><th rowspan="2">Best Practices</th><th colspan="5">Performance Metrics</th></tr>',
+    '<tr><th><abbr title="Largest Contentful Paint">LCP</abbr></th><th><abbr title="Total Blocking Time">TBT</abbr></th><th><abbr title="Cumulative Layout Shift">CLS</abbr></th><th><abbr title="First Contentful Paint">FCP</abbr></th><th><abbr title="Speed Index">SI</abbr></th></tr>',
+    "</thead>",
+    "<tbody>",
   );
   for (const [market, marketLabel] of MARKETS) {
     const run = runs[`${market}-${device}`];
+    lines.push(`<tr><td colspan="9" align="left"><b>${escapeHtml(marketLabel)}</b></td></tr>`);
     for (const page of pages) {
-      const result = run?.status === "ok" ? run.pages?.[page.slug] : undefined;
-      const failed = !result || result.error;
-      const cells = failed
-        ? Array(3 + METRICS.length).fill("⚠️ failed")
-        : [
-            ...CATEGORIES.map((category) => scoreCell(result[category])),
-            ...METRICS.map((metric) => metricCell(result.metrics?.[metric])),
-          ];
-      lines.push(
-        `| ${marketLabel} · [${page.label}](${baseUrl}${page.path}) | ${cells.join(" | ")} |`,
-      );
+      const result = run?.pages?.[page.slug];
+      const failed = !run || run.status !== "ok" || !result || result.error;
+      const pageCell = `<td><a href="${escapeHtml(baseUrl + page.path)}">${escapeHtml(page.label)}</a></td>`;
+      if (failed) {
+        const reason =
+          typeof result?.reason === "string" && /^[A-Za-z0-9_:.-]{1,40}$/.test(result.reason)
+            ? ` · ${escapeHtml(result.reason)}`
+            : "";
+        lines.push(`<tr>${pageCell}<td colspan="8">⚠️ failed${reason}</td></tr>`);
+        continue;
+      }
+      const cells = [
+        scoreCell(result.performance),
+        scoreCell(result.accessibility),
+        scoreCell(result.bestPractices),
+        ...METRICS.map((metric) => metricCell(result.metrics?.[metric])),
+      ];
+      lines.push(`<tr>${pageCell}${cells.map((cell) => `<td align="right">${cell}</td>`).join("")}</tr>`);
     }
   }
-  lines.push("");
+  lines.push("</tbody>", "</table>", "");
 }
 
+lines.push(
+  "<sub>LCP Largest Contentful Paint · TBT Total Blocking Time · CLS Cumulative Layout Shift · FCP First Contentful Paint · SI Speed Index · Bold = poor</sub>",
+  "",
+);
 lines.push(`[Full reports](${runUrl}) · Scores can vary a few points between runs`);
 process.stdout.write(`${lines.join("\n")}\n`);
 
