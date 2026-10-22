@@ -38,3 +38,14 @@ python -m venv .venv
 
 Branch protection is not available on this plan, so no check is "required"; treat a red `Tests`
 as blocking by convention. Do not rely on a check while it is flaky; fix the cause first.
+
+## Lighthouse
+
+The separate `Lighthouse` workflow runs on pull requests that change `src/**`, `public/**`,
+`vite.config.ts`, `package.json`, `package-lock.json`, `wrangler.jsonc`, the Lighthouse workflow,
+or its summary script. It also supports manual dispatch. It measures the fixed production URL, so
+the scores describe deployed `main`, not the pull request; the check is informational only and has
+no score thresholds or failing gates. Dashboard routes are behind login and are not measured.
+
+The PR comment is updated in place using the `<!-- lighthouse-check -->` marker. When #290 provides
+preview URLs, change the single `BASE_URL` value in `.github/workflows/lighthouse.yml` to use them.
