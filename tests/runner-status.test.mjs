@@ -94,8 +94,10 @@ test("a collector failure disables work that requires live operational data", ()
 });
 
 test("a tunnel outage does not turn a live machine offline or disable background forward jobs", () => {
-  const result = resolve([host(), jobs()], { ...enabled, gatewayReachable: false });
+  const result = resolve([host(), jobs()], { ...enabled, gatewayReachable: false, gatewayReason: "timeout" });
   assert.equal(result.gatewayReachable, false);
+  assert.equal(result.gatewayReason, "timeout", "the failure reason is passed through");
+  assert.equal(resolve([host(), jobs()]).gatewayReason, null, "no reason given: null");
   assert.equal(result.online, true);
   assert.equal(result.state, "degraded");
   assert.deepEqual(result.services, { analysis: false, alerts: false, forward: true, jobs: true });
@@ -110,7 +112,7 @@ test("missing health and lookup failures remain unknown even when the gateway is
   assert.equal(missing.reason, "never-reported");
   assert.deepEqual(unavailableRunnerStatus(true), {
     configured: true, jobsEnabled: false, state: "unknown", online: null,
-    lastOnlineAt: null, gatewayReachable: null,
+    lastOnlineAt: null, gatewayReachable: null, gatewayReason: null,
     servicesLastOnlineAt: { analysis: null, alerts: null, forward: null, jobs: null },
     reason: "check-failed",
     services: { analysis: false, alerts: false, forward: false, jobs: false },
