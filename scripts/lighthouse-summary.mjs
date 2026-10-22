@@ -1,17 +1,18 @@
-// Sticky PR comment for the Lighthouse workflow (#463): reads every scores-*/scores.json written by
+// Sticky PR comment for the Lighthouse workflow (#463): reads the single scores.json written by
 // lighthouse-run.mjs and prints one Mobile and one Desktop table (crypto rows, then forex, in PAGES order).
-import { readdir, readFile } from "node:fs/promises";
-import path from "node:path";
+// With --timing it prints only the collapsed run-time block for the step summary.
+import { readFile } from "node:fs/promises";
 
 function getArgument(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
-const scoresDir = getArgument("--scores-dir") ?? "lh-scores";
+const scoresFile = getArgument("--scores-file") ?? "";
 const hostUp = getArgument("--host-up") ?? "";
 const baseUrl = (getArgument("--base-url") ?? "").replace(/\/+$/, "");
 const runUrl = getArgument("--run-url") ?? "";
+const timing = process.argv.includes("--timing");
 const pages = (getArgument("--pages") ?? "")
   .split(/\r?\n/)
   .map((entry) => entry.trim())
@@ -33,30 +34,38 @@ const DEVICES = [
 ];
 const CATEGORIES = ["performance", "accessibility", "bestPractices"];
 
-async function findScoreFiles(directory) {
-  let entries;
-  try {
-    entries = await readdir(directory, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const found = [];
-  for (const entry of entries) {
-    const full = path.join(directory, entry.name);
-    if (entry.isDirectory()) found.push(...(await findScoreFiles(full)));
-    else if (entry.name === "scores.json") found.push(full);
-  }
-  return found;
+let scores = null;
+try {
+  const data = JSON.parse(await readFile(scoresFile, "utf8"));
+  if (data && typeof data === "object") scores = data;
+} catch {
+  // a missing or unreadable file counts as no scores
 }
+const runs = scores?.runs && typeof scores.runs === "object" ? scores.runs : {};
 
-const runs = new Map();
-for (const file of await findScoreFiles(scoresDir)) {
-  try {
-    const data = JSON.parse(await readFile(file, "utf8"));
-    if (data && data.market && data.device) runs.set(`${data.market}-${data.device}`, data);
-  } catch {
-    // an unreadable file counts as missing
+if (timing) {
+  if (scores) {
+    const lines = [
+      "<details><summary>Run time</summary>",
+      "",
+      "| Market | Device | Seconds |",
+      "| --- | --- | ---: |",
+    ];
+    for (const [market] of MARKETS) {
+      for (const [device] of DEVICES) {
+        const run = runs[`${market}-${device}`];
+        const total = Object.values(run?.pages ?? {}).reduce(
+          (sum, result) => sum + (typeof result?.seconds === "number" ? result.seconds : 0),
+          0,
+        );
+        lines.push(`| ${MARKET_NAME[market]} | ${device} | ${run ? total.toFixed(1) : "-"} |`);
+      }
+    }
+    if (typeof scores.totalSeconds === "number") lines.push(`| **Total** | | ${scores.totalSeconds.toFixed(1)} |`);
+    lines.push("", "</details>");
+    process.stdout.write(`${lines.join("\n")}\n`);
   }
+  process.exit(0);
 }
 
 function scoreCell(value) {
@@ -81,16 +90,15 @@ if (hostUp === "false") {
 }
 
 const notes = [];
-const statuses = new Set([...runs.values()].map((run) => run.status));
-if (statuses.has("no-credentials")) notes.push("⚠️ Test sign-in is not set up.");
-if (statuses.has("login-failed")) notes.push("⚠️ Test sign-in failed.");
-if (statuses.has("no-access")) notes.push("⚠️ Test account has no market access.");
+const status = scores?.status;
+if (status === "no-credentials") notes.push("⚠️ Test sign-in is not set up.");
+if (status === "login-failed") notes.push("⚠️ Test sign-in failed.");
+if (status === "no-access") notes.push("⚠️ Test account has no market access.");
 for (const [market] of MARKETS) {
-  const missing = [...runs.values()].some(
-    (run) => run.status === "market-unavailable" && run.market === market,
-  );
+  const missing = DEVICES.some(([device]) => runs[`${market}-${device}`]?.status === "market-unavailable");
   if (missing) notes.push(`⚠️ Test account has no access to ${MARKET_NAME[market]}.`);
 }
+if (scores?.runner === "offline") notes.push("🔴 Runner is offline.");
 if (notes.length) lines.push(...notes, "");
 
 for (const [device, heading] of DEVICES) {
@@ -101,7 +109,7 @@ for (const [device, heading] of DEVICES) {
     "| --- | ---: | ---: | ---: |",
   );
   for (const [market, marketLabel] of MARKETS) {
-    const run = runs.get(`${market}-${device}`);
+    const run = runs[`${market}-${device}`];
     for (const page of pages) {
       const result = run?.status === "ok" ? run.pages?.[page.slug] : undefined;
       const cells = CATEGORIES.map((category) =>
@@ -118,4 +126,4 @@ for (const [device, heading] of DEVICES) {
 lines.push(`[Full reports](${runUrl}) · Scores can vary a few points between runs`);
 process.stdout.write(`${lines.join("\n")}\n`);
 
-if (runs.size === 0 && hostUp === "true") process.exitCode = 1;
+if (!scores && hostUp === "true") process.exitCode = 1;

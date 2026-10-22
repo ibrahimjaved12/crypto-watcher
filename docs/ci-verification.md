@@ -47,9 +47,20 @@ workflow manually with the PR number (`pr_number`). Informational only: no thres
 
 **What.** The fixed production URL (`BASE_URL`), so the scores describe deployed `main`, not the PR. Six
 logged-in pages (Dashboard, Alerts, Strategy Lab, Notes, Paper account, Settings) for Crypto and Forex, on
-mobile and desktop (four matrix jobs). Lighthouse audits one URL per run and does not crawl. A host check runs
-first; if the site does not answer, the comment says "Host server is down" and nothing else runs. The PR gets
-one sticky comment (`<!-- lighthouse-check -->`); full HTML/JSON reports are run artifacts (14 days)..
+mobile and desktop: one job, one install, one sign-in and all 24 runs in one Chrome. Lighthouse audits one URL
+per run and does not crawl. A host check runs first; if the site does not answer, the comment says "Host server
+is down" and nothing else runs. The PR gets one sticky comment (`<!-- lighthouse-check -->`); full HTML/JSON
+reports, final screenshots (all pages except Settings, which shows the account email) and `scores.json` are one
+run artifact, `lighthouse-reports` (14 days). The step summary also lists the run time per run.
+
+**Caches.** Every run starts from a cold HTTP cache and cleared service workers/Cache Storage (login and market
+stay in localStorage; the app stores no other data there), with a fresh Chrome profile per job. Cloudflare's edge
+cache and server-side caches are intentionally not bypassed because real visitors get them, so the first run
+after a deploy can be slightly slower.
+
+**Notes.** Two status notes exist besides the sign-in ones: "Host server is down" (the Cloudflare site is
+unreachable, nothing runs) and "Runner is offline" (the laptop runner, read from the app's Runner badge; pages
+are still measured, with the app's offline banner showing).
 
 **Setup.**
 - Supabase dashboard > Authentication > Users > Add user: use a non-personal email, a generated

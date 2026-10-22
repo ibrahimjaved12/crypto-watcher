@@ -1,7 +1,9 @@
-// Lighthouse for the logged-in pages of one market on one device (#463). Copied next to its own node_modules in
-// $RUNNER_TEMP/lh by the workflow, so the bare imports resolve there and nothing is installed into the repo.
-// Signs in through the real form with the dedicated test account, selects the market, then audits each page in
-// the same Chrome (storage kept). Every expected failure is written to scores.json with exit code 0; only an
+// Lighthouse for the logged-in pages of both markets on mobile and desktop (#463). Copied next to its own
+// node_modules in $RUNNER_TEMP/lh by the workflow, so the bare imports resolve there and nothing is installed into
+// the repo. Signs in once through the real form with the dedicated test account, reads the runner badge, then for
+// each market selects it and audits every page on both devices in the same Chrome. Every run starts from a cold
+// HTTP cache and cleared service workers/Cache Storage (Lighthouse's storage reset); localStorage is kept, so the
+// login and the market stay. Every expected failure is written to scores.json with exit code 0; only an
 // unexpected exception crashes. Never logs URLs with query strings, the email, the password or tokens.
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,8 +16,6 @@ import puppeteer from "puppeteer-core";
 
 const env = (name) => process.env[name] ?? "";
 const BASE_URL = env("BASE_URL").replace(/\/+$/, "");
-const MARKET = env("MARKET");
-const DEVICE = env("DEVICE");
 const OUT_DIR = env("OUT_DIR");
 const PAGES = env("PAGES")
   .split("\n")
@@ -27,6 +27,12 @@ const PAGES = env("PAGES")
   })
   .filter((page) => page.slug && page.path);
 const WAIT_MS = 30_000;
+const MARKETS = ["crypto", "forex"];
+const DEVICES = ["mobile", "desktop"];
+const startedAt = Date.now();
+let runner;
+
+const secondsSince = (from) => Math.round((Date.now() - from) / 100) / 10;
 
 const score = (category) =>
   category && typeof category.score === "number" ? Math.round(category.score * 100) : null;
@@ -35,17 +41,25 @@ async function writeScores(result) {
   await mkdir(OUT_DIR, { recursive: true });
   await writeFile(
     join(OUT_DIR, "scores.json"),
-    `${JSON.stringify({ market: MARKET, device: DEVICE, ...result }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        status: result.status,
+        ...(runner ? { runner } : {}),
+        totalSeconds: secondsSince(startedAt),
+        runs: result.runs ?? {},
+      },
+      null,
+      2,
+    )}\n`,
   );
 }
 
 async function main() {
-  if (!BASE_URL || !OUT_DIR || !["crypto", "forex"].includes(MARKET) || !["mobile", "desktop"].includes(DEVICE))
-    throw new Error("BASE_URL, OUT_DIR, MARKET (crypto|forex) and DEVICE (mobile|desktop) are required");
+  if (!BASE_URL || !OUT_DIR) throw new Error("BASE_URL and OUT_DIR are required");
   const email = env("LH_EMAIL");
   const password = env("LH_PASSWORD");
   if (!email || !password) {
-    await writeScores({ status: "no-credentials", pages: {} });
+    await writeScores({ status: "no-credentials" });
     console.log("no credentials");
     return;
   }
@@ -69,78 +83,111 @@ async function main() {
       await page.click('form:has(#signin-email) button[type="submit"]');
       await page.waitForFunction(() => location.pathname === "/dashboard", { timeout: WAIT_MS });
     } catch {
-      await writeScores({ status: "login-failed", pages: {} });
+      await writeScores({ status: "login-failed" });
       console.log("login failed");
       return;
     }
 
-    await page.evaluate((market) => localStorage.setItem("cw.market", market), MARKET);
-    await page.goto(`${BASE_URL}/dashboard`, { waitUntil: "domcontentloaded", timeout: 60_000 });
     try {
-      await page.waitForFunction(
-        (market) => document.documentElement.dataset.market === market,
-        { timeout: WAIT_MS },
-        MARKET,
-      );
-    } catch {
-      await writeScores({ status: "market-unavailable", pages: {} });
-      console.log(`market ${MARKET} unavailable`);
-      return;
-    }
-    try {
+      await page.goto(`${BASE_URL}/dashboard`, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector('nav[aria-label="Main"]', { timeout: WAIT_MS });
     } catch {
-      await writeScores({ status: "no-access", pages: {} });
+      await writeScores({ status: "no-access" });
       console.log("no access");
       return;
     }
+
+    // The badge is rendered by the app shell only when a runner is configured; otherwise it stays "unknown".
+    runner = "unknown";
+    try {
+      const label = await page
+        .waitForSelector('button[aria-label^="Runner "]', { timeout: 20_000 })
+        .then((el) => el.evaluate((node) => node.getAttribute("aria-label") ?? ""));
+      runner = /^runner offline/i.test(label) ? "offline" : /^runner online/i.test(label) ? "online" : "unknown";
+    } catch {
+      runner = "unknown";
+    }
+    console.log(`runner ${runner}`);
     await page.close();
 
-    const pages = {};
-    for (const { slug, path } of PAGES) {
-      const started = Date.now();
-      const result = await lighthouse(
-        `${BASE_URL}${path}`,
-        {
-          port: chrome.port,
-          output: ["json", "html"],
-          logLevel: "error",
-          onlyCategories: ["performance", "accessibility", "best-practices"],
-          disableStorageReset: true,
-          disableFullPageScreenshot: true,
-          skipAudits: ["screenshot-thumbnails", "final-screenshot"],
-          maxWaitForLoad: 60_000,
-        },
-        DEVICE === "desktop" ? desktopConfig : undefined,
-      ).catch(() => undefined);
-      const seconds = Math.round((Date.now() - started) / 100) / 10;
-      const lhr = result?.lhr;
-      let finalPath = null;
+    const runs = {};
+    for (const market of MARKETS) {
+      const marketPage = await browser.newPage();
+      let available = true;
       try {
-        finalPath = lhr ? new URL(lhr.finalDisplayedUrl).pathname : null;
+        await marketPage.goto(`${BASE_URL}/auth`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await marketPage.evaluate((m) => localStorage.setItem("cw.market", m), market);
+        await marketPage.goto(`${BASE_URL}/dashboard`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await marketPage.waitForFunction(
+          (m) => document.documentElement.dataset.market === m,
+          { timeout: WAIT_MS },
+          market,
+        );
       } catch {
-        finalPath = null;
+        available = false;
       }
-      if (!lhr || lhr.runtimeError || finalPath !== path) {
-        pages[slug] = { error: true, seconds };
-        console.log(`${slug} ${seconds}s failed`);
+      await marketPage.close().catch(() => {});
+      if (!available) {
+        for (const device of DEVICES) runs[`${market}-${device}`] = { status: "market-unavailable", pages: {} };
+        console.log(`market ${market} unavailable`);
         continue;
       }
-      const [json, html] = Array.isArray(result.report) ? result.report : [result.report, ""];
-      const base = join(OUT_DIR, `${MARKET}-${DEVICE}-${slug}`);
-      await writeFile(`${base}.json`, json);
-      if (html) await writeFile(`${base}.html`, html);
-      const scores = {
-        performance: score(lhr.categories.performance),
-        accessibility: score(lhr.categories.accessibility),
-        bestPractices: score(lhr.categories["best-practices"]),
-      };
-      pages[slug] = { ...scores, seconds };
-      console.log(
-        `${slug} ${seconds}s perf=${scores.performance} a11y=${scores.accessibility} bp=${scores.bestPractices}`,
-      );
+
+      for (const device of DEVICES) {
+        const pages = {};
+        for (const { slug, path } of PAGES) {
+          const started = Date.now();
+          const result = await lighthouse(
+            `${BASE_URL}${path}`,
+            {
+              port: chrome.port,
+              output: ["json", "html"],
+              logLevel: "error",
+              onlyCategories: ["performance", "accessibility", "best-practices"],
+              disableFullPageScreenshot: true,
+              // Settings shows the account email, so it gets no final screenshot.
+              skipAudits: slug === "settings" ? ["screenshot-thumbnails", "final-screenshot"] : ["screenshot-thumbnails"],
+              maxWaitForLoad: 60_000,
+            },
+            device === "desktop" ? desktopConfig : undefined,
+          ).catch(() => undefined);
+          const seconds = secondsSince(started);
+          const lhr = result?.lhr;
+          let finalPath = null;
+          try {
+            finalPath = lhr ? new URL(lhr.finalDisplayedUrl).pathname : null;
+          } catch {
+            finalPath = null;
+          }
+          if (!lhr || lhr.runtimeError || finalPath !== path) {
+            pages[slug] = { error: true, seconds };
+            console.log(`${market} ${device} ${slug} ${seconds}s failed`);
+            continue;
+          }
+          const [json, html] = Array.isArray(result.report) ? result.report : [result.report, ""];
+          const base = join(OUT_DIR, `${market}-${device}-${slug}`);
+          await writeFile(`${base}.json`, json);
+          if (html) await writeFile(`${base}.html`, html);
+          if (slug !== "settings") {
+            const shot = lhr.audits["final-screenshot"]?.details?.data;
+            const match = typeof shot === "string" ? /^data:image\/jpeg;base64,(.+)$/.exec(shot) : null;
+            if (match) await writeFile(`${base}.jpg`, Buffer.from(match[1], "base64"));
+          }
+          const scores = {
+            performance: score(lhr.categories.performance),
+            accessibility: score(lhr.categories.accessibility),
+            bestPractices: score(lhr.categories["best-practices"]),
+          };
+          pages[slug] = { ...scores, seconds };
+          console.log(
+            `${market} ${device} ${slug} ${seconds}s perf=${scores.performance} a11y=${scores.accessibility} bp=${scores.bestPractices}`,
+          );
+        }
+        runs[`${market}-${device}`] = { status: "ok", pages };
+      }
     }
-    await writeScores({ status: "ok", pages });
+    await writeScores({ status: "ok", runs });
+    console.log(`total ${secondsSince(startedAt)}s`);
   } finally {
     await browser?.disconnect().catch(() => {});
     try {
