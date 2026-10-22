@@ -50,13 +50,15 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    env:
-      OUT_DIR: ${{ runner.temp }}/lh-out
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Set output directory
+        shell: bash
+        run: echo "OUT_DIR=$RUNNER_TEMP/lh-out" >> "$GITHUB_ENV"
 
       - name: Check host
         id: host
