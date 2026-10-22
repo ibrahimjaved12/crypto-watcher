@@ -51,7 +51,7 @@ mobile and desktop: one job, one install, one sign-in and all 24 runs in one Chr
 per run and does not crawl. A host check runs first; if the site does not answer, the comment says "Host server
 is down" and nothing else runs. The PR gets one sticky comment (`<!-- lighthouse-check -->`); full HTML/JSON
 reports, final screenshots (all pages except Settings, which shows the account email) and `scores.json` are one
-run artifact, `lighthouse-reports` (14 days). The step summary also lists the run time per run.
+run artifact, `lighthouse-reports` (14 days). The step summary also lists the run time per run..
 
 The comment has one table per device with Page, Performance, Accessibility, Best Practices and a "Performance
 Metrics" group (LCP, TBT, CLS, FCP, SI), a group row per market, compact values and a legend line. Metric
