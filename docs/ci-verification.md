@@ -60,7 +60,7 @@ after a deploy can be slightly slower.
 
 **Notes.** Two status notes exist besides the sign-in ones: "Host server is down" (the Cloudflare site is
 unreachable, nothing runs) and "Runner is offline" (the laptop runner, read from the app's Runner badge; pages
-are still measured, with the app's offline banner showing).
+are still measured, with the app's offline banner showing)..
 
 **Setup.**
 - Supabase dashboard > Authentication > Users > Add user: use a non-personal email, a generated
