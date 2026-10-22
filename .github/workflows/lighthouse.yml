@@ -4,7 +4,9 @@ name: Lighthouse
 # PR opens. Never pull_request_target: fork PRs get no secrets and every job skips them.
 on:
   pull_request:
-    types: [opened]
+    # Previous PR-open-only trigger; restore it after temporary testing.
+    # types: [opened]
+    types: [opened, synchronize]
     paths:
       - "src/**"
       - "public/**"

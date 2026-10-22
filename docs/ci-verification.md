@@ -41,7 +41,7 @@ as blocking by convention. Do not rely on a check while it is flaky; fix the cau
 
 ## Lighthouse
 
-**When.** Once when a PR opens, if it touches `src/**`, `public/**`, `vite.config.ts`, `package.json`,
+**When.** When a PR opens and on every subsequent PR commit, if it touches `src/**`, `public/**`, `vite.config.ts`, `package.json`,
 `package-lock.json`, `wrangler.jsonc`, the workflow or its two scripts. To refresh the comment later, run the
 workflow manually with the PR number (`pr_number`). Informational only: no thresholds, no failing gate.
 
