@@ -51,7 +51,7 @@ mobile and desktop (four matrix jobs). Lighthouse audits one URL per run and doe
 first; if the site does not answer, the comment says "Host server is down" and nothing else runs. The PR gets
 one sticky comment (`<!-- lighthouse-check -->`); full HTML/JSON reports are run artifacts (14 days).
 
-**Secrets.** `LIGHTHOUSE_EMAIL` and `LIGHTHOUSE_PASSWORD` (setup: #<setup-ticket>). Without them the comment
+**Secrets.** `LIGHTHOUSE_EMAIL` and `LIGHTHOUSE_PASSWORD` (setup: #463>). Without them the comment
 says "Test sign-in is not set up."
 
 **Security.**
