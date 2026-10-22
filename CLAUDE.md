@@ -120,7 +120,7 @@ Setup charts are rendered on the owner's machine from windows captured at event 
 
 Approved decisions and facts. Anything marked UNVERIFIED in the code or docs stays unverified here.
 
-- **Two markets, Crypto and Forex.** The Crypto/Forex toggle in the header is UI-only. Entitlement to a
+- **Two markets, Crypto and Forex.** Entitlement to a
   market comes from the plan (`has_market()`, `my_markets()`). Each market has its own paper account
   (`forward_wallet_accounts` per market) and its own tables (`fx_market_*`).
 - **Data is free:** Exness MT5 demo for CFDs and PMEX MT5 demo for futures. Real-money trading
