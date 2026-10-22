@@ -4,9 +4,7 @@ name: Lighthouse
 # PR opens. Never pull_request_target: fork PRs get no secrets and every job skips them.
 on:
   pull_request:
-    # Previous PR-open-only trigger; restore it after temporary testing.
-    # types: [opened]
-    types: [opened, synchronize]
+    types: [opened]
     paths:
       - "src/**"
       - "public/**"
@@ -17,18 +15,12 @@ on:
       - ".github/workflows/lighthouse.yml"
       - "scripts/lighthouse-run.mjs"
       - "scripts/lighthouse-summary.mjs"
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: "PR number whose Lighthouse comment to refresh (optional)"
-        required: false
-        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: lighthouse-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+  group: lighthouse-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 env:
@@ -43,7 +35,7 @@ env:
 
 jobs:
   lighthouse:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository
     name: Lighthouse
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -110,10 +102,10 @@ jobs:
           node scripts/lighthouse-summary.mjs --scores-file "$OUT_DIR/scores.json" --timing >> "$GITHUB_STEP_SUMMARY"
 
       - name: Update pull request comment
-        if: always() && (github.event.pull_request.number || inputs.pr_number) != ''
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         shell: bash
         run: |
           comment_id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate --jq '.[] | select(.body | contains("<!-- lighthouse-check -->")) | .id' | sed -n 1p)

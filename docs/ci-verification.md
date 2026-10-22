@@ -41,9 +41,9 @@ as blocking by convention. Do not rely on a check while it is flaky; fix the cau
 
 ## Lighthouse
 
-**When.** When a PR opens and on every subsequent PR commit, if it touches `src/**`, `public/**`, `vite.config.ts`, `package.json`,
-`package-lock.json`, `wrangler.jsonc`, the workflow or its two scripts. To refresh the comment later, run the
-workflow manually with the PR number (`pr_number`). Informational only: no thresholds, no failing gate.
+**When.** Once, when a PR opens, if it touches `src/**`, `public/**`, `vite.config.ts`, `package.json`,
+`package-lock.json`, `wrangler.jsonc`, the workflow or its two scripts. It does not run on subsequent PR commits,
+manual dispatch or pushes to `main`. Informational only: no thresholds, no failing gate.
 
 **What.** The fixed production URL (`BASE_URL`), so the scores describe deployed `main`, not the PR. Six
 logged-in pages (Dashboard, Alerts, Strategy Lab, Notes, Paper account, Settings) for Crypto and Forex, on
