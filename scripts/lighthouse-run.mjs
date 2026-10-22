@@ -61,12 +61,12 @@ async function main() {
     browser = await puppeteer.connect({ browserURL: `http://127.0.0.1:${chrome.port}` });
     const page = await browser.newPage();
 
-    await page.goto(`${BASE_URL}/auth`, { waitUntil: "networkidle2", timeout: 60_000 });
-    await page.waitForSelector("#signin-email", { timeout: WAIT_MS });
-    await page.type("#signin-email", email);
-    await page.type("#signin-password", password);
-    await page.click('form:has(#signin-email) button[type="submit"]');
     try {
+      await page.goto(`${BASE_URL}/auth`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await page.waitForSelector("#signin-email", { timeout: WAIT_MS });
+      await page.type("#signin-email", email);
+      await page.type("#signin-password", password);
+      await page.click('form:has(#signin-email) button[type="submit"]');
       await page.waitForFunction(() => location.pathname === "/dashboard", { timeout: WAIT_MS });
     } catch {
       await writeScores({ status: "login-failed", pages: {} });
@@ -75,7 +75,7 @@ async function main() {
     }
 
     await page.evaluate((market) => localStorage.setItem("cw.market", market), MARKET);
-    await page.goto(`${BASE_URL}/dashboard`, { waitUntil: "networkidle2", timeout: 60_000 });
+    await page.goto(`${BASE_URL}/dashboard`, { waitUntil: "domcontentloaded", timeout: 60_000 });
     try {
       await page.waitForFunction(
         (market) => document.documentElement.dataset.market === market,
@@ -85,6 +85,13 @@ async function main() {
     } catch {
       await writeScores({ status: "market-unavailable", pages: {} });
       console.log(`market ${MARKET} unavailable`);
+      return;
+    }
+    try {
+      await page.waitForSelector('nav[aria-label="Main"]', { timeout: WAIT_MS });
+    } catch {
+      await writeScores({ status: "no-access", pages: {} });
+      console.log("no access");
       return;
     }
     await page.close();

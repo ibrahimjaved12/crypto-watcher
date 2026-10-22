@@ -84,6 +84,7 @@ const notes = [];
 const statuses = new Set([...runs.values()].map((run) => run.status));
 if (statuses.has("no-credentials")) notes.push("⚠️ Test sign-in is not set up.");
 if (statuses.has("login-failed")) notes.push("⚠️ Test sign-in failed.");
+if (statuses.has("no-access")) notes.push("⚠️ Test account has no market access.");
 for (const [market] of MARKETS) {
   const missing = [...runs.values()].some(
     (run) => run.status === "market-unavailable" && run.market === market,

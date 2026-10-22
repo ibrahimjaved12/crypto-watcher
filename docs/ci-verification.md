@@ -51,8 +51,17 @@ mobile and desktop (four matrix jobs). Lighthouse audits one URL per run and doe
 first; if the site does not answer, the comment says "Host server is down" and nothing else runs. The PR gets
 one sticky comment (`<!-- lighthouse-check -->`); full HTML/JSON reports are run artifacts (14 days).
 
-**Secrets.** `LIGHTHOUSE_EMAIL` and `LIGHTHOUSE_PASSWORD` (setup: #463>). Without them the comment
-says "Test sign-in is not set up."
+**Setup.**
+- Supabase dashboard > Authentication > Users > Add user: use a non-personal email, a generated
+  password of at least 32 characters, and auto-confirm.
+- On your own machine, run `npm run access:grant -- <that email> --label all --expires <date about a year out>`.
+  It reads `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from `.env.production.local`; those values
+  must never go into GitHub.
+- GitHub: Settings > Secrets and variables > Actions > add `LIGHTHOUSE_EMAIL` and
+  `LIGHTHOUSE_PASSWORD`.
+- Comments may say: "Test sign-in is not set up." (no secrets), "Test sign-in failed." (wrong
+  password or expired account), "Test account has no access to Crypto/Forex." (label), or
+  "Test account has no market access." (no label at all).
 
 **Security.**
 - A dedicated, empty test account with the label `all` and an expiry. Never a real account, never the
