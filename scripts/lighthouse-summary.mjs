@@ -154,9 +154,10 @@ for (const [device, heading] of DEVICES) {
         lines.push(`<tr>${pageCell}<td colspan="3">⚠️ failed${reason}</td></tr>`);
         continue;
       }
-      const metricSummary = METRICS.map(
+      const metricValues = METRICS.map(
         ([metric, label]) => `${label}&nbsp;${metricCell(result.metrics?.[metric])}`,
-      ).join(" · ");
+      );
+      const metricSummary = `${metricValues.slice(0, 3).join(" · ")}<br>${metricValues.slice(3).join(" · ")}`;
       const cells = [
         `${scoreCell(result.performance)}<br><small>${metricSummary}</small>`,
         scoreCell(result.accessibility),
