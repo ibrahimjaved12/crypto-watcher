@@ -51,7 +51,7 @@ mobile and desktop: one job, one install, one sign-in and all 24 runs in one Chr
 per run and does not crawl. A host check runs first; if the site does not answer, the comment says "Host server
 is down" and nothing else runs. The PR gets one sticky comment (`<!-- lighthouse-check -->`); full HTML/JSON
 reports, final screenshots (all pages except Settings, which shows the account email) and `scores.json` are one
-run artifact, `lighthouse-reports` (14 days). The step summary also lists the run time per run..
+run artifact, `lighthouse-reports` (14 days). The step summary also lists the run time per run.
 
 The comment has one table per device with Page, Perf, A11y, Best Prac and five Performance Metrics columns
 (LCP, TBT, CLS, FCP, SI), plus a group row per market. Category scores and metric values have red/orange/green
@@ -67,7 +67,7 @@ after a deploy can be slightly slower.
 
 **Notes.** Two status notes exist besides the sign-in ones: "Host server is down" (the Cloudflare site is
 unreachable, nothing runs) and "Runner is offline" (the laptop runner, read from the app's Runner badge; pages
-are still measured, with the app's offline banner showing)..
+are still measured, with the app's offline banner showing).
 
 **Setup.**
 - Supabase dashboard > Authentication > Users > Add user: use a non-personal email, a generated
