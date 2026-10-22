@@ -41,11 +41,27 @@ as blocking by convention. Do not rely on a check while it is flaky; fix the cau
 
 ## Lighthouse
 
-The separate `Lighthouse` workflow runs on pull requests that change `src/**`, `public/**`,
-`vite.config.ts`, `package.json`, `package-lock.json`, `wrangler.jsonc`, the Lighthouse workflow,
-or its summary script. It also supports manual dispatch. It measures the fixed production URL, so
-the scores describe deployed `main`, not the pull request; the check is informational only and has
-no score thresholds or failing gates. Dashboard routes are behind login and are not measured.
+**When.** Once when a PR opens, if it touches `src/**`, `public/**`, `vite.config.ts`, `package.json`,
+`package-lock.json`, `wrangler.jsonc`, the workflow or its two scripts. To refresh the comment later, run the
+workflow manually with the PR number (`pr_number`). Informational only: no thresholds, no failing gate.
 
-The PR comment is updated in place using the `<!-- lighthouse-check -->` marker. When #290 provides
-preview URLs, change the single `BASE_URL` value in `.github/workflows/lighthouse.yml` to use them.
+**What.** The fixed production URL (`BASE_URL`), so the scores describe deployed `main`, not the PR. Six
+logged-in pages (Dashboard, Alerts, Strategy Lab, Notes, Paper account, Settings) for Crypto and Forex, on
+mobile and desktop (four matrix jobs). Lighthouse audits one URL per run and does not crawl. A host check runs
+first; if the site does not answer, the comment says "Host server is down" and nothing else runs. The PR gets
+one sticky comment (`<!-- lighthouse-check -->`); full HTML/JSON reports are run artifacts (14 days).
+
+**Secrets.** `LIGHTHOUSE_EMAIL` and `LIGHTHOUSE_PASSWORD` (setup: #<setup-ticket>). Without them the comment
+says "Test sign-in is not set up."
+
+**Security.**
+- A dedicated, empty test account with the label `all` and an expiry. Never a real account, never the
+  service-role key in GitHub.
+- Secrets reach only the single run step and are masked. Fork PRs get no secrets and every job skips them
+  (never `pull_request_target`).
+- Artifacts of a public repo can be downloaded by any signed-in GitHub user, so the account must stay empty;
+  reports are made with screenshots disabled.
+
+**Too slow?** Remove lines from `PAGES` in `.github/workflows/lighthouse.yml`.
+
+**Previews.** When #290 provides preview URLs, change `BASE_URL` to use them.

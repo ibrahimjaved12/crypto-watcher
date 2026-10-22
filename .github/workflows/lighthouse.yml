@@ -1,7 +1,10 @@
 name: Lighthouse
 
+# Measures the logged-in pages of the deployed production site (main) with a dedicated test account, once when a
+# PR opens. Never pull_request_target: fork PRs get no secrets and every job skips them.
 on:
   pull_request:
+    types: [opened]
     paths:
       - "src/**"
       - "public/**"
@@ -10,27 +13,63 @@ on:
       - "package-lock.json"
       - "wrangler.jsonc"
       - ".github/workflows/lighthouse.yml"
+      - "scripts/lighthouse-run.mjs"
       - "scripts/lighthouse-summary.mjs"
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number whose Lighthouse comment to refresh (optional)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
-  group: lighthouse-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: lighthouse-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+  cancel-in-progress: false
 
 env:
   BASE_URL: https://crypto-watcher.cwlabs.workers.dev
-  LH_PAGES: |
-    home|Home|/
-    signin|Sign in|/auth
+  PAGES: |
+    dashboard|Dashboard|/dashboard
+    alerts|Alerts|/alerts
+    forward|Strategy Lab|/forward
+    notes|Notes|/notes
+    paper|Paper account|/paper
+    settings|Settings|/settings
 
 jobs:
-  Lighthouse:
+  host:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 3
+    outputs:
+      up: ${{ steps.check.outputs.up }}
+    steps:
+      - name: Check host
+        id: check
+        shell: bash
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 --retry 3 --retry-all-errors --retry-delay 5 "$BASE_URL/" || true)
+          if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
+            echo "up=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Host answered: ${code:-none}"
+            echo "up=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  lighthouse:
+    needs: host
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.host.outputs.up == 'true'
+    name: Lighthouse (${{ matrix.market }}, ${{ matrix.device }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        market: [crypto, forex]
+        device: [mobile, desktop]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -40,77 +79,89 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Warm up pages
+      - name: Install Lighthouse tools (outside the repo)
         shell: bash
         run: |
-          while IFS='|' read -r slug label path; do
-            [ -n "$slug" ] || continue
-            if ! curl --retry 3 --retry-delay 5 -fsS -o /dev/null "$BASE_URL$path"; then
-              echo "::warning::Warm-up request failed for $slug"
-            fi
-          done <<< "$LH_PAGES"
+          npm install --prefix "$RUNNER_TEMP/lh" --no-audit --no-fund lighthouse@13 puppeteer-core@25 chrome-launcher@1
+          cp scripts/lighthouse-run.mjs "$RUNNER_TEMP/lh/"
 
       - name: Run Lighthouse
         shell: bash
-        run: |
-          mkdir -p lighthouse-reports
-          while IFS='|' read -r slug label path; do
-            [ -n "$slug" ] || continue
-            for device in mobile desktop; do
-              output="lighthouse-reports/${slug}-${device}"
-              preset=()
-              if [ "$device" = desktop ]; then
-                preset=(--preset=desktop)
-              fi
-              if npx --yes lighthouse@13 "$BASE_URL$path" \
-                --quiet \
-                --only-categories=performance,accessibility,best-practices,seo \
-                --output=json \
-                --output=html \
-                --output-path="$output" \
-                --chrome-flags="--headless=new --no-sandbox" \
-                "${preset[@]}"; then
-                for extension in json html; do
-                  if [ -f "${output}.report.${extension}" ]; then
-                    mv "${output}.report.${extension}" "${output}.${extension}"
-                  fi
-                done
-              else
-                echo "::warning::Lighthouse failed for ${slug} (${device})"
-              fi
-            done
-          done <<< "$LH_PAGES"
-
-      - name: Create summary
-        if: always()
-        run: >-
-          node scripts/lighthouse-summary.mjs
-          --dir lighthouse-reports
-          --pages "$LH_PAGES"
-          --base-url "$BASE_URL"
-          --run-url
-          "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          > lighthouse-comment.md
-          && cat lighthouse-comment.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Update pull request comment
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        shell: bash
+          LH_EMAIL: ${{ secrets.LIGHTHOUSE_EMAIL }}
+          LH_PASSWORD: ${{ secrets.LIGHTHOUSE_PASSWORD }}
+          MARKET: ${{ matrix.market }}
+          DEVICE: ${{ matrix.device }}
+          OUT_DIR: ${{ runner.temp }}/lh-out
         run: |
-          comment_id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate --jq '.[] | select(.body | contains("<!-- lighthouse-check -->")) | .id' | head -n1)
-          if [ -n "$comment_id" ]; then
-            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" -F body=@lighthouse-comment.md
-          else
-            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@lighthouse-comment.md
-          fi
+          if [ -n "$LH_EMAIL" ]; then echo "::add-mask::$LH_EMAIL"; fi
+          mkdir -p "$OUT_DIR"
+          node "$RUNNER_TEMP/lh/lighthouse-run.mjs"
+
+      - name: Upload scores
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: scores-${{ matrix.market }}-${{ matrix.device }}
+          path: ${{ runner.temp }}/lh-out/scores.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: lighthouse-reports
-          path: lighthouse-reports/
+          name: reports-${{ matrix.market }}-${{ matrix.device }}
+          path: |
+            ${{ runner.temp }}/lh-out/*.html
+            ${{ runner.temp }}/lh-out/*.json
+            !${{ runner.temp }}/lh-out/scores.json
           if-no-files-found: ignore
+          retention-days: 14
+
+  comment:
+    needs: [host, lighthouse]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name == 'pull_request' || inputs.pr_number != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: scores-*
+          path: lh-scores
+
+      - name: Create summary
+        shell: bash
+        run: |
+          node scripts/lighthouse-summary.mjs \
+            --scores-dir lh-scores \
+            --host-up "${{ needs.host.outputs.up }}" \
+            --base-url "$BASE_URL" \
+            --pages "$PAGES" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            > lighthouse-comment.md
+          cat lighthouse-comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update pull request comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+        shell: bash
+        run: |
+          comment_id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate --jq '.[] | select(.body | contains("<!-- lighthouse-check -->")) | .id' | sed -n 1p)
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" -F body=@lighthouse-comment.md
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@lighthouse-comment.md
+          fi
