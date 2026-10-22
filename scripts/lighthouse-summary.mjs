@@ -1,6 +1,6 @@
 // Sticky PR comment for the Lighthouse workflow (#463): reads the new scores.json shape written by
-// lighthouse-run.mjs and prints one compact HTML table per device, with market group rows and grouped
-// performance metric headers. With --timing it prints only the collapsed run-time block for the step summary.
+// lighthouse-run.mjs and prints one compact HTML table per device, with market group rows and performance
+// metrics beneath the overall score. With --timing it prints only the collapsed run-time block for the step summary.
 import { readFile } from "node:fs/promises";
 
 function getArgument(name) {
@@ -33,11 +33,11 @@ const DEVICES = [
   ["desktop", "🖥️ Desktop"],
 ];
 const METRICS = [
-  "largestContentfulPaint",
-  "totalBlockingTime",
-  "cumulativeLayoutShift",
-  "firstContentfulPaint",
-  "speedIndex",
+  ["largestContentfulPaint", "LCP"],
+  ["totalBlockingTime", "TBT"],
+  ["cumulativeLayoutShift", "CLS"],
+  ["firstContentfulPaint", "FCP"],
+  ["speedIndex", "SI"],
 ];
 
 let scores = null;
@@ -135,14 +135,13 @@ for (const [device, heading] of DEVICES) {
     "",
     "<table>",
     "<thead>",
-    '<tr><th rowspan="2" align="left">Page</th><th rowspan="2">Performance</th><th rowspan="2">Accessibility</th><th rowspan="2">Best Practices</th><th colspan="5">Performance Metrics</th></tr>',
-    '<tr><th><abbr title="Largest Contentful Paint">LCP</abbr></th><th><abbr title="Total Blocking Time">TBT</abbr></th><th><abbr title="Cumulative Layout Shift">CLS</abbr></th><th><abbr title="First Contentful Paint">FCP</abbr></th><th><abbr title="Speed Index">SI</abbr></th></tr>',
+    '<tr><th align="left">Page</th><th>Performance</th><th>Accessibility</th><th>Best Practices</th></tr>',
     "</thead>",
     "<tbody>",
   );
   for (const [market, marketLabel] of MARKETS) {
     const run = runs[`${market}-${device}`];
-    lines.push(`<tr><td colspan="9" align="left"><b>${escapeHtml(marketLabel)}</b></td></tr>`);
+    lines.push(`<tr><td colspan="4" align="left"><b>${escapeHtml(marketLabel)}</b></td></tr>`);
     for (const page of pages) {
       const result = run?.pages?.[page.slug];
       const failed = !run || run.status !== "ok" || !result || result.error;
@@ -152,14 +151,16 @@ for (const [device, heading] of DEVICES) {
           typeof result?.reason === "string" && /^[A-Za-z0-9_:.-]{1,40}$/.test(result.reason)
             ? ` · ${escapeHtml(result.reason)}`
             : "";
-        lines.push(`<tr>${pageCell}<td colspan="8">⚠️ failed${reason}</td></tr>`);
+        lines.push(`<tr>${pageCell}<td colspan="3">⚠️ failed${reason}</td></tr>`);
         continue;
       }
+      const metricSummary = METRICS.map(
+        ([metric, label]) => `${label}&nbsp;${metricCell(result.metrics?.[metric])}`,
+      ).join(" · ");
       const cells = [
-        scoreCell(result.performance),
+        `${scoreCell(result.performance)}<br><small>${metricSummary}</small>`,
         scoreCell(result.accessibility),
         scoreCell(result.bestPractices),
-        ...METRICS.map((metric) => metricCell(result.metrics?.[metric])),
       ];
       lines.push(`<tr>${pageCell}${cells.map((cell) => `<td align="right">${cell}</td>`).join("")}</tr>`);
     }
