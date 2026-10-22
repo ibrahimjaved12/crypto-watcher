@@ -53,11 +53,10 @@ is down" and nothing else runs. The PR gets one sticky comment (`<!-- lighthouse
 reports, final screenshots (all pages except Settings, which shows the account email) and `scores.json` are one
 run artifact, `lighthouse-reports` (14 days). The step summary also lists the run time per run..
 
-The comment has one table per device with Page, Performance, Accessibility and Best Practices columns, plus
-a group row per market. The Performance cell shows its overall score followed by the five compact metric
-values (LCP, TBT and CLS on the first line; FCP and SI on the second), each with a red/orange/green dot for
-its Lighthouse score band; values are not bolded. A legend line expands the metric abbreviations. The
-Performance score weights those metrics 25/30/25/10/10 (LCP/TBT/CLS/FCP/SI).
+The comment has one table per device with Page, Perf, A11y, Best Prac and five Performance Metrics columns
+(LCP, TBT, CLS, FCP, SI), plus a group row per market. Category scores and metric values have red/orange/green
+dots for their Lighthouse score bands; metric values are not bolded. A legend line expands the metric
+abbreviations. The Performance score weights those metrics 25/30/25/10/10 (LCP/TBT/CLS/FCP/SI).
 Lighthouse, puppeteer-core and chrome-launcher versions are pinned so scores stay comparable between PRs and
 must be bumped deliberately. A failed page records its reason in the run log and `scores.json`.
 
