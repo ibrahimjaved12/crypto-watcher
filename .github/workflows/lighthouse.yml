@@ -81,7 +81,7 @@ jobs:
         if: steps.host.outputs.up == 'true'
         shell: bash
         run: |
-          npm install --prefix "$RUNNER_TEMP/lh" --no-audit --no-fund lighthouse@13 puppeteer-core@25 chrome-launcher@1
+          npm install --prefix "$RUNNER_TEMP/lh" --no-audit --no-fund lighthouse@13.5.0 puppeteer-core@25.16.0 chrome-launcher@1.2.2
           cp scripts/lighthouse-run.mjs "$RUNNER_TEMP/lh/"
 
       - name: Run Lighthouse

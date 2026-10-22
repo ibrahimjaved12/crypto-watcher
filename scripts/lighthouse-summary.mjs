@@ -1,4 +1,4 @@
-// Sticky PR comment for the Lighthouse workflow (#463): reads the single scores.json written by
+// Sticky PR comment for the Lighthouse workflow (#463): reads the new scores.json shape written by
 // lighthouse-run.mjs and prints one Mobile and one Desktop table (crypto rows, then forex, in PAGES order).
 // With --timing it prints only the collapsed run-time block for the step summary.
 import { readFile } from "node:fs/promises";
@@ -32,7 +32,14 @@ const DEVICES = [
   ["mobile", "📱 Mobile"],
   ["desktop", "🖥️ Desktop"],
 ];
-const CATEGORIES = ["performance", "accessibility", "bestPractices"];
+const CATEGORIES = ["accessibility", "bestPractices", "performance"];
+const METRICS = [
+  "largestContentfulPaint",
+  "totalBlockingTime",
+  "cumulativeLayoutShift",
+  "firstContentfulPaint",
+  "speedIndex",
+];
 
 let scores = null;
 try {
@@ -75,6 +82,12 @@ function scoreCell(value) {
   return `${band} ${rounded}`;
 }
 
+function metricCell(metric) {
+  if (typeof metric?.text !== "string" || !metric.text) return "—";
+  const band = metric.score >= 0.9 ? "🟢" : metric.score >= 0.5 ? "🟠" : "🔴";
+  return `${band} ${metric.text}`;
+}
+
 const lines = [
   "<!-- lighthouse-check -->",
   "### 🔦 Lighthouse",
@@ -105,16 +118,20 @@ for (const [device, heading] of DEVICES) {
   lines.push(
     `#### ${heading}`,
     "",
-    "| Page | Performance | Accessibility | Best Practices |",
-    "| --- | ---: | ---: | ---: |",
+    "| Page | Accessibility | Best Practices | Performance | Largest Contentful Paint | Total Blocking Time | Cumulative Layout Shift | First Contentful Paint | Speed Index |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   );
   for (const [market, marketLabel] of MARKETS) {
     const run = runs[`${market}-${device}`];
     for (const page of pages) {
       const result = run?.status === "ok" ? run.pages?.[page.slug] : undefined;
-      const cells = CATEGORIES.map((category) =>
-        result && !result.error ? scoreCell(result[category]) : "⚠️ failed",
-      );
+      const failed = !result || result.error;
+      const cells = failed
+        ? Array(3 + METRICS.length).fill("⚠️ failed")
+        : [
+            ...CATEGORIES.map((category) => scoreCell(result[category])),
+            ...METRICS.map((metric) => metricCell(result.metrics?.[metric])),
+          ];
       lines.push(
         `| ${marketLabel} · [${page.label}](${baseUrl}${page.path}) | ${cells.join(" | ")} |`,
       );

@@ -29,6 +29,13 @@ const PAGES = env("PAGES")
 const WAIT_MS = 30_000;
 const MARKETS = ["crypto", "forex"];
 const DEVICES = ["mobile", "desktop"];
+const METRICS = [
+  ["largestContentfulPaint", "largest-contentful-paint"],
+  ["totalBlockingTime", "total-blocking-time"],
+  ["cumulativeLayoutShift", "cumulative-layout-shift"],
+  ["firstContentfulPaint", "first-contentful-paint"],
+  ["speedIndex", "speed-index"],
+];
 const startedAt = Date.now();
 let runner;
 
@@ -137,6 +144,8 @@ async function main() {
         const pages = {};
         for (const { slug, path } of PAGES) {
           const started = Date.now();
+          let callFailed = false;
+          let errorName = null;
           const result = await lighthouse(
             `${BASE_URL}${path}`,
             {
@@ -150,7 +159,11 @@ async function main() {
               maxWaitForLoad: 60_000,
             },
             device === "desktop" ? desktopConfig : undefined,
-          ).catch(() => undefined);
+          ).catch((error) => {
+          callFailed = true;
+          errorName = typeof error?.name === "string" ? error.name : null;
+          return undefined;
+          });
           const seconds = secondsSince(started);
           const lhr = result?.lhr;
           let finalPath = null;
@@ -160,8 +173,19 @@ async function main() {
             finalPath = null;
           }
           if (!lhr || lhr.runtimeError || finalPath !== path) {
-            pages[slug] = { error: true, seconds };
-            console.log(`${market} ${device} ${slug} ${seconds}s failed`);
+            const runtimeErrorCode = lhr?.runtimeError?.code;
+            let reason;
+            if (runtimeErrorCode !== undefined && runtimeErrorCode !== null) {
+              reason = runtimeErrorCode;
+            } else if (finalPath !== null && finalPath !== path) {
+              reason = "redirected";
+            } else if (callFailed) {
+              reason = errorName ? `error:${errorName}` : "error";
+            } else {
+              reason = "no-result";
+            }
+            pages[slug] = { error: true, seconds, reason };
+            console.log(`${market} ${device} ${slug} ${seconds}s failed (${reason})`);
             continue;
           }
           const [json, html] = Array.isArray(result.report) ? result.report : [result.report, ""];
@@ -178,9 +202,25 @@ async function main() {
             accessibility: score(lhr.categories.accessibility),
             bestPractices: score(lhr.categories["best-practices"]),
           };
-          pages[slug] = { ...scores, seconds };
+          const metrics = Object.fromEntries(
+            METRICS.map(([key, id]) => {
+              const audit = lhr.audits[id];
+              return [
+                key,
+                {
+                  text:
+                    typeof audit?.displayValue === "string"
+                      ? audit.displayValue.replace(/\u00a0/g, " ")
+                      : null,
+                  score:
+                    typeof audit?.score === "number" ? Math.round(audit.score * 100) / 100 : null,
+                },
+              ];
+            }),
+          );
+          pages[slug] = { ...scores, metrics, seconds };
           console.log(
-            `${market} ${device} ${slug} ${seconds}s perf=${scores.performance} a11y=${scores.accessibility} bp=${scores.bestPractices}`,
+            `${market} ${device} ${slug} ${seconds}s perf=${scores.performance} a11y=${scores.accessibility} bp=${scores.bestPractices} lcp=${metrics.largestContentfulPaint.text ?? "?"} tbt=${metrics.totalBlockingTime.text ?? "?"} cls=${metrics.cumulativeLayoutShift.text ?? "?"}`,
           );
         }
         runs[`${market}-${device}`] = { status: "ok", pages };

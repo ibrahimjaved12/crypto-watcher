@@ -53,6 +53,12 @@ is down" and nothing else runs. The PR gets one sticky comment (`<!-- lighthouse
 reports, final screenshots (all pages except Settings, which shows the account email) and `scores.json` are one
 run artifact, `lighthouse-reports` (14 days). The step summary also lists the run time per run.
 
+The comment table shows Accessibility, Best Practices, Performance, Largest Contentful Paint, Total Blocking
+Time, Cumulative Layout Shift, First Contentful Paint and Speed Index, with Lighthouse's own colour bands for
+the five performance metrics. The Performance score weights those metrics 25/30/25/10/10 (LCP/TBT/CLS/FCP/SI).
+Lighthouse, puppeteer-core and chrome-launcher versions are pinned so scores stay comparable between PRs and
+must be bumped deliberately. A failed page records its reason in the run log and `scores.json`.
+
 **Caches.** Every run starts from a cold HTTP cache and cleared service workers/Cache Storage (login and market
 stay in localStorage; the app stores no other data there), with a fresh Chrome profile per job. Cloudflare's edge
 cache and server-side caches are intentionally not bypassed because real visitors get them, so the first run
