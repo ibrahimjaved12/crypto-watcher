@@ -118,7 +118,7 @@ export function RunnerStatusBadge() {
                       {working
                         ? "Working now"
                         : lastWorking != null
-                          ? `Last working ${formatAgo(lastWorking, now)} · ${formatClock(lastWorking, now)}`
+                          ? `Host heartbeat ${formatAgo(lastWorking, now)} · ${formatClock(lastWorking, now)}`
                           : "—"}
                     </span>
                   </li>
@@ -156,14 +156,24 @@ export function RunnerStatusNotice() {
     message = unavailable.length
       ? `Runner online: ${unavailable.join(", ")} temporarily unavailable.`
       : "Runner online: One or more background services are temporarily unavailable.";
-    if (data.gatewayReachable === false && data.services.forward) {
-      message += " The runner connection is unavailable; background runs can continue.";
+    if (data.gatewayReachable === false) {
+      const why = GATEWAY_REASON_TEXT[data.gatewayReason ?? ""] ?? "(no response)";
+      message += ` Site can't reach the runner ${why}${data.services.forward ? "; background runs can continue." : "."}`;
     }
   }
 
   const tone = checkFailed ? "muted" : available && data?.state === "degraded" ? "warn" : "bear";
   return <NoticeBox tone={tone} message={message} />;
 }
+
+/** Short reason for a failed Worker-to-runner `/health` check (status-core GatewayReason). */
+const GATEWAY_REASON_TEXT: Record<string, string> = {
+  timeout: "(timed out)",
+  redirect: "(redirected)",
+  http_error: "(server error)",
+  network: "(no response)",
+  config: "(not configured)",
+};
 
 function NoticeBox({ tone, message }: { tone: "muted" | "warn" | "bear"; message: string }) {
   const [open, setOpen] = useState(false);

@@ -9,6 +9,10 @@ export type RunnerHealthRecord = {
   last_seen_at: string | null;
 };
 
+export type GatewayReason = "ok" | "timeout" | "redirect" | "http_error" | "network" | "config";
+/** Result of the Worker-to-Funnel `/health` check. */
+export type GatewayCheck = { reachable: boolean; reason: GatewayReason; status?: number; ms: number };
+
 export type RunnerStatus = {
   configured: boolean;
   jobsEnabled: boolean;
@@ -23,6 +27,8 @@ export type RunnerStatus = {
   };
   reason: "ok" | "never-reported" | "check-failed";
   gatewayReachable: boolean | null;
+  /** Why the gateway check failed (or "ok"); null when it was not run. */
+  gatewayReason: string | null;
   services: { analysis: boolean; alerts: boolean; forward: boolean; jobs: boolean };
 };
 
@@ -36,6 +42,7 @@ export function unavailableRunnerStatus(configured: boolean, jobsEnabled = false
     servicesLastOnlineAt: { analysis: null, alerts: null, forward: null, jobs: null },
     reason: configured ? "check-failed" : "ok",
     gatewayReachable: null,
+    gatewayReason: null,
     services: { analysis: false, alerts: false, forward: false, jobs: false },
   };
 }
@@ -48,16 +55,19 @@ export function resolveRunnerStatus(
     gatewayEnabled,
     jobsEnabled,
     gatewayReachable,
+    gatewayReason = null,
   }: {
     gatewayEnabled: boolean;
     jobsEnabled: boolean;
     gatewayReachable: boolean | null;
+    gatewayReason?: string | null;
   },
 ): RunnerStatus {
   const configured = gatewayEnabled || jobsEnabled;
   const result = unavailableRunnerStatus(configured, jobsEnabled);
   if (!configured) return result;
   result.gatewayReachable = gatewayReachable;
+  result.gatewayReason = gatewayReason;
   const valid = (row: RunnerHealthRecord) =>
     ["online", "degraded", "offline"].includes(row.status) &&
     Number.isFinite(Date.parse(row.updated_at)) &&
