@@ -1,4 +1,4 @@
-import { Link, createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute, stripSearchParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import {
@@ -47,6 +47,11 @@ import { useMarket } from "@/lib/market/market-context";
 export const Route = createFileRoute("/_authenticated/forward")({
   head: () => ({ meta: [{ title: "Strategy Lab — Crypto Watch" }] }),
   validateSearch: (search: Record<string, unknown>): ForwardFilters => parseSearch(search),
+  search: {
+    middlewares: [
+      stripSearchParams({ families: [], horizons: [], sides: [], symbols: [], rr: [] }),
+    ],
+  },
   component: ForwardPageRoute,
 });
 
