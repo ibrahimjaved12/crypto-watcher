@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { assertMarketEnabled, requireMarketAccess } from "@/integrations/supabase/auth-middleware";
 import type { JsonObject } from "./paper/paper-account";
 import {
   loadFxPaperAccount,
@@ -39,39 +39,43 @@ const pageInput = z
 const wire = (value: unknown) => value as JsonObject;
 
 export const getPaperAccount = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireMarketAccess])
   .validator((input: unknown) => accountInput.parse(input ?? undefined))
-  .handler(async ({ context, data }) =>
-    wire(
+  .handler(async ({ context, data }) => {
+    assertMarketEnabled(context.markets, data.market);
+    return wire(
       data.market === "forex"
         ? await loadFxPaperAccount(context.supabase as never, Date.now())
         : await loadPaperAccount(context.supabase as never),
-    ),
-  );
+    );
+  });
 
 export const getPaperTrades = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireMarketAccess])
   .validator((input: unknown) => pageInput.parse(input))
-  .handler(async ({ context, data }) =>
-    wire(
+  .handler(async ({ context, data }) => {
+    assertMarketEnabled(context.markets, data.market);
+    return wire(
       await loadPaperTrades(context.supabase as never, data.accountId, data.cursor, undefined, data.market),
-    ),
-  );
+    );
+  });
 
 export const getPaperRejected = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireMarketAccess])
   .validator((input: unknown) => pageInput.parse(input))
-  .handler(async ({ context, data }) =>
-    wire(
+  .handler(async ({ context, data }) => {
+    assertMarketEnabled(context.markets, data.market);
+    return wire(
       await loadPaperRejected(context.supabase as never, data.accountId, data.cursor, undefined, data.market),
-    ),
-  );
+    );
+  });
 
 export const getPaperLedger = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireMarketAccess])
   .validator((input: unknown) => pageInput.parse(input))
-  .handler(async ({ context, data }) =>
-    wire(
+  .handler(async ({ context, data }) => {
+    assertMarketEnabled(context.markets, data.market);
+    return wire(
       await loadPaperLedger(context.supabase as never, data.accountId, data.cursor, undefined, data.market),
-    ),
-  );
+    );
+  });

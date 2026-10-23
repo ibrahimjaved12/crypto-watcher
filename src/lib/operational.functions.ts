@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { requireMarketAccess } from "@/integrations/supabase/auth-middleware";
 import type { MonitorRun } from "./db";
 import type {
   CollectorHealth,
@@ -39,7 +39,7 @@ export type OperationalState = {
 
 /** Authenticated read-through; the service-role credential never reaches the browser. */
 export const getOperationalState = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireMarketAccess])
   .handler(async ({ context }): Promise<OperationalState> => {
     const loadActivityFreshness = async (): Promise<OperationalState["activityFreshness"]> => {
       const [checkpoint, movement, ...ta] = await Promise.all([

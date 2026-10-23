@@ -10,7 +10,8 @@ import { cn } from "@/lib/utils";
 
 /**
  * Access gate (#411): nobody has access by default. Nothing behind it mounts (no page content, no queries) until
- * `my_markets()` lists at least one market. Crypto data is gated here in the app only; forex also by RLS.
+ * `my_markets()` lists at least one market. This gate is the UI; server functions also
+ * enforce the label through `requireMarketAccess` (#468), and the forex tables by RLS.
  */
 export function AccessGate({ children }: { children: ReactNode }) {
   const { access } = useMarket();

@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { requireMarketAccess } from "@/integrations/supabase/auth-middleware";
 import {
   MARKET_UNIVERSE_ID,
   toMarketMovementCurrentState,
@@ -18,7 +18,7 @@ export type { MarketMovementCurrentState, MarketMovementRead };
  * the service-role credential never leaves the server.
  */
 export const getMarketMovementCurrentState = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireMarketAccess])
   .handler(async ({ context }): Promise<MarketMovementRead> => {
     const { getOperationalStore } = await import("./operational/repository.server");
     const store = getOperationalStore();
@@ -53,7 +53,7 @@ export const getMarketMovementCurrentState = createServerFn({ method: "GET" })
  * an error. The page grades freshness itself against its own clock (`slowStatus`).
  */
 export const getSlowMovementState = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireMarketAccess])
   .handler(async ({ context }): Promise<SlowMovementRead> => {
     const { data, error } = await context.supabase
       .from("market_state_published")

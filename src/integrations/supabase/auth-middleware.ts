@@ -3,6 +3,7 @@ import { createMiddleware } from '@tanstack/react-start'
 import { getRequest } from '@tanstack/react-start/server'
 import { createClient } from '@supabase/supabase-js'
 import type { Database } from './types'
+import { normalizeEntitled } from '../../lib/market/market-select'
 
 
 
@@ -111,3 +112,28 @@ export const requireSupabaseAuth = createMiddleware({ type: 'function' }).server
     });
   },
 );
+
+// Market access labels (#411, #468): the gate in the app is only the UI; every server function also needs a label.
+export const requireMarketAccess = createMiddleware({ type: 'function' })
+  .middleware([requireSupabaseAuth])
+  .server(async ({ next, context }) => {
+    // Runs under the user's own token; my_markets() is granted to authenticated.
+    const { data, error } = await context.supabase.rpc('my_markets');
+    if (error) {
+      throw new Error('Forbidden: access check failed');
+    }
+
+    const markets = normalizeEntitled(data);
+    if (markets.length === 0) {
+      throw new Error('Forbidden: no market access');
+    }
+
+    return next({ context: { markets } });
+  });
+
+/** For server functions whose input names a market: that market must be on the caller's label. */
+export function assertMarketEnabled(markets: readonly string[], market: string) {
+  if (!markets.includes(market)) {
+    throw new Error('Forbidden: market not enabled');
+  }
+}
