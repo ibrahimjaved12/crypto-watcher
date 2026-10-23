@@ -86,8 +86,8 @@ are still measured, with the app's offline banner showing).
   service-role key in GitHub.
 - Secrets reach only the single run step and are masked. Fork PRs get no secrets and every job skips them
   (never `pull_request_target`).
-- Artifacts of a public repo can be downloaded by any signed-in GitHub user, so the account must stay empty;
-  reports are made with screenshots disabled.
+- Artifacts of a public repo can be downloaded by any signed-in GitHub user, so the account must stay empty.
+  The Settings page, which shows the account email, gets no screenshot.
 
 **Too slow?** Remove lines from `PAGES` in `.github/workflows/lighthouse.yml`.
 

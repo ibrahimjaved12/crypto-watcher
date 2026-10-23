@@ -504,11 +504,13 @@ forex is an access rule.
   row with one label: `crypto`, `forex` or `all` (both), plus an optional `expires_at`; no row or an
   expired row means no markets. `plans`/`plan_markets` map the label to markets. There are no roles.
   Users can read their own row and never write it. `my_markets()` and `has_market(market)` are for
-  the app; the fx tables' RLS uses `has_market('forex')`. Labels are enforced server-side by
-  `requireMarketAccess` (#468): every server function checks `my_markets()` under the caller's token and
-  refuses a caller with no label, or a `market` input not on the label. Crypto user tables stay
-  owner-scoped by RLS (no label check in the database); `market_quotes` is public by design; the fx
-  tables are also gated by RLS. Commands (service-role env
+  the app; the fx tables' RLS uses `has_market('forex')`. Labels are enforced server-side (#468):
+  every server function checks `my_markets()` under the caller's token (`requireMarketAccess`, which
+  refuses a caller with no label). Market-specific server functions use `requireMarket("crypto" | "forex")`,
+  which requires that market's label (or `all`); functions shared by both markets (runner status, runner
+  job, machine capabilities) only need any label; functions with a `market` input check it with
+  `assertMarketEnabled`. Crypto user tables stay owner-scoped by RLS (no label check in the database);
+  `market_quotes` is public by design; the fx tables are also gated by RLS. Commands (service-role env
   from the shell or `.env.production.local`):
   - grant or change: `npm run access:grant -- <email> --label crypto|forex|all [--expires 2027-01-01]`
     (omitting `--expires` clears it);

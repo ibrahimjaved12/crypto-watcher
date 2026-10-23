@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
-import { requireMarketAccess } from "@/integrations/supabase/auth-middleware";
+import { requireMarket } from "@/integrations/supabase/auth-middleware";
 
 const alertInput = z.object({ alertId: z.string().uuid() });
 
@@ -11,7 +11,7 @@ const alertInput = z.object({ alertId: z.string().uuid() });
  * from storage, so no image is fetched, resized or rendered here.
  */
 export const getAlertChartImage = createServerFn({ method: "GET" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("crypto")])
   .validator((input: unknown) => alertInput.parse(input))
   .handler(async ({ context, data }) => {
     const { chartImageFor } = await import("./hosted.server");
@@ -21,7 +21,7 @@ export const getAlertChartImage = createServerFn({ method: "GET" })
 
 /** Deletes an alert together with its hosted chart (storage object and metadata row). */
 export const deleteAlertWithChart = createServerFn({ method: "POST" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("crypto")])
   .validator((input: unknown) => alertInput.parse(input))
   .handler(async ({ context, data }) => {
     const { deleteAlertAndChart } = await import("./hosted.server");

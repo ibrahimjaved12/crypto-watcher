@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { assertMarketEnabled, requireMarketAccess } from "@/integrations/supabase/auth-middleware";
+import { assertMarketEnabled, requireMarket, requireMarketAccess } from "@/integrations/supabase/auth-middleware";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { z } from "zod";
@@ -78,7 +78,7 @@ export const getRunnerJob = createServerFn({ method: "GET" })
 
 /** On-demand forward run for the signed-in account (#239 P11); the hourly job uses the same path. */
 export const runForwardNow = createServerFn({ method: "POST" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("crypto")])
   .validator((input: unknown) => runNowInput.parse(input))
   .handler(async ({ context, data }) => {
     const { machineOnlyEnabled, requireMachineOnly } = await import("./machine-only.server");
@@ -96,7 +96,7 @@ export const runForwardNow = createServerFn({ method: "POST" })
 
 /** Dashboard data, read with the user's own client (RLS: own rows only). */
 export const getForwardDashboard = createServerFn({ method: "GET" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("crypto")])
   .handler(async ({ context }) => loadForwardDashboard(context.supabase as never));
 
 const logInput = z.object({
@@ -115,13 +115,13 @@ const exportInput = z
 
 /** Results by strategy (n, mean, SE, matched random-timing control, non-trades) for the filters. */
 export const getForwardReport = createServerFn({ method: "POST" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("crypto")])
   .validator((input: unknown) => forwardFiltersSchema.parse(input))
   .handler(async ({ context, data }) => loadForwardReport(context.supabase as never, data));
 
 /** One page (50 rows) of the signal, outcome or ledger log; `cursor` comes from the previous page. */
 export const getForwardLog = createServerFn({ method: "POST" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("crypto")])
   .validator((input: unknown) => logInput.parse(input))
   .handler(async ({ context, data }) =>
     loadForwardLogPage(context.supabase as never, data.kind, data.filters, data.cursor));
@@ -137,7 +137,7 @@ export const exportForwardLogCsv = createServerFn({ method: "POST" })
 
 /** On-demand daily trend track run for the signed-in account (#239 P14); the daily job uses the same path. */
 export const runForwardTrendNow = createServerFn({ method: "POST" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("crypto")])
   .validator((input: unknown) => runNowInput.parse(input))
   .handler(async ({ context, data }) => {
     const { machineOnlyEnabled, requireMachineOnly } = await import("./machine-only.server");
@@ -151,5 +151,5 @@ export const runForwardTrendNow = createServerFn({ method: "POST" })
 
 /** Trend track dashboard data, read with the user's own client (RLS: own rows only). */
 export const getTrendDashboard = createServerFn({ method: "GET" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("crypto")])
   .handler(async ({ context }) => loadTrendDashboard(context.supabase as never));

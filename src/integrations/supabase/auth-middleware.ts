@@ -3,6 +3,7 @@ import { createMiddleware } from '@tanstack/react-start'
 import { getRequest } from '@tanstack/react-start/server'
 import { createClient } from '@supabase/supabase-js'
 import type { Database } from './types'
+import type { Market } from '../../lib/market/instruments'
 import { normalizeEntitled } from '../../lib/market/market-select'
 
 
@@ -130,6 +131,16 @@ export const requireMarketAccess = createMiddleware({ type: 'function' })
 
     return next({ context: { markets } });
   });
+
+/** Server-function middleware factory: caller must hold the given market's label (or `all`). */
+export function requireMarket(market: Market) {
+  return createMiddleware({ type: 'function' })
+    .middleware([requireMarketAccess])
+    .server(async ({ next, context }) => {
+      assertMarketEnabled(context.markets, market);
+      return next();
+    });
+}
 
 /** For server functions whose input names a market: that market must be on the caller's label. */
 export function assertMarketEnabled(markets: readonly string[], market: string) {

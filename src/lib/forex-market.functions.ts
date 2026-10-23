@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { requireMarketAccess } from "@/integrations/supabase/auth-middleware";
+import { requireMarket } from "@/integrations/supabase/auth-middleware";
 import { toFxQuote, type FxQuote, type FxQuoteRow } from "./market/fx-quotes";
 
 /**
@@ -8,7 +8,7 @@ import { toFxQuote, type FxQuote, type FxQuoteRow } from "./market/fx-quotes";
  * here. A read error throws, so the page shows an error state instead of an empty market.
  */
 export const getForexQuotes = createServerFn({ method: "GET" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("forex")])
   .handler(async ({ context }): Promise<{ quotes: FxQuote[]; readAt: number }> => {
     const { data, error } = await context.supabase
       .from("fx_market_quotes")

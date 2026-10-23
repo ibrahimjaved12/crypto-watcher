@@ -1,13 +1,13 @@
 import { createServerFn } from "@tanstack/react-start";
 
-import { requireMarketAccess } from "@/integrations/supabase/auth-middleware";
+import { requireMarket } from "@/integrations/supabase/auth-middleware";
 import type { runManualMonitorCheck as LocalMonitorCheck } from "@/lib/monitor/manual-check.server";
 
 type MonitorCheckReply = Awaited<ReturnType<typeof LocalMonitorCheck>>;
 
 /** Runs the same monitoring pass the scheduler runs, but only for the caller. */
 export const runMyMonitorCheck = createServerFn({ method: "POST" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("crypto")])
   .handler(async ({ context }) => {
     const { runnerConfig, callRunner } = await import("./runner/client.server");
     if (runnerConfig() !== null) {

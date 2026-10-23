@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { requireMarketAccess } from "@/integrations/supabase/auth-middleware";
+import { requireMarket } from "@/integrations/supabase/auth-middleware";
 import { z } from "zod";
 import { analysisInput, analysisResponse, type AnalysisReply } from "./analysis.contract";
 
@@ -27,7 +27,7 @@ const runnerAnalysisReply = z.discriminatedUnion("ok", [
 ]);
 
 export const runPythonAnalysis = createServerFn({ method: "POST" })
-  .middleware([requireMarketAccess])
+  .middleware([requireMarket("crypto")])
   .validator((input: unknown) => analysisInput.parse(input))
   .handler(async ({ context, data }): Promise<AnalysisReply> => {
     const { runnerConfig, callRunner, RunnerConfigurationError } = await import(
