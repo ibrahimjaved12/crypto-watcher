@@ -88,6 +88,7 @@ import {
   type PositionView,
   type Tone,
 } from "@/lib/paper/paper-account";
+import { useMarket } from "@/lib/market/market-context";
 import type { PaperAccountData } from "@/lib/paper/paper-data";
 import { balanceSeries, paperKeys } from "@/lib/paper/paper-view";
 import { useNow } from "@/lib/use-now";
@@ -577,6 +578,7 @@ function cryptoMetrics(view: AccountView, loaded: PaperAccountData | undefined):
 }
 
 export function PaperAccountView() {
+  const { market } = useMarket();
   const now = useNow(60_000);
   const load = useServerFn(getPaperAccount);
   // Same cadence as the Strategy Lab dashboard: one read a minute, nothing faster.
@@ -643,7 +645,8 @@ export function PaperAccountView() {
         {header}
         <StateScreen icon={Wallet} title="No paper wallet yet">
           <Link
-            to="/forward"
+            to="/$market/forward"
+            params={{ market }}
             search={{ families: [], horizons: [], sides: [], symbols: [], rr: [] }}
             className="text-sm text-primary underline-offset-4 hover:underline"
           >

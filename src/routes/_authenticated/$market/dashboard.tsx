@@ -61,7 +61,7 @@ import { useStaleSelfHeal } from "@/lib/use-stale-self-heal";
 import { MAX_WATCHLIST_SIZE, SUPPORTED_SYMBOLS, baseAsset } from "@/lib/market/symbols";
 import { useMarket } from "@/lib/market/market-context";
 
-export const Route = createFileRoute("/_authenticated/dashboard")({
+export const Route = createFileRoute("/_authenticated/$market/dashboard")({
   head: () => ({
     meta: [
       { title: "Market — Crypto Watch" },

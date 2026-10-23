@@ -520,7 +520,8 @@ Code: `src/lib/market/market-select.ts` (pure rules), `src/lib/market/market-con
 (`MarketProvider`, `useMarket()`), `src/components/market-toggle.tsx`, `src/components/forex-landing.tsx`.
 
 - **UI-only.** The backend always computes and stores both markets; the switch only chooses which
-  screens are shown. The Forex identity is a teal primary and nebula (`:root[data-market="forex"]`,
+  screens are shown. The market is the first URL segment (`/crypto/...`, `/forex/...`, #467) and the toggle
+  navigates between them. The Forex identity is a teal primary and nebula (`:root[data-market="forex"]`,
   set on `<html>` and on the shell) on the same surfaces, plus a 2 px market line under the header
   and a small "Forex" chip beside the logo.
 - **Entitlement and gate.** The provider reads `my_markets()` (react-query key `my-markets`, 5 min).

@@ -519,7 +519,7 @@ exits): they exist in the Python, SQL (`20261016180000_paper_ledger_order_kinds.
 
 ### Paper account page (#36 Part 3)
 
-`/paper` ("Paper account", `src/components/paper-account.tsx`, view models in `src/lib/paper/paper-account.ts`) is the
+`/<market>/paper` ("Paper account", `src/components/paper-account.tsx`, view models in `src/lib/paper/paper-account.ts`) is the
 money view of the simulated wallet. It is a top-level navigation item between **Strategy Lab** and **Alerts**: the
 Strategy Lab answers "does a strategy work" (results by strategy, signals, setups, outcomes), this page answers "what
 does the account hold and do"; a separate page keeps both readable on a phone. The Strategy Lab's former wallet

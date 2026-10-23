@@ -1,16 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useRouter } from "@tanstack/react-router";
+import { createContext, useCallback, useContext, useEffect, useMemo, type ReactNode } from "react";
 
 import { supabase } from "@/integrations/supabase/client";
-import { MARKETS, type Market } from "./instruments";
-import {
-  MARKET_STORAGE_KEY,
-  accessState,
-  canOpen as canOpenFor,
-  normalizeEntitled,
-  resolveMarket,
-  type AccessState,
-} from "./market-select";
+import type { Market } from "./instruments";
+import { accessState, canOpen as canOpenFor, normalizeEntitled, type AccessState } from "./market-select";
+import { writeStoredMarket } from "./market-storage";
 
 type MarketState = {
   market: Market;
@@ -25,54 +20,28 @@ type MarketState = {
 const NONE: readonly Market[] = Object.freeze([]);
 const MarketContext = createContext<MarketState | null>(null);
 
-function readStored(): string | null {
-  try {
-    return window.localStorage.getItem(MARKET_STORAGE_KEY);
-  } catch {
-    return null; // private windows and blocked storage
-  }
-}
-
-function writeStored(market: Market) {
-  try {
-    window.localStorage.setItem(MARKET_STORAGE_KEY, market);
-  } catch {
-    // the choice still applies for this tab
-  }
-}
-
 async function loadMyMarkets(): Promise<Market[]> {
   const { data, error } = await supabase.rpc("my_markets");
   if (error) throw error;
   return normalizeEntitled(data);
 }
 
-/** Market switch and access (#411): nobody has access by default; `my_markets()` lists what may be opened. */
-export function MarketProvider({ children }: { children: ReactNode }) {
+/**
+ * Market and access (#411, #467): the market comes from the URL's first segment; nobody has access by default and
+ * `my_markets()` lists what may be opened. Switching navigates to the same page in the other market.
+ */
+export function MarketProvider({ market, children }: { market: Market; children: ReactNode }) {
+  const router = useRouter();
   const query = useQuery({ queryKey: ["my-markets"], queryFn: loadMyMarkets, staleTime: 5 * 60_000, retry: 1 });
   const ready = query.isSuccess;
   const entitled = ready ? query.data : NONE;
   const access = accessState(ready ? "ready" : query.isError ? "error" : "loading", entitled);
   const { refetch } = query;
-  // While my_markets() is still loading, honour the stored choice (no crypto flash for Forex users; UI-only, RLS
-  // guards the data). Once it answers or fails, a choice that is not entitled snaps to an open market. Clicks always
-  // use the real `entitled`, and this fallback never writes the stored value.
-  const open: readonly Market[] = ready || query.isError ? entitled : MARKETS;
-  const [market, setMarketState] = useState<Market>(() => resolveMarket(readStored(), open));
 
-  // Re-resolve on every entitlement change: a revoked plan snaps back to crypto, a granted one restores the choice.
+  // Remember the last market actually opened; entry redirects (sign-in, old bookmarks) start there.
   useEffect(() => {
-    setMarketState(resolveMarket(readStored(), open));
-  }, [open]);
-
-  // Two tabs agree on the market.
-  useEffect(() => {
-    function onStorage(event: StorageEvent) {
-      if (event.key === MARKET_STORAGE_KEY) setMarketState(resolveMarket(event.newValue, entitled));
-    }
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, [entitled]);
+    if (entitled.includes(market)) writeStoredMarket(market);
+  }, [market, entitled]);
 
   // Portals (popovers, toasts) live outside the shell, so the accent is set on <html> too.
   useEffect(() => {
@@ -85,11 +54,10 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const setMarket = useCallback(
     (next: Market) => {
       if (!canOpenFor(next, entitled)) return false;
-      writeStored(next);
-      setMarketState(next);
+      void router.navigate({ to: ".", params: (previous) => ({ ...previous, market: next }) });
       return true;
     },
-    [entitled],
+    [router, entitled],
   );
   const canOpen = useCallback((value: Market) => canOpenFor(value, entitled), [entitled]);
   const value = useMemo(

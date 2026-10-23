@@ -46,7 +46,7 @@ futures, then OKX, with a banner and explicit venue/contract labels; see
 [the runtime switch and removal condition](environments.md#temporary-degraded-market-fallback-323).
 The [forward harness](forward-harness.md) exists: shared market stages, per-user wallet replay
 and a paper ledger, run on the owner's machine by `worker:host`. Strategy profitability is **not**
-validated; the `/forward` page carries a banner saying so.
+validated; the `/<market>/forward` page carries a banner saying so.
 Background execution also needs verification: [issue #13](https://github.com/ibrahimjaved12/crypto-watcher/issues/13)
 reports an observed disabled cron; repository code alone does not prove a live schedule.
 

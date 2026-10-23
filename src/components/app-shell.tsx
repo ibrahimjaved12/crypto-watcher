@@ -20,12 +20,12 @@ import { supabase } from "@/integrations/supabase/client";
 import { useMarket } from "@/lib/market/market-context";
 
 const NAV = [
-  { to: "/dashboard", label: "Market", short: "Market", icon: LineChart },
-  { to: "/forward", label: "Strategy Lab", short: "Lab", icon: FlaskConical },
-  { to: "/paper", label: "Paper account", short: "Paper", icon: Wallet },
-  { to: "/alerts", label: "Alerts", short: "Alerts", icon: Bell },
-  { to: "/notes", label: "Notes", short: "Notes", icon: NotebookPen },
-  { to: "/settings", label: "Control room", short: "Control", icon: SlidersHorizontal },
+  { to: "/$market/dashboard", label: "Market", short: "Market", icon: LineChart },
+  { to: "/$market/forward", label: "Strategy Lab", short: "Lab", icon: FlaskConical },
+  { to: "/$market/paper", label: "Paper account", short: "Paper", icon: Wallet },
+  { to: "/$market/alerts", label: "Alerts", short: "Alerts", icon: Bell },
+  { to: "/$market/notes", label: "Notes", short: "Notes", icon: NotebookPen },
+  { to: "/$market/settings", label: "Control room", short: "Control", icon: SlidersHorizontal },
 ] as const;
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -48,7 +48,8 @@ export function AppShell({ children }: { children: ReactNode }) {
             {/* One row on every width; a fixed height and nothing in it depends on the market, so a switch moves nothing. */}
             <div className="flex h-12 flex-nowrap items-center gap-2 sm:gap-3">
               <Link
-                to="/dashboard"
+                to="/$market/dashboard"
+                params={{ market }}
                 aria-label="Crypto Watch"
                 className="flex shrink-0 items-center gap-2 font-display text-lg font-semibold"
               >
@@ -62,6 +63,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   <Link
                     key={to}
                     to={to}
+                    params={{ market }}
                     title={label}
                     className="group flex min-h-10 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground [&.active]:bg-primary/12 [&.active]:text-foreground [&.active]:shadow-[inset_0_-2px_0_var(--color-primary)]"
                   >
@@ -97,6 +99,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Link
               key={to}
               to={to}
+              params={{ market }}
               title={label}
               aria-label={label}
               className="group flex h-14 flex-col items-center justify-center gap-0.5 text-muted-foreground transition-colors [&.active]:text-foreground [&.active]:shadow-[inset_0_2px_0_var(--color-primary)]"

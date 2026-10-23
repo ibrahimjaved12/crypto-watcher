@@ -146,7 +146,7 @@ for (const [device, heading] of DEVICES) {
     for (const page of pages) {
       const result = run?.pages?.[page.slug];
       const failed = !run || run.status !== "ok" || !result || result.error;
-      const pageCell = `<td><a href="${escapeHtml(baseUrl + page.path)}">${escapeHtml(page.label)}</a></td>`;
+      const pageCell = `<td><a href="${escapeHtml(`${baseUrl}/${market}${page.path}`)}">${escapeHtml(page.label)}</a></td>`;
       if (failed) {
         const reason =
           typeof result?.reason === "string" && /^[A-Za-z0-9_:.-]{1,40}$/.test(result.reason)

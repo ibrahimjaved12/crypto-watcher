@@ -60,10 +60,10 @@ abbreviations. The Performance score weights those metrics 25/30/25/10/10 (LCP/T
 Lighthouse, puppeteer-core and chrome-launcher versions are pinned so scores stay comparable between PRs and
 must be bumped deliberately. A failed page records its reason in the run log and `scores.json`.
 
-**Caches.** Every run starts from a cold HTTP cache and cleared service workers/Cache Storage (login and market
-stay in localStorage; the app stores no other data there), with a fresh Chrome profile per job. Cloudflare's edge
-cache and server-side caches are intentionally not bypassed because real visitors get them, so the first run
-after a deploy can be slightly slower.
+**Caches.** Every run starts from a cold HTTP cache and cleared service workers/Cache Storage (login stays in
+localStorage; the market is the first URL segment, so each page is audited at `/<market>/<page>`), with a fresh
+Chrome profile per job. Cloudflare's edge cache and server-side caches are intentionally not bypassed because real
+visitors get them, so the first run after a deploy can be slightly slower.
 
 **Notes.** Two status notes exist besides the sign-in ones: "Host server is down" (the Cloudflare site is
 unreachable, nothing runs) and "Runner is offline" (the laptop runner, read from the app's Runner badge; pages

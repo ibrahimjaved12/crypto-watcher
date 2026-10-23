@@ -5,7 +5,7 @@ import { PaperAccountView } from "@/components/paper-account";
 import { FxPaperAccountView } from "@/components/paper/fx-paper-account";
 import { useMarket } from "@/lib/market/market-context";
 
-export const Route = createFileRoute("/_authenticated/paper")({
+export const Route = createFileRoute("/_authenticated/$market/paper")({
   head: () => ({ meta: [{ title: "Paper account — Crypto Watch" }] }),
   component: PaperPage,
 });

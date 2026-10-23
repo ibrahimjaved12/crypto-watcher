@@ -28,7 +28,7 @@ import { deleteAlertWithChart } from "@/lib/alert-charts/view.functions";
 import { WINDOW_LABELS } from "@/lib/market/symbols";
 import { useMarket } from "@/lib/market/market-context";
 
-export const Route = createFileRoute("/_authenticated/alerts")({
+export const Route = createFileRoute("/_authenticated/$market/alerts")({
   head: () => ({
     meta: [
       { title: "Alerts — Crypto Watch" },

@@ -13,7 +13,7 @@ import { EmptyState, PageHeader, TimeAgo } from "@/components/plain";
 import { relativeTime } from "@/lib/labels";
 import { createNote, deleteNote, fetchNotes, fetchWatchlist } from "@/lib/db";
 
-export const Route = createFileRoute("/_authenticated/notes")({
+export const Route = createFileRoute("/_authenticated/$market/notes")({
   head: () => ({
     meta: [
       { title: "Notes — Crypto Watch" },

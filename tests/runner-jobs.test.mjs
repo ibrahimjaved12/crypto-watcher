@@ -74,7 +74,7 @@ test("runner uses leased sequential execution and safe failure messages without 
 });
 
 test("Strategy Lab gates new work on service readiness and preserves polling for active jobs", async () => {
-  const source = await read("../src/routes/_authenticated/forward.tsx");
+  const source = await read("../src/routes/_authenticated/$market/forward.tsx");
   assert.match(source, /runnerReady = runner\.canRunForward && \(!jobMode \|\| runner\.canQueueJobs\)/);
   assert.match(source, /canRun = runnerReady && \(machineOnlyEnabled \|\| runnerJobsEnabled\)/);
   assert.match(source, /crypto\.randomUUID\(\)/);
@@ -100,7 +100,7 @@ test("Strategy Lab gates new work on service readiness and preserves polling for
 });
 
 test("both Strategy Lab dashboards poll independently of the runner status", async () => {
-  const source = await read("../src/routes/_authenticated/forward.tsx");
+  const source = await read("../src/routes/_authenticated/$market/forward.tsx");
   for (const key of ["forward-dashboard", "forward-trend-dashboard"]) {
     const query = source.slice(source.indexOf(`queryKey: ["${key}"]`)).split("});", 1)[0];
     assert.match(query, /refetchInterval: 60_000/);
