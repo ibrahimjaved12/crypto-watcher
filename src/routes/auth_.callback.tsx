@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 
 import { supabase } from "@/integrations/supabase/client";
+import { readStoredMarket } from "@/lib/market/market-storage";
 
 // Supabase redirects here after Google sign-in and after email confirmation (PKCE flow).
 // The `auth_` file name keeps this route out of the `/auth` layout while serving /auth/callback.
@@ -37,7 +38,7 @@ function AuthCallback() {
         navigate({ to: "/auth", replace: true });
         return;
       }
-      navigate({ to: "/dashboard", replace: true });
+      navigate({ to: "/$market/dashboard", params: { market: readStoredMarket() }, replace: true });
     }
 
     void finish();

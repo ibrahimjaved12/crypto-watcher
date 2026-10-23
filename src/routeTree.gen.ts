@@ -12,12 +12,14 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as AuthRouteImport } from './routes/auth'
-import { Route as AuthenticatedAlertsRouteImport } from './routes/_authenticated/alerts'
-import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
-import { Route as AuthenticatedForwardRouteImport } from './routes/_authenticated/forward'
-import { Route as AuthenticatedNotesRouteImport } from './routes/_authenticated/notes'
-import { Route as AuthenticatedPaperRouteImport } from './routes/_authenticated/paper'
-import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
+import { Route as AuthenticatedMarketRouteRouteImport } from './routes/_authenticated/$market/route'
+import { Route as AuthenticatedMarketIndexRouteImport } from './routes/_authenticated/$market/index'
+import { Route as AuthenticatedMarketAlertsRouteImport } from './routes/_authenticated/$market/alerts'
+import { Route as AuthenticatedMarketDashboardRouteImport } from './routes/_authenticated/$market/dashboard'
+import { Route as AuthenticatedMarketForwardRouteImport } from './routes/_authenticated/$market/forward'
+import { Route as AuthenticatedMarketNotesRouteImport } from './routes/_authenticated/$market/notes'
+import { Route as AuthenticatedMarketPaperRouteImport } from './routes/_authenticated/$market/paper'
+import { Route as AuthenticatedMarketSettingsRouteImport } from './routes/_authenticated/$market/settings'
 import { Route as AuthCallbackRouteImport } from './routes/auth_.callback'
 import { Route as ApiPublicHooksMonitorPricesRouteImport } from './routes/api/public/hooks/monitor-prices'
 import { Route as ApiPublicHooksSyncCollectorSubscriptionsRouteImport } from './routes/api/public/hooks/sync-collector-subscriptions'
@@ -38,35 +40,45 @@ const AuthRoute = AuthRouteImport.update({
   path: '/auth',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AuthenticatedAlertsRoute = AuthenticatedAlertsRouteImport.update({
+const AuthenticatedMarketRouteRoute = AuthenticatedMarketRouteRouteImport.update({
+  id: '/$market',
+  path: '/$market',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedMarketIndexRoute = AuthenticatedMarketIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AuthenticatedMarketRouteRoute,
+} as any)
+const AuthenticatedMarketAlertsRoute = AuthenticatedMarketAlertsRouteImport.update({
   id: '/alerts',
   path: '/alerts',
-  getParentRoute: () => AuthenticatedRouteRoute,
+  getParentRoute: () => AuthenticatedMarketRouteRoute,
 } as any)
-const AuthenticatedDashboardRoute = AuthenticatedDashboardRouteImport.update({
+const AuthenticatedMarketDashboardRoute = AuthenticatedMarketDashboardRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
-  getParentRoute: () => AuthenticatedRouteRoute,
+  getParentRoute: () => AuthenticatedMarketRouteRoute,
 } as any)
-const AuthenticatedForwardRoute = AuthenticatedForwardRouteImport.update({
+const AuthenticatedMarketForwardRoute = AuthenticatedMarketForwardRouteImport.update({
   id: '/forward',
   path: '/forward',
-  getParentRoute: () => AuthenticatedRouteRoute,
+  getParentRoute: () => AuthenticatedMarketRouteRoute,
 } as any)
-const AuthenticatedNotesRoute = AuthenticatedNotesRouteImport.update({
+const AuthenticatedMarketNotesRoute = AuthenticatedMarketNotesRouteImport.update({
   id: '/notes',
   path: '/notes',
-  getParentRoute: () => AuthenticatedRouteRoute,
+  getParentRoute: () => AuthenticatedMarketRouteRoute,
 } as any)
-const AuthenticatedPaperRoute = AuthenticatedPaperRouteImport.update({
+const AuthenticatedMarketPaperRoute = AuthenticatedMarketPaperRouteImport.update({
   id: '/paper',
   path: '/paper',
-  getParentRoute: () => AuthenticatedRouteRoute,
+  getParentRoute: () => AuthenticatedMarketRouteRoute,
 } as any)
-const AuthenticatedSettingsRoute = AuthenticatedSettingsRouteImport.update({
+const AuthenticatedMarketSettingsRoute = AuthenticatedMarketSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
-  getParentRoute: () => AuthenticatedRouteRoute,
+  getParentRoute: () => AuthenticatedMarketRouteRoute,
 } as any)
 const AuthCallbackRoute = AuthCallbackRouteImport.update({
   id: '/auth_/callback',
@@ -99,12 +111,14 @@ const ApiPublicHooksMarketStatePublishRoute = ApiPublicHooksMarketStatePublishRo
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
-  '/alerts': typeof AuthenticatedAlertsRoute
-  '/dashboard': typeof AuthenticatedDashboardRoute
-  '/forward': typeof AuthenticatedForwardRoute
-  '/notes': typeof AuthenticatedNotesRoute
-  '/paper': typeof AuthenticatedPaperRoute
-  '/settings': typeof AuthenticatedSettingsRoute
+  '/$market': typeof AuthenticatedMarketRouteRouteWithChildren
+  '/$market/': typeof AuthenticatedMarketIndexRoute
+  '/$market/alerts': typeof AuthenticatedMarketAlertsRoute
+  '/$market/dashboard': typeof AuthenticatedMarketDashboardRoute
+  '/$market/forward': typeof AuthenticatedMarketForwardRoute
+  '/$market/notes': typeof AuthenticatedMarketNotesRoute
+  '/$market/paper': typeof AuthenticatedMarketPaperRoute
+  '/$market/settings': typeof AuthenticatedMarketSettingsRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
@@ -114,12 +128,13 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
-  '/alerts': typeof AuthenticatedAlertsRoute
-  '/dashboard': typeof AuthenticatedDashboardRoute
-  '/forward': typeof AuthenticatedForwardRoute
-  '/notes': typeof AuthenticatedNotesRoute
-  '/paper': typeof AuthenticatedPaperRoute
-  '/settings': typeof AuthenticatedSettingsRoute
+  '/$market': typeof AuthenticatedMarketIndexRoute
+  '/$market/alerts': typeof AuthenticatedMarketAlertsRoute
+  '/$market/dashboard': typeof AuthenticatedMarketDashboardRoute
+  '/$market/forward': typeof AuthenticatedMarketForwardRoute
+  '/$market/notes': typeof AuthenticatedMarketNotesRoute
+  '/$market/paper': typeof AuthenticatedMarketPaperRoute
+  '/$market/settings': typeof AuthenticatedMarketSettingsRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
@@ -131,12 +146,14 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/_authenticated': typeof AuthenticatedRouteRouteWithChildren
   '/auth': typeof AuthRoute
-  '/_authenticated/alerts': typeof AuthenticatedAlertsRoute
-  '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
-  '/_authenticated/forward': typeof AuthenticatedForwardRoute
-  '/_authenticated/notes': typeof AuthenticatedNotesRoute
-  '/_authenticated/paper': typeof AuthenticatedPaperRoute
-  '/_authenticated/settings': typeof AuthenticatedSettingsRoute
+  '/_authenticated/$market': typeof AuthenticatedMarketRouteRouteWithChildren
+  '/_authenticated/$market/': typeof AuthenticatedMarketIndexRoute
+  '/_authenticated/$market/alerts': typeof AuthenticatedMarketAlertsRoute
+  '/_authenticated/$market/dashboard': typeof AuthenticatedMarketDashboardRoute
+  '/_authenticated/$market/forward': typeof AuthenticatedMarketForwardRoute
+  '/_authenticated/$market/notes': typeof AuthenticatedMarketNotesRoute
+  '/_authenticated/$market/paper': typeof AuthenticatedMarketPaperRoute
+  '/_authenticated/$market/settings': typeof AuthenticatedMarketSettingsRoute
   '/auth_/callback': typeof AuthCallbackRoute
   '/api/public/hooks/monitor-prices': typeof ApiPublicHooksMonitorPricesRoute
   '/api/public/hooks/sync-collector-subscriptions': typeof ApiPublicHooksSyncCollectorSubscriptionsRoute
@@ -148,12 +165,14 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/auth'
-    | '/alerts'
-    | '/dashboard'
-    | '/forward'
-    | '/notes'
-    | '/paper'
-    | '/settings'
+    | '/$market'
+    | '/$market/'
+    | '/$market/alerts'
+    | '/$market/dashboard'
+    | '/$market/forward'
+    | '/$market/notes'
+    | '/$market/paper'
+    | '/$market/settings'
     | '/auth/callback'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
@@ -163,12 +182,13 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/auth'
-    | '/alerts'
-    | '/dashboard'
-    | '/forward'
-    | '/notes'
-    | '/paper'
-    | '/settings'
+    | '/$market'
+    | '/$market/alerts'
+    | '/$market/dashboard'
+    | '/$market/forward'
+    | '/$market/notes'
+    | '/$market/paper'
+    | '/$market/settings'
     | '/auth/callback'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
@@ -179,12 +199,14 @@ export interface FileRouteTypes {
     | '/'
     | '/_authenticated'
     | '/auth'
-    | '/_authenticated/alerts'
-    | '/_authenticated/dashboard'
-    | '/_authenticated/forward'
-    | '/_authenticated/notes'
-    | '/_authenticated/paper'
-    | '/_authenticated/settings'
+    | '/_authenticated/$market'
+    | '/_authenticated/$market/'
+    | '/_authenticated/$market/alerts'
+    | '/_authenticated/$market/dashboard'
+    | '/_authenticated/$market/forward'
+    | '/_authenticated/$market/notes'
+    | '/_authenticated/$market/paper'
+    | '/_authenticated/$market/settings'
     | '/auth_/callback'
     | '/api/public/hooks/monitor-prices'
     | '/api/public/hooks/sync-collector-subscriptions'
@@ -226,47 +248,61 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/_authenticated/alerts': {
-      id: '/_authenticated/alerts'
+    '/_authenticated/$market': {
+      id: '/_authenticated/$market'
+      path: '/$market'
+      fullPath: '/$market'
+      preLoaderRoute: typeof AuthenticatedMarketRouteRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/$market/': {
+      id: '/_authenticated/$market/'
+      path: '/'
+      fullPath: '/$market/'
+      preLoaderRoute: typeof AuthenticatedMarketIndexRouteImport
+      parentRoute: typeof AuthenticatedMarketRouteRoute
+    }
+    '/_authenticated/$market/alerts': {
+      id: '/_authenticated/$market/alerts'
       path: '/alerts'
-      fullPath: '/alerts'
-      preLoaderRoute: typeof AuthenticatedAlertsRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
+      fullPath: '/$market/alerts'
+      preLoaderRoute: typeof AuthenticatedMarketAlertsRouteImport
+      parentRoute: typeof AuthenticatedMarketRouteRoute
     }
-    '/_authenticated/dashboard': {
-      id: '/_authenticated/dashboard'
+    '/_authenticated/$market/dashboard': {
+      id: '/_authenticated/$market/dashboard'
       path: '/dashboard'
-      fullPath: '/dashboard'
-      preLoaderRoute: typeof AuthenticatedDashboardRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
+      fullPath: '/$market/dashboard'
+      preLoaderRoute: typeof AuthenticatedMarketDashboardRouteImport
+      parentRoute: typeof AuthenticatedMarketRouteRoute
     }
-    '/_authenticated/forward': {
-      id: '/_authenticated/forward'
+    '/_authenticated/$market/forward': {
+      id: '/_authenticated/$market/forward'
       path: '/forward'
-      fullPath: '/forward'
-      preLoaderRoute: typeof AuthenticatedForwardRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
+      fullPath: '/$market/forward'
+      preLoaderRoute: typeof AuthenticatedMarketForwardRouteImport
+      parentRoute: typeof AuthenticatedMarketRouteRoute
     }
-    '/_authenticated/notes': {
-      id: '/_authenticated/notes'
+    '/_authenticated/$market/notes': {
+      id: '/_authenticated/$market/notes'
       path: '/notes'
-      fullPath: '/notes'
-      preLoaderRoute: typeof AuthenticatedNotesRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
+      fullPath: '/$market/notes'
+      preLoaderRoute: typeof AuthenticatedMarketNotesRouteImport
+      parentRoute: typeof AuthenticatedMarketRouteRoute
     }
-    '/_authenticated/paper': {
-      id: '/_authenticated/paper'
+    '/_authenticated/$market/paper': {
+      id: '/_authenticated/$market/paper'
       path: '/paper'
-      fullPath: '/paper'
-      preLoaderRoute: typeof AuthenticatedPaperRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
+      fullPath: '/$market/paper'
+      preLoaderRoute: typeof AuthenticatedMarketPaperRouteImport
+      parentRoute: typeof AuthenticatedMarketRouteRoute
     }
-    '/_authenticated/settings': {
-      id: '/_authenticated/settings'
+    '/_authenticated/$market/settings': {
+      id: '/_authenticated/$market/settings'
       path: '/settings'
-      fullPath: '/settings'
-      preLoaderRoute: typeof AuthenticatedSettingsRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
+      fullPath: '/$market/settings'
+      preLoaderRoute: typeof AuthenticatedMarketSettingsRouteImport
+      parentRoute: typeof AuthenticatedMarketRouteRoute
     }
     '/auth_/callback': {
       id: '/auth_/callback'
@@ -306,22 +342,37 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface AuthenticatedMarketRouteRouteChildren {
+  AuthenticatedMarketIndexRoute: typeof AuthenticatedMarketIndexRoute
+  AuthenticatedMarketAlertsRoute: typeof AuthenticatedMarketAlertsRoute
+  AuthenticatedMarketDashboardRoute: typeof AuthenticatedMarketDashboardRoute
+  AuthenticatedMarketForwardRoute: typeof AuthenticatedMarketForwardRoute
+  AuthenticatedMarketNotesRoute: typeof AuthenticatedMarketNotesRoute
+  AuthenticatedMarketPaperRoute: typeof AuthenticatedMarketPaperRoute
+  AuthenticatedMarketSettingsRoute: typeof AuthenticatedMarketSettingsRoute
+}
+
+const AuthenticatedMarketRouteRouteChildren: AuthenticatedMarketRouteRouteChildren = {
+  AuthenticatedMarketIndexRoute: AuthenticatedMarketIndexRoute,
+  AuthenticatedMarketAlertsRoute: AuthenticatedMarketAlertsRoute,
+  AuthenticatedMarketDashboardRoute: AuthenticatedMarketDashboardRoute,
+  AuthenticatedMarketForwardRoute: AuthenticatedMarketForwardRoute,
+  AuthenticatedMarketNotesRoute: AuthenticatedMarketNotesRoute,
+  AuthenticatedMarketPaperRoute: AuthenticatedMarketPaperRoute,
+  AuthenticatedMarketSettingsRoute: AuthenticatedMarketSettingsRoute,
+}
+
+const AuthenticatedMarketRouteRouteWithChildren =
+  AuthenticatedMarketRouteRoute._addFileChildren(
+    AuthenticatedMarketRouteRouteChildren,
+  )
+
 interface AuthenticatedRouteRouteChildren {
-  AuthenticatedAlertsRoute: typeof AuthenticatedAlertsRoute
-  AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
-  AuthenticatedForwardRoute: typeof AuthenticatedForwardRoute
-  AuthenticatedNotesRoute: typeof AuthenticatedNotesRoute
-  AuthenticatedPaperRoute: typeof AuthenticatedPaperRoute
-  AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
+  AuthenticatedMarketRouteRoute: typeof AuthenticatedMarketRouteRouteWithChildren
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
-  AuthenticatedAlertsRoute: AuthenticatedAlertsRoute,
-  AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
-  AuthenticatedForwardRoute: AuthenticatedForwardRoute,
-  AuthenticatedNotesRoute: AuthenticatedNotesRoute,
-  AuthenticatedPaperRoute: AuthenticatedPaperRoute,
-  AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
+  AuthenticatedMarketRouteRoute: AuthenticatedMarketRouteRouteWithChildren,
 }
 
 const AuthenticatedRouteRouteWithChildren =

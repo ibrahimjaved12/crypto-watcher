@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { supabase } from "@/integrations/supabase/client";
 import { createNonce, loadGoogleScript } from "@/lib/google-identity";
+import { readStoredMarket } from "@/lib/market/market-storage";
 
 export const Route = createFileRoute("/auth")({
   ssr: false,
@@ -43,7 +44,7 @@ function AuthPage() {
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
-      if (data.session) navigate({ to: "/dashboard", replace: true });
+      if (data.session) navigate({ to: "/$market/dashboard", params: { market: readStoredMarket() }, replace: true });
     });
   }, [navigate]);
 
@@ -56,7 +57,7 @@ function AuthPage() {
       toast.error(error.message);
       return;
     }
-    navigate({ to: "/dashboard", replace: true });
+    navigate({ to: "/$market/dashboard", params: { market: readStoredMarket() }, replace: true });
   }
 
   async function signUp(e: React.FormEvent) {
@@ -76,7 +77,7 @@ function AuthPage() {
       toast.success("Check your email to confirm your account, then sign in.");
       return;
     }
-    navigate({ to: "/dashboard", replace: true });
+    navigate({ to: "/$market/dashboard", params: { market: readStoredMarket() }, replace: true });
   }
 
   // Google Identity Services signs in inside this page, so Google's consent UI never shows the
@@ -106,7 +107,7 @@ function AuthPage() {
               toast.error(error.message);
               return;
             }
-            navigate({ to: "/dashboard", replace: true });
+            navigate({ to: "/$market/dashboard", params: { market: readStoredMarket() }, replace: true });
           },
         });
         target.replaceChildren();

@@ -44,7 +44,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useMarket } from "@/lib/market/market-context";
 
-export const Route = createFileRoute("/_authenticated/forward")({
+export const Route = createFileRoute("/_authenticated/$market/forward")({
   head: () => ({ meta: [{ title: "Strategy Lab — Crypto Watch" }] }),
   validateSearch: (search: Record<string, unknown>): ForwardFilters => parseSearch(search),
   search: {
@@ -318,6 +318,7 @@ function SignalsSection({
   offline: boolean;
   runNow: ForwardRunAction;
 }) {
+  const { market } = useMarket();
   const latest = data.data?.latestRun as unknown as SignalRun | null | undefined;
   const signals = (data.data?.signals ?? []).slice(0, 20);
   const openSetups = (data.data?.openSetups ?? []).slice(0, 20);
@@ -438,7 +439,9 @@ function SignalsSection({
           </p>
         </div>
         <Button asChild variant="outline" className="min-h-11 sm:min-h-9">
-          <Link to="/paper">Open Paper account</Link>
+          <Link to="/$market/paper" params={{ market }}>
+            Open Paper account
+          </Link>
         </Button>
       </section>
 

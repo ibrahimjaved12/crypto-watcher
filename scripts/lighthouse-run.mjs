@@ -88,7 +88,7 @@ async function main() {
       await page.type("#signin-email", email);
       await page.type("#signin-password", password);
       await page.click('form:has(#signin-email) button[type="submit"]');
-      await page.waitForFunction(() => location.pathname === "/dashboard", { timeout: WAIT_MS });
+      await page.waitForFunction(() => location.pathname.endsWith("/dashboard"), { timeout: WAIT_MS });
     } catch {
       await writeScores({ status: "login-failed" });
       console.log("login failed");
@@ -96,7 +96,7 @@ async function main() {
     }
 
     try {
-      await page.goto(`${BASE_URL}/dashboard`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await page.goto(`${BASE_URL}/${MARKETS[0]}/dashboard`, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector('nav[aria-label="Main"]', { timeout: WAIT_MS });
     } catch {
       await writeScores({ status: "no-access" });
@@ -122,9 +122,7 @@ async function main() {
       const marketPage = await browser.newPage();
       let available = true;
       try {
-        await marketPage.goto(`${BASE_URL}/auth`, { waitUntil: "domcontentloaded", timeout: 60_000 });
-        await marketPage.evaluate((m) => localStorage.setItem("cw.market", m), market);
-        await marketPage.goto(`${BASE_URL}/dashboard`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await marketPage.goto(`${BASE_URL}/${market}/dashboard`, { waitUntil: "domcontentloaded", timeout: 60_000 });
         await marketPage.waitForFunction(
           (m) => document.documentElement.dataset.market === m,
           { timeout: WAIT_MS },
@@ -143,11 +141,12 @@ async function main() {
       for (const device of DEVICES) {
         const pages = {};
         for (const { slug, path } of PAGES) {
+          const marketPath = `/${market}${path}`;
           const started = Date.now();
           let callFailed = false;
           let errorName = null;
           const result = await lighthouse(
-            `${BASE_URL}${path}`,
+            `${BASE_URL}${marketPath}`,
             {
               port: chrome.port,
               output: ["json", "html"],
@@ -172,12 +171,12 @@ async function main() {
           } catch {
             finalPath = null;
           }
-          if (!lhr || lhr.runtimeError || finalPath !== path) {
+          if (!lhr || lhr.runtimeError || finalPath !== marketPath) {
             const runtimeErrorCode = lhr?.runtimeError?.code;
             let reason;
             if (runtimeErrorCode !== undefined && runtimeErrorCode !== null) {
               reason = runtimeErrorCode;
-            } else if (finalPath !== null && finalPath !== path) {
+            } else if (finalPath !== null && finalPath !== marketPath) {
               reason = "redirected";
             } else if (callFailed) {
               reason = errorName ? `error:${errorName}` : "error";

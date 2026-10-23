@@ -214,7 +214,7 @@ flowchart TD
     Bridge -->|Validated result|Browser
 ```
 
-Code evidence: [dashboard](../src/routes/_authenticated/dashboard.tsx),
+Code evidence: [dashboard](../src/routes/_authenticated/$market/dashboard.tsx),
 [TA history](../src/components/market/technical-analysis.tsx),
 [monitor engine](../src/lib/monitor/engine.server.ts),
 [TA persistence](../src/lib/ta/engine.server.ts),

@@ -29,7 +29,7 @@ import { getOperationalState } from "@/lib/operational.functions";
 import type { CollectorHealthStatus } from "@/lib/operational/types";
 import { useServerFn } from "@tanstack/react-start";
 
-export const Route = createFileRoute("/_authenticated/settings")({
+export const Route = createFileRoute("/_authenticated/$market/settings")({
   head: () => ({
     meta: [
       { title: "Control room — Crypto Watch" },
