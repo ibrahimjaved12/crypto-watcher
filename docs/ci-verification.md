@@ -38,3 +38,57 @@ python -m venv .venv
 
 Branch protection is not available on this plan, so no check is "required"; treat a red `Tests`
 as blocking by convention. Do not rely on a check while it is flaky; fix the cause first.
+
+## Lighthouse
+
+**When.** Once, when a PR opens, if it touches `src/**`, `public/**`, `vite.config.ts`, `package.json`,
+`package-lock.json`, `wrangler.jsonc`, the workflow or its two scripts. It does not run on subsequent PR commits,
+manual dispatch or pushes to `main`. Informational only: no thresholds, no failing gate.
+
+**What.** The fixed production URL (`BASE_URL`), so the scores describe deployed `main`, not the PR. Six
+logged-in pages (Dashboard, Alerts, Strategy Lab, Notes, Paper account, Settings) for Crypto and Forex, on
+mobile and desktop: one job, one install, one sign-in and all 24 runs in one Chrome. Lighthouse audits one URL
+per run and does not crawl. A host check runs first; if the site does not answer, the comment says "Host server
+is down" and nothing else runs. The PR gets one sticky comment (`<!-- lighthouse-check -->`); full HTML/JSON
+reports, final screenshots (all pages except Settings, which shows the account email) and `scores.json` are one
+run artifact, `lighthouse-reports` (14 days). The step summary also lists the run time per run.
+
+The comment has one table per device with Page, Perf, A11y, Best Prac and five Performance Metrics columns
+(LCP, TBT, CLS, FCP, SI), plus a group row per market. Category scores and metric values have red/orange/green
+dots for their Lighthouse score bands; metric values are not bolded. A legend line expands the metric
+abbreviations. The Performance score weights those metrics 25/30/25/10/10 (LCP/TBT/CLS/FCP/SI).
+Lighthouse, puppeteer-core and chrome-launcher versions are pinned so scores stay comparable between PRs and
+must be bumped deliberately. A failed page records its reason in the run log and `scores.json`.
+
+**Caches.** Every run starts from a cold HTTP cache and cleared service workers/Cache Storage (login and market
+stay in localStorage; the app stores no other data there), with a fresh Chrome profile per job. Cloudflare's edge
+cache and server-side caches are intentionally not bypassed because real visitors get them, so the first run
+after a deploy can be slightly slower.
+
+**Notes.** Two status notes exist besides the sign-in ones: "Host server is down" (the Cloudflare site is
+unreachable, nothing runs) and "Runner is offline" (the laptop runner, read from the app's Runner badge; pages
+are still measured, with the app's offline banner showing).
+
+**Setup.**
+- Supabase dashboard > Authentication > Users > Add user: use a non-personal email, a generated
+  password of at least 32 characters, and auto-confirm.
+- On your own machine, run `npm run access:grant -- <that email> --label all --expires <date about a year out>`.
+  It reads `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from `.env.production.local`; those values
+  must never go into GitHub.
+- GitHub: Settings > Secrets and variables > Actions > add `LIGHTHOUSE_EMAIL` and
+  `LIGHTHOUSE_PASSWORD`.
+- Comments may say: "Test sign-in is not set up." (no secrets), "Test sign-in failed." (wrong
+  password or expired account), "Test account has no access to Crypto/Forex." (label), or
+  "Test account has no market access." (no label at all).
+
+**Security.**
+- A dedicated, empty test account with the label `all` and an expiry. Never a real account, never the
+  service-role key in GitHub.
+- Secrets reach only the single run step and are masked. Fork PRs get no secrets and every job skips them
+  (never `pull_request_target`).
+- Artifacts of a public repo can be downloaded by any signed-in GitHub user, so the account must stay empty;
+  reports are made with screenshots disabled.
+
+**Too slow?** Remove lines from `PAGES` in `.github/workflows/lighthouse.yml`.
+
+**Previews.** When #290 provides preview URLs, change `BASE_URL` to use them.

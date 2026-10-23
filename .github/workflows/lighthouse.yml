@@ -1,0 +1,128 @@
+name: Lighthouse
+
+# Measures the logged-in pages of the deployed production site (main) with a dedicated test account, once when a
+# PR opens. Never pull_request_target: fork PRs get no secrets and every job skips them.
+on:
+  pull_request:
+    types: [opened]
+    paths:
+      - "src/**"
+      - "public/**"
+      - "vite.config.ts"
+      - "package.json"
+      - "package-lock.json"
+      - "wrangler.jsonc"
+      - ".github/workflows/lighthouse.yml"
+      - "scripts/lighthouse-run.mjs"
+      - "scripts/lighthouse-summary.mjs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lighthouse-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  BASE_URL: https://crypto-watcher.cwlabs.workers.dev
+  PAGES: |
+    dashboard|Dashboard|/dashboard
+    alerts|Alerts|/alerts
+    forward|Strategy Lab|/forward
+    notes|Notes|/notes
+    paper|Paper account|/paper
+    settings|Settings|/settings
+
+jobs:
+  lighthouse:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    name: Lighthouse
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set output directory
+        shell: bash
+        run: echo "OUT_DIR=$RUNNER_TEMP/lh-out" >> "$GITHUB_ENV"
+
+      - name: Check host
+        id: host
+        shell: bash
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 --retry 3 --retry-all-errors --retry-delay 5 "$BASE_URL/" || true)
+          if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
+            echo "up=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Host answered: ${code:-none}"
+            echo "up=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v7
+        if: steps.host.outputs.up == 'true'
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install Lighthouse tools (outside the repo)
+        if: steps.host.outputs.up == 'true'
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/lh" --no-audit --no-fund lighthouse@13.5.0 puppeteer-core@25.16.0 chrome-launcher@1.2.2
+          cp scripts/lighthouse-run.mjs "$RUNNER_TEMP/lh/"
+
+      - name: Run Lighthouse
+        if: steps.host.outputs.up == 'true'
+        shell: bash
+        env:
+          LH_EMAIL: ${{ secrets.LIGHTHOUSE_EMAIL }}
+          LH_PASSWORD: ${{ secrets.LIGHTHOUSE_PASSWORD }}
+        run: |
+          if [ -n "$LH_EMAIL" ]; then echo "::add-mask::$LH_EMAIL"; fi
+          mkdir -p "$OUT_DIR"
+          node "$RUNNER_TEMP/lh/lighthouse-run.mjs"
+
+      - name: Create summary
+        if: always()
+        shell: bash
+        run: |
+          node scripts/lighthouse-summary.mjs \
+            --scores-file "$OUT_DIR/scores.json" \
+            --host-up "${{ steps.host.outputs.up }}" \
+            --base-url "$BASE_URL" \
+            --pages "$PAGES" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            > lighthouse-comment.md
+          cat lighthouse-comment.md >> "$GITHUB_STEP_SUMMARY"
+          node scripts/lighthouse-summary.mjs --scores-file "$OUT_DIR/scores.json" --timing >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update pull request comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          comment_id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate --jq '.[] | select(.body | contains("<!-- lighthouse-check -->")) | .id' | sed -n 1p)
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" -F body=@lighthouse-comment.md
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@lighthouse-comment.md
+          fi
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lighthouse-reports
+          path: |
+            ${{ runner.temp }}/lh-out/*.html
+            ${{ runner.temp }}/lh-out/*.json
+            ${{ runner.temp }}/lh-out/*.jpg
+          if-no-files-found: ignore
+          retention-days: 14
