@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { requireMarketAccess } from "@/integrations/supabase/auth-middleware";
 import {
   resolveRunnerStatus,
   unavailableRunnerStatus,
@@ -8,7 +8,7 @@ import {
 } from "./status-core";
 
 export const getRunnerStatus = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireMarketAccess])
   .handler(async ({ context }): Promise<RunnerStatus> => {
     const gatewayEnabled = process.env["RUNNER_GATEWAY_ENABLED"] === "true";
     const jobsEnabled = process.env["RUNNER_JOBS_ENABLED"] === "true";
