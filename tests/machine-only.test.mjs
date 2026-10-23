@@ -40,8 +40,11 @@ const functionsUrl = await moduleUrl("../src/lib/forward.functions.ts", {
       return chain;
     };
   `),
-  "@/integrations/supabase/auth-middleware": stub(`export const requireSupabaseAuth=()=>{
+  "@/integrations/supabase/auth-middleware": stub(`export const requireMarketAccess=()=>{
     globalThis.__machineAuthCalls++;if(!globalThis.__machineAuthenticated)throw new Error('Unauthorized');
+  };
+  export const assertMarketEnabled=(markets, market)=>{
+    if(!markets.includes(market))throw new Error('Forbidden: market not enabled');
   }`),
   zod: import.meta.resolve("zod"),
   "./machine-only.server": gateUrl,

@@ -34,7 +34,7 @@ test("only service role can claim, extend and finish jobs; old jobs are never re
 test("Worker enqueues and polls with the user client behind the separate flag", async () => {
   const source = await read("../src/lib/forward.functions.ts");
   assert.match(source, /z\.object\(\{ idempotencyKey: z\.string\(\)\.uuid\(\) \}\)/);
-  assert.match(source, /export const getRunnerJob = createServerFn\(\{ method: "GET" \}\)\s+\.middleware\(\[requireSupabaseAuth\]\)/);
+  assert.match(source, /export const getRunnerJob = createServerFn\(\{ method: "GET" \}\)\s+\.middleware\(\[requireMarketAccess\]\)/);
   assert.match(source, /context\.supabase\.from\("runner_jobs"\)/);
   assert.match(source, /runnerJobsEnabled: process\.env\["RUNNER_JOBS_ENABLED"\] === "true"/);
   assert.equal(source.match(/!machineOnlyEnabled\(\) && process\.env\["RUNNER_JOBS_ENABLED"\] === "true"/g)?.length, 2);
