@@ -31,6 +31,8 @@ gateway is decided after it.
 terminal and serves completed 1-minute BID bars, symbol specs and the clock. The forex collector (#453)
 on the host is its only client. It initializes the terminal without credentials, never trades and never
 reads account data. One file, standard library plus the MT5 module, Python 3.9.
+The gateway is deliberately single-threaded, because the MT5 package must only be called from the thread that
+initialized it. Requests are handled one at a time, and a client that sends nothing is dropped after 10 seconds.
 
 **The terminal must be signed in by the owner, by hand.** The gateway never sends a login, never
 retries with credentials, and shows no account, server or balance data in `/health`.

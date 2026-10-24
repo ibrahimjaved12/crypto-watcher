@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import socketserver
 from pathlib import Path
 from types import SimpleNamespace
 from contextlib import redirect_stderr
@@ -324,7 +325,7 @@ class HttpTests(unittest.TestCase):
     def test_over_a_real_socket_no_cors_and_token_not_logged(self):
         with tempfile.TemporaryDirectory() as tmp:
             gateway, _, _ = make(tmp)
-            server = gw.ThreadingHTTPServer(("127.0.0.1", 0), gw.make_handler(gateway))
+            server = gw.make_server("127.0.0.1", 0, gateway)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             log = io.StringIO()
@@ -397,6 +398,13 @@ class SafetyAndConfigTests(unittest.TestCase):
             self.assertEqual(gw.main([], environ={"MT5_GATEWAY_TOKEN": TOKEN, "MT5_GATEWAY_PORT": "x"}), 2)
             self.assertEqual(gw.main([], environ={"MT5_GATEWAY_TOKEN": TOKEN, "MT5_SERVER_UTC_OFFSET_SECONDS": "1.5"}), 2)
         self.assertNotIn(TOKEN, error.getvalue())
+
+    def test_server_is_single_threaded(self):
+        server = gw.make_server("127.0.0.1", 0, gw.Gateway(FakeMt5(Clock()), token=TOKEN))
+        try:
+            self.assertNotIsInstance(server, socketserver.ThreadingMixIn)
+        finally:
+            server.server_close()
 
 
 if __name__ == "__main__":
