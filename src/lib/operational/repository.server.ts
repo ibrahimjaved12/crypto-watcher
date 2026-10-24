@@ -16,6 +16,7 @@ import type {
   FxCalendarSourceStatus,
   FxSymbolSpec,
   FxCollectorHealthRow,
+  FxGapCheck,
   FxGatewayRow,
   FxSubscription,
   OperationalCheckpoint,
@@ -185,6 +186,12 @@ const disabledStore: OperationalStore = {
   },
   async releaseFxCollectorLease() {},
   async getFxBarCoverage() {
+    return [];
+  },
+  async recordFxGapChecks() {
+    throw new Error("Operational forex collector ownership is disabled");
+  },
+  async getFxGapChecks() {
     return [];
   },
   async recordFxCalendar() {
@@ -722,6 +729,29 @@ export function createOperationalStore(
       const { data, error } = await client.rpc("get_fx_bar_coverage");
       rpcError(error, "forex bar coverage read");
       return Array.isArray(data) ? (data as FxBarCoverage[]) : [];
+    },
+    async recordFxGapChecks(rows) {
+      if (rows.length === 0) return;
+      const { error } = await client.rpc("record_fx_gap_checks", {
+        p_rows: rows.map((row) => ({
+          venue: row.venue,
+          instrument_id: row.instrumentId,
+          from_ms: row.fromMs,
+          to_ms: row.toMs,
+          requested_minutes: row.requestedMinutes,
+          returned_minutes: row.returnedMinutes,
+        })),
+      });
+      rpcError(error, "forex gap check write");
+    },
+    async getFxGapChecks(venue, instrumentId, sinceMs) {
+      const { data, error } = await client.rpc("get_fx_gap_checks", {
+        p_venue: venue,
+        p_instrument_id: instrumentId,
+        p_since_ms: sinceMs,
+      });
+      rpcError(error, "forex gap check read");
+      return Array.isArray(data) ? (data as FxGapCheck[]) : [];
     },
     async recordFxCalendar(rows) {
       // record_fx_calendar takes 1..2000 items per call; observations are idempotent, so a chunk

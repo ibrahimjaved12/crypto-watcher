@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
   FX_DEFAULT_BACKFILL_DAYS,
+  FX_GAP_DEFAULT_RECHECK_HOURS,
+  FX_GAP_DEFAULT_SCAN_HOURS,
+  FX_GAP_MAX_HOURS,
   createGatewayClient,
   parseFxSubscriptions,
   startFxCollector,
@@ -33,6 +36,16 @@ try {
   const backfillDays = backfillText ? Number(backfillText) : FX_DEFAULT_BACKFILL_DAYS;
   if (!Number.isInteger(backfillDays) || backfillDays < 0 || backfillDays > 30)
     throw new Error("FX_BACKFILL_DAYS must be a whole number of days between 0 and 30");
+  // Gap scan (#457): hours behind the newest stored minute searched for missing open minutes (0 disables it), and
+  // how long a range the gateway answered is not asked for again.
+  const scanText = env["FX_GAP_SCAN_HOURS"]?.trim();
+  const scanHours = scanText ? Number(scanText) : FX_GAP_DEFAULT_SCAN_HOURS;
+  if (!Number.isInteger(scanHours) || scanHours < 0 || scanHours > FX_GAP_MAX_HOURS)
+    throw new Error(`FX_GAP_SCAN_HOURS must be a whole number of hours between 0 and ${FX_GAP_MAX_HOURS}`);
+  const recheckText = env["FX_GAP_RECHECK_HOURS"]?.trim();
+  const recheckHours = recheckText ? Number(recheckText) : FX_GAP_DEFAULT_RECHECK_HOURS;
+  if (!Number.isInteger(recheckHours) || recheckHours < 1 || recheckHours > FX_GAP_MAX_HOURS)
+    throw new Error(`FX_GAP_RECHECK_HOURS must be a whole number of hours between 1 and ${FX_GAP_MAX_HOURS}`);
 
   const accountCurrency = (env["FX_ACCOUNT_CURRENCY"]?.trim() || "USD").toUpperCase();
   if (!/^[A-Z]{3}$/.test(accountCurrency)) throw new Error("FX_ACCOUNT_CURRENCY must be a three-letter currency code");
@@ -44,6 +57,7 @@ try {
     instanceId: randomUUID(), // the lease owner id is a UUID
     accountCurrency,
     backfillDays,
+    ...(scanHours > 0 ? { gapScan: { scanHours, recheckHours } } : {}),
     log: (line) => console.log(line),
     error: (line) => console.error(line),
   });

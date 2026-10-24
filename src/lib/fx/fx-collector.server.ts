@@ -3,15 +3,19 @@
 // operational store, and reports collector health per instrument. It never talks to MetaTrader itself and never
 // sees account data. Every dependency is injected; the entrypoint (src/worker/forex-collector.ts) builds them.
 //
+// With `gapScan` set it also looks back for missing open minutes behind the newest stored one and asks for them
+// again (#457; see scanGaps).
+//
 // One collector owns the store at a time (claimFxCollectorLease, 90 s, renewed every pass). A pass never throws:
 // every failure is logged with the "[fx-collector]" prefix and shows in the health rows.
 import type {
   FxBar, FxCollectorHealthInput, FxCollectorHealthStatus, FxSubscription, FxSymbolSpec, OperationalStore,
 } from "../operational/types";
-import { fxNextOpenMs, isFxOpen } from "../market/trading-calendar";
+import { fxNextOpenMs, fxWeekWindow, isFxOpen } from "../market/trading-calendar";
 
 export const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 const LOG = "[fx-collector]";
 export const FX_LEASE_SECONDS = 90;
 /** The gateway's cap per request. */
@@ -30,12 +34,21 @@ export const FX_SPEC_BATCH = 50;
  * only works once the owner has set the gateway's MT5_SERVER_UTC_OFFSET_SECONDS override. */
 export const FX_DEFAULT_BACKFILL_DAYS = 0;
 export const FX_DEFAULT_VENUE = "exness-mt5-demo";
+/** Gap scan (#457): how often a symbol is scanned, and how soon after a gateway problem it is tried again. */
+export const FX_GAP_SCAN_INTERVAL_MS = HOUR_MS;
+export const FX_GAP_WAIT_MS = 10 * MINUTE_MS;
+export const FX_GAP_DEFAULT_SCAN_HOURS = 24;
+export const FX_GAP_DEFAULT_RECHECK_HOURS = 24;
+export const FX_GAP_MAX_HOURS = 168;
+/** Gateway requests per symbol and scan; the remaining runs follow FX_GAP_WAIT_MS later (the checks skip done ones). */
+export const FX_GAP_MAX_REQUESTS_PER_SCAN = 30;
 
 export type GatewayReply = { status: number; body: unknown };
 
 export type FxCollectorDeps = {
   store: Pick<OperationalStore, "getFxSubscriptions" | "recordFxBars" | "getFxBarCoverage" | "recordFxCollectorHealth"
-    | "claimFxCollectorLease" | "renewFxCollectorLease" | "releaseFxCollectorLease" | "recordFxSymbolSpecs">;
+    | "claimFxCollectorLease" | "renewFxCollectorLease" | "releaseFxCollectorLease" | "recordFxSymbolSpecs"
+    | "getFxBars" | "recordFxGapChecks" | "getFxGapChecks">;
   /** GET a gateway path (with query); resolves with the status and parsed JSON body, rejects when unreachable. */
   gateway(path: string): Promise<GatewayReply>;
   now(): number;
@@ -44,6 +57,9 @@ export type FxCollectorDeps = {
   /** The account currency of the demo account (FX_ACCOUNT_CURRENCY, default USD): the gateway never reads account data. */
   accountCurrency: string;
   backfillDays?: number;
+  /** Look back `scanHours` behind the newest stored minute for missing open minutes and ask for them again; a
+   * range the gateway answered is not asked for again for `recheckHours`. Absent: no gap scan. */
+  gapScan?: { scanHours: number; recheckHours: number };
   log(line: string): void;
   error(line: string): void;
 };
@@ -56,10 +72,15 @@ export type FxCollectorState = {
   warnedSpecs: Set<string>;
   /** The "another collector owns the store" line has been logged (it is repeated only after a change). */
   warnedLease: boolean;
+  /** When the next gap scan of an instrument is due (absent = at the next pass). */
+  nextGapScanAt: Map<string, number>;
+  /** Missing open minutes of the last 24 h still absent after an instrument's latest scan. */
+  lastGapMissing: Map<string, number>;
 };
 
 export function newFxCollectorState(): FxCollectorState {
-  return { leased: false, nextSpecsAt: 0, warnedSpecs: new Set(), warnedLease: false };
+  return { leased: false, nextSpecsAt: 0, warnedSpecs: new Set(), warnedLease: false, nextGapScanAt: new Map(),
+    lastGapMissing: new Map() };
 }
 
 export type FxPassResult = {
@@ -220,14 +241,115 @@ async function collectSymbol(deps: FxCollectorDeps, sub: FxSubscription, newestS
   return outcome;
 }
 
+// ---------------------------------------------------------------- gap scan (#457)
+
+/** The open minutes of the FX week calendar in [fromMs, toMs), from its week spans (never isFxOpen per minute). */
+export function fxOpenMinutes(fromMs: number, toMs: number): number[] {
+  const out: number[] = [];
+  for (let t = fromMs; t < toMs;) {
+    const [open, close] = fxWeekWindow(t);
+    if (open >= toMs) break;
+    for (let m = Math.max(open, t); m < Math.min(close, toMs); m += MINUTE_MS) out.push(m);
+    t = close;
+  }
+  return out;
+}
+
+/**
+ * One gap scan of one symbol: the open minutes in [newest - scanHours, newest] (not before the oldest stored bar)
+ * without a stored bar, minus those inside a check of the last `recheckHours`, asked for again run by run. Only a
+ * 200 page is recorded as a check. A gateway problem or a throw stops the scan and retries it FX_GAP_WAIT_MS later.
+ * Never throws.
+ */
+async function scanGaps(deps: FxCollectorDeps, state: FxCollectorState, sub: FxSubscription,
+                        gapScan: { scanHours: number; recheckHours: number }, newestOpen: number, oldestOpen: number,
+                        now: number): Promise<void> {
+  const symbol = symbolOf(sub.instrumentId);
+  const scanHours = Math.min(gapScan.scanHours, FX_GAP_MAX_HOURS);
+  const recheckHours = Math.min(Math.max(gapScan.recheckHours, 1), FX_GAP_MAX_HOURS);
+  const end = newestOpen; // inclusive
+  const start = Math.max(end - scanHours * HOUR_MS, oldestOpen);
+  let missing: number[] = [];
+  let requested = 0;
+  const filled = new Set<number>();
+  const summary = () => `${LOG} ${symbol}: gap scan: ${missing.length} missing, ${requested} requested, ${filled.size} filled`;
+  const wait = (reason: string) => {
+    state.nextGapScanAt.set(sub.instrumentId, now + FX_GAP_WAIT_MS);
+    deps.error(`${summary()}; stopped: ${reason}, next try in ${FX_GAP_WAIT_MS / MINUTE_MS} min`);
+  };
+  try {
+    const stored = new Set((await deps.store.getFxBars(sub.venue, sub.instrumentId,
+      { fromMs: start, toMs: end + MINUTE_MS, limit: 20_000 })).map((row) => row.open_time_ms));
+    missing = fxOpenMinutes(start, end + MINUTE_MS).filter((minute) => !stored.has(minute));
+    const checks = missing.length
+      ? await deps.store.getFxGapChecks(sub.venue, sub.instrumentId, now - recheckHours * HOUR_MS) : [];
+    const due = missing.filter((minute) => !checks.some((check) => check.from_ms <= minute && minute < check.to_ms));
+    // Runs of consecutive due minutes: [from, to).
+    const runs: [number, number][] = [];
+    for (const minute of due) {
+      const last = runs.at(-1);
+      if (last && last[1] === minute) last[1] = minute + MINUTE_MS; else runs.push([minute, minute + MINUTE_MS]);
+    }
+    let requests = 0;
+    let skipped = 0;
+    for (const [runFrom, runTo] of runs) {
+      for (let from = runFrom; from < runTo;) {
+        if (requests >= FX_GAP_MAX_REQUESTS_PER_SCAN) {
+          state.nextGapScanAt.set(sub.instrumentId, now + FX_GAP_WAIT_MS);
+          deps.log(`${summary()}; ${FX_GAP_MAX_REQUESTS_PER_SCAN} requests, the rest in ${FX_GAP_WAIT_MS / MINUTE_MS} min`);
+          state.lastGapMissing.set(sub.instrumentId, missing.filter((m) => !filled.has(m) && m >= now - DAY_MS).length);
+          return;
+        }
+        requests++;
+        const pageTo = Math.min(runTo, from + FX_PAGE_MINUTES * MINUTE_MS);
+        const path = `/v1/bars?symbol=${encodeURIComponent(sub.nativeSymbol)}&from_ms=${from}&to_ms=${pageTo}`;
+        const reply = await deps.gateway(path);
+        if (reply.status !== 200 || !object(reply.body) || !Array.isArray(reply.body["bars"])) {
+          wait(gatewayCode(reply));
+          return;
+        }
+        const bars: FxBar[] = [];
+        const returned = new Set<number>();
+        for (const row of reply.body["bars"]) {
+          const bar = barFromRow(row, sub, { fromMs: from, toMs: pageTo }, "history", now);
+          // Every minute of the page is a due missing minute (a run holds nothing else); a repeated row is stored once.
+          if (bar && !returned.has(bar.openTime)) { returned.add(bar.openTime); bars.push(bar); }
+          else if (!bar) skipped++;
+        }
+        bars.sort((a, b) => a.openTime - b.openTime);
+        for (let i = 0; i < bars.length; i += WRITE_BATCH) await deps.store.recordFxBars(bars.slice(i, i + WRITE_BATCH));
+        const pageMinutes = (pageTo - from) / MINUTE_MS;
+        await deps.store.recordFxGapChecks([{ venue: sub.venue, instrumentId: sub.instrumentId, fromMs: from, toMs: pageTo,
+          requestedMinutes: pageMinutes, returnedMinutes: returned.size }]);
+        requested += pageMinutes;
+        for (const minute of returned) filled.add(minute);
+        from = pageTo;
+      }
+    }
+    if (skipped) deps.error(`${LOG} ${symbol}: gap scan skipped ${skipped} row(s) that failed the local checks`);
+    state.nextGapScanAt.set(sub.instrumentId, now + FX_GAP_SCAN_INTERVAL_MS);
+    state.lastGapMissing.set(sub.instrumentId, missing.filter((m) => !filled.has(m) && m >= now - DAY_MS).length);
+    deps.log(summary());
+  } catch (error) {
+    wait(errorText(error).slice(0, 200));
+  }
+}
+
 /** Health of one instrument after a pass (see the statuses in FxCollectorHealthStatus). */
 export function fxHealth(sub: FxSubscription, now: number, newestOpen: number | null,
                          outcome: Pick<SymbolOutcome, "problem" | "backfilling"> | null,
                          gatewayProblem: { status: "UNAVAILABLE" | "LOGIN_FAILED"; message: string } | null,
+                         missingOpenMinutes24h?: number,
 ): FxCollectorHealthInput {
   const lag = newestOpen === null ? null : now - (newestOpen + MINUTE_MS);
-  const row = (status: FxCollectorHealthStatus, errorMessage: string | null): FxCollectorHealthInput =>
-    ({ venue: sub.venue, instrumentId: sub.instrumentId, status, lastBarOpenTime: newestOpen, lagMs: lag, errorMessage });
+  // The gap count never changes the status (LIVE stays LIVE); it only explains a status that is not LIVE.
+  const note = (status: FxCollectorHealthStatus) => status !== "LIVE" && (missingOpenMinutes24h ?? 0) > 0
+    ? `${missingOpenMinutes24h} open minute(s) missing in the last 24 h` : null;
+  const row = (status: FxCollectorHealthStatus, message: string | null): FxCollectorHealthInput => {
+    const extra = note(status);
+    const errorMessage = extra === null ? message : message === null ? extra : `${message}; ${extra}`;
+    return { venue: sub.venue, instrumentId: sub.instrumentId, status, lastBarOpenTime: newestOpen, lagMs: lag, errorMessage };
+  };
   const problem = gatewayProblem ?? outcome?.problem ?? null;
   if (problem) return row(problem.status, problem.message);
   if (!isFxOpen(now)) return row("MARKET_CLOSED", null);
@@ -272,9 +394,11 @@ export async function runFxCollectorPass(deps: FxCollectorDeps, state: FxCollect
     }
 
     let coverage = new Map<string, number>();
+    let oldestStored = new Map<string, number>();
     try {
-      coverage = new Map((await deps.store.getFxBarCoverage()).map((item) => [`${item.venue}|${item.instrument_id}`,
-        item.newest_open_time_ms]));
+      const items = await deps.store.getFxBarCoverage();
+      coverage = new Map(items.map((item) => [`${item.venue}|${item.instrument_id}`, item.newest_open_time_ms]));
+      oldestStored = new Map(items.map((item) => [`${item.venue}|${item.instrument_id}`, item.oldest_open_time_ms]));
     } catch (error) {
       deps.error(`${LOG} coverage read failed: ${errorText(error)}`);
       return result;
@@ -301,7 +425,15 @@ export async function runFxCollectorPass(deps: FxCollectorDeps, state: FxCollect
         if (outcome.problem && !outcome.problem.message.startsWith("collect failed"))
           deps.error(`${LOG} ${symbol}: gateway answered ${outcome.problem.message}`);
       }
-      result.health.push(fxHealth(sub, now, outcome?.newestOpen ?? newest, outcome, gatewayProblem));
+      // Gap scan: only with a healthy, caught-up symbol in an open market, at most once per FX_GAP_SCAN_INTERVAL_MS.
+      // The oldest stored minute comes from the coverage read before this pass (none yet: the next pass scans).
+      const oldest = oldestStored.get(key);
+      if (deps.gapScan && deps.gapScan.scanHours > 0 && !gatewayProblem && outcome && !outcome.problem
+          && !outcome.backfilling && isFxOpen(now) && outcome.newestOpen !== null && oldest !== undefined
+          && now >= (state.nextGapScanAt.get(sub.instrumentId) ?? 0))
+        await scanGaps(deps, state, sub, deps.gapScan, outcome.newestOpen, oldest, now);
+      const missing = deps.gapScan ? state.lastGapMissing.get(sub.instrumentId) : undefined;
+      result.health.push(fxHealth(sub, now, outcome?.newestOpen ?? newest, outcome, gatewayProblem, missing));
     }
     if (gatewayProblem) deps.error(`${LOG} gateway: ${gatewayProblem.status} ${gatewayProblem.message}`);
     try {
