@@ -326,9 +326,30 @@ host by default.
   connected; `UNAVAILABLE` when the gateway is unreachable or answers 503 (`offset_unknown`) or 409
   (`offset_changed`) (the code is the error message); `MARKET_CLOSED` when the FX week is closed; otherwise
   `RECOVERING` while pages remain, `LIVE` when the newest bar closed at most 3 minutes ago, `RECOVERING` up to 10
-  minutes, `STALE` beyond (and with no bars). `lag_ms` is now minus the newest bar's close. Gap fill is not a
-  separate step: a minute the gateway did not return (or a skipped row) leaves a hole behind the newest stored
-  minute that this resume rule does not revisit; the stage still reports it as a missing minute (outcome `X`).
+  minutes, `STALE` beyond (and with no bars). `lag_ms` is now minus the newest bar's close. With the gap scan on
+  and status not `LIVE`, the message ends with `N open minute(s) missing in the last 24 h` (the status itself never
+  changes because of it; `LIVE` stays `LIVE` with no note).
+- **Gap scan (#457).** The resume rule never revisits a hole behind the newest stored minute (a minute the gateway did
+  not return, or a skipped row), so a separate scan does. Per symbol, at most once an hour, and only when the
+  gateway is healthy, the symbol has no problem, no pages remain and the FX week is open: the expected minutes are
+  the TypeScript FX week calendar's open minutes in `[newest - FX_GAP_SCAN_HOURS, newest]` (not before the oldest
+  stored bar), computed from the week spans; the missing ones are those without a stored bar. Minutes inside a range
+  checked in the last `FX_GAP_RECHECK_HOURS` (table `fx_gap_checks`, append-only, read via `get_fx_gap_checks`,
+  newest 500) are dropped; the rest are grouped into runs of consecutive minutes and asked for with `/v1/bars`
+  (pages of at most 5000 minutes, the same local row checks, `transport` `history`, writes of 1000). Each page
+  answered 200 is recorded as a check with the minutes asked for and the valid ones returned. A non-200 answer
+  (`503 offset_unknown`, `409 offset_changed`, ...), a throw or an unreachable gateway records nothing and the symbol
+  is scanned again 10 minutes later; one symbol's failure never stops the others. At most 30 requests per symbol and
+  scan; the rest follows 10 minutes later. One log line per scan: `EURUSD: gap scan: M missing, R requested, F
+  filled`. `FX_GAP_SCAN_HOURS` (whole hours 0-168, default 24, 0 disables) and `FX_GAP_RECHECK_HOURS` (1-168,
+  default 24) are host variables like `FX_BACKFILL_DAYS`. The stage still reports a minute that stays missing as
+  outcome `X`.
+  - UNVERIFIED: MT5 may have no 1-minute bar for an open minute without ticks (a quiet minute). Such a minute comes
+    back empty, is recorded as a confirmed-empty check (`returned_minutes < requested_minutes`) and is asked for
+    again only after the recheck window.
+  - The TypeScript calendar has no holidays and no daily breaks (Python-only for now), so minutes inside a holiday
+    or a daily break count as expected; they too end up as confirmed-empty checks, and they are part of the missing
+    count in the health message.
 
 ### Hosted forex quotes
 

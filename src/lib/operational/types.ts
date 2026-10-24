@@ -183,6 +183,26 @@ export type FxBarCoverage = {
   newest_open_time_ms: number;
 };
 
+/** One gap-scan request the gateway answered 200 for (#457): [from_ms, to_ms), as get_fx_gap_checks returns it. */
+export type FxGapCheck = {
+  from_ms: number;
+  to_ms: number;
+  checked_at_ms: number;
+  /** Missing open minutes inside the range that were asked for. */
+  requested_minutes: number;
+  /** Valid bars the gateway returned for those minutes; fewer than requested = minutes MT5 has no bar for. */
+  returned_minutes: number;
+};
+
+export type FxGapCheckInput = {
+  venue: string;
+  instrumentId: string;
+  fromMs: number;
+  toMs: number;
+  requestedMinutes: number;
+  returnedMinutes: number;
+};
+
 /** One economic calendar observation as the fetcher records it (#401). A reschedule or re-rating is a new observation. */
 export type FxCalendarObservation = {
   source: string;
@@ -453,6 +473,10 @@ export interface OperationalStore {
   releaseFxCollectorLease(instanceId: string): Promise<void>;
   /** Stored range per series; what is missing needs the trading calendar and is not decided here. */
   getFxBarCoverage(): Promise<FxBarCoverage[]>;
+  /** Append gap-scan checks (#457); 1..100 rows per call. */
+  recordFxGapChecks(rows: FxGapCheckInput[]): Promise<void>;
+  /** Checks of one series made at or after `sinceMs`, newest first, at most 500. */
+  getFxGapChecks(venue: string, instrumentId: string, sinceMs: number): Promise<FxGapCheck[]>;
   /** Append calendar observations (#401); known ones are skipped. Returns the number of new observations. */
   recordFxCalendar(rows: FxCalendarObservation[]): Promise<number>;
   recordFxCalendarFetch(result: FxCalendarFetchResult): Promise<void>;

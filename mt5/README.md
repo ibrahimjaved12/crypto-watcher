@@ -131,6 +131,8 @@ FX_GATEWAY_TOKEN=<the gateway's MT5_GATEWAY_TOKEN>
 FX_SUBSCRIPTIONS=fx:EURUSD=EURUSD,fx:XAUUSD=XAUUSD       # instrument id = the broker's native name (UNVERIFIED suffixes)
 FX_ACCOUNT_CURRENCY=<three letters, the demo account's currency; default USD>
 FX_BACKFILL_DAYS=0                                        # keep 0 unless the gateway has the offset override
+FX_GAP_SCAN_HOURS=24                                      # hours searched for missing minutes (0-168, 0 disables; default 24)
+FX_GAP_RECHECK_HOURS=24                                   # an answered range is not asked again for this long (1-168; default 24)
 ```
 
 Seed the instruments once with `npm run forex:collector -- --subscribe --mode production`, then start the
@@ -144,3 +146,8 @@ gateway's `MT5_SERVER_UTC_OFFSET_SECONDS` override, a history range is answered 
 detection only covers the minutes since it started. The collector treats that answer as "wait" (health
 `UNAVAILABLE`, retried at the next pass). Set the override once the broker's offset is verified, then raise
 `FX_BACKFILL_DAYS`.
+
+The gap scan (`FX_GAP_SCAN_HOURS`, `FX_GAP_RECHECK_HOURS`) asks again, once an hour per symbol, for open-market
+minutes in the last `FX_GAP_SCAN_HOURS` behind the newest stored minute that have no stored bar. Like the backfill it
+asks for history, so without the offset override a hole older than the gateway's offset detection is answered
+`503 offset_unknown`; the scan then waits 10 minutes and tries again (nothing is recorded). See docs/forex.md.

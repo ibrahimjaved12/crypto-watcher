@@ -398,3 +398,249 @@ test("503 offset_unknown is a wait: UNAVAILABLE with the code, nothing stored, t
   assert.equal(healthOf(w)["fx:EURUSD"].status, "LIVE");
   assert.equal(gateway.bars()[2].includes(`from_ms=${TO + MIN - 5 * 86_400_000}`), true, "the retry asks for the same backfill start (shifted by the clock)");
 });
+
+// ---------------------------------------------------------------- gap scan (#457)
+
+/** [from, to) in whole minutes. */
+const minutes = (from, to) => { const out = []; for (let t = from; t < to; t += MIN) out.push(t); return out; };
+const without = (times, gone) => times.filter((t) => !gone.includes(t));
+const barsQuery = (from, to, symbol = "EURUSD") => `/v1/bars?symbol=${symbol}&from_ms=${from}&to_ms=${to}`;
+const barsReply = (url) => ({ status: 200, body: { bars: rowsFor(url.searchParams.get("symbol"),
+  Number(url.searchParams.get("from_ms")), Number(url.searchParams.get("to_ms"))) } });
+
+/** world() plus a store that keeps every stored open time, the gap checks and the gap-scan reads. */
+function gapWorld({ subs = [SUBS[0]], stored = {}, gapScan = { scanHours: 24, recheckHours: 24 }, ...rest } = {}) {
+  const w = world({ subs, ...rest });
+  const series = new Map(Object.entries(stored).map(([id, times]) => [key(VENUE, id), new Set(times)]));
+  const checks = [];
+  Object.assign(w.calls, { reads: [], checkReads: [] });
+  const recordBars = w.deps.store.recordFxBars;
+  Object.assign(w.deps.store, {
+    async recordFxBars(bars) {
+      for (const bar of bars) {
+        const k = key(bar.venue, bar.instrumentId);
+        if (!series.has(k)) series.set(k, new Set());
+        series.get(k).add(bar.openTime);
+      }
+      return recordBars(bars);
+    },
+    async getFxBarCoverage() {
+      return [...series].filter(([, set]) => set.size).map(([k, set]) => ({ venue: k.split("|")[0],
+        instrument_id: k.split("|")[1], bar_count: set.size, oldest_open_time_ms: Math.min(...set),
+        newest_open_time_ms: Math.max(...set) }));
+    },
+    async getFxBars(venue, instrumentId, options) {
+      w.calls.reads.push([instrumentId, options]);
+      const times = [...(series.get(key(venue, instrumentId)) ?? [])].sort((a, b) => a - b)
+        .filter((t) => t >= options.fromMs && t < options.toMs).slice(-options.limit);
+      return times.map((t) => ({ ...row(instrumentId.split(":")[1], t), venue, instrument_id: instrumentId, open_time_ms: t }));
+    },
+    async recordFxGapChecks(rows) { for (const r of rows) checks.push({ ...r, checkedAt: w.time.now }); },
+    async getFxGapChecks(venue, instrumentId, sinceMs) {
+      w.calls.checkReads.push([instrumentId, sinceMs]);
+      return checks.filter((c) => c.venue === venue && c.instrumentId === instrumentId && c.checkedAt >= sinceMs).reverse()
+        .slice(0, 500).map((c) => ({ from_ms: c.fromMs, to_ms: c.toMs, checked_at_ms: c.checkedAt,
+          requested_minutes: c.requestedMinutes, returned_minutes: c.returnedMinutes }));
+    },
+  });
+  if (gapScan) w.deps.gapScan = gapScan;
+  return { ...w, series, checks };
+}
+const checkOf = (c) => [c.instrumentId, c.fromMs, c.toMs, c.requestedMinutes, c.returnedMinutes];
+
+test("gap scan: a hole behind the newest stored minute is found, refilled with transport history and recorded", async () => {
+  const hole = minutes(TO - 2 * HOUR, TO - 2 * HOUR + 5 * MIN);
+  const w = gapWorld({ stored: { "fx:EURUSD": without(minutes(TO - 3 * HOUR, TO), hole) } });
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.deepEqual(w.gateway.bars(), [barsQuery(hole[0], hole[0] + 5 * MIN)], "only the hole; nothing after the newest minute");
+  assert.deepEqual(flat(w.calls.bars).map((b) => [b.openTime, b.transport, b.receivedAt]), hole.map((t) => [t, "history", NOW]));
+  assert.deepEqual(w.checks.map(checkOf), [["fx:EURUSD", hole[0], hole[0] + 5 * MIN, 5, 5]]);
+  assert.ok(w.calls.logs.includes("[fx-collector] EURUSD: gap scan: 5 missing, 5 requested, 5 filled"));
+  assert.equal(w.state.nextGapScanAt.get("fx:EURUSD"), NOW + HOUR);
+  assert.equal(w.state.lastGapMissing.get("fx:EURUSD"), 0);
+  assert.deepEqual([healthOf(w)["fx:EURUSD"].status, healthOf(w)["fx:EURUSD"].errorMessage], ["LIVE", null]);
+  // Not again before the hour is up.
+  w.time.now += 30 * MIN;
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.equal(w.calls.reads.length, 1);
+  assert.equal(w.checks.length, 1);
+});
+
+test("gap scan: a minute the gateway returns nothing for is asked once, then skipped until the recheck time", async () => {
+  const hole = TO - 2 * HOUR;
+  const gateway = fakeGateway({ "/v1/bars": (url) => Number(url.searchParams.get("from_ms")) === hole
+    ? { status: 200, body: { bars: [] } } : barsReply(url) });
+  const w = gapWorld({ gateway, gapScan: { scanHours: 24, recheckHours: 2 },
+    stored: { "fx:EURUSD": without(minutes(TO - 3 * HOUR, TO), [hole]) } });
+  const asked = () => gateway.bars().filter((p) => p.includes(`from_ms=${hole}&`)).length;
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.equal(asked(), 1);
+  assert.deepEqual(w.checks.map(checkOf), [["fx:EURUSD", hole, hole + MIN, 1, 0]], "a confirmed-empty check");
+  assert.ok(w.calls.logs.includes("[fx-collector] EURUSD: gap scan: 1 missing, 1 requested, 0 filled"));
+  assert.equal(w.state.lastGapMissing.get("fx:EURUSD"), 1);
+  // The next scan (an hour later) still sees it missing but inside the check: not asked.
+  w.time.now = NOW + HOUR + MIN;
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.equal(w.calls.reads.length, 2, "the scan ran");
+  assert.equal(asked(), 1);
+  assert.deepEqual(w.calls.checkReads.at(-1), ["fx:EURUSD", w.time.now - 2 * HOUR]);
+  // After the recheck window it is asked once more.
+  w.time.now = NOW + 2 * HOUR + 2 * MIN;
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.equal(asked(), 2);
+  assert.equal(w.checks.length, 2);
+});
+
+test("gap scan: closed-market minutes are never requested; runs break at the weekend", async () => {
+  const fridayClose = Date.UTC(2026, 9, 16, 21, 0, 0); // 17:00 New York (EDT)
+  const sundayOpen = Date.UTC(2026, 9, 18, 21, 0, 0);
+  const now = Date.UTC(2026, 9, 19, 0, 0, 30);
+  const to = Math.floor(now / MIN) * MIN;
+  const stored = [...minutes(fridayClose - 3 * HOUR, fridayClose - MIN), ...minutes(sundayOpen + MIN, to)];
+  const w = gapWorld({ stored: { "fx:EURUSD": stored }, gapScan: { scanHours: 72, recheckHours: 24 }, time: { now } });
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.deepEqual(w.gateway.bars(), [barsQuery(fridayClose - MIN, fridayClose), barsQuery(sundayOpen, sundayOpen + MIN)]);
+  assert.ok(w.calls.logs.includes("[fx-collector] EURUSD: gap scan: 2 missing, 2 requested, 2 filled"));
+  assert.deepEqual(fx.fxOpenMinutes(fridayClose - 2 * MIN, sundayOpen + 2 * MIN),
+    [fridayClose - 2 * MIN, fridayClose - MIN, sundayOpen, sundayOpen + MIN]);
+});
+
+test("gap scan: a run longer than 5000 minutes is asked in two pages, each recorded", async () => {
+  const open = Date.UTC(2026, 9, 11, 21, 0, 0); // Sunday 17:00 New York (EDT)
+  const now = Date.UTC(2026, 9, 16, 20, 0, 30); // Friday
+  const to = Math.floor(now / MIN) * MIN;
+  const resume = Date.UTC(2026, 9, 16, 19, 0, 0);
+  const w = gapWorld({ stored: { "fx:EURUSD": [open, ...minutes(resume, to)] }, gapScan: { scanHours: 168, recheckHours: 24 },
+    time: { now } });
+  await fx.runFxCollectorPass(w.deps, w.state);
+  const split = open + MIN + 5000 * MIN;
+  assert.deepEqual(w.gateway.bars(), [barsQuery(open + MIN, split), barsQuery(split, resume)]);
+  assert.deepEqual(w.checks.map(checkOf), [["fx:EURUSD", open + MIN, split, 5000, 5000], ["fx:EURUSD", split, resume, 2079, 2079]]);
+  assert.deepEqual(w.calls.bars.map((batch) => batch.length), [1000, 1000, 1000, 1000, 1000, 1000, 1000, 79]);
+  assert.ok(w.calls.logs.includes("[fx-collector] EURUSD: gap scan: 7079 missing, 7079 requested, 7079 filled"));
+  assert.deepEqual(w.calls.reads, [["fx:EURUSD", { fromMs: open, toMs: to, limit: 20000 }]], "not before the oldest stored bar");
+});
+
+test("gap scan: 503 offset_unknown, 409 offset_changed and an unreachable gateway are waits: nothing recorded, next scan in 10 minutes", async () => {
+  const hole = TO - HOUR;
+  const answers = {
+    offset_unknown: () => ({ status: 503, body: { error: "offset_unknown" } }),
+    offset_changed: () => ({ status: 409, body: { error: "offset_changed" } }),
+    "connect ECONNREFUSED": () => { throw new Error("connect ECONNREFUSED"); },
+  };
+  for (const [code, answer] of Object.entries(answers)) {
+    const gateway = fakeGateway({ "/v1/bars": (url) => Number(url.searchParams.get("from_ms")) === hole ? answer() : barsReply(url) });
+    const w = gapWorld({ gateway, stored: { "fx:EURUSD": without(minutes(TO - 2 * HOUR, TO), [hole]) } });
+    await fx.runFxCollectorPass(w.deps, w.state);
+    assert.deepEqual([w.checks.length, w.calls.bars.length], [0, 0], code);
+    assert.equal(w.state.nextGapScanAt.get("fx:EURUSD"), NOW + 10 * MIN, code);
+    assert.equal(w.state.lastGapMissing.has("fx:EURUSD"), false, code);
+    assert.ok(w.calls.errors.some((l) => l.startsWith("[fx-collector] EURUSD: gap scan: 1 missing, 0 requested, 0 filled; stopped")
+      && l.includes(code)), code);
+    assert.equal(healthOf(w)["fx:EURUSD"].status, "LIVE", `${code}: the scan never changes the status`);
+    // Retried after 10 minutes, not before.
+    const asked = () => gateway.bars().filter((p) => p.includes(`from_ms=${hole}&`)).length;
+    w.time.now = NOW + 5 * MIN;
+    await fx.runFxCollectorPass(w.deps, w.state);
+    assert.equal(asked(), 1, code);
+    w.time.now = NOW + 10 * MIN;
+    await fx.runFxCollectorPass(w.deps, w.state);
+    assert.equal(asked(), 2, code);
+  }
+});
+
+test("gap scan: one failing symbol does not stop the others", async () => {
+  const hole = TO - HOUR;
+  const gateway = fakeGateway({ "/v1/bars": (url) => {
+    if (url.searchParams.get("symbol") === "EURUSD") throw new Error("socket hang up");
+    return barsReply(url);
+  } });
+  const series = without(minutes(TO - 2 * HOUR, TO), [hole]);
+  const w = gapWorld({ subs: SUBS, gateway, stored: { "fx:EURUSD": series, "fx:XAUUSD": series } });
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.deepEqual(w.checks.map(checkOf), [["fx:XAUUSD", hole, hole + MIN, 1, 1]]);
+  assert.equal(w.state.nextGapScanAt.get("fx:EURUSD"), NOW + 10 * MIN);
+  assert.equal(w.state.nextGapScanAt.get("fx:XAUUSD"), NOW + HOUR);
+  assert.deepEqual(w.calls.health.at(-1).map((r) => [r.instrumentId, r.status]), [["fx:EURUSD", "LIVE"], ["fx:XAUUSD", "LIVE"]]);
+});
+
+test("gap scan: the scan stays inside its window and caps its requests", async () => {
+  const outside = TO - 25 * HOUR;
+  const inside = TO - 23 * HOUR;
+  const w = gapWorld({ stored: { "fx:EURUSD": without(minutes(TO - 30 * HOUR, TO), [outside, inside]) } });
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.deepEqual(w.gateway.bars(), [barsQuery(inside, inside + MIN)]);
+  assert.deepEqual(w.calls.reads, [["fx:EURUSD", { fromMs: TO - MIN - 24 * HOUR, toMs: TO, limit: 20000 }]]);
+  // More runs than requests per scan: the first 30 now, the rest 10 minutes later (done runs are skipped by their checks).
+  const holes = Array.from({ length: 31 }, (_, i) => TO - 2 * HOUR + 2 * i * MIN);
+  const many = gapWorld({ stored: { "fx:EURUSD": without(minutes(TO - 3 * HOUR, TO), holes) } });
+  await fx.runFxCollectorPass(many.deps, many.state);
+  assert.equal(many.gateway.bars().length, fx.FX_GAP_MAX_REQUESTS_PER_SCAN);
+  assert.equal(many.state.nextGapScanAt.get("fx:EURUSD"), NOW + 10 * MIN);
+  many.time.now = NOW + 10 * MIN;
+  await fx.runFxCollectorPass(many.deps, many.state);
+  assert.deepEqual(many.checks.map((c) => c.fromMs), holes);
+});
+
+test("no gap scan without gapScan, with FX_GAP_SCAN_HOURS 0, while the market is closed or while backfilling", async () => {
+  const series = without(minutes(TO - 2 * HOUR, TO), [TO - HOUR]);
+  for (const gapScan of [null, { scanHours: 0, recheckHours: 24 }]) {
+    const w = gapWorld({ gapScan, stored: { "fx:EURUSD": series } });
+    await fx.runFxCollectorPass(w.deps, w.state);
+    assert.deepEqual([w.calls.reads.length, w.calls.checkReads.length, w.gateway.bars().length], [0, 0, 0]);
+    assert.equal(healthOf(w)["fx:EURUSD"].errorMessage, null);
+  }
+  const fridayClose = Date.UTC(2026, 9, 16, 21, 0, 0);
+  const closed = gapWorld({ stored: { "fx:EURUSD": without(minutes(fridayClose - HOUR, fridayClose), [fridayClose - 30 * MIN]) },
+    time: { now: Date.UTC(2026, 9, 17, 12, 0, 30) } });
+  await fx.runFxCollectorPass(closed.deps, closed.state);
+  assert.deepEqual([closed.calls.reads.length, closed.gateway.bars().length], [0, 0]);
+  const old = TO - 30 * 86_400_000;
+  const backfilling = gapWorld({ stored: { "fx:EURUSD": [old - 2 * MIN, old] } });
+  await fx.runFxCollectorPass(backfilling.deps, backfilling.state);
+  assert.equal(healthOf(backfilling)["fx:EURUSD"].status, "RECOVERING");
+  assert.equal(backfilling.calls.reads.length, 0);
+  assert.ok(backfilling.gateway.bars().every((p) => !p.includes(`from_ms=${old - MIN}&`)));
+});
+
+test("the missing count is in the health message only when the status is not LIVE", async () => {
+  // In a pass: the gateway has nothing new, so the newest bar ages to RECOVERING and the quiet minute is reported.
+  const hole = TO - HOUR;
+  const quiet = fakeGateway({ "/v1/bars": () => ({ status: 200, body: { bars: [] } }) });
+  const w = gapWorld({ gateway: quiet, stored: { "fx:EURUSD": without(minutes(TO - 2 * HOUR, TO - 4 * MIN), [hole]) } });
+  await fx.runFxCollectorPass(w.deps, w.state);
+  assert.deepEqual([healthOf(w)["fx:EURUSD"].status, healthOf(w)["fx:EURUSD"].errorMessage],
+    ["RECOVERING", "1 open minute(s) missing in the last 24 h"]);
+  // Directly: appended to an existing message, alone for a null one, never on LIVE, nothing for 0.
+  const sub = SUBS[0];
+  const ok = { problem: null, backfilling: false };
+  const message = (...args) => fx.fxHealth(sub, ...args).errorMessage;
+  assert.equal(message(NOW, TO - MIN, ok, null, 7), null);
+  assert.equal(fx.fxHealth(sub, NOW, TO - MIN, ok, null, 7).status, "LIVE");
+  assert.equal(message(NOW, TO - 5 * MIN, ok, null, 7), "7 open minute(s) missing in the last 24 h");
+  assert.equal(message(NOW, null, ok, null, 7), "no bars stored; 7 open minute(s) missing in the last 24 h");
+  assert.equal(message(NOW, TO - MIN, { problem: { status: "UNAVAILABLE", message: "offset_unknown" }, backfilling: false }, null, 2),
+    "offset_unknown; 2 open minute(s) missing in the last 24 h");
+  assert.equal(message(NOW, TO - 5 * MIN, ok, null, 0), null);
+});
+
+test("fxHealth without the missing count is unchanged", () => {
+  const sub = SUBS[0];
+  const ok = { problem: null, backfilling: false };
+  const base = { venue: VENUE, instrumentId: "fx:EURUSD" };
+  const saturday = Date.UTC(2026, 9, 17, 12, 0, 30);
+  const cases = [
+    [[NOW, TO - MIN, ok, null], { status: "LIVE", lastBarOpenTime: TO - MIN, lagMs: 30_000, errorMessage: null }],
+    [[NOW, TO - 5 * MIN, ok, null], { status: "RECOVERING", lastBarOpenTime: TO - 5 * MIN, lagMs: 4 * MIN + 30_000, errorMessage: null }],
+    [[NOW, TO - 12 * MIN, ok, null], { status: "STALE", lastBarOpenTime: TO - 12 * MIN, lagMs: 11 * MIN + 30_000, errorMessage: null }],
+    [[NOW, null, ok, null], { status: "STALE", lastBarOpenTime: null, lagMs: null, errorMessage: "no bars stored" }],
+    [[NOW, TO - MIN, { problem: null, backfilling: true }, null], { status: "RECOVERING", lastBarOpenTime: TO - MIN, lagMs: 30_000, errorMessage: null }],
+    [[NOW, TO - MIN, null, { status: "LOGIN_FAILED", message: "terminal not connected" }],
+      { status: "LOGIN_FAILED", lastBarOpenTime: TO - MIN, lagMs: 30_000, errorMessage: "terminal not connected" }],
+    [[saturday, TO - MIN, ok, null], { status: "MARKET_CLOSED", lastBarOpenTime: TO - MIN, lagMs: saturday - TO, errorMessage: null }],
+  ];
+  for (const [args, expected] of cases) {
+    assert.deepEqual(fx.fxHealth(sub, ...args), { ...base, ...expected });
+    assert.deepEqual(fx.fxHealth(sub, ...args, undefined), { ...base, ...expected });
+  }
+});
