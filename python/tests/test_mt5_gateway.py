@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import socketserver
 from pathlib import Path
 from types import SimpleNamespace
 from contextlib import redirect_stderr
@@ -397,6 +398,13 @@ class SafetyAndConfigTests(unittest.TestCase):
             self.assertEqual(gw.main([], environ={"MT5_GATEWAY_TOKEN": TOKEN, "MT5_GATEWAY_PORT": "x"}), 2)
             self.assertEqual(gw.main([], environ={"MT5_GATEWAY_TOKEN": TOKEN, "MT5_SERVER_UTC_OFFSET_SECONDS": "1.5"}), 2)
         self.assertNotIn(TOKEN, error.getvalue())
+
+    def test_server_is_single_threaded(self):
+        server = gw.make_server("127.0.0.1", 0, gw.Gateway(FakeMt5(Clock()), token=TOKEN))
+        try:
+            self.assertNotIsInstance(server, socketserver.ThreadingMixIn)
+        finally:
+            server.server_close()
 
 
 if __name__ == "__main__":

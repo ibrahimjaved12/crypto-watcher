@@ -25,6 +25,10 @@ when the offset is known for its range: all stored observations inside the range
 ``409 offset_changed``), and with no observation or override it is ``503 offset_unknown``. The offset can
 change twice a year when the broker server moves its clock for daylight saving time; with an override set,
 that change is NOT noticed, so the owner must update the override.
+
+Threading. Requests are served one at a time on the main thread, because the MT5 bridge must be called from the
+thread that initialized it (a threaded server freezes the process on the Windows package). A client that
+connects and sends nothing is dropped after 10 seconds so it cannot block the others.
 """
 from __future__ import annotations
 
@@ -38,7 +42,7 @@ import sys
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
@@ -413,6 +417,7 @@ class Gateway:
 
 def make_handler(gateway: Gateway):
     class Handler(BaseHTTPRequestHandler):
+        timeout = 10  # socket timeout: one silent client must not block the single-threaded server
         server_version = "mt5-gateway"
         sys_version = ""
 
@@ -449,6 +454,11 @@ def load_mt5(backend: str, host: str, port: int) -> Any:
     return MetaTrader5
 
 
+def make_server(bind: str, port: int, gateway: Gateway) -> HTTPServer:
+    """A single-threaded server: the MT5 bridge may only be called from the thread that initialized it."""
+    return HTTPServer((bind, port), make_handler(gateway))
+
+
 def main(argv: Optional[List[str]] = None, environ: Optional[Dict[str, str]] = None) -> int:
     environ = os.environ if environ is None else environ
     parser = argparse.ArgumentParser(description="Read-only MT5 market-data gateway")
@@ -482,7 +492,7 @@ def main(argv: Optional[List[str]] = None, environ: Optional[Dict[str, str]] = N
     except ValueError as error:
         sys.stderr.write("%s\n" % error)
         return 2
-    server = ThreadingHTTPServer((bind, port), make_handler(gateway))
+    server = make_server(bind, port, gateway)
     sys.stderr.write("mt5-gateway listening on %s:%d (terminal initialized: %s)\n"
                      % (bind, server.server_address[1], gateway.initialized))
     try:
