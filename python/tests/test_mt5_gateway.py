@@ -325,7 +325,7 @@ class HttpTests(unittest.TestCase):
     def test_over_a_real_socket_no_cors_and_token_not_logged(self):
         with tempfile.TemporaryDirectory() as tmp:
             gateway, _, _ = make(tmp)
-            server = gw.ThreadingHTTPServer(("127.0.0.1", 0), gw.make_handler(gateway))
+            server = gw.make_server("127.0.0.1", 0, gateway)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             log = io.StringIO()
